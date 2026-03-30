@@ -14,6 +14,7 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_icmp_isel(egraph);
     changed |= apply_select_isel(egraph);
     changed |= apply_sext_zext_trunc_isel(egraph);
+    changed |= apply_bitcast_isel(egraph);
     changed |= apply_fp_isel(egraph);
     changed
 }
@@ -246,9 +247,8 @@ fn apply_select_isel(egraph: &mut EGraph) -> bool {
         let t = snap.children[1];
         let f = snap.children[2];
 
-        // Find cc from the Icmp (or X86Cmov) node in the flags class
-        let cc = find_cc_in_class(egraph, flags);
-        let Some(cc) = cc else { continue };
+        // Find cc from the Icmp node in the flags class; fall back to Ne if absent.
+        let cc = find_cc_in_class(egraph, flags).unwrap_or(CondCode::Ne);
 
         let cmov = egraph.add(ENode {
             op: Op::X86Cmov(cc),
@@ -316,6 +316,41 @@ fn apply_sext_zext_trunc_isel(egraph: &mut EGraph) -> bool {
 
         let machine_node = egraph.add(ENode {
             op: machine_op,
+            children: smallvec![child],
+        });
+
+        let canon = egraph.unionfind.find_immutable(class_id);
+        let machine_canon = egraph.unionfind.find_immutable(machine_node);
+        if canon != machine_canon {
+            egraph.merge(class_id, machine_node);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Bitcast(to)(a) -> X86Bitcast{from, to}(a)
+fn apply_bitcast_isel(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
+    let mut changed = false;
+
+    for snap in &snaps {
+        let class_id = snap.class_id;
+        if snap.children.len() != 1 {
+            continue;
+        }
+        let Op::Bitcast(to) = &snap.op else { continue };
+
+        let child = snap.children[0];
+        let Some(from_ty) = infer_class_type(egraph, child) else {
+            continue;
+        };
+
+        let machine_node = egraph.add(ENode {
+            op: Op::X86Bitcast {
+                from: from_ty,
+                to: to.clone(),
+            },
             children: smallvec![child],
         });
 

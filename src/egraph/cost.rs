@@ -168,6 +168,22 @@ impl CostModel {
             // ── X86Trunc: free — upper bits are simply ignored on x86-64 ──────────
             Op::X86Trunc { .. } => 0.0,
 
+            // ── X86Bitcast: one MOVQ instruction for cross-class, or free for same ─
+            Op::X86Bitcast { from, to } => {
+                if from.is_integer() == to.is_integer() {
+                    // Same register class (int->int or float->float same size): just a copy.
+                    0.0
+                } else {
+                    // Cross-class (int<->float): MOVQ instruction.
+                    CostTuple {
+                        latency: 1.0,
+                        throughput: 0.33,
+                        size: 5.0,
+                    }
+                    .weighted(self.goal)
+                }
+            }
+
             // ── Generic IR ops: must be lowered before extraction ─────────────────
             Op::Add
             | Op::Sub

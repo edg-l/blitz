@@ -310,4 +310,16 @@ pub enum MachInst {
         src1: Operand,
         src2: Operand,
     },
+
+    // ── Bitcast / MOVQ between GPR and XMM ───────────────────────────────────
+    /// MOVQ xmm, r/m64  (66 REX.W 0F 6E /r) — move 64-bit integer into XMM.
+    MovqToXmm {
+        dst: Operand, // XMM
+        src: Operand, // GPR
+    },
+    /// MOVQ r/m64, xmm  (66 REX.W 0F 7E /r) — move XMM bits into 64-bit integer register.
+    MovqFromXmm {
+        dst: Operand, // GPR
+        src: Operand, // XMM
+    },
 }

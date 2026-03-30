@@ -1005,6 +1005,30 @@ impl Encoder {
         self.encode_sse_rr(0x66, 0x2E, src1, src2);
     }
 
+    /// MOVQ xmm, r/m64 — move 64-bit integer from GPR into the low 64 bits of XMM.
+    /// Encoding: 66 REX.W 0F 6E /r  (reg field = xmm, rm = gpr)
+    pub fn encode_movq_to_xmm(&mut self, dst: Reg, src: Reg) {
+        let d = dst.hw_enc(); // XMM register
+        let s = src.hw_enc(); // GPR
+        self.emit_byte(0x66);
+        self.emit_rex(true, d, 0, s);
+        self.emit_byte(0x0F);
+        self.emit_byte(0x6E);
+        self.emit_modrm(0b11, d, s);
+    }
+
+    /// MOVQ r/m64, xmm — move 64-bit value from XMM into GPR.
+    /// Encoding: 66 REX.W 0F 7E /r  (reg field = xmm, rm = gpr)
+    pub fn encode_movq_from_xmm(&mut self, dst: Reg, src: Reg) {
+        let d = dst.hw_enc(); // GPR
+        let s = src.hw_enc(); // XMM register
+        self.emit_byte(0x66);
+        self.emit_rex(true, s, 0, d);
+        self.emit_byte(0x0F);
+        self.emit_byte(0x7E);
+        self.emit_modrm(0b11, s, d);
+    }
+
     pub fn encode_ucomiss_rr(&mut self, src1: Reg, src2: Reg) {
         // 0F 2E /r (no mandatory prefix)
         let d = src1.hw_enc();
@@ -1216,6 +1240,12 @@ impl Encoder {
             }
             MachInst::UcomissRR { src1, src2 } => {
                 self.encode_ucomiss_rr(Self::expect_reg(src1), Self::expect_reg(src2));
+            }
+            MachInst::MovqToXmm { dst, src } => {
+                self.encode_movq_to_xmm(Self::expect_reg(dst), Self::expect_reg(src));
+            }
+            MachInst::MovqFromXmm { dst, src } => {
+                self.encode_movq_from_xmm(Self::expect_reg(dst), Self::expect_reg(src));
             }
         }
     }

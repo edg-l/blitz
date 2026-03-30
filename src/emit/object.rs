@@ -28,12 +28,12 @@ pub struct ObjectFile {
 
 // ── Section index constants ───────────────────────────────────────────────────
 
-// We always emit: null(0), .text(1), .rela.text(2), .symtab(3), .strtab(4), .shstrtab(5)
+// Sections: null(0), .text(1), .rela.text(2), .symtab(3), .strtab(4), .shstrtab(5), .note.GNU-stack(6)
 const SEC_TEXT: u16 = 1;
 const SEC_SYMTAB: u16 = 3;
 const SEC_STRTAB: u16 = 4;
 const SEC_SHSTRTAB: u16 = 5;
-const NUM_SECTIONS: u16 = 6;
+const NUM_SECTIONS: u16 = 7;
 
 // ── Alignment helpers ─────────────────────────────────────────────────────────
 
@@ -58,6 +58,7 @@ impl ObjectFile {
         let name_symtab = shstrtab.add(".symtab");
         let name_strtab = shstrtab.add(".strtab");
         let name_shstrtab = shstrtab.add(".shstrtab");
+        let name_note_gnu_stack = shstrtab.add(".note.GNU-stack");
 
         // ── Build .strtab and collect external symbol names ───────────────────
         let mut strtab = StringTable::new();
@@ -259,6 +260,21 @@ impl ObjectFile {
             sh_entsize: 0,
         };
         buf.extend_from_slice(&shdr_shstrtab.to_bytes());
+
+        // .note.GNU-stack section header (empty, flags=0 → non-executable stack)
+        let shdr_note_gnu_stack = Elf64Shdr {
+            sh_name: name_note_gnu_stack,
+            sh_type: SHT_PROGBITS,
+            sh_flags: 0,
+            sh_addr: 0,
+            sh_offset: 0,
+            sh_size: 0,
+            sh_link: 0,
+            sh_info: 0,
+            sh_addralign: 1,
+            sh_entsize: 0,
+        };
+        buf.extend_from_slice(&shdr_note_gnu_stack.to_bytes());
 
         // ── Write ELF header ──────────────────────────────────────────────────
         let mut e_ident = [0u8; 16];

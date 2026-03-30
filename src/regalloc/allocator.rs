@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::egraph::extract::VReg;
 use crate::ir::op::Op;
 use crate::schedule::scheduler::ScheduledInst;
-use crate::x86::abi::CALLEE_SAVED;
+use crate::x86::abi::{CALLEE_SAVED, CALLER_SAVED_GPR};
 use crate::x86::reg::{Reg, RegClass};
 
 use super::coalesce::coalesce;
@@ -52,6 +52,7 @@ pub fn allocate(
     block_live_out: &HashSet<VReg>,
     copy_pairs: &[(VReg, VReg)], // phi copy pairs for coalescing
     loop_depths: &std::collections::HashMap<VReg, u32>, // loop-depth info for spill selection
+    call_points: &[usize],       // instruction indices after which a call occurs
 ) -> Result<RegAllocResult, String> {
     let mut insts: Vec<ScheduledInst> = insts.to_vec();
     let mut spill_slots = 0u32;
@@ -83,6 +84,8 @@ pub fn allocate(
 
         // Step 3: Build interference graph.
         let graph = build_interference(&liveness, &insts, &vreg_classes);
+        let (graph, _) =
+            add_call_clobber_interferences(graph, &liveness, call_points, &mut next_vreg);
 
         // Step 4 (first round only): coalesce copy pairs on original SSA graph.
         // Per spec: coalescing must NOT be re-run after spill insertion.
@@ -111,9 +114,16 @@ pub fn allocate(
         let liveness2 = compute_liveness(&insts_coalesced, block_live_out);
         let vreg_classes2 = build_vreg_classes(&insts_coalesced, &liveness2);
         let graph2 = build_interference(&liveness2, &insts_coalesced, &vreg_classes2);
+        let (graph2, phantom_precolors) =
+            add_call_clobber_interferences(graph2, &liveness2, call_points, &mut next_vreg);
+
+        // Merge phantom pre-colorings (caller-saved phantoms at call sites) with
+        // param pre-colorings.
+        let mut pre_coloring_colors2 = pre_coloring_colors.clone();
+        pre_coloring_colors2.extend(phantom_precolors);
 
         let ordering = mcs_ordering(&graph2);
-        let coloring = greedy_color(&graph2, &ordering, &pre_coloring_colors);
+        let coloring = greedy_color(&graph2, &ordering, &pre_coloring_colors2);
 
         // Step 6: Check if we need to spill.
         let gpr_colors_needed = coloring.chromatic_number;
@@ -200,12 +210,99 @@ pub fn allocate(
     unreachable!("loop should have returned before exhausting rounds")
 }
 
-/// Returns true if `op` produces or consumes an XMM (FP) register.
+/// Extend the interference graph with phantom VRegs for caller-saved GPRs at each
+/// call point.
+///
+/// For each call point index `cp`, all GPR VRegs live at that point must not be
+/// assigned to any caller-saved register. This is modeled by adding a phantom VReg
+/// pre-colored to each caller-saved register and adding interference edges between
+/// the phantom and every live GPR VReg at `cp`.
+///
+/// Returns the extended graph and a pre-coloring map (phantom vreg idx -> color)
+/// that the caller must merge into the coloring's pre-coloring constraints.
+fn add_call_clobber_interferences(
+    mut graph: super::interference::InterferenceGraph,
+    liveness: &super::liveness::LivenessInfo,
+    call_points: &[usize],
+    next_vreg: &mut u32,
+) -> (super::interference::InterferenceGraph, HashMap<usize, u32>) {
+    if call_points.is_empty() {
+        return (graph, HashMap::new());
+    }
+
+    // Build the same register ordering as map_colors_to_regs uses for GPR so that
+    // the color numbers assigned to phantoms correspond to caller-saved registers.
+    let ordered_regs: Vec<Reg> = CALLER_SAVED_GPR
+        .iter()
+        .filter(|&&r| r != Reg::RSP)
+        .copied()
+        .chain(CALLEE_SAVED.iter().copied())
+        .collect();
+    let reg_to_color: HashMap<Reg, u32> = ordered_regs
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| (r, i as u32))
+        .collect();
+
+    let n = liveness.live_at.len();
+    let mut phantom_precolors: HashMap<usize, u32> = HashMap::new();
+
+    for &cp in call_points {
+        // The live set at the call boundary: if cp < n use live_at[cp]; otherwise live_out.
+        let live_at_cp: &std::collections::HashSet<VReg> = if cp < n {
+            &liveness.live_at[cp]
+        } else {
+            &liveness.live_out
+        };
+
+        // For each caller-saved GPR, add a phantom VReg pre-colored to it and
+        // add interference with all GPR VRegs in live_at_cp.
+        for &csr in CALLER_SAVED_GPR.iter().filter(|&&r| r != Reg::RSP) {
+            let Some(&color) = reg_to_color.get(&csr) else {
+                continue;
+            };
+
+            // Allocate a fresh phantom VReg index.
+            let phantom_idx = *next_vreg as usize;
+            *next_vreg += 1;
+
+            // Grow the graph to accommodate the new phantom.
+            if phantom_idx >= graph.num_vregs {
+                let new_n = phantom_idx + 1;
+                graph.adj.resize(new_n, std::collections::HashSet::new());
+                graph.reg_class.resize(new_n, RegClass::GPR);
+                graph.num_vregs = new_n;
+            }
+
+            // Record pre-coloring for the phantom.
+            phantom_precolors.insert(phantom_idx, color);
+
+            // Add interference between the phantom and each GPR VReg live at cp.
+            for &live_v in live_at_cp {
+                let live_idx = live_v.0 as usize;
+                if live_idx < graph.num_vregs && graph.reg_class[live_idx] == RegClass::GPR {
+                    graph.add_edge(phantom_idx, live_idx);
+                }
+            }
+        }
+    }
+
+    (graph, phantom_precolors)
+}
+
+/// Returns true if `op` produces an XMM (FP) register as its destination.
 fn is_fp_op(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::X86Addsd | Op::X86Subsd | Op::X86Mulsd | Op::X86Divsd | Op::X86Sqrtsd | Op::Fconst(_)
-    )
+    use crate::ir::types::Type;
+    match op {
+        Op::X86Addsd
+        | Op::X86Subsd
+        | Op::X86Mulsd
+        | Op::X86Divsd
+        | Op::X86Sqrtsd
+        | Op::Fconst(_) => true,
+        Op::X86Bitcast { to, .. } => matches!(to, Type::F32 | Type::F64),
+        _ => false,
+    }
 }
 
 /// Build a VReg class map for all VRegs referenced in the instruction list.
@@ -327,6 +424,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::HashMap::new(),
+            &[],
         )
         .expect("allocation should succeed");
 
@@ -360,6 +458,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::HashMap::new(),
+            &[],
         )
         .expect("allocation should succeed");
 
@@ -395,6 +494,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::HashMap::new(),
+            &[],
         )
         .expect("allocation should succeed");
 
@@ -435,6 +535,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::HashMap::new(),
+            &[],
         );
         // Either it succeeds (some spilling reduced pressure) or it errors.
         // With 16 simultaneous live regs and only constants (rematerializable),
@@ -478,6 +579,7 @@ mod tests {
             &live_out,
             &copy_pairs,
             &std::collections::HashMap::new(),
+            &[],
         )
         .expect("allocation with copy pairs should succeed");
 
@@ -513,6 +615,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::HashMap::new(),
+            &[],
         )
         .expect("allocation with shift pre-coloring should succeed");
 

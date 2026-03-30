@@ -265,6 +265,34 @@ pub fn compile(
 
     let all_scheduled: Vec<ScheduledInst> = block_schedules.iter().flatten().cloned().collect();
 
+    // Compute call point indices for caller-saved clobber modeling.
+    //
+    // For each block processed in RPO order that contains a Call effectful op,
+    // record the instruction index just after the end of that block's schedule.
+    // VRegs live at that point must not be placed in caller-saved registers.
+    let call_points: Vec<usize> = {
+        let mut pts = Vec::new();
+        let mut offset = 0usize;
+        for &block_idx in &rpo_order {
+            let block = &func.blocks[block_idx];
+            let sched_len = block_schedules[block_idx].len();
+            // Check if any non-terminator effectful op is a Call.
+            let non_term_count = if block.ops.is_empty() {
+                0
+            } else {
+                block.ops.len() - 1
+            };
+            if block.ops[..non_term_count]
+                .iter()
+                .any(|op| matches!(op, EffectfulOp::Call { .. }))
+            {
+                pts.push(offset + sched_len);
+            }
+            offset += sched_len;
+        }
+        pts
+    };
+
     // Build phi copy pairs from block parameter passing for coalescing.
     let copy_pairs = compute_copy_pairs(func, &class_to_vreg, &egraph, &block_param_map);
 
@@ -306,6 +334,7 @@ pub fn compile(
         &live_out,
         &copy_pairs,
         &loop_depths,
+        &call_points,
     )
     .map_err(|e| CompileError {
         phase: "regalloc".into(),
@@ -1240,6 +1269,45 @@ fn lower_op(
                     dst: Operand::Reg(dst),
                     src: Operand::Reg(src),
                 }])
+            }
+        }
+
+        Op::X86Bitcast { from, to } => {
+            use crate::ir::types::Type;
+            let dst = dst_reg.ok_or_else(|| "X86Bitcast: no register for dst".to_string())?;
+            let src = operand_regs
+                .first()
+                .and_then(|r| *r)
+                .ok_or_else(|| "X86Bitcast: no register for src".to_string())?;
+            let int_to_float = from.is_integer() && matches!(to, Type::F32 | Type::F64);
+            let float_to_int = matches!(from, Type::F32 | Type::F64) && to.is_integer();
+            if int_to_float {
+                // MOVQ xmm, gpr
+                Ok(vec![MachInst::MovqToXmm {
+                    dst: Operand::Reg(dst),
+                    src: Operand::Reg(src),
+                }])
+            } else if float_to_int {
+                // MOVQ gpr, xmm
+                Ok(vec![MachInst::MovqFromXmm {
+                    dst: Operand::Reg(dst),
+                    src: Operand::Reg(src),
+                }])
+            } else if dst == src {
+                Ok(vec![])
+            } else {
+                // Same class (int->int or float->float): register copy.
+                if from.is_integer() {
+                    Ok(vec![MachInst::MovRR {
+                        dst: Operand::Reg(dst),
+                        src: Operand::Reg(src),
+                    }])
+                } else {
+                    Ok(vec![MachInst::MovsdRR {
+                        dst: Operand::Reg(dst),
+                        src: Operand::Reg(src),
+                    }])
+                }
             }
         }
     }

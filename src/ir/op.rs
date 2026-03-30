@@ -170,6 +170,13 @@ pub enum Op {
         from: Type,
         to: Type,
     },
+    /// Reinterpret bits without conversion; 1 child.
+    /// - int->float or float->int: MOVQ between GPR and XMM.
+    /// - same class, same size: register copy (or no-op if coalesced).
+    X86Bitcast {
+        from: Type,
+        to: Type,
+    },
 }
 
 impl Op {
@@ -503,6 +510,15 @@ impl Op {
                 assert_eq!(
                     &child_types[0], from,
                     "X86Trunc child type mismatch: expected {from:?}, got {:?}",
+                    &child_types[0]
+                );
+                to.clone()
+            }
+            Op::X86Bitcast { from, to } => {
+                assert_eq!(child_types.len(), 1, "X86Bitcast requires 1 child");
+                assert_eq!(
+                    &child_types[0], from,
+                    "X86Bitcast child type mismatch: expected {from:?}, got {:?}",
                     &child_types[0]
                 );
                 to.clone()
