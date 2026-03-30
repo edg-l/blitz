@@ -219,79 +219,13 @@ pub fn compile(
         s.phase_stats("schedule", &format!("insts={total_insts}"));
     }
 
-    // Phase 5: Register allocation across all blocks (concatenated).
+    // Phase 5: Register allocation -- per-block with cross-block live range splitting.
     //
-    // We concatenate all block schedules into a single flat list. The live-out
-    // set is the union of:
-    //   a) All block param VRegs (phi destinations, so they survive jumps/branches)
-    //   b) All phi source VRegs (the args passed to Jump/Branch), so that values
-    //      needed for phi copies are kept alive through loop back-edges
+    // Single-block fast path: skip global liveness and run allocate() directly.
+    // Multi-block path: compute global liveness, assign cross-block spill slots,
+    // rewrite each block to insert spill/reload code at boundaries, then run
+    // allocate() per block and merge results.
     let param_vregs = assign_param_vregs_from_map(func, &class_to_vreg, &egraph);
-
-    // Compute global live-out (conservative):
-    //   a) All block param VRegs (phi destinations)
-    //   b) All phi source VRegs (branch/jump args, especially loop back-edge values)
-    //   c) All function param VRegs: function parameters have no ScheduledInst
-    //      (they are pre-colored), so liveness analysis cannot track them. Adding
-    //      them to live_out forces the interference graph to prevent block param
-    //      VRegs from being assigned the same register as any function parameter.
-    //   d) All cross-block operand VRegs: values defined in one block but used in
-    //      another must survive across the boundary.
-    let mut live_out: HashSet<VReg> = collect_block_param_vregs(&egraph, &class_to_vreg);
-    collect_phi_source_vregs(func, &egraph, &class_to_vreg, &mut live_out);
-    // (c) Function param VRegs must stay alive across all blocks.
-    for &(vreg, _reg) in &param_vregs {
-        live_out.insert(vreg);
-    }
-    // (d) Cross-block operand VRegs: values used in a different block than where
-    // they are defined must be globally live.
-    for (block_idx, sched) in block_schedules.iter().enumerate() {
-        let defined_in_block: HashSet<VReg> = sched.iter().map(|s| s.dst).collect();
-        for other_sched in block_schedules
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != block_idx)
-            .map(|(_, s)| s)
-        {
-            for inst in other_sched {
-                for &op_vreg in &inst.operands {
-                    if defined_in_block.contains(&op_vreg) {
-                        live_out.insert(op_vreg);
-                    }
-                }
-            }
-        }
-    }
-
-    let all_scheduled: Vec<ScheduledInst> = block_schedules.iter().flatten().cloned().collect();
-
-    // Compute call point indices for caller-saved clobber modeling.
-    //
-    // For each block processed in RPO order that contains a Call effectful op,
-    // record the instruction index just after the end of that block's schedule.
-    // VRegs live at that point must not be placed in caller-saved registers.
-    let call_points: Vec<usize> = {
-        let mut pts = Vec::new();
-        let mut offset = 0usize;
-        for &block_idx in &rpo_order {
-            let block = &func.blocks[block_idx];
-            let sched_len = block_schedules[block_idx].len();
-            // Check if any non-terminator effectful op is a Call.
-            let non_term_count = if block.ops.is_empty() {
-                0
-            } else {
-                block.ops.len() - 1
-            };
-            if block.ops[..non_term_count]
-                .iter()
-                .any(|op| matches!(op, EffectfulOp::Call { .. }))
-            {
-                pts.push(offset + sched_len);
-            }
-            offset += sched_len;
-        }
-        pts
-    };
 
     // Build phi copy pairs from block parameter passing for coalescing.
     let copy_pairs = compute_copy_pairs(func, &class_to_vreg, &egraph, &block_param_map);
@@ -299,86 +233,260 @@ pub fn compile(
     // Compute loop depths from the CFG for spill selection.
     let loop_depths = compute_loop_depths(func, &block_schedules, &class_to_vreg);
 
-    // Pre-color shift count operands to RCX so variable shifts don't clobber live values.
-    let mut all_param_vregs = param_vregs.clone();
-    for inst in &all_scheduled {
-        if matches!(inst.op, Op::X86Shl | Op::X86Shr | Op::X86Sar) && inst.operands.len() >= 2 {
-            let count_vreg = inst.operands[1];
-            // Only pre-color if not already pre-colored to something else.
-            if !all_param_vregs.iter().any(|&(v, _)| v == count_vreg) {
-                all_param_vregs.push((count_vreg, Reg::RCX));
-            }
-        }
-    }
+    // Shared next_vreg counter for fresh VReg allocation across all blocks.
+    let shared_next_vreg_start: u32 = block_schedules
+        .iter()
+        .flatten()
+        .flat_map(|i| std::iter::once(i.dst.0).chain(i.operands.iter().map(|v| v.0)))
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
 
-    // Pre-color call argument VRegs to their ABI destination registers.
-    // This prevents regalloc from assigning all call args to the same physical
-    // register. For register args (first 6 GPR args: RDI..R9), pre-color directly.
-    // For stack args (7+), we add them to live_out so they interfere with each
-    // other (preventing the regalloc from coalescing them into one register).
-    //
-    // All call arg types are treated as I64 (matching lower_effectful_op).
-    for block in &func.blocks {
-        for op in &block.ops {
-            if let EffectfulOp::Call { args, .. } = op {
-                let arg_types: Vec<crate::ir::types::Type> =
-                    vec![crate::ir::types::Type::I64; args.len()];
-                let locs = crate::x86::abi::assign_args(&arg_types);
-                for (&cid, loc) in args.iter().zip(locs.iter()) {
-                    let canon = egraph.unionfind.find_immutable(cid);
-                    if let Some(&vreg) = class_to_vreg.get(&canon) {
-                        match loc {
-                            crate::x86::abi::ArgLoc::Reg(reg) => {
-                                if !all_param_vregs.iter().any(|&(v, _)| v == vreg) {
-                                    all_param_vregs.push((vreg, *reg));
-                                }
-                            }
-                            crate::x86::abi::ArgLoc::Stack { .. } => {
-                                // Stack args must have distinct registers; force them
-                                // to interfere by making them globally live.
-                                live_out.insert(vreg);
-                            }
-                        }
-                    }
+    // Single-block fast path skips global liveness.
+    let (regalloc_result, block_rewritten) = if func.blocks.len() == 1 {
+        // --- Single-block fast path ---
+        let all_scheduled: Vec<ScheduledInst> = block_schedules.iter().flatten().cloned().collect();
+
+        let mut live_out: HashSet<VReg> = HashSet::new();
+        collect_phi_source_vregs(func, &egraph, &class_to_vreg, &mut live_out);
+        for &(vreg, _reg) in &param_vregs {
+            live_out.insert(vreg);
+        }
+
+        let mut all_param_vregs = param_vregs.clone();
+        add_shift_precolors(&all_scheduled, &mut all_param_vregs);
+        add_call_precolors(
+            func,
+            &egraph,
+            &class_to_vreg,
+            &mut all_param_vregs,
+            &mut live_out,
+        );
+
+        let call_points = collect_call_points_for_block(func, 0, &all_scheduled);
+
+        let result = allocate(
+            &all_scheduled,
+            &all_param_vregs,
+            &live_out,
+            &copy_pairs,
+            &loop_depths,
+            &call_points,
+        )
+        .map_err(|e| CompileError {
+            phase: "regalloc".into(),
+            message: e,
+            location: Some(IrLocation {
+                function: func.name.clone(),
+                block: None,
+                inst: None,
+            }),
+        })?;
+
+        let rewritten = vec![rewrite_vregs(&all_scheduled, &result.vreg_to_reg)];
+        (result, rewritten)
+    } else {
+        // --- Multi-block path ---
+
+        // Step 1: Compute CFG successors and phi uses per block.
+        let cfg_succs = crate::regalloc::global_liveness::cfg_successors(func);
+        let phi_uses = crate::regalloc::global_liveness::compute_phi_uses(
+            func,
+            &egraph.unionfind,
+            &class_to_vreg,
+        );
+
+        // Step 2: Compute global liveness.
+        let global_liveness = crate::regalloc::global_liveness::compute_global_liveness(
+            &block_schedules,
+            &cfg_succs,
+            &phi_uses,
+        );
+
+        // Step 3: Determine block params per block (excluded from reload insertion).
+        let block_param_vregs_per_block =
+            crate::regalloc::global_liveness::collect_block_param_vregs_per_block(
+                func,
+                &egraph,
+                &class_to_vreg,
+            );
+
+        // Step 4: Assign cross-block spill slots.
+        let spill_map = crate::regalloc::split::assign_cross_block_slots(
+            &global_liveness,
+            &block_schedules,
+            &block_param_vregs_per_block,
+        );
+        let cross_block_slots = spill_map.num_slots;
+
+        // Step 5: Build def_insts map for rematerialization.
+        let def_insts: HashMap<VReg, ScheduledInst> = block_schedules
+            .iter()
+            .flatten()
+            .map(|inst| (inst.dst, inst.clone()))
+            .collect();
+
+        // Step 6: Build vreg_classes map from all schedules.
+        let vreg_classes =
+            crate::regalloc::split::build_vreg_classes_from_schedules(&block_schedules);
+
+        // Step 7: Compute block defs.
+        let block_defs = crate::regalloc::split::compute_block_defs(&block_schedules);
+
+        // Build function-level pre-colorings for filtering per block.
+        let mut func_level_param_vregs = param_vregs.clone();
+        {
+            let all_scheduled: Vec<ScheduledInst> =
+                block_schedules.iter().flatten().cloned().collect();
+            add_shift_precolors(&all_scheduled, &mut func_level_param_vregs);
+        }
+        let mut dummy_live_out: HashSet<VReg> = HashSet::new();
+        add_call_precolors(
+            func,
+            &egraph,
+            &class_to_vreg,
+            &mut func_level_param_vregs,
+            &mut dummy_live_out,
+        );
+
+        // Step 8: Per-block allocation loop (RPO order).
+        let mut shared_next_vreg = shared_next_vreg_start;
+        let mut merged_vreg_to_reg: HashMap<VReg, Reg> = HashMap::new();
+        let mut merged_callee_saved: Vec<Reg> = Vec::new();
+        let mut spill_slot_counter = cross_block_slots;
+        let mut block_rewritten_storage: Vec<Vec<ScheduledInst>> =
+            vec![Vec::new(); func.blocks.len()];
+
+        for &block_idx in &rpo_order {
+            let block = &func.blocks[block_idx];
+
+            // Step 8a: Insert cross-block spill/reload code.
+            let (split_schedule, _rename) = crate::regalloc::split::rewrite_block_for_splitting(
+                &block_schedules[block_idx],
+                block_idx,
+                &global_liveness,
+                &spill_map,
+                &block_defs,
+                &def_insts,
+                &mut shared_next_vreg,
+                &block_param_vregs_per_block[block_idx],
+                &vreg_classes,
+            );
+
+            // Step 8a-reorder: Move all BlockParam instructions to the front of
+            // split_schedule. Block params receive their values from predecessor
+            // phi copies before the block begins execution. Placing them at
+            // position 0 ensures liveness analysis treats them as live from the
+            // start of the block, preventing other instructions scheduled before
+            // their original position from sharing the same physical register.
+            let split_schedule = {
+                let (mut bps, rest): (Vec<_>, Vec<_>) = split_schedule
+                    .into_iter()
+                    .partition(|inst| matches!(inst.op, Op::BlockParam(_, _, _)));
+                bps.extend(rest);
+                bps
+            };
+
+            // Step 8b: Per-block live_out for allocate():
+            //   - phi source VRegs (from this block's terminator args): ensures the
+            //     phi source values stay live at the terminator for phi copy emission.
+            //   - block param VRegs for this block: forces them into the interference
+            //     graph so they are not coalesced away, ensuring build_phi_copies can
+            //     find their physical registers in merged_vreg_to_reg.
+            let block_live_out: HashSet<VReg> = phi_uses[block_idx]
+                .iter()
+                .chain(block_param_vregs_per_block[block_idx].iter())
+                .copied()
+                .collect();
+
+            // Step 8c: Filter pre-colorings to VRegs in this block's schedule.
+            let split_vreg_set: HashSet<VReg> = split_schedule
+                .iter()
+                .flat_map(|i| std::iter::once(i.dst).chain(i.operands.iter().copied()))
+                .collect();
+
+            let block_param_vregs: Vec<(VReg, Reg)> = func_level_param_vregs
+                .iter()
+                .filter(|&&(v, _)| split_vreg_set.contains(&v))
+                .copied()
+                .collect();
+
+            // Step 8d: Filter copy pairs to VRegs in this block.
+            let block_copy_pairs: Vec<(VReg, VReg)> = copy_pairs
+                .iter()
+                .filter(|&&(a, b)| split_vreg_set.contains(&a) && split_vreg_set.contains(&b))
+                .copied()
+                .collect();
+
+            // Step 8e: Per-block call points (local instruction indices).
+            let block_call_points = collect_call_points_for_block(func, block_idx, &split_schedule);
+
+            // Step 8f: Per-block loop depths.
+            let block_loop_depths: HashMap<VReg, u32> = loop_depths
+                .iter()
+                .filter(|(v, _)| split_vreg_set.contains(v))
+                .map(|(&v, &d)| (v, d))
+                .collect();
+
+            // Step 8g: Run per-block allocation.
+            let block_result = allocate(
+                &split_schedule,
+                &block_param_vregs,
+                &block_live_out,
+                &block_copy_pairs,
+                &block_loop_depths,
+                &block_call_points,
+            )
+            .map_err(|e| CompileError {
+                phase: "regalloc".into(),
+                message: format!("block {}: {}", block.id, e),
+                location: Some(IrLocation {
+                    function: func.name.clone(),
+                    block: Some(block.id),
+                    inst: None,
+                }),
+            })?;
+
+            // Merge results: only insert VRegs that actually appear in this
+            // block's split schedule. The allocate() function builds an
+            // interference graph with num_vregs = max_vreg_seen + 1, which
+            // includes "phantom" entries for all VReg indices up to the max.
+            // Those phantom entries get color 0 (RAX) and must not be merged
+            // into merged_vreg_to_reg as they would overwrite correct
+            // assignments from other blocks.
+            for (v, r) in &block_result.vreg_to_reg {
+                if split_vreg_set.contains(v) {
+                    merged_vreg_to_reg.insert(*v, *r);
                 }
             }
-        }
-    }
-
-    // Pre-color the first CallResult of each Call op to RAX (GPR return register).
-    // This ensures the return value lands in RAX so lower_effectful_op can capture it.
-    for block in &func.blocks {
-        for op in &block.ops {
-            if let EffectfulOp::Call { results, .. } = op {
-                if let Some(&first_result_cid) = results.first() {
-                    let canon = egraph.unionfind.find_immutable(first_result_cid);
-                    if let Some(&vreg) = class_to_vreg.get(&canon) {
-                        if !all_param_vregs.iter().any(|&(v, _)| v == vreg) {
-                            all_param_vregs.push((vreg, GPR_RETURN_REG));
-                        }
-                    }
+            for &r in &block_result.callee_saved_used {
+                if !merged_callee_saved.contains(&r) {
+                    merged_callee_saved.push(r);
                 }
             }
-        }
-    }
 
-    let regalloc_result = allocate(
-        &all_scheduled,
-        &all_param_vregs,
-        &live_out,
-        &copy_pairs,
-        &loop_depths,
-        &call_points,
-    )
-    .map_err(|e| CompileError {
-        phase: "regalloc".into(),
-        message: e,
-        location: Some(IrLocation {
-            function: func.name.clone(),
-            block: None,
-            inst: None,
-        }),
-    })?;
+            // Rewrite split_schedule with physical registers.
+            // The split_schedule contains cross-block spill/reload instructions
+            // with absolute slot numbers (0..cross_block_slots). Any intra-block
+            // spill instructions inserted by allocate() internally use a separate
+            // local copy and are not reflected here; their slot count is tracked
+            // for frame layout purposes.
+            let rewritten_insts = rewrite_vregs(&split_schedule, &block_result.vreg_to_reg);
+            spill_slot_counter += block_result.spill_slots;
+            block_rewritten_storage[block_idx] = rewritten_insts;
+        }
+
+        merged_callee_saved.sort_by_key(|r| *r as u8);
+        merged_callee_saved.dedup();
+
+        let merged_result = RegAllocResult {
+            vreg_to_reg: merged_vreg_to_reg,
+            spill_slots: spill_slot_counter,
+            callee_saved_used: merged_callee_saved,
+        };
+
+        (merged_result, block_rewritten_storage)
+    };
 
     if let Some(s) = sink.as_deref_mut() {
         s.phase_stats(
@@ -390,12 +498,6 @@ pub fn compile(
             ),
         );
     }
-
-    // Phase 6: Rewrite VRegs per block.
-    let block_rewritten: Vec<Vec<ScheduledInst>> = block_schedules
-        .iter()
-        .map(|sched| rewrite_vregs(sched, &regalloc_result.vreg_to_reg))
-        .collect();
 
     // Build the set of param VRegs so lowering can skip their Iconst sentinels.
     let param_vreg_set: HashSet<VReg> = param_vregs.iter().map(|(v, _)| *v).collect();
@@ -1430,30 +1532,6 @@ fn build_block_param_class_map(egraph: &EGraph) -> HashMap<(BlockId, u32), Class
     map
 }
 
-/// Collect VRegs for all block params across all blocks (used for global live-out).
-fn collect_block_param_vregs(
-    egraph: &EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-) -> HashSet<VReg> {
-    let mut result = HashSet::new();
-    for i in 0..egraph.classes.len() as u32 {
-        let cid = ClassId(i);
-        let canon = egraph.unionfind.find_immutable(cid);
-        if canon != cid {
-            continue;
-        }
-        let class = egraph.class(cid);
-        for node in &class.nodes {
-            if matches!(node.op, Op::BlockParam(_, _, _)) {
-                if let Some(&vreg) = class_to_vreg.get(&cid) {
-                    result.insert(vreg);
-                }
-            }
-        }
-    }
-    result
-}
-
 /// Collect VRegs for all phi-copy source arguments across all blocks.
 ///
 /// These are the values passed as args to Jump/Branch. They need to be in
@@ -1616,6 +1694,87 @@ fn compute_loop_depths(
     // Also map VRegs from class_to_vreg for blocks (they may not appear in schedules).
     let _ = class_to_vreg; // already covered via block_schedules
     result
+}
+
+/// Pre-color shift count operands to RCX for variable-shift instructions.
+fn add_shift_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(VReg, Reg)>) {
+    for inst in insts {
+        if matches!(inst.op, Op::X86Shl | Op::X86Shr | Op::X86Sar) && inst.operands.len() >= 2 {
+            let count_vreg = inst.operands[1];
+            if !param_vregs.iter().any(|&(v, _)| v == count_vreg) {
+                param_vregs.push((count_vreg, Reg::RCX));
+            }
+        }
+    }
+}
+
+/// Pre-color call argument and call result VRegs to their ABI registers.
+///
+/// For register args (first 6 GPR), pre-color directly.
+/// For stack args, add to `live_out` to force them to interfere with each other.
+/// For call results, pre-color to RAX.
+fn add_call_precolors(
+    func: &Function,
+    egraph: &EGraph,
+    class_to_vreg: &HashMap<ClassId, VReg>,
+    param_vregs: &mut Vec<(VReg, Reg)>,
+    live_out: &mut HashSet<VReg>,
+) {
+    for block in &func.blocks {
+        for op in &block.ops {
+            if let EffectfulOp::Call { args, results, .. } = op {
+                let arg_types: Vec<crate::ir::types::Type> =
+                    vec![crate::ir::types::Type::I64; args.len()];
+                let locs = crate::x86::abi::assign_args(&arg_types);
+                for (&cid, loc) in args.iter().zip(locs.iter()) {
+                    let canon = egraph.unionfind.find_immutable(cid);
+                    if let Some(&vreg) = class_to_vreg.get(&canon) {
+                        match loc {
+                            crate::x86::abi::ArgLoc::Reg(reg) => {
+                                if !param_vregs.iter().any(|&(v, _)| v == vreg) {
+                                    param_vregs.push((vreg, *reg));
+                                }
+                            }
+                            crate::x86::abi::ArgLoc::Stack { .. } => {
+                                live_out.insert(vreg);
+                            }
+                        }
+                    }
+                }
+                if let Some(&first_result_cid) = results.first() {
+                    let canon = egraph.unionfind.find_immutable(first_result_cid);
+                    if let Some(&vreg) = class_to_vreg.get(&canon) {
+                        if !param_vregs.iter().any(|&(v, _)| v == vreg) {
+                            param_vregs.push((vreg, GPR_RETURN_REG));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Compute call point indices (local to a block's instruction list) for
+/// caller-saved clobber modeling. Returns local indices into `block_sched`.
+fn collect_call_points_for_block(
+    func: &Function,
+    block_idx: usize,
+    block_sched: &[ScheduledInst],
+) -> Vec<usize> {
+    let block = &func.blocks[block_idx];
+    let non_term_count = if block.ops.is_empty() {
+        0
+    } else {
+        block.ops.len() - 1
+    };
+    let has_call = block.ops[..non_term_count]
+        .iter()
+        .any(|op| matches!(op, EffectfulOp::Call { .. }));
+    if has_call {
+        vec![block_sched.len()]
+    } else {
+        vec![]
+    }
 }
 
 /// Negate a CondCode.

@@ -23,7 +23,11 @@ pub struct RegAllocResult {
     pub callee_saved_used: Vec<Reg>,
 }
 
-/// Allocate physical registers for a basic block's scheduled instruction list.
+/// Allocate physical registers for a single basic block's scheduled instruction list.
+///
+/// This function is called once per basic block by the per-block register allocator
+/// in compile.rs. Cross-block live ranges are handled by the caller via spill/reload
+/// insertion (`rewrite_block_for_splitting`) before this function is invoked.
 ///
 /// Algorithm:
 /// 1. Compute liveness.
@@ -34,18 +38,6 @@ pub struct RegAllocResult {
 /// 6. If chromatic_number > available_regs: spill, re-run (up to 3 times).
 /// 7. Map colors to physical registers.
 /// 8. Return result.
-///
-/// # Known limitation: cross-block live range splitting
-///
-/// The compiler concatenates all block schedules into a single flat list before
-/// calling this function. A value defined in block 0 and used in block 5 will
-/// have a live range spanning blocks 1-4, even if it is not needed in those blocks.
-/// This inflates register pressure unnecessarily. The correct fix is per-block
-/// regalloc with live range splitting at block boundaries (spill at exit, reload
-/// at entry), which is a significant architectural change deferred to a future phase.
-///
-/// The conservative `live_out` set passed in ensures correctness but may cause
-/// excessive pressure in functions with many cross-block live values.
 pub fn allocate(
     insts: &[ScheduledInst],
     param_vregs: &[(VReg, Reg)], // pre-colored function params
@@ -127,16 +119,6 @@ pub fn allocate(
 
         // Step 6: Check if we need to spill.
         let gpr_colors_needed = coloring.chromatic_number;
-
-        // Diagnostic: high chromatic number often indicates cross-block live
-        // ranges inflating pressure beyond what per-block regalloc would see.
-        // This is a known limitation of the single-pass flat-list approach.
-        if gpr_colors_needed > 12 {
-            eprintln!(
-                "note: regalloc chromatic number {gpr_colors_needed} > 12; \
-                 cross-block live range splitting would reduce pressure"
-            );
-        }
 
         if gpr_colors_needed <= AVAILABLE_GPR_COLORS {
             // Success: map colors to physical registers.
