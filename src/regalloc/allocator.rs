@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::egraph::extract::VReg;
+use crate::ir::op::Op;
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::CALLEE_SAVED;
 use crate::x86::reg::{Reg, RegClass};
@@ -33,10 +34,24 @@ pub struct RegAllocResult {
 /// 6. If chromatic_number > available_regs: spill, re-run (up to 3 times).
 /// 7. Map colors to physical registers.
 /// 8. Return result.
+///
+/// # Known limitation: cross-block live range splitting
+///
+/// The compiler concatenates all block schedules into a single flat list before
+/// calling this function. A value defined in block 0 and used in block 5 will
+/// have a live range spanning blocks 1-4, even if it is not needed in those blocks.
+/// This inflates register pressure unnecessarily. The correct fix is per-block
+/// regalloc with live range splitting at block boundaries (spill at exit, reload
+/// at entry), which is a significant architectural change deferred to a future phase.
+///
+/// The conservative `live_out` set passed in ensures correctness but may cause
+/// excessive pressure in functions with many cross-block live values.
 pub fn allocate(
     insts: &[ScheduledInst],
     param_vregs: &[(VReg, Reg)], // pre-colored function params
     block_live_out: &HashSet<VReg>,
+    copy_pairs: &[(VReg, VReg)], // phi copy pairs for coalescing
+    loop_depths: &std::collections::HashMap<VReg, u32>, // loop-depth info for spill selection
 ) -> Result<RegAllocResult, String> {
     let mut insts: Vec<ScheduledInst> = insts.to_vec();
     let mut spill_slots = 0u32;
@@ -72,11 +87,12 @@ pub fn allocate(
         // Step 4 (first round only): coalesce copy pairs on original SSA graph.
         // Per spec: coalescing must NOT be re-run after spill insertion.
         let coalesced = if round == 0 {
-            // Derive copy pairs from param_vregs: if a param VReg is used as a
-            // block-parameter source, it forms a copy pair with the destination.
-            // For now, no block-param copy pairs are passed in; this is a hook
-            // for the caller to supply them. We return empty.
-            coalesce(&graph, &[])
+            let pairs: Vec<(usize, usize)> = copy_pairs
+                .iter()
+                .map(|(src, dst)| (src.0 as usize, dst.0 as usize))
+                .filter(|&(src, dst)| src < graph.num_vregs && dst < graph.num_vregs)
+                .collect();
+            coalesce(&graph, &pairs)
         } else {
             vec![]
         };
@@ -101,6 +117,17 @@ pub fn allocate(
 
         // Step 6: Check if we need to spill.
         let gpr_colors_needed = coloring.chromatic_number;
+
+        // Diagnostic: high chromatic number often indicates cross-block live
+        // ranges inflating pressure beyond what per-block regalloc would see.
+        // This is a known limitation of the single-pass flat-list approach.
+        if gpr_colors_needed > 12 {
+            eprintln!(
+                "note: regalloc chromatic number {gpr_colors_needed} > 12; \
+                 cross-block live range splitting would reduce pressure"
+            );
+        }
+
         if gpr_colors_needed <= AVAILABLE_GPR_COLORS {
             // Success: map colors to physical registers.
             let pre_coloring_regs = build_pre_coloring_regs(&insts_coalesced, &param_vreg_to_reg);
@@ -144,8 +171,13 @@ pub fn allocate(
         }
 
         // Select a VReg to spill.
-        let spill_candidate =
-            select_spill(&graph2, &liveness2, &insts_coalesced, AVAILABLE_GPR_COLORS);
+        let spill_candidate = select_spill(
+            &graph2,
+            &liveness2,
+            &insts_coalesced,
+            AVAILABLE_GPR_COLORS,
+            loop_depths,
+        );
 
         let Some(spill_idx) = spill_candidate else {
             return Err(format!(
@@ -156,28 +188,57 @@ pub fn allocate(
         // Insert spill code.
         let mut spilled = HashSet::new();
         spilled.insert(spill_idx);
-        insert_spills(&mut insts, &spilled, &mut spill_slots, &mut next_vreg);
+        insert_spills(
+            &mut insts,
+            &spilled,
+            &mut spill_slots,
+            &mut next_vreg,
+            &vreg_classes2,
+        );
     }
 
     unreachable!("loop should have returned before exhausting rounds")
 }
 
+/// Returns true if `op` produces or consumes an XMM (FP) register.
+fn is_fp_op(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::X86Addsd | Op::X86Subsd | Op::X86Mulsd | Op::X86Divsd | Op::X86Sqrtsd | Op::Fconst(_)
+    )
+}
+
 /// Build a VReg class map for all VRegs referenced in the instruction list.
-/// Currently assumes all VRegs are GPR (XMM support is task 10.13a).
+/// FP ops (X86Addsd etc.) use XMM; everything else uses GPR.
 fn build_vreg_classes(
     insts: &[ScheduledInst],
     liveness: &super::liveness::LivenessInfo,
 ) -> HashMap<VReg, RegClass> {
     let mut map = HashMap::new();
     for inst in insts {
-        map.insert(inst.dst, RegClass::GPR);
+        let class = if is_fp_op(&inst.op) {
+            RegClass::XMM
+        } else {
+            RegClass::GPR
+        };
+        map.insert(inst.dst, class);
         for &op in &inst.operands {
-            map.insert(op, RegClass::GPR);
+            // Operand class is inferred from the defining instruction's class.
+            // Default to GPR; will be overridden if the defining inst is FP.
+            map.entry(op).or_insert(RegClass::GPR);
+        }
+    }
+    // Propagate XMM class: if an instruction is FP, its operands are also XMM.
+    for inst in insts {
+        if is_fp_op(&inst.op) {
+            for &op in &inst.operands {
+                map.insert(op, RegClass::XMM);
+            }
         }
     }
     for live_set in &liveness.live_at {
         for &v in live_set {
-            map.insert(v, RegClass::GPR);
+            map.entry(v).or_insert(RegClass::GPR);
         }
     }
     map
@@ -260,7 +321,14 @@ mod tests {
     fn basic_allocation_succeeds() {
         let insts = vec![iconst_inst(0, 1), iconst_inst(1, 2), add_inst(2, 0, 1)];
         let live_out = HashSet::new();
-        let result = allocate(&insts, &[], &live_out).expect("allocation should succeed");
+        let result = allocate(
+            &insts,
+            &[],
+            &live_out,
+            &[],
+            &std::collections::HashMap::new(),
+        )
+        .expect("allocation should succeed");
 
         assert!(result.vreg_to_reg.contains_key(&VReg(0)));
         assert!(result.vreg_to_reg.contains_key(&VReg(1)));
@@ -286,7 +354,14 @@ mod tests {
         ];
         let params = vec![(VReg(0), Reg::RDI)];
         let live_out = HashSet::new();
-        let result = allocate(&insts, &params, &live_out).expect("allocation should succeed");
+        let result = allocate(
+            &insts,
+            &params,
+            &live_out,
+            &[],
+            &std::collections::HashMap::new(),
+        )
+        .expect("allocation should succeed");
 
         assert_eq!(
             result.vreg_to_reg.get(&VReg(0)),
@@ -314,7 +389,14 @@ mod tests {
             },
         ];
         let live_out = HashSet::new();
-        let result = allocate(&insts, &[], &live_out).expect("allocation should succeed");
+        let result = allocate(
+            &insts,
+            &[],
+            &live_out,
+            &[],
+            &std::collections::HashMap::new(),
+        )
+        .expect("allocation should succeed");
 
         // v0 and v2 don't overlap -- they may get the same register.
         // The important thing is that v0 and v2 are allocated (no panic).
@@ -347,11 +429,98 @@ mod tests {
         // Chromatic number = 16 > 15 available GPRs.
         // After 3 spill rounds, should error.
         let live_out = HashSet::new();
-        let result = allocate(&insts, &[], &live_out);
+        let result = allocate(
+            &insts,
+            &[],
+            &live_out,
+            &[],
+            &std::collections::HashMap::new(),
+        );
         // Either it succeeds (some spilling reduced pressure) or it errors.
         // With 16 simultaneous live regs and only constants (rematerializable),
         // spilling will re-emit iconsts and eventually succeed.
         // This test just checks it doesn't panic or loop infinitely.
         let _ = result; // success or error, both acceptable here
+    }
+
+    // Phase 4.1: allocator with explicit copy pairs coalesces non-interfering ones.
+    //
+    // v0 = iconst; v1 = iconst; [v0 and v1 are non-interfering since v0 dies before v1 is used]
+    // Copy pair (v0, v2) and (v1, v3) — if regalloc coalesces them, v0==v2 and v1==v3.
+    //
+    // Actually we test that passing copy pairs doesn't break allocation, and
+    // that non-interfering pairs can share a register (same as non_overlapping test
+    // but with explicit copy pairs supplied).
+    #[test]
+    fn copy_pairs_passed_to_allocate() {
+        // v0 = iconst; v1 = use(v0) [v0 dies]; v2 = iconst; v3 = use(v2)
+        // Copy pair (v0, v2): since they don't interfere, coalescing may assign same reg.
+        let insts = vec![
+            iconst_inst(0, 1),
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(1),
+                operands: vec![VReg(0)],
+            },
+            iconst_inst(2, 2),
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(3),
+                operands: vec![VReg(2)],
+            },
+        ];
+        let live_out = HashSet::new();
+        // Pass a copy pair (v0, v2) — non-interfering, so coalescing may unify them.
+        let copy_pairs = vec![(VReg(0), VReg(2))];
+        let result = allocate(
+            &insts,
+            &[],
+            &live_out,
+            &copy_pairs,
+            &std::collections::HashMap::new(),
+        )
+        .expect("allocation with copy pairs should succeed");
+
+        // All four VRegs must be allocated.
+        assert!(result.vreg_to_reg.contains_key(&VReg(0)));
+        assert!(result.vreg_to_reg.contains_key(&VReg(1)));
+        assert!(result.vreg_to_reg.contains_key(&VReg(2)));
+        assert!(result.vreg_to_reg.contains_key(&VReg(3)));
+    }
+
+    // Phase 4.3: shift count VReg pre-colored to RCX is allocated to RCX.
+    //
+    // Simulate a variable shift by pre-coloring the count VReg to RCX,
+    // as compile() does before calling allocate().
+    #[test]
+    fn shift_count_precolored_to_rcx() {
+        // v0 = iconst (value to shift); v1 = iconst (shift count, pre-colored to RCX)
+        // v2 = X86Shl(v0, v1)
+        let insts = vec![
+            iconst_inst(0, 4),
+            iconst_inst(1, 2), // count
+            ScheduledInst {
+                op: Op::X86Shl,
+                dst: VReg(2),
+                operands: vec![VReg(0), VReg(1)],
+            },
+        ];
+        let params = vec![(VReg(1), Reg::RCX)]; // pre-color count to RCX
+        let live_out = HashSet::new();
+        let result = allocate(
+            &insts,
+            &params,
+            &live_out,
+            &[],
+            &std::collections::HashMap::new(),
+        )
+        .expect("allocation with shift pre-coloring should succeed");
+
+        // The shift count must be allocated to RCX.
+        assert_eq!(
+            result.vreg_to_reg.get(&VReg(1)),
+            Some(&Reg::RCX),
+            "shift count VReg must be allocated to RCX"
+        );
     }
 }

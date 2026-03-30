@@ -126,4 +126,68 @@ mod tests {
         assert_eq!(insts.len(), 1);
         assert_eq!(insts[0], mov(Reg::RDX, Reg::RCX));
     }
+
+    fn simulate(
+        copies: &[(Reg, Reg)],
+        initial: &[(Reg, u64)],
+    ) -> std::collections::HashMap<Reg, u64> {
+        let insts = phi_copies(copies, Reg::R11);
+        let mut state: std::collections::HashMap<Reg, u64> = initial.iter().copied().collect();
+        // Ensure R11 exists as scratch in case cycle-breaking uses it.
+        state.entry(Reg::R11).or_insert(0);
+        for inst in &insts {
+            if let MachInst::MovRR {
+                dst: Operand::Reg(d),
+                src: Operand::Reg(s),
+            } = inst
+            {
+                let v = state[s];
+                state.insert(*d, v);
+            }
+        }
+        state
+    }
+
+    #[test]
+    fn four_way_cycle() {
+        // A->B, B->C, C->D, D->A: four-way rotation.
+        // RAX=1, RCX=2, RDX=3, RSI=4
+        // After: RCX=1, RDX=2, RSI=3, RAX=4
+        let copies = [
+            (Reg::RAX, Reg::RCX),
+            (Reg::RCX, Reg::RDX),
+            (Reg::RDX, Reg::RSI),
+            (Reg::RSI, Reg::RAX),
+        ];
+        let initial = [(Reg::RAX, 1), (Reg::RCX, 2), (Reg::RDX, 3), (Reg::RSI, 4)];
+        let state = simulate(&copies, &initial);
+        assert_eq!(state[&Reg::RCX], 1, "RCX should receive RAX's value");
+        assert_eq!(state[&Reg::RDX], 2, "RDX should receive RCX's value");
+        assert_eq!(state[&Reg::RSI], 3, "RSI should receive RDX's value");
+        assert_eq!(state[&Reg::RAX], 4, "RAX should receive RSI's value");
+    }
+
+    #[test]
+    fn multiple_independent_cycles() {
+        // Two independent 2-cycles: RAX<->RCX and RDX<->RSI.
+        let copies = [
+            (Reg::RAX, Reg::RCX),
+            (Reg::RCX, Reg::RAX),
+            (Reg::RDX, Reg::RSI),
+            (Reg::RSI, Reg::RDX),
+        ];
+        let initial = [
+            (Reg::RAX, 10),
+            (Reg::RCX, 20),
+            (Reg::RDX, 30),
+            (Reg::RSI, 40),
+        ];
+        let state = simulate(&copies, &initial);
+        // First cycle: RAX<->RCX
+        assert_eq!(state[&Reg::RAX], 20, "RAX should have RCX's original value");
+        assert_eq!(state[&Reg::RCX], 10, "RCX should have RAX's original value");
+        // Second cycle: RDX<->RSI
+        assert_eq!(state[&Reg::RDX], 40, "RDX should have RSI's original value");
+        assert_eq!(state[&Reg::RSI], 30, "RSI should have RDX's original value");
+    }
 }

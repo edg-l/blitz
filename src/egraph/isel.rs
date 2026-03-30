@@ -4,13 +4,17 @@ use crate::egraph::egraph::{EGraph, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::condcode::CondCode;
 use crate::ir::op::{ClassId, Op};
+use crate::ir::types::Type;
 
 pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     let mut changed = false;
     changed |= apply_alu_isel(egraph);
     changed |= apply_shift_isel(egraph);
+    changed |= apply_shift_imm_isel(egraph);
     changed |= apply_icmp_isel(egraph);
     changed |= apply_select_isel(egraph);
+    changed |= apply_sext_zext_trunc_isel(egraph);
+    changed |= apply_fp_isel(egraph);
     changed
 }
 
@@ -65,6 +69,21 @@ fn apply_alu_isel(egraph: &mut EGraph) -> bool {
     changed
 }
 
+/// Search a class for an Iconst node and return its value, if any.
+fn find_iconst_in_class(egraph: &EGraph, class_id: ClassId) -> Option<i64> {
+    let canon = egraph.unionfind.find_immutable(class_id);
+    if canon == ClassId::NONE {
+        return None;
+    }
+    let class = egraph.class(canon);
+    for node in &class.nodes {
+        if let Op::Iconst(val, _) = &node.op {
+            return Some(*val);
+        }
+    }
+    None
+}
+
 /// Shl/Sar/Shr -> X86Shl/X86Sar/X86Shr (as Proj0)
 fn apply_shift_isel(egraph: &mut EGraph) -> bool {
     let snaps = snapshot_all(egraph);
@@ -98,6 +117,75 @@ fn apply_shift_isel(egraph: &mut EGraph) -> bool {
         let proj0_canon = egraph.unionfind.find_immutable(proj0);
         if canon != proj0_canon {
             egraph.merge(class_id, proj0);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// X86Shl(a, Iconst(n)) -> add X86ShlImm(n)(a) as an alternative in the same class.
+/// Looks for Proj0(X86Shl(a, b)) where b has a constant value, and merges that
+/// Proj0 class with Proj0(X86ShlImm(n)(a)). Same for Shr/Sar.
+fn apply_shift_imm_isel(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
+    let mut changed = false;
+
+    for snap in &snaps {
+        let class_id = snap.class_id;
+
+        // Look for Proj0 nodes whose child is X86Shl/X86Shr/X86Sar.
+        if snap.op != Op::Proj0 || snap.children.len() != 1 {
+            continue;
+        }
+        let shift_class = snap.children[0];
+        let shift_canon = egraph.unionfind.find_immutable(shift_class);
+        if shift_canon == ClassId::NONE {
+            continue;
+        }
+
+        // Find an X86Shl/Shr/Sar node in the shift class with its operands.
+        let shift_class_data = egraph.class(shift_canon);
+        let shift_node = shift_class_data.nodes.iter().find(|n| {
+            matches!(n.op, Op::X86Shl | Op::X86Shr | Op::X86Sar) && n.children.len() == 2
+        });
+        let Some(shift_node) = shift_node else {
+            continue;
+        };
+
+        let mk_imm_op: fn(u8) -> Op = match &shift_node.op {
+            Op::X86Shl => |n| Op::X86ShlImm(n),
+            Op::X86Shr => |n| Op::X86ShrImm(n),
+            Op::X86Sar => |n| Op::X86SarImm(n),
+            _ => unreachable!(),
+        };
+
+        let a = shift_node.children[0];
+        let b = shift_node.children[1];
+
+        // Check if b is a constant that fits in shift count range 0..=63.
+        let Some(val) = find_iconst_in_class(egraph, b) else {
+            continue;
+        };
+        if val < 0 || val > 63 {
+            continue;
+        }
+        let n = val as u8;
+
+        // Create X86ShlImm(n)(a), then Proj0 of it.
+        let imm_node = egraph.add(ENode {
+            op: mk_imm_op(n),
+            children: smallvec![a],
+        });
+        let proj0_imm = egraph.add(ENode {
+            op: Op::Proj0,
+            children: smallvec![imm_node],
+        });
+
+        // Merge the existing Proj0(X86Shl) class with Proj0(X86ShlImm).
+        let canon = egraph.unionfind.find_immutable(class_id);
+        let proj0_imm_canon = egraph.unionfind.find_immutable(proj0_imm);
+        if canon != proj0_imm_canon {
+            egraph.merge(class_id, proj0_imm);
             changed = true;
         }
     }
@@ -171,6 +259,104 @@ fn apply_select_isel(egraph: &mut EGraph) -> bool {
         let cmov_canon = egraph.unionfind.find_immutable(cmov);
         if canon != cmov_canon {
             egraph.merge(class_id, cmov);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Infer the result type of a class by inspecting its nodes.
+///
+/// Returns `Some(ty)` if any node in the class has a directly-determinable type
+/// (constants, params, x86 machine ops, conversion ops). Returns `None` only if
+/// no such node is found.
+fn infer_class_type(egraph: &EGraph, class_id: ClassId) -> Option<Type> {
+    let canon = egraph.unionfind.find_immutable(class_id);
+    if canon == ClassId::NONE {
+        return None;
+    }
+    let class = egraph.class(canon);
+    // Use the type stored directly on the e-class (always available after `add`).
+    Some(class.ty.clone())
+}
+
+/// Sext(ty)(a) -> X86Movsx{from, to}(a)
+/// Zext(ty)(a) -> X86Movzx{from, to}(a)
+/// Trunc(ty)(a) -> X86Trunc{from, to}(a)
+fn apply_sext_zext_trunc_isel(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
+    let mut changed = false;
+
+    for snap in &snaps {
+        let class_id = snap.class_id;
+        if snap.children.len() != 1 {
+            continue;
+        }
+
+        let child = snap.children[0];
+        let Some(from_ty) = infer_class_type(egraph, child) else {
+            continue;
+        };
+
+        let machine_op = match &snap.op {
+            Op::Sext(to) => Op::X86Movsx {
+                from: from_ty,
+                to: to.clone(),
+            },
+            Op::Zext(to) => Op::X86Movzx {
+                from: from_ty,
+                to: to.clone(),
+            },
+            Op::Trunc(to) => Op::X86Trunc {
+                from: from_ty,
+                to: to.clone(),
+            },
+            _ => continue,
+        };
+
+        let machine_node = egraph.add(ENode {
+            op: machine_op,
+            children: smallvec![child],
+        });
+
+        let canon = egraph.unionfind.find_immutable(class_id);
+        let machine_canon = egraph.unionfind.find_immutable(machine_node);
+        if canon != machine_canon {
+            egraph.merge(class_id, machine_node);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Fadd/Fsub/Fmul/Fdiv/Fsqrt -> X86Addsd/X86Subsd/X86Mulsd/X86Divsd/X86Sqrtsd
+fn apply_fp_isel(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
+    let mut changed = false;
+
+    for snap in &snaps {
+        let class_id = snap.class_id;
+
+        let (machine_op, expected_children) = match &snap.op {
+            Op::Fadd if snap.children.len() == 2 => (Op::X86Addsd, 2),
+            Op::Fsub if snap.children.len() == 2 => (Op::X86Subsd, 2),
+            Op::Fmul if snap.children.len() == 2 => (Op::X86Mulsd, 2),
+            Op::Fdiv if snap.children.len() == 2 => (Op::X86Divsd, 2),
+            Op::Fsqrt if snap.children.len() == 1 => (Op::X86Sqrtsd, 1),
+            _ => continue,
+        };
+
+        let children: smallvec::SmallVec<[ClassId; 2]> =
+            snap.children[..expected_children].iter().copied().collect();
+        let machine_node = egraph.add(ENode {
+            op: machine_op,
+            children,
+        });
+
+        let canon = egraph.unionfind.find_immutable(class_id);
+        let machine_canon = egraph.unionfind.find_immutable(machine_node);
+        if canon != machine_canon {
+            egraph.merge(class_id, machine_node);
             changed = true;
         }
     }
@@ -321,5 +507,80 @@ mod tests {
             children: smallvec![flags, t, f],
         });
         assert_eq!(g.find(sel), g.find(cmov));
+    }
+
+    // Sext(I64) on an I32 value merges with X86Movsx{I32, I64}
+    #[test]
+    fn sext_i32_to_i64_isel() {
+        let mut g = EGraph::new();
+        let val = g.add(ENode {
+            op: Op::Iconst(42, Type::I32),
+            children: smallvec![],
+        });
+        let sext = g.add(ENode {
+            op: Op::Sext(Type::I64),
+            children: smallvec![val],
+        });
+        apply_isel_rules(&mut g);
+        g.rebuild();
+
+        let movsx = g.add(ENode {
+            op: Op::X86Movsx {
+                from: Type::I32,
+                to: Type::I64,
+            },
+            children: smallvec![val],
+        });
+        assert_eq!(g.find(sext), g.find(movsx));
+    }
+
+    // Zext(I64) on an I8 value merges with X86Movzx{I8, I64}
+    #[test]
+    fn zext_i8_to_i64_isel() {
+        let mut g = EGraph::new();
+        let val = g.add(ENode {
+            op: Op::Iconst(1, Type::I8),
+            children: smallvec![],
+        });
+        let zext = g.add(ENode {
+            op: Op::Zext(Type::I64),
+            children: smallvec![val],
+        });
+        apply_isel_rules(&mut g);
+        g.rebuild();
+
+        let movzx = g.add(ENode {
+            op: Op::X86Movzx {
+                from: Type::I8,
+                to: Type::I64,
+            },
+            children: smallvec![val],
+        });
+        assert_eq!(g.find(zext), g.find(movzx));
+    }
+
+    // Trunc(I32) on an I64 value merges with X86Trunc{I64, I32}
+    #[test]
+    fn trunc_i64_to_i32_isel() {
+        let mut g = EGraph::new();
+        let val = g.add(ENode {
+            op: Op::Iconst(0xFF_FFFF_FFFFi64, Type::I64),
+            children: smallvec![],
+        });
+        let trunc = g.add(ENode {
+            op: Op::Trunc(Type::I32),
+            children: smallvec![val],
+        });
+        apply_isel_rules(&mut g);
+        g.rebuild();
+
+        let x86trunc = g.add(ENode {
+            op: Op::X86Trunc {
+                from: Type::I64,
+                to: Type::I32,
+            },
+            children: smallvec![val],
+        });
+        assert_eq!(g.find(trunc), g.find(x86trunc));
     }
 }

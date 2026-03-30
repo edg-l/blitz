@@ -94,6 +94,13 @@ pub enum Op {
     X86Sar,
     X86Shr,
 
+    /// Shift left by immediate count — `shl dst, imm`; 1 child. Free of RCX pressure.
+    X86ShlImm(u8),
+    /// Logical shift right by immediate count — `shr dst, imm`; 1 child.
+    X86ShrImm(u8),
+    /// Arithmetic shift right by immediate count — `sar dst, imm`; 1 child.
+    X86SarImm(u8),
+
     /// `lea [base + idx]`
     X86Lea2,
     /// `lea [base + idx * scale]` — scale embedded in op
@@ -120,6 +127,48 @@ pub enum Op {
     Addr {
         scale: u8,
         disp: i32,
+    },
+
+    // ── x86-64 FP machine ops ─────────────────────────────────────────────────
+    /// `addsd dst, src` — f64 + f64 → f64.
+    X86Addsd,
+    /// `subsd dst, src` — f64 - f64 → f64.
+    X86Subsd,
+    /// `mulsd dst, src` — f64 * f64 → f64.
+    X86Mulsd,
+    /// `divsd dst, src` — f64 / f64 → f64.
+    X86Divsd,
+    /// `sqrtsd dst, src` — sqrt(f64) → f64.
+    X86Sqrtsd,
+
+    // ── Load result placeholder ───────────────────────────────────────────────
+    /// Placeholder node representing the result of a Load effectful op.
+    /// The `u32` is a unique identifier (block_id * 1000 + load_index) to
+    /// ensure each load gets a distinct e-class. Has no children.
+    LoadResult(u32, Type),
+
+    // ── Call result placeholder ───────────────────────────────────────────────
+    /// Placeholder node representing a return value of a Call effectful op.
+    /// - `u32` index: which return value (0 = first, 1 = second, ...).
+    /// - `Type`: the type of this return value.
+    /// Has no children. Cost is zero (instruction emitted by effectful lowering).
+    CallResult(u32, Type),
+
+    // ── x86-64 conversion ops ─────────────────────────────────────────────────
+    /// `movsx` — sign-extend from `from` type to `to` type; 1 child.
+    X86Movsx {
+        from: Type,
+        to: Type,
+    },
+    /// `movzx` — zero-extend from `from` type to `to` type; 1 child.
+    X86Movzx {
+        from: Type,
+        to: Type,
+    },
+    /// Truncate from `from` type to `to` type; 1 child. Free on x86-64.
+    X86Trunc {
+        from: Type,
+        to: Type,
     },
 }
 
@@ -227,6 +276,14 @@ impl Op {
                 assert_eq!(child_types.len(), 0, "BlockParam requires 0 children");
                 ty.clone()
             }
+            Op::LoadResult(_uid, ty) => {
+                assert_eq!(child_types.len(), 0, "LoadResult requires 0 children");
+                ty.clone()
+            }
+            Op::CallResult(_idx, ty) => {
+                assert_eq!(child_types.len(), 0, "CallResult requires 0 children");
+                ty.clone()
+            }
 
             // ── Comparison ────────────────────────────────────────────────────
             Op::Icmp(_cc) => {
@@ -320,6 +377,17 @@ impl Op {
                 Type::Pair(Box::new(child_types[0].clone()), Box::new(Type::Flags))
             }
 
+            // ── x86 immediate-form shifts (1 child → Pair(childtype, Flags)) ────
+            Op::X86ShlImm(_) | Op::X86ShrImm(_) | Op::X86SarImm(_) => {
+                assert_eq!(child_types.len(), 1, "{self:?} requires 1 child");
+                assert!(
+                    child_types[0].is_integer(),
+                    "{self:?} operand must be integer, got {:?}",
+                    child_types[0]
+                );
+                Type::Pair(Box::new(child_types[0].clone()), Box::new(Type::Flags))
+            }
+
             // ── x86 LEA variants (I64, I64 → I64) ───────────────────────────
             Op::X86Lea2 | Op::X86Lea3 { .. } | Op::X86Lea4 { .. } => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
@@ -371,6 +439,34 @@ impl Op {
                 Type::I8
             }
 
+            // ── x86 FP binary ops (F64, F64 → F64) ──────────────────────────
+            Op::X86Addsd | Op::X86Subsd | Op::X86Mulsd | Op::X86Divsd => {
+                assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
+                assert_eq!(
+                    child_types[0],
+                    Type::F64,
+                    "{self:?} requires F64 operands, got {:?}",
+                    child_types[0]
+                );
+                assert_eq!(
+                    child_types[1],
+                    Type::F64,
+                    "{self:?} requires F64 operands, got {:?}",
+                    child_types[1]
+                );
+                Type::F64
+            }
+            Op::X86Sqrtsd => {
+                assert_eq!(child_types.len(), 1, "X86Sqrtsd requires 1 child");
+                assert_eq!(
+                    child_types[0],
+                    Type::F64,
+                    "X86Sqrtsd requires F64 operand, got {:?}",
+                    child_types[0]
+                );
+                Type::F64
+            }
+
             // ── Addr (base I64, index I64 → I64) ─────────────────────────────
             Op::Addr { .. } => {
                 assert_eq!(
@@ -381,6 +477,35 @@ impl Op {
                 assert_eq!(child_types[0], Type::I64, "Addr base must be I64");
                 assert_eq!(child_types[1], Type::I64, "Addr index must be I64");
                 Type::I64
+            }
+
+            // ── x86-64 conversion ops (1 child → to type) ────────────────────
+            Op::X86Movsx { from, to } => {
+                assert_eq!(child_types.len(), 1, "X86Movsx requires 1 child");
+                assert_eq!(
+                    &child_types[0], from,
+                    "X86Movsx child type mismatch: expected {from:?}, got {:?}",
+                    &child_types[0]
+                );
+                to.clone()
+            }
+            Op::X86Movzx { from, to } => {
+                assert_eq!(child_types.len(), 1, "X86Movzx requires 1 child");
+                assert_eq!(
+                    &child_types[0], from,
+                    "X86Movzx child type mismatch: expected {from:?}, got {:?}",
+                    &child_types[0]
+                );
+                to.clone()
+            }
+            Op::X86Trunc { from, to } => {
+                assert_eq!(child_types.len(), 1, "X86Trunc requires 1 child");
+                assert_eq!(
+                    &child_types[0], from,
+                    "X86Trunc child type mismatch: expected {from:?}, got {:?}",
+                    &child_types[0]
+                );
+                to.clone()
             }
         }
     }

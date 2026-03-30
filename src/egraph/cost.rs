@@ -54,6 +54,12 @@ impl CostModel {
             // ── Block parameters: free (value comes from predecessor block) ──────────
             Op::BlockParam(..) => 0.0,
 
+            // ── Load result placeholder: free (instruction emitted by effectful lowering) ──
+            Op::LoadResult(_, _) => 0.0,
+
+            // ── Call result placeholder: free (result captured after CallDirect) ──
+            Op::CallResult(_, _) => 0.0,
+
             // ── Addr: inlined into load/store, no separate instruction ───────────
             Op::Addr { .. } => 0.0,
 
@@ -68,13 +74,24 @@ impl CostModel {
             }
             .weighted(self.goal),
 
-            // ── x86-64 shifts: latency=1, throughput=0.5, size=3 ────────────────
+            // ── x86-64 shifts (variable count via CL): latency=1, throughput=0.5, size=3 ──
             Op::X86Shl | Op::X86Sar | Op::X86Shr => CostTuple {
                 latency: 1.0,
                 throughput: 0.5,
                 size: 3.0,
             }
             .weighted(self.goal),
+
+            // ── x86-64 immediate-form shifts: slightly cheaper (no CL constraint) ─
+            Op::X86ShlImm(_) | Op::X86ShrImm(_) | Op::X86SarImm(_) => {
+                CostTuple {
+                    latency: 1.0,
+                    throughput: 0.5,
+                    size: 3.0, // same encoding size as CL form
+                }
+                .weighted(self.goal)
+                    * 0.9
+            } // small discount to prefer imm form when available
 
             // ── LEA variants ─────────────────────────────────────────────────────
             Op::X86Lea2 => CostTuple {
@@ -119,6 +136,37 @@ impl CostModel {
                 size: 3.0,
             }
             .weighted(self.goal),
+
+            // ── x86 FP ops (SSE2) ─────────────────────────────────────────────────
+            Op::X86Addsd | Op::X86Subsd => CostTuple {
+                latency: 3.0,
+                throughput: 0.5,
+                size: 4.0,
+            }
+            .weighted(self.goal),
+            Op::X86Mulsd => CostTuple {
+                latency: 5.0,
+                throughput: 0.5,
+                size: 4.0,
+            }
+            .weighted(self.goal),
+            Op::X86Divsd | Op::X86Sqrtsd => CostTuple {
+                latency: 13.0,
+                throughput: 4.0,
+                size: 4.0,
+            }
+            .weighted(self.goal),
+
+            // ── X86Movsx/X86Movzx: latency=1, throughput=0.25, size=4 ────────────
+            Op::X86Movsx { .. } | Op::X86Movzx { .. } => CostTuple {
+                latency: 1.0,
+                throughput: 0.25,
+                size: 4.0,
+            }
+            .weighted(self.goal),
+
+            // ── X86Trunc: free — upper bits are simply ignored on x86-64 ──────────
+            Op::X86Trunc { .. } => 0.0,
 
             // ── Generic IR ops: must be lowered before extraction ─────────────────
             Op::Add
@@ -210,5 +258,49 @@ mod tests {
     fn select_is_infinite() {
         let cm = CostModel::new(OptGoal::Balanced);
         assert_eq!(cm.cost(&Op::Select), f64::INFINITY);
+    }
+
+    #[test]
+    fn x86movsx_has_finite_cost() {
+        use crate::ir::types::Type;
+        let cm = CostModel::new(OptGoal::Balanced);
+        let cost = cm.cost(&Op::X86Movsx {
+            from: Type::I32,
+            to: Type::I64,
+        });
+        assert!(cost.is_finite(), "X86Movsx should have finite cost");
+    }
+
+    #[test]
+    fn x86movzx_has_finite_cost() {
+        use crate::ir::types::Type;
+        let cm = CostModel::new(OptGoal::Balanced);
+        let cost = cm.cost(&Op::X86Movzx {
+            from: Type::I8,
+            to: Type::I64,
+        });
+        assert!(cost.is_finite(), "X86Movzx should have finite cost");
+    }
+
+    #[test]
+    fn x86trunc_is_free() {
+        use crate::ir::types::Type;
+        let cm = CostModel::new(OptGoal::Balanced);
+        let cost = cm.cost(&Op::X86Trunc {
+            from: Type::I64,
+            to: Type::I32,
+        });
+        assert_eq!(cost, 0.0, "X86Trunc should be free");
+    }
+
+    #[test]
+    fn sext_is_infinite() {
+        use crate::ir::types::Type;
+        let cm = CostModel::new(OptGoal::Balanced);
+        assert_eq!(
+            cm.cost(&Op::Sext(Type::I64)),
+            f64::INFINITY,
+            "generic Sext should have infinite cost"
+        );
     }
 }

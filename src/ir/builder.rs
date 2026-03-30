@@ -324,27 +324,33 @@ impl FunctionBuilder {
 
     /// Emit a load from `addr` of type `ty`. Returns the loaded value.
     pub fn load(&mut self, addr: Value, ty: Type) -> Value {
-        // Create a fresh e-class for the loaded value using a sentinel constant.
         let block_id = self
             .current_block
             .expect("no current block set; call set_block first");
+        // Compute a unique ID so that two loads with the same type in the same
+        // function get distinct e-classes (the egraph memo deduplicates by op+children).
         let load_count = {
             let block = self
                 .blocks
                 .iter()
                 .find(|b| b.id == block_id)
                 .expect("current block not found");
-            block.ops.len()
+            block.ops.len() as u32
         };
-        let sentinel = -((block_id as i64 + 1) * 100_000 + load_count as i64 + 1);
+        let uid = block_id * 1000 + load_count;
+        // Create a fresh e-class for the loaded value using a LoadResult placeholder.
         let node = ENode {
-            op: Op::Iconst(sentinel, ty.clone()),
+            op: Op::LoadResult(uid, ty.clone()),
             children: smallvec![],
         };
-        let load_val = Value(self.egraph.add(node));
+        let load_result = Value(self.egraph.add(node));
         let block = self.current_block_mut();
-        block.ops.push(EffectfulOp::Load { addr: addr.0, ty });
-        load_val
+        block.ops.push(EffectfulOp::Load {
+            addr: addr.0,
+            ty,
+            result: load_result.0,
+        });
+        load_result
     }
 
     /// Emit a store of `val` to `addr`.
@@ -362,6 +368,8 @@ impl FunctionBuilder {
         let block_id = self
             .current_block
             .expect("no current block set; call set_block first");
+        // Unique call index within the block, used to disambiguate CallResult nodes
+        // so each call site gets distinct e-classes even for the same return type.
         let call_idx = {
             let block = self
                 .blocks
@@ -371,25 +379,32 @@ impl FunctionBuilder {
             block.ops.len()
         };
 
+        // Create a CallResult placeholder node for each return value.
+        // The uid encodes (block_id, call_idx, result_index) to guarantee a distinct
+        // e-class per call site, preventing the egraph from merging return values of
+        // different calls that happen to have the same type.
         let ret_vals: Vec<Value> = ret_tys
             .iter()
             .enumerate()
             .map(|(i, ty)| {
-                let sentinel =
-                    -((block_id as i64 + 1) * 200_000 + call_idx as i64 * 100 + i as i64 + 1);
+                let uid = block_id * 100_000 + call_idx as u32 * 100 + i as u32;
                 let node = ENode {
-                    op: Op::Iconst(sentinel, ty.clone()),
+                    op: Op::CallResult(uid, ty.clone()),
                     children: smallvec![],
                 };
                 Value(self.egraph.add(node))
             })
             .collect();
 
+        // Collect ClassIds of the CallResult nodes for storage in the effectful op.
+        let result_class_ids: Vec<ClassId> = ret_vals.iter().map(|v| v.0).collect();
+
         let block = self.current_block_mut();
         block.ops.push(EffectfulOp::Call {
             func: func.to_string(),
             args: args.iter().map(|v| v.0).collect(),
             ret_tys: ret_tys.to_vec(),
+            results: result_class_ids,
         });
         ret_vals
     }

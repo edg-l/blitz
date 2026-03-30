@@ -30,12 +30,24 @@ use super::liveness::LivenessInfo;
 pub const SPILL_STORE_TYPE: Type = Type::I8;
 pub const SPILL_LOAD_TYPE: Type = Type::I16;
 
+/// Sentinel types for XMM (FP) spill markers. Must differ from GPR sentinels.
+pub const XMM_SPILL_STORE_TYPE: Type = Type::F32;
+pub const XMM_SPILL_LOAD_TYPE: Type = Type::Flags;
+
 pub fn is_spill_store(inst: &ScheduledInst) -> bool {
     matches!(&inst.op, Op::Iconst(_, t) if *t == SPILL_STORE_TYPE)
 }
 
 pub fn is_spill_load(inst: &ScheduledInst) -> bool {
     matches!(&inst.op, Op::Iconst(_, t) if *t == SPILL_LOAD_TYPE)
+}
+
+pub fn is_xmm_spill_store(inst: &ScheduledInst) -> bool {
+    matches!(&inst.op, Op::Iconst(_, t) if *t == XMM_SPILL_STORE_TYPE)
+}
+
+pub fn is_xmm_spill_load(inst: &ScheduledInst) -> bool {
+    matches!(&inst.op, Op::Iconst(_, t) if *t == XMM_SPILL_LOAD_TYPE)
 }
 
 pub fn spill_slot_of(inst: &ScheduledInst) -> u32 {
@@ -47,11 +59,13 @@ pub fn spill_slot_of(inst: &ScheduledInst) -> u32 {
 
 // ── Spill selection (10.9) ────────────────────────────────────────────────────
 
-/// Select a VReg to spill using a farthest-next-use heuristic.
+/// Select a VReg to spill using a farthest-next-use heuristic with loop-depth penalty.
 ///
 /// Among all VRegs that are live (present in the interference graph) and not
 /// rematerializable, picks the one whose next use is farthest from the point
-/// where register pressure exceeds `available_regs`.
+/// where register pressure exceeds `available_regs`. VRegs defined inside a
+/// loop (higher `loop_depths`) are penalized so they are less likely to be
+/// spilled.
 ///
 /// Returns `None` if no spill candidate is found (shouldn't happen if the
 /// chromatic number truly exceeds available_regs).
@@ -60,6 +74,7 @@ pub fn select_spill(
     liveness: &LivenessInfo,
     insts: &[ScheduledInst],
     available_regs: u32,
+    loop_depths: &HashMap<VReg, u32>,
 ) -> Option<usize> {
     // Find the instruction index where we first exceed register pressure.
     let pressure_point = find_pressure_point(liveness, available_regs)?;
@@ -92,9 +107,14 @@ pub fn select_spill(
         non_remat
     };
 
-    // Pick the candidate with the farthest next use.
+    // Pick the candidate with the farthest next use, penalized by loop depth.
+    // A VReg at loop depth d has its effective next-use distance divided by 10^d,
+    // making loop-body VRegs much less attractive as spill candidates.
     candidates.into_iter().max_by_key(|&idx| {
-        next_use.get(&idx).copied().unwrap_or(usize::MAX) // no future use = best to spill
+        let next = next_use.get(&idx).copied().unwrap_or(usize::MAX);
+        let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
+        let penalty = 10u64.saturating_pow(depth);
+        (next as u64).saturating_div(penalty)
     })
 }
 
@@ -153,6 +173,7 @@ pub fn insert_spills(
     spilled: &HashSet<usize>,
     spill_slots: &mut u32,
     next_vreg: &mut u32,
+    vreg_classes: &HashMap<VReg, crate::x86::reg::RegClass>,
 ) -> HashMap<VReg, Vec<VReg>> {
     if spilled.is_empty() {
         return HashMap::new();
@@ -222,8 +243,18 @@ pub fn insert_spills(
                     // Each use gets its own reload VReg (short-lived).
                     let new_vreg = VReg(*next_vreg);
                     *next_vreg += 1;
+                    let is_xmm = vreg_classes
+                        .get(&op)
+                        .copied()
+                        .map(|c| c == crate::x86::reg::RegClass::XMM)
+                        .unwrap_or(false);
+                    let load_type = if is_xmm {
+                        XMM_SPILL_LOAD_TYPE
+                    } else {
+                        SPILL_LOAD_TYPE
+                    };
                     let load_inst = ScheduledInst {
-                        op: Op::Iconst(slot as i64, SPILL_LOAD_TYPE),
+                        op: Op::Iconst(slot as i64, load_type),
                         dst: new_vreg,
                         operands: vec![],
                     };
@@ -250,10 +281,20 @@ pub fn insert_spills(
         // After the def of a spilled VReg, insert a SpillStore (if not remat).
         if is_spill_def && let Some(&slot) = vreg_to_slot.get(&dst_idx) {
             let spilled_vreg = VReg(dst_idx as u32);
+            let is_xmm = vreg_classes
+                .get(&spilled_vreg)
+                .copied()
+                .map(|c| c == crate::x86::reg::RegClass::XMM)
+                .unwrap_or(false);
+            let store_type = if is_xmm {
+                XMM_SPILL_STORE_TYPE
+            } else {
+                SPILL_STORE_TYPE
+            };
             let dummy_dst = VReg(*next_vreg);
             *next_vreg += 1;
             let store_inst = ScheduledInst {
-                op: Op::Iconst(slot as i64, SPILL_STORE_TYPE),
+                op: Op::Iconst(slot as i64, store_type),
                 dst: dummy_dst,
                 operands: vec![spilled_vreg],
             };
@@ -311,7 +352,13 @@ mod tests {
         let mut spill_slots = 0u32;
         let mut next_vreg = 100u32;
 
-        insert_spills(&mut insts, &spilled, &mut spill_slots, &mut next_vreg);
+        insert_spills(
+            &mut insts,
+            &spilled,
+            &mut spill_slots,
+            &mut next_vreg,
+            &HashMap::new(),
+        );
 
         // spill_slots should now be 1.
         assert_eq!(spill_slots, 1);
@@ -335,6 +382,66 @@ mod tests {
         assert_eq!(load_count, 2, "two SpillLoads expected (one per use)");
     }
 
+    // Phase 4.2: loop-depth penalty — VReg inside a loop is preferred to NOT be spilled.
+    //
+    // Given two candidates with equal next-use distance but different loop depths,
+    // the one outside the loop (depth=0) should be spilled before the loop-body one.
+    #[test]
+    fn loop_depth_penalty_prefers_outer_spill() {
+        use super::super::interference::InterferenceGraph;
+        use super::super::liveness::LivenessInfo;
+        use crate::x86::reg::RegClass;
+
+        // Construct a minimal scenario: 2 VRegs, both live at pressure point.
+        // VReg 0: depth=0 (outside loop). VReg 1: depth=2 (inside loop).
+        // Both have next-use at infinity. The one with lower depth should be spilled.
+        let insts = vec![
+            iconst_inst(0, 10),
+            use_inst(2, 0), // v0 used here
+            iconst_inst(1, 20),
+            use_inst(3, 1), // v1 used here
+        ];
+
+        // Manually create a liveness info where both v0 and v1 are live at inst 0.
+        let live_at: Vec<HashSet<VReg>> = vec![
+            [VReg(0), VReg(1)].iter().copied().collect(), // pressure at inst 0
+            [VReg(0), VReg(1)].iter().copied().collect(),
+            [VReg(1)].iter().copied().collect(),
+            [VReg(1)].iter().copied().collect(),
+        ];
+        let liveness = LivenessInfo {
+            live_at,
+            live_in: HashSet::new(),
+            live_out: HashSet::new(),
+        };
+
+        // Both VRegs are in the interference graph (num_vregs=4).
+        let graph = InterferenceGraph {
+            num_vregs: 4,
+            adj: vec![
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+            ],
+            reg_class: vec![RegClass::GPR; 4],
+        };
+
+        let mut loop_depths = HashMap::new();
+        loop_depths.insert(VReg(0), 0u32); // outside loop
+        loop_depths.insert(VReg(1), 2u32); // inside loop (depth 2)
+
+        // select_spill with 1 available register: must pick one of the two.
+        // Due to loop penalty, VReg 1 (depth=2) should NOT be spilled.
+        // VReg 0 (depth=0) should be chosen.
+        let candidate = select_spill(&graph, &liveness, &insts, 1, &loop_depths);
+        assert_eq!(
+            candidate,
+            Some(0),
+            "should spill VReg 0 (outside loop), not VReg 1 (inside loop)"
+        );
+    }
+
     // Rematerialization: Iconst is re-emitted before each use, no SpillStore.
     #[test]
     fn rematerialization_no_store() {
@@ -348,7 +455,13 @@ mod tests {
         let mut spill_slots = 0u32;
         let mut next_vreg = 10u32;
 
-        insert_spills(&mut insts, &spilled, &mut spill_slots, &mut next_vreg);
+        insert_spills(
+            &mut insts,
+            &spilled,
+            &mut spill_slots,
+            &mut next_vreg,
+            &HashMap::new(),
+        );
 
         // No SpillStore: constants are rematerializable.
         assert!(
@@ -362,5 +475,65 @@ mod tests {
         );
         // spill_slots unchanged.
         assert_eq!(spill_slots, 0);
+    }
+
+    // Phase 4.4: XMM VReg spill inserts XMM-specific markers (not GPR markers).
+    //
+    // When a VReg is classified as XMM (via vreg_classes), insert_spills must
+    // emit XMM_SPILL_STORE_TYPE / XMM_SPILL_LOAD_TYPE sentinels instead of the
+    // GPR sentinels. The compile.rs lowering then emits MOVSD instead of MOV.
+    #[test]
+    fn xmm_spill_uses_xmm_markers() {
+        use crate::x86::reg::RegClass;
+
+        // Simulate an XMM VReg: v0 = Proj0 (non-remat, will be spilled).
+        // v1 = use(v0); v2 = use(v0)
+        let mut insts = vec![
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(0),
+                operands: vec![VReg(99)],
+            },
+            use_inst(1, 0),
+            use_inst(2, 0),
+        ];
+
+        let mut spilled = HashSet::new();
+        spilled.insert(0usize);
+        let mut spill_slots = 0u32;
+        let mut next_vreg = 100u32;
+
+        // Mark v0 as XMM class.
+        let mut vreg_classes = HashMap::new();
+        vreg_classes.insert(VReg(0), RegClass::XMM);
+
+        insert_spills(
+            &mut insts,
+            &spilled,
+            &mut spill_slots,
+            &mut next_vreg,
+            &vreg_classes,
+        );
+
+        // There should be an XMM SpillStore (not a GPR SpillStore).
+        assert!(
+            insts.iter().any(|i| is_xmm_spill_store(i)),
+            "XMM VReg spill must produce XMM_SPILL_STORE_TYPE marker"
+        );
+        assert!(
+            !insts.iter().any(|i| is_spill_store(i)),
+            "XMM VReg spill must NOT produce GPR SPILL_STORE_TYPE marker"
+        );
+
+        // There should be XMM SpillLoads before each use.
+        let xmm_load_count = insts.iter().filter(|i| is_xmm_spill_load(i)).count();
+        assert_eq!(
+            xmm_load_count, 2,
+            "two XMM SpillLoads expected (one per use)"
+        );
+        assert!(
+            !insts.iter().any(|i| is_spill_load(i)),
+            "XMM VReg spill must NOT produce GPR SPILL_LOAD_TYPE marker"
+        );
     }
 }

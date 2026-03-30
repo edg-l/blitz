@@ -11,17 +11,26 @@ pub type BlockId = u32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectfulOp {
     /// Load a value of type `ty` from the given address e-class.
-    Load { addr: ClassId, ty: Type },
+    /// `result` is the e-graph ClassId of the `Op::LoadResult` node that
+    /// represents the loaded value in the pure-op world.
+    Load {
+        addr: ClassId,
+        ty: Type,
+        result: ClassId,
+    },
 
     /// Store a value e-class to an address e-class.
     Store { addr: ClassId, val: ClassId },
 
     /// Call a named function with the given argument e-classes.
     /// `ret_tys` lists the types of the return values.
+    /// `results` holds the e-graph ClassIds of the `Op::CallResult` nodes that
+    /// represent the return values in the pure-op world (one per ret_ty).
     Call {
         func: Symbol,
         args: Vec<ClassId>,
         ret_tys: Vec<Type>,
+        results: Vec<ClassId>,
     },
 
     /// Conditional branch to `bb_true` or `bb_false` depending on flags.

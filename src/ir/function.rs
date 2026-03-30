@@ -146,6 +146,7 @@ mod tests {
         bb.ops.push(EffectfulOp::Load {
             addr: ClassId(0),
             ty: Type::I64,
+            result: ClassId::NONE,
         });
         bb.ops.push(ret_none());
         assert!(bb.is_well_formed());
@@ -158,6 +159,7 @@ mod tests {
         bb.ops.push(EffectfulOp::Load {
             addr: ClassId(0),
             ty: Type::I64,
+            result: ClassId::NONE,
         });
         bb.validate();
     }
@@ -170,6 +172,7 @@ mod tests {
         bb.ops.push(EffectfulOp::Load {
             addr: ClassId(0),
             ty: Type::I64,
+            result: ClassId::NONE,
         });
         bb.validate();
     }

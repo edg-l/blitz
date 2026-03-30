@@ -605,8 +605,7 @@ impl Encoder {
     // ── JMP ───────────────────────────────────────────────────────────────
 
     pub fn encode_jmp(&mut self, target: LabelId) {
-        // Emit the long form (E9 rel32) unconditionally; short form is an
-        // optimisation pass that can be added separately.
+        // Near form: E9 rel32
         self.emit_byte(0xE9);
         let offset = self.buf.len();
         self.emit_le32(0);
@@ -617,11 +616,23 @@ impl Encoder {
         });
     }
 
+    /// Short (rel8) form: EB cb
+    pub fn encode_jmp_short(&mut self, target: LabelId) {
+        self.emit_byte(0xEB);
+        let offset = self.buf.len();
+        self.emit_byte(0); // placeholder rel8
+        self.fixups.push(Fixup {
+            offset,
+            target,
+            kind: FixupKind::Rel8,
+        });
+    }
+
     // ── Jcc ───────────────────────────────────────────────────────────────
 
     pub fn encode_jcc(&mut self, cc: CondCode, target: LabelId) {
         let tttn = Self::cc_byte(cc);
-        // Long form: 0F 80+cc + rel32
+        // Near form: 0F 80+cc + rel32
         self.emit_byte(0x0F);
         self.emit_byte(0x80 | tttn);
         let offset = self.buf.len();
@@ -631,6 +642,43 @@ impl Encoder {
             target,
             kind: FixupKind::Rel32,
         });
+    }
+
+    /// Short (rel8) form: 7x cb
+    pub fn encode_jcc_short(&mut self, cc: CondCode, target: LabelId) {
+        let tttn = Self::cc_byte(cc);
+        self.emit_byte(0x70 | tttn);
+        let offset = self.buf.len();
+        self.emit_byte(0); // placeholder rel8
+        self.fixups.push(Fixup {
+            offset,
+            target,
+            kind: FixupKind::Rel8,
+        });
+    }
+
+    // ── Dispatch with short/near form selection ────────────────────────────
+
+    /// Encode `inst`, using the short (rel8) jump form when `short` is true
+    /// for `Jmp`/`Jcc`.  All other instructions ignore `short`.
+    pub fn encode_inst_with_form(&mut self, inst: &MachInst, short: bool) {
+        match inst {
+            MachInst::Jmp { target } => {
+                if short {
+                    self.encode_jmp_short(*target);
+                } else {
+                    self.encode_jmp(*target);
+                }
+            }
+            MachInst::Jcc { cc, target } => {
+                if short {
+                    self.encode_jcc_short(*cc, *target);
+                } else {
+                    self.encode_jcc(*cc, *target);
+                }
+            }
+            _ => self.encode_inst(inst),
+        }
     }
 
     // ── SETCC / CMOV ──────────────────────────────────────────────────────
@@ -1179,6 +1227,18 @@ impl Default for Encoder {
     }
 }
 
+// ── inst_size ─────────────────────────────────────────────────────────────────
+
+/// Return the encoded byte size of `inst` using a scratch encoder.
+///
+/// For `Jmp`/`Jcc` this returns the **near** (rel32) size; callers that need
+/// the short size should use the constants in `emit::relax` directly.
+pub fn inst_size(inst: &MachInst) -> usize {
+    let mut scratch = Encoder::new();
+    scratch.encode_inst(inst);
+    scratch.buf.len()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1698,5 +1758,140 @@ mod tests {
         let mut e = enc();
         e.encode_inst(&MachInst::Ret);
         check(&e.buf, &[0xC3]);
+    }
+
+    // ── inst_size ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn inst_size_mov_rr() {
+        // REX.W + 89 + ModRM = 3 bytes
+        let inst = MachInst::MovRR {
+            dst: Operand::Reg(Reg::RAX),
+            src: Operand::Reg(Reg::RCX),
+        };
+        assert_eq!(inst_size(&inst), 3);
+    }
+
+    #[test]
+    fn inst_size_ret() {
+        assert_eq!(inst_size(&MachInst::Ret), 1);
+    }
+
+    #[test]
+    fn inst_size_jmp_near() {
+        // Near JMP: E9 + rel32 = 5 bytes
+        let inst = MachInst::Jmp { target: 0 };
+        assert_eq!(inst_size(&inst), 5);
+    }
+
+    #[test]
+    fn inst_size_jcc_near() {
+        // Near Jcc: 0F 8x + rel32 = 6 bytes
+        let inst = MachInst::Jcc {
+            cc: CondCode::Eq,
+            target: 0,
+        };
+        assert_eq!(inst_size(&inst), 6);
+    }
+
+    #[test]
+    fn inst_size_add_ri_small() {
+        // REX.W + 83 /0 + ib = 4 bytes
+        let inst = MachInst::AddRI {
+            dst: Operand::Reg(Reg::RAX),
+            imm: 1,
+        };
+        assert_eq!(inst_size(&inst), 4);
+    }
+
+    // ── short-form jumps ─────────────────────────────────────────────────────
+
+    #[test]
+    fn jmp_short_encodes_eb() {
+        // encode_jmp_short emits EB + one byte placeholder
+        let mut e = enc();
+        e.encode_jmp_short(0);
+        // Before resolve: EB 00
+        check(&e.buf, &[0xEB, 0x00]);
+    }
+
+    #[test]
+    fn jcc_short_encodes_7x() {
+        // encode_jcc_short(Eq) emits 74 + one byte placeholder (0x70 | 0x4 = 0x74)
+        let mut e = enc();
+        e.encode_jcc_short(CondCode::Eq, 0);
+        check(&e.buf, &[0x74, 0x00]);
+    }
+
+    #[test]
+    fn jmp_short_resolves_forward() {
+        // Layout: [0] JMP_SHORT label; [1] RET; label here
+        // EB offset=1; after emit: buf = [EB, 00, C3]
+        // label bound at offset 3.
+        // rel8 = target - (offset+1) = 3 - (1+1) = 1.
+        let mut e = enc();
+        e.encode_jmp_short(42);
+        e.encode_ret(); // filler byte
+        e.bind_label(42);
+        e.resolve_fixups();
+        check(&e.buf, &[0xEB, 0x01, 0xC3]);
+    }
+
+    #[test]
+    fn jcc_short_resolves_forward() {
+        // JE to label right after RET: buf[0]=74, buf[1]=00 (placeholder), buf[2]=C3; label at 3.
+        // rel8 = 3 - (1+1) = 1
+        let mut e = enc();
+        e.encode_jcc_short(CondCode::Eq, 7);
+        e.encode_ret();
+        e.bind_label(7);
+        e.resolve_fixups();
+        check(&e.buf, &[0x74, 0x01, 0xC3]);
+    }
+
+    #[test]
+    fn encode_inst_with_form_uses_short_for_jmp() {
+        let mut e = enc();
+        let inst = MachInst::Jmp { target: 0 };
+        e.encode_inst_with_form(&inst, true);
+        // Short JMP: EB + rel8 placeholder
+        assert_eq!(e.buf[0], 0xEB);
+        assert_eq!(e.buf.len(), 2);
+    }
+
+    #[test]
+    fn encode_inst_with_form_uses_near_for_jmp() {
+        let mut e = enc();
+        let inst = MachInst::Jmp { target: 0 };
+        e.encode_inst_with_form(&inst, false);
+        // Near JMP: E9 + rel32
+        assert_eq!(e.buf[0], 0xE9);
+        assert_eq!(e.buf.len(), 5);
+    }
+
+    #[test]
+    fn encode_inst_with_form_uses_short_for_jcc() {
+        let mut e = enc();
+        let inst = MachInst::Jcc {
+            cc: CondCode::Ne,
+            target: 0,
+        };
+        e.encode_inst_with_form(&inst, true);
+        // Short JNE: 75 + rel8 placeholder
+        assert_eq!(e.buf[0], 0x75);
+        assert_eq!(e.buf.len(), 2);
+    }
+
+    #[test]
+    fn encode_inst_with_form_uses_near_for_jcc() {
+        let mut e = enc();
+        let inst = MachInst::Jcc {
+            cc: CondCode::Ne,
+            target: 0,
+        };
+        e.encode_inst_with_form(&inst, false);
+        // Near JNE: 0F 85 + rel32
+        check(&e.buf[..2], &[0x0F, 0x85]);
+        assert_eq!(e.buf.len(), 6);
     }
 }
