@@ -1,47 +1,12 @@
-## Correctness Risks (can produce wrong code)
+## Remaining Known Limitations
 
-1. Caller-saved clobbers across calls: values live across Call in caller-saved
-   regs (RAX, RCX, RDX, RSI, RDI, R8-R11, XMM0-15) get silently corrupted.
-   Fix: add clobber sets to interference graph.
-
-2. Cross-block live range splitting: single flat regalloc pass means values
-   defined in block 0 and used in block 5 hold a register across all
-   intermediate blocks, inflating pressure. Can cause unnecessary spills.
-
-## Missing Lowerings (will error on these IR patterns)
-
-3. Bitcast: no isel rule, no lowering. Needs MOVD/MOVQ for int<->float.
-
-4. Select without Icmp: Select only works when isel converts to X86Cmov via
-   an Icmp-produced flags value. Other condition sources won't lower.
-
-## Incomplete Features (partially working)
-
-5. FP constant loading: Fconst lowering uses MOV to GPR but lacks a path to
-   get the value into XMM. Needs .rodata section for FP constant pool.
-
-6. Call stack arguments: only register args (<=6 GPR) are wired. Stack args
-   (7+ GPR args) not handled in lower_effectful_op.
-
-7. F32 (single-precision): only F64 has isel rules (X86Addsd etc). No
-   X86Addss/X86Subss etc. for F32.
-
-8. Addressing mode fusion into loads/stores: Load/Store emit [reg+0]. Addr
-   node extraction exists but isn't consumed by Load/Store lowering to
-   produce [base + idx*scale + disp].
-
-## Missing Infrastructure
-
-9. .note.GNU-stack section: linker warns about executable stack. Need to
-   emit this ELF section.
-
-10. Peephole branch threading: jcc L1 where L1 is jmp L2 should rewrite to
-    jcc L2. Not implemented.
+1. Cross-block live range splitting not implemented (single flat regalloc
+   pass; long-lived values increase register pressure across blocks)
 
 ## Future Features (out of scope)
 
-11. SIMD / AVX
-12. x87 FP
-13. DWARF debug info
-14. Unwind tables (.eh_frame)
-15. Position-independent code (PIC/PIE)
+2. SIMD / AVX
+3. x87 FP
+4. DWARF debug info
+5. Unwind tables (.eh_frame)
+6. Position-independent code (PIC/PIE)
