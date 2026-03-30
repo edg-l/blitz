@@ -97,7 +97,9 @@ pub(super) fn add_call_precolors(
 }
 
 /// Compute call point indices (local to a block's instruction list) for
-/// caller-saved clobber modeling. Returns local indices into `block_sched`.
+/// caller-saved clobber modeling. Returns `block_sched.len()` as a sentinel
+/// meaning "clobber spans through end of block" -- the allocator treats
+/// these as exclusive upper bounds, not instruction indices.
 pub(super) fn collect_call_points_for_block(
     func: &Function,
     block_idx: usize,

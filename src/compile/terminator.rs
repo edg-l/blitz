@@ -38,7 +38,7 @@ fn negate_cc(cc: CondCode) -> CondCode {
 /// rewrite all `Jcc` and `Jmp` instructions that point to it to jump directly to
 /// the final destination. Repeated until no changes occur (handles chains).
 pub(super) fn thread_branches(
-    block_items: &mut Vec<Vec<BlockItem>>,
+    block_items: &mut [Vec<BlockItem>],
     func: &Function,
     rpo_order: &[usize],
 ) {
@@ -246,38 +246,17 @@ pub(super) fn lower_terminator(
                 }
             } else if false_phi.is_empty() {
                 // jcc !cc, false_block; [true_phi]; jmp true_block
-                // If false_block is the fallthrough, emit only the true_phi + jmp true.
-                // If true_block is the fallthrough, we can flip: jcc cc, true_block; jmp false.
-                if false_is_fallthrough {
-                    // false falls through; emit: [true_phi]; jcc !cc, false (skipped = nop);
-                    // actually we need to only execute true_phi when cc is true.
-                    // Emit: jcc !cc, skip; [true_phi]; L_skip: jmp true_block
-                    // But if true_block is also not next, we need jmp true_block too.
-                    // Simpler: keep the jcc to false but emit jmp true at the end.
-                    // If false falls through, the jcc target (false_block) is next --
-                    // this is fine: jcc !cc, false; [true_phi]; jmp true_block.
-                    // The jmp true_block is still needed unless true_block is also next.
-                    items.push(BlockItem::Inst(MachInst::Jcc {
-                        cc: negate_cc(cc),
-                        target: *bb_false as LabelId,
+                // The Jcc is always needed (even if false is fallthrough) to skip
+                // the true_phi copies when the condition is false.
+                items.push(BlockItem::Inst(MachInst::Jcc {
+                    cc: negate_cc(cc),
+                    target: *bb_false as LabelId,
+                }));
+                items.extend(true_phi.into_iter().map(BlockItem::Inst));
+                if !true_is_fallthrough {
+                    items.push(BlockItem::Inst(MachInst::Jmp {
+                        target: *bb_true as LabelId,
                     }));
-                    items.extend(true_phi.into_iter().map(BlockItem::Inst));
-                    if !true_is_fallthrough {
-                        items.push(BlockItem::Inst(MachInst::Jmp {
-                            target: *bb_true as LabelId,
-                        }));
-                    }
-                } else {
-                    items.push(BlockItem::Inst(MachInst::Jcc {
-                        cc: negate_cc(cc),
-                        target: *bb_false as LabelId,
-                    }));
-                    items.extend(true_phi.into_iter().map(BlockItem::Inst));
-                    if !true_is_fallthrough {
-                        items.push(BlockItem::Inst(MachInst::Jmp {
-                            target: *bb_true as LabelId,
-                        }));
-                    }
                 }
             } else {
                 // Both sides have copies. Use trampoline labels:

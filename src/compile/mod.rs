@@ -145,7 +145,7 @@ pub fn compile(
         }),
     })?;
 
-    if let Some(s) = sink.as_deref_mut() {
+    if let Some(s) = sink.as_mut() {
         s.phase_stats(
             "egraph",
             &format!(
@@ -171,7 +171,7 @@ pub fn compile(
         }),
     })?;
 
-    if let Some(s) = sink.as_deref_mut() {
+    if let Some(s) = sink.as_mut() {
         s.phase_stats(
             "extraction",
             &format!("classes_extracted={}", extraction.choices.len()),
@@ -227,7 +227,7 @@ pub fn compile(
         block_schedules[block_idx] = sched;
     }
 
-    if let Some(s) = sink.as_deref_mut() {
+    if let Some(s) = sink.as_mut() {
         s.phase_stats("schedule", &format!("insts={total_insts}"));
     }
 
@@ -243,7 +243,7 @@ pub fn compile(
     let copy_pairs = compute_copy_pairs(func, &class_to_vreg, &egraph, &block_param_map);
 
     // Compute loop depths from the CFG for spill selection.
-    let loop_depths = compute_loop_depths(func, &block_schedules, &class_to_vreg);
+    let loop_depths = compute_loop_depths(func, &block_schedules);
 
     // Shared next_vreg counter for fresh VReg allocation across all blocks.
     let shared_next_vreg_start: u32 = block_schedules
@@ -500,7 +500,7 @@ pub fn compile(
         (merged_result, block_rewritten_storage)
     };
 
-    if let Some(s) = sink.as_deref_mut() {
+    if let Some(s) = sink.as_mut() {
         s.phase_stats(
             "regalloc",
             &format!(
@@ -666,7 +666,7 @@ pub fn compile(
 
     let func_size = encoder.buf.len() - func_start;
 
-    if let Some(s) = sink.as_deref_mut() {
+    if let Some(s) = sink.as_mut() {
         s.phase_stats("encoding", &format!("bytes={func_size}"));
     }
 

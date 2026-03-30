@@ -83,8 +83,8 @@ pub(super) fn compute_rpo(func: &Function) -> Vec<usize> {
     }
 
     // Any blocks not reachable from block 0 are appended at the end in index order.
-    for i in 0..n {
-        if !visited[i] {
+    for (i, &was_visited) in visited.iter().enumerate() {
+        if !was_visited {
             post_order.push(i);
         }
     }
@@ -308,7 +308,6 @@ pub(super) fn compute_copy_pairs(
 pub(super) fn compute_loop_depths(
     func: &Function,
     block_schedules: &[Vec<ScheduledInst>],
-    class_to_vreg: &HashMap<ClassId, VReg>,
 ) -> HashMap<VReg, u32> {
     let n = func.blocks.len();
     // Compute per-block loop depth using back-edge counting.
@@ -350,7 +349,5 @@ pub(super) fn compute_loop_depths(
         }
     }
 
-    // Also map VRegs from class_to_vreg for blocks (they may not appear in schedules).
-    let _ = class_to_vreg; // already covered via block_schedules
     result
 }
