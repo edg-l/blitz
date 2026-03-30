@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.svg" width="160" alt="Blitz logo">
+</p>
+
 # Blitz
 
 A pure-Rust compiler backend targeting x86-64, optimizing for generated code quality.
