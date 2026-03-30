@@ -137,7 +137,7 @@ impl CostModel {
             }
             .weighted(self.goal),
 
-            // ── x86 FP ops (SSE2) ─────────────────────────────────────────────────
+            // ── x86 FP ops SSE2 double (sd) ───────────────────────────────────────
             Op::X86Addsd | Op::X86Subsd => CostTuple {
                 latency: 3.0,
                 throughput: 0.5,
@@ -151,6 +151,26 @@ impl CostModel {
             }
             .weighted(self.goal),
             Op::X86Divsd | Op::X86Sqrtsd => CostTuple {
+                latency: 13.0,
+                throughput: 4.0,
+                size: 4.0,
+            }
+            .weighted(self.goal),
+
+            // ── x86 FP ops SSE single (ss) ────────────────────────────────────────
+            Op::X86Addss | Op::X86Subss => CostTuple {
+                latency: 3.0,
+                throughput: 0.5,
+                size: 4.0,
+            }
+            .weighted(self.goal),
+            Op::X86Mulss => CostTuple {
+                latency: 5.0,
+                throughput: 0.5,
+                size: 4.0,
+            }
+            .weighted(self.goal),
+            Op::X86Divss | Op::X86Sqrtss => CostTuple {
                 latency: 13.0,
                 throughput: 4.0,
                 size: 4.0,

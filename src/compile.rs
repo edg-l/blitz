@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::egraph::EGraph;
 use crate::egraph::cost::{CostModel, OptGoal};
-use crate::egraph::extract::{VReg, VRegInst, extract, vreg_insts_for_block};
+use crate::egraph::extract::{ExtractionResult, VReg, VRegInst, extract, vreg_insts_for_block};
 use crate::egraph::isel::find_cc_in_class;
 use crate::egraph::phases::{CompileOptions as EGraphOptions, run_phases};
 use crate::emit::object::{FunctionInfo, ObjectFile};
@@ -311,6 +311,40 @@ pub fn compile(
         }
     }
 
+    // Pre-color call argument VRegs to their ABI destination registers.
+    // This prevents regalloc from assigning all call args to the same physical
+    // register. For register args (first 6 GPR args: RDI..R9), pre-color directly.
+    // For stack args (7+), we add them to live_out so they interfere with each
+    // other (preventing the regalloc from coalescing them into one register).
+    //
+    // All call arg types are treated as I64 (matching lower_effectful_op).
+    for block in &func.blocks {
+        for op in &block.ops {
+            if let EffectfulOp::Call { args, .. } = op {
+                let arg_types: Vec<crate::ir::types::Type> =
+                    vec![crate::ir::types::Type::I64; args.len()];
+                let locs = crate::x86::abi::assign_args(&arg_types);
+                for (&cid, loc) in args.iter().zip(locs.iter()) {
+                    let canon = egraph.unionfind.find_immutable(cid);
+                    if let Some(&vreg) = class_to_vreg.get(&canon) {
+                        match loc {
+                            crate::x86::abi::ArgLoc::Reg(reg) => {
+                                if !all_param_vregs.iter().any(|&(v, _)| v == vreg) {
+                                    all_param_vregs.push((vreg, *reg));
+                                }
+                            }
+                            crate::x86::abi::ArgLoc::Stack { .. } => {
+                                // Stack args must have distinct registers; force them
+                                // to interfere by making them globally live.
+                                live_out.insert(vreg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Pre-color the first CallResult of each Call op to RAX (GPR return register).
     // This ensures the return value lands in RAX so lower_effectful_op can capture it.
     for block in &func.blocks {
@@ -409,7 +443,8 @@ pub fn compile(
         };
         let mut all_insts = pure_insts;
         for op in &block.ops[..non_term_count] {
-            let extra = lower_effectful_op(op, &class_to_vreg, &regalloc_result, func)?;
+            let extra =
+                lower_effectful_op(op, &class_to_vreg, &regalloc_result, &extraction, func)?;
             all_insts.extend(extra);
         }
 
@@ -438,6 +473,10 @@ pub fn compile(
         items.extend(term_items);
         block_items.push(items);
     }
+
+    // Branch threading: rewrite Jcc/Jmp targets that point to empty blocks
+    // containing only a single Jmp. Repeat until fixed point.
+    thread_branches(&mut block_items, func, &rpo_order);
 
     // Phase 10: Encoding with branch relaxation.
     //
@@ -839,6 +878,26 @@ fn lower_fp_binary(
     Ok(insts)
 }
 
+fn lower_fp_binary_ss(
+    name: &str,
+    dst_reg: Option<Reg>,
+    operand_regs: &[Option<Reg>],
+    mk: fn(Operand, Operand) -> MachInst,
+) -> Result<Vec<MachInst>, String> {
+    let dst = get_dst(name, dst_reg)?;
+    let src_a = get_op(name, operand_regs, 0)?;
+    let src_b = get_op(name, operand_regs, 1)?;
+    let mut insts = Vec::new();
+    if dst != src_a {
+        insts.push(MachInst::MovssRR {
+            dst: Operand::Reg(dst),
+            src: Operand::Reg(src_a),
+        });
+    }
+    insts.push(mk(Operand::Reg(dst), Operand::Reg(src_b)));
+    Ok(insts)
+}
+
 /// Convert a single Op to a sequence of MachInsts.
 ///
 /// `dst_vreg` is the VReg being defined; `dst_reg` is the physical reg (if allocated).
@@ -1151,19 +1210,42 @@ fn lower_op(
             }])
         }
 
-        // Fconst: load FP constant into an XMM register using a 64-bit immediate
-        // materialized via MOVSD from a data constant embedded in the code.
-        // For now, emit a MOVSD from memory (simplified: use a spill-based approach).
-        // TODO: proper .rodata section for FP constants.
+        // ── x86 F32 machine ops ───────────────────────────────────────────────
+        Op::X86Addss => lower_fp_binary_ss("X86Addss", dst_reg, operand_regs, |dst, src| {
+            MachInst::AddssRR { dst, src }
+        }),
+        Op::X86Subss => lower_fp_binary_ss("X86Subss", dst_reg, operand_regs, |dst, src| {
+            MachInst::SubssRR { dst, src }
+        }),
+        Op::X86Mulss => lower_fp_binary_ss("X86Mulss", dst_reg, operand_regs, |dst, src| {
+            MachInst::MulssRR { dst, src }
+        }),
+        Op::X86Divss => lower_fp_binary_ss("X86Divss", dst_reg, operand_regs, |dst, src| {
+            MachInst::DivssRR { dst, src }
+        }),
+        Op::X86Sqrtss => {
+            let dst = get_dst("X86Sqrtss", dst_reg)?;
+            let src = get_op("X86Sqrtss", operand_regs, 0)?;
+            Ok(vec![MachInst::SqrtssRR {
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+            }])
+        }
+
+        // Fconst: load FP constant bits into a scratch GPR (R11), then move to XMM.
+        // R11 is caller-saved and not used by regalloc for any persistent value.
         Op::Fconst(bits) => {
             let dst = dst_reg.ok_or_else(|| "Fconst: no register for dst".to_string())?;
-            // Use MovRI to materialize bits into a GPR, then MOVSD-like move.
-            // This is a simplification; ideally we'd use a memory reference.
-            // For now emit as integer constant (relies on bitcast behavior).
-            Ok(vec![MachInst::MovRI {
-                dst: Operand::Reg(dst),
-                imm: *bits as i64,
-            }])
+            Ok(vec![
+                MachInst::MovRI {
+                    dst: Operand::Reg(Reg::R11),
+                    imm: *bits as i64,
+                },
+                MachInst::MovqToXmm {
+                    dst: Operand::Reg(dst),
+                    src: Operand::Reg(Reg::R11),
+                },
+            ])
         }
 
         // Generic ops that should have been lowered by the e-graph phases.
@@ -1671,11 +1753,56 @@ fn lower_block_pure_ops(
     Ok(result)
 }
 
+/// Build an `Addr` for Load/Store by checking if `addr_cid` extracted to an Addr node.
+///
+/// If the extraction result for `addr_cid` is an `Op::Addr { scale, disp }` node,
+/// fuse the addressing mode directly into the memory operand (no separate LEA needed).
+/// Otherwise fall back to `[addr_reg + 0]`.
+fn build_mem_addr(
+    addr_cid: ClassId,
+    addr_reg: Reg,
+    extraction: &ExtractionResult,
+    class_to_vreg: &HashMap<ClassId, VReg>,
+    regalloc: &RegAllocResult,
+) -> crate::x86::addr::Addr {
+    if let Some(ext) = extraction.choices.get(&addr_cid) {
+        if let Op::Addr { scale, disp } = &ext.op {
+            // children[0] = base ClassId, children[1] = index ClassId (may be NONE).
+            let base_reg = ext
+                .children
+                .first()
+                .and_then(|&c| class_to_vreg.get(&c))
+                .and_then(|v| regalloc.vreg_to_reg.get(v).copied());
+            let index_reg = ext
+                .children
+                .get(1)
+                .filter(|&&c| c != ClassId::NONE)
+                .and_then(|&c| class_to_vreg.get(&c))
+                .and_then(|v| regalloc.vreg_to_reg.get(v).copied());
+            if let Some(base) = base_reg {
+                return crate::x86::addr::Addr {
+                    base: Some(base),
+                    index: index_reg,
+                    scale: *scale,
+                    disp: *disp,
+                };
+            }
+        }
+    }
+    crate::x86::addr::Addr {
+        base: Some(addr_reg),
+        index: None,
+        scale: 1,
+        disp: 0,
+    }
+}
+
 /// Lower a non-terminator effectful op (Load, Store, Call) to MachInsts.
 fn lower_effectful_op(
     op: &EffectfulOp,
     class_to_vreg: &HashMap<ClassId, VReg>,
     regalloc: &RegAllocResult,
+    extraction: &ExtractionResult,
     func: &Function,
 ) -> Result<Vec<MachInst>, CompileError> {
     let get_reg = |cid: ClassId| -> Option<Reg> {
@@ -1690,7 +1817,8 @@ fn lower_effectful_op(
             result,
             ty: _,
         } => {
-            let addr_reg = get_reg(*addr).ok_or_else(|| CompileError {
+            let canon_addr = *addr;
+            let addr_reg = get_reg(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
                 message: "Load: no register for addr".into(),
                 location: Some(IrLocation {
@@ -1711,18 +1839,15 @@ fn lower_effectful_op(
                         inst: None,
                     }),
                 })?;
+            let addr = build_mem_addr(canon_addr, addr_reg, extraction, class_to_vreg, regalloc);
             Ok(vec![MachInst::MovRM {
                 dst: Operand::Reg(result_reg),
-                addr: crate::x86::addr::Addr {
-                    base: Some(addr_reg),
-                    index: None,
-                    scale: 1,
-                    disp: 0,
-                },
+                addr,
             }])
         }
         EffectfulOp::Store { addr, val } => {
-            let addr_reg = get_reg(*addr).ok_or_else(|| CompileError {
+            let canon_addr = *addr;
+            let addr_reg = get_reg(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
                 message: "Store: no register for addr".into(),
                 location: Some(IrLocation {
@@ -1740,13 +1865,9 @@ fn lower_effectful_op(
                     inst: None,
                 }),
             })?;
+            let addr = build_mem_addr(canon_addr, addr_reg, extraction, class_to_vreg, regalloc);
             Ok(vec![MachInst::MovMR {
-                addr: crate::x86::addr::Addr {
-                    base: Some(addr_reg),
-                    index: None,
-                    scale: 1,
-                    disp: 0,
-                },
+                addr,
                 src: Operand::Reg(val_reg),
             }])
         }
@@ -1756,15 +1877,45 @@ fn lower_effectful_op(
             ret_tys: _,
             results,
         } => {
-            let arg_regs: Vec<Reg> = args.iter().filter_map(|&cid| get_reg(cid)).collect();
-            // All args treated as I64 for ABI setup (conservative but correct for GPR args).
-            let arg_types: Vec<crate::ir::types::Type> = (0..arg_regs.len())
-                .map(|_| crate::ir::types::Type::I64)
-                .collect();
+            // Collect a register for each argument. Missing registers are an error.
+            let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len());
+            for &cid in args {
+                let r = get_reg(cid).ok_or_else(|| CompileError {
+                    phase: "lowering".into(),
+                    message: format!("Call: no register for argument class {cid:?}"),
+                    location: Some(IrLocation {
+                        function: func.name.clone(),
+                        block: None,
+                        inst: None,
+                    }),
+                })?;
+                arg_regs.push(r);
+            }
+            // All args treated as I64 for ABI assignment (correct for GPR-only calls;
+            // FP args via XMM will be handled when arg type tracking is added).
+            let arg_types: Vec<crate::ir::types::Type> =
+                vec![crate::ir::types::Type::I64; arg_regs.len()];
             let mut insts = setup_call_args(&arg_types, &arg_regs, Reg::R11);
+
+            // Count stack args so we can clean up RSP after the call.
+            let locs = crate::x86::abi::assign_args(&arg_types);
+            let n_stack = locs
+                .iter()
+                .filter(|l| matches!(l, crate::x86::abi::ArgLoc::Stack { .. }))
+                .count();
+
             insts.push(MachInst::CallDirect {
                 target: callee.clone(),
             });
+
+            // Clean up stack arguments after the call.
+            if n_stack > 0 {
+                insts.push(MachInst::AddRI {
+                    dst: Operand::Reg(Reg::RSP),
+                    imm: (n_stack as i32) * 8,
+                });
+            }
+
             // After the call, the first GPR return value is in RAX.
             // If a CallResult ClassId was allocated to a different register, emit a MOV.
             //
@@ -1793,6 +1944,86 @@ fn lower_effectful_op(
 enum BlockItem {
     Inst(MachInst),
     BindLabel(LabelId),
+}
+
+/// Rewrite branch targets to skip through empty trampoline blocks.
+///
+/// A block is "empty" if its items contain only a single `Jmp { target }` (no phi
+/// copies, no labels). For any such block, we record `block_id -> target` and then
+/// rewrite all `Jcc` and `Jmp` instructions that point to it to jump directly to
+/// the final destination. Repeated until no changes occur (handles chains).
+fn thread_branches(block_items: &mut Vec<Vec<BlockItem>>, func: &Function, rpo_order: &[usize]) {
+    loop {
+        // Build a map: block_id -> jump_target for blocks that are just a Jmp.
+        let mut redirect: HashMap<LabelId, LabelId> = HashMap::new();
+        for (rpo_pos, items) in block_items.iter().enumerate() {
+            let block_id = func.blocks[rpo_order[rpo_pos]].id as LabelId;
+            // Count real instructions (not BindLabel).
+            let real: Vec<&MachInst> = items
+                .iter()
+                .filter_map(|item| {
+                    if let BlockItem::Inst(inst) = item {
+                        Some(inst)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if real.len() == 1 {
+                if let MachInst::Jmp { target } = real[0] {
+                    redirect.insert(block_id, *target);
+                }
+            }
+        }
+
+        if redirect.is_empty() {
+            break;
+        }
+
+        // Resolve chains: if A -> B -> C, make A -> C directly.
+        let keys: Vec<LabelId> = redirect.keys().copied().collect();
+        for k in keys {
+            let mut dest = redirect[&k];
+            let mut seen = std::collections::HashSet::new();
+            seen.insert(k);
+            while let Some(&next) = redirect.get(&dest) {
+                if seen.contains(&next) {
+                    break; // cycle guard
+                }
+                seen.insert(dest);
+                dest = next;
+            }
+            redirect.insert(k, dest);
+        }
+
+        // Rewrite Jcc/Jmp targets in all blocks.
+        let mut changed = false;
+        for items in block_items.iter_mut() {
+            for item in items.iter_mut() {
+                if let BlockItem::Inst(inst) = item {
+                    match inst {
+                        MachInst::Jmp { target } => {
+                            if let Some(&new_target) = redirect.get(target) {
+                                *target = new_target;
+                                changed = true;
+                            }
+                        }
+                        MachInst::Jcc { target, .. } => {
+                            if let Some(&new_target) = redirect.get(target) {
+                                *target = new_target;
+                                changed = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// Lower a block terminator, including phi copies for block-parameter passing.
@@ -2948,5 +3179,194 @@ int main(void) {
         // A near-short JMP (EB + 1 byte) would be 2 bytes; Jmp to fallthrough = 0 bytes saved.
         // We just verify the code is non-empty and compilation succeeded.
         assert!(!obj.code.is_empty(), "compiled code should not be empty");
+    }
+
+    // Fix 5: FP constant loading — fconst value must reach an XMM register.
+    #[test]
+    fn e2e_fconst_f64() {
+        // Build: fp_const() -> f64 returning the constant 2.5
+        let mut builder = FunctionBuilder::new("blitz_fp_const", &[], &[Type::F64]);
+        let c = builder.fconst(2.5f64);
+        builder.ret(Some(c));
+        let (func, egraph) = builder.finalize().expect("fp_const finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile fp_const");
+        assert!(!obj.code.is_empty());
+
+        let c_main = r#"
+double blitz_fp_const(void);
+int main(void) {
+    double v = blitz_fp_const();
+    return (v == 2.5) ? 0 : 1;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_fp_const", &obj, c_main) {
+            assert_eq!(code, 0, "fp_const returned wrong exit code {code}");
+        }
+    }
+
+    // Fix 6: Call with 8 args (7th and 8th go on the stack).
+    // The caller uses iconst values so we don't depend on incoming stack param handling.
+    #[test]
+    fn e2e_call_8_args() {
+        // Build: call_8args() — calls blitz_sum8_ext(1,2,3,4,5,6,7,8).
+        // Args 7 and 8 go on the stack.
+        let mut builder = FunctionBuilder::new("blitz_call_8args", &[], &[Type::I64]);
+        let a = builder.iconst(1, Type::I64);
+        let b = builder.iconst(2, Type::I64);
+        let c = builder.iconst(3, Type::I64);
+        let d = builder.iconst(4, Type::I64);
+        let e = builder.iconst(5, Type::I64);
+        let f = builder.iconst(6, Type::I64);
+        let g = builder.iconst(7, Type::I64);
+        let h = builder.iconst(8, Type::I64);
+        let results = builder.call("blitz_sum8_ext", &[a, b, c, d, e, f, g, h], &[Type::I64]);
+        builder.ret(Some(results[0]));
+        let (func, egraph) = builder.finalize().expect("call_8args finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile call_8args");
+        assert!(!obj.code.is_empty());
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_sum8_ext(int64_t a, int64_t b, int64_t c, int64_t d,
+                       int64_t e, int64_t f, int64_t g, int64_t h) {
+    return a + b + c + d + e + f + g + h;
+}
+int64_t blitz_call_8args(void);
+int main(void) {
+    // 1+2+3+4+5+6+7+8 = 36
+    int64_t r = blitz_call_8args();
+    return (r == 36) ? 0 : 1;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_call8", &obj, c_main) {
+            assert_eq!(code, 0, "call_8args returned wrong exit code {code}");
+        }
+    }
+
+    // Fix 7: F32 isel — fadd on F32 operands should use addss, not addsd.
+    #[test]
+    fn e2e_f32_add() {
+        use crate::ir::types::Type;
+
+        // Build: f32_add(a: f32, b: f32) -> f32  (using fadd).
+        // F32 support requires fconst for F32 values; use params instead.
+        let mut builder =
+            FunctionBuilder::new("blitz_f32_add", &[Type::F32, Type::F32], &[Type::F32]);
+        let params = builder.params().to_vec();
+        let sum = builder.fadd(params[0], params[1]);
+        builder.ret(Some(sum));
+        let (func, egraph) = builder.finalize().expect("f32_add finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile f32_add");
+        assert!(!obj.code.is_empty());
+
+        let c_main = r#"
+float blitz_f32_add(float a, float b);
+int main(void) {
+    float r = blitz_f32_add(1.5f, 2.5f);
+    return (r == 4.0f) ? 0 : 1;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_f32_add", &obj, c_main) {
+            assert_eq!(code, 0, "f32_add returned wrong exit code {code}");
+        }
+    }
+
+    // Fix 8: Addr fusion into Load — load(add(base, iconst(16))) emits [base + 16].
+    #[test]
+    fn e2e_addr_fusion_load() {
+        // Build: load_offset16(ptr: *i64) -> i64 — loads *(ptr + 16).
+        // The add(ptr, iconst(16)) should fuse into the load addressing mode.
+        let mut builder = FunctionBuilder::new("blitz_load_offset16", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let base = params[0];
+        let offset = builder.iconst(16, Type::I64);
+        let addr = builder.add(base, offset);
+        let val = builder.load(addr, Type::I64);
+        builder.ret(Some(val));
+        let (func, egraph) = builder.finalize().expect("load_offset16 finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile load_offset16");
+        assert!(!obj.code.is_empty());
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_load_offset16(int64_t *ptr);
+int main(void) {
+    int64_t arr[4] = {10, 20, 30, 40};
+    // arr[2] is at offset 16 bytes from arr[0]
+    int64_t r = blitz_load_offset16(arr);
+    return (r == 30) ? 0 : 1;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_addr_fuse", &obj, c_main) {
+            assert_eq!(code, 0, "load_offset16 returned wrong exit code {code}");
+        }
+    }
+
+    // Fix 10: Branch threading — a block that just jumps to another block should
+    // have its predecessors redirected to skip the trampoline block.
+    #[test]
+    fn branch_threading_skips_empty_block() {
+        use crate::ir::condcode::CondCode;
+
+        // Build a CFG where BB2 is an empty trampoline that jumps to BB3:
+        //   BB0: if cond goto BB1 else BB2
+        //   BB1: ret(1)
+        //   BB2: jump(BB3)    <- empty trampoline
+        //   BB3: ret(0)
+        //
+        // After threading, BB0's false branch should target BB3 directly.
+        let mut builder = FunctionBuilder::new("blitz_threaded", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let n = params[0];
+
+        let (bb1, _) = builder.create_block_with_params(&[]);
+        let (bb2, _) = builder.create_block_with_params(&[]);
+        let (bb3, _) = builder.create_block_with_params(&[]);
+
+        // BB0: branch on n > 0.
+        let zero = builder.iconst(0, Type::I64);
+        let cond = builder.icmp(CondCode::Sgt, n, zero);
+        builder.branch(cond, bb1, bb2, &[], &[]);
+
+        // BB1: return 1.
+        builder.set_block(bb1);
+        let one = builder.iconst(1, Type::I64);
+        builder.ret(Some(one));
+
+        // BB2: just jump to BB3 (trampoline).
+        builder.set_block(bb2);
+        builder.jump(bb3, &[]);
+
+        // BB3: return 0.
+        builder.set_block(bb3);
+        let ret_zero = builder.iconst(0, Type::I64);
+        builder.ret(Some(ret_zero));
+
+        let (func, egraph) = builder.finalize().expect("threaded finalize");
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile threaded");
+        assert!(!obj.code.is_empty());
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_threaded(int64_t n);
+int main(void) {
+    if (blitz_threaded(5)  != 1) return 1;
+    if (blitz_threaded(-1) != 0) return 2;
+    if (blitz_threaded(0)  != 0) return 3;
+    return 0;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_threaded", &obj, c_main) {
+            assert_eq!(code, 0, "threaded returned wrong exit code {code}");
+        }
     }
 }

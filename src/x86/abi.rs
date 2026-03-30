@@ -325,6 +325,30 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
     let locs = assign_args(arg_types);
     let mut insts: Vec<MachInst> = Vec::new();
 
+    // Push stack arguments right-to-left BEFORE doing register copies.
+    // This ensures the stack-arg source registers are not yet clobbered by
+    // moves that place other values into the ABI argument registers.
+    let stack_args: Vec<(i32, Reg)> = locs
+        .iter()
+        .zip(arg_regs.iter())
+        .filter_map(|(loc, &src)| {
+            if let ArgLoc::Stack { offset } = *loc {
+                Some((offset, src))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort descending by offset (rightmost = highest offset pushed first).
+    let mut stack_args = stack_args;
+    stack_args.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, src) in stack_args {
+        insts.push(MachInst::Push {
+            src: Operand::Reg(src),
+        });
+    }
+
     // Collect register-to-register copies.
     let reg_copies: Vec<(Reg, Reg)> = locs
         .iter()
@@ -343,28 +367,6 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
     for (src, dst) in seq {
         insts.push(MachInst::MovRR {
             dst: Operand::Reg(dst),
-            src: Operand::Reg(src),
-        });
-    }
-
-    // Push stack arguments right-to-left.
-    let stack_args: Vec<(i32, Reg)> = locs
-        .iter()
-        .zip(arg_regs.iter())
-        .filter_map(|(loc, &src)| {
-            if let ArgLoc::Stack { offset } = *loc {
-                Some((offset, src))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Sort descending by offset (rightmost = highest offset pushed first).
-    let mut stack_args = stack_args;
-    stack_args.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, src) in stack_args {
-        insts.push(MachInst::Push {
             src: Operand::Reg(src),
         });
     }

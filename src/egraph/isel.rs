@@ -364,7 +364,8 @@ fn apply_bitcast_isel(egraph: &mut EGraph) -> bool {
     changed
 }
 
-/// Fadd/Fsub/Fmul/Fdiv/Fsqrt -> X86Addsd/X86Subsd/X86Mulsd/X86Divsd/X86Sqrtsd
+/// Fadd/Fsub/Fmul/Fdiv/Fsqrt -> X86Addsd/X86Subsd/X86Mulsd/X86Divsd/X86Sqrtsd (F64)
+///                             -> X86Addss/X86Subss/X86Mulss/X86Divss/X86Sqrtss (F32)
 fn apply_fp_isel(egraph: &mut EGraph) -> bool {
     let snaps = snapshot_all(egraph);
     let mut changed = false;
@@ -372,12 +373,50 @@ fn apply_fp_isel(egraph: &mut EGraph) -> bool {
     for snap in &snaps {
         let class_id = snap.class_id;
 
+        // Determine the operand type from the first child to choose sd vs ss.
+        let child_ty = if !snap.children.is_empty() {
+            infer_class_type(egraph, snap.children[0])
+        } else {
+            None
+        };
+        let is_f32 = matches!(child_ty, Some(Type::F32));
+
         let (machine_op, expected_children) = match &snap.op {
-            Op::Fadd if snap.children.len() == 2 => (Op::X86Addsd, 2),
-            Op::Fsub if snap.children.len() == 2 => (Op::X86Subsd, 2),
-            Op::Fmul if snap.children.len() == 2 => (Op::X86Mulsd, 2),
-            Op::Fdiv if snap.children.len() == 2 => (Op::X86Divsd, 2),
-            Op::Fsqrt if snap.children.len() == 1 => (Op::X86Sqrtsd, 1),
+            Op::Fadd if snap.children.len() == 2 => {
+                if is_f32 {
+                    (Op::X86Addss, 2)
+                } else {
+                    (Op::X86Addsd, 2)
+                }
+            }
+            Op::Fsub if snap.children.len() == 2 => {
+                if is_f32 {
+                    (Op::X86Subss, 2)
+                } else {
+                    (Op::X86Subsd, 2)
+                }
+            }
+            Op::Fmul if snap.children.len() == 2 => {
+                if is_f32 {
+                    (Op::X86Mulss, 2)
+                } else {
+                    (Op::X86Mulsd, 2)
+                }
+            }
+            Op::Fdiv if snap.children.len() == 2 => {
+                if is_f32 {
+                    (Op::X86Divss, 2)
+                } else {
+                    (Op::X86Divsd, 2)
+                }
+            }
+            Op::Fsqrt if snap.children.len() == 1 => {
+                if is_f32 {
+                    (Op::X86Sqrtss, 1)
+                } else {
+                    (Op::X86Sqrtsd, 1)
+                }
+            }
             _ => continue,
         };
 

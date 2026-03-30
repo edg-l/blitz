@@ -141,6 +141,17 @@ pub enum Op {
     /// `sqrtsd dst, src` — sqrt(f64) → f64.
     X86Sqrtsd,
 
+    /// `addss dst, src` — f32 + f32 → f32.
+    X86Addss,
+    /// `subss dst, src` — f32 - f32 → f32.
+    X86Subss,
+    /// `mulss dst, src` — f32 * f32 → f32.
+    X86Mulss,
+    /// `divss dst, src` — f32 / f32 → f32.
+    X86Divss,
+    /// `sqrtss dst, src` — sqrt(f32) → f32.
+    X86Sqrtss,
+
     // ── Load result placeholder ───────────────────────────────────────────────
     /// Placeholder node representing the result of a Load effectful op.
     /// The `u32` is a unique identifier (block_id * 1000 + load_index) to
@@ -308,14 +319,26 @@ impl Op {
             // ── FP binary ops ─────────────────────────────────────────────────
             Op::Fadd | Op::Fsub | Op::Fmul | Op::Fdiv => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
-                assert_eq!(child_types[0], Type::F64, "{self:?} requires F64 operands");
-                assert_eq!(child_types[1], Type::F64, "{self:?} requires F64 operands");
-                Type::F64
+                assert!(
+                    child_types[0].is_float(),
+                    "{self:?} requires float operands, got {:?}",
+                    child_types[0]
+                );
+                assert_eq!(
+                    child_types[0], child_types[1],
+                    "{self:?} operand type mismatch: {:?} vs {:?}",
+                    child_types[0], child_types[1]
+                );
+                child_types[0].clone()
             }
             Op::Fsqrt => {
                 assert_eq!(child_types.len(), 1, "Fsqrt requires 1 child");
-                assert_eq!(child_types[0], Type::F64, "Fsqrt requires F64 operand");
-                Type::F64
+                assert!(
+                    child_types[0].is_float(),
+                    "Fsqrt requires float operand, got {:?}",
+                    child_types[0]
+                );
+                child_types[0].clone()
             }
 
             // ── Select ────────────────────────────────────────────────────────
@@ -472,6 +495,34 @@ impl Op {
                     child_types[0]
                 );
                 Type::F64
+            }
+
+            // ── x86 FP binary ops (F32, F32 → F32) ──────────────────────────
+            Op::X86Addss | Op::X86Subss | Op::X86Mulss | Op::X86Divss => {
+                assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
+                assert_eq!(
+                    child_types[0],
+                    Type::F32,
+                    "{self:?} requires F32 operands, got {:?}",
+                    child_types[0]
+                );
+                assert_eq!(
+                    child_types[1],
+                    Type::F32,
+                    "{self:?} requires F32 operands, got {:?}",
+                    child_types[1]
+                );
+                Type::F32
+            }
+            Op::X86Sqrtss => {
+                assert_eq!(child_types.len(), 1, "X86Sqrtss requires 1 child");
+                assert_eq!(
+                    child_types[0],
+                    Type::F32,
+                    "X86Sqrtss requires F32 operand, got {:?}",
+                    child_types[0]
+                );
+                Type::F32
             }
 
             // ── Addr (base I64, index I64 → I64) ─────────────────────────────
