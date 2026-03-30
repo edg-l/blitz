@@ -1,8 +1,8 @@
 ## Status
 
-All originally planned features are implemented (315 tests, 22+ e2e).
+All originally planned features are implemented (323 tests, 29 e2e + 8 codegen quality).
 The compiler produces correct code for integer, FP, multi-block, and
-spilling scenarios.
+spilling scenarios. Pipeline split into 7 focused modules.
 
 ## Next: Production-Grade x86-64 Optimization
 
