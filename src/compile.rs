@@ -4157,4 +4157,319 @@ int main(void) {
             assert_eq!(code, 0, "shift_edge_cases returned wrong exit code {code}");
         }
     }
+
+    // ── Code quality / optimization tests ────────────────────────────────────
+    //
+    // These tests inspect the *generated machine code* to verify that the
+    // optimizer is actually improving code quality, not just producing correct
+    // output.  They check code size and disassembly patterns rather than
+    // runtime results.
+
+    // Constant folding eliminates all arithmetic.
+    //
+    // Build: fn f() -> i64 { (3 + 7) * (10 - 4) }
+    // All operands are iconst nodes, so the e-graph folds the entire expression
+    // to Iconst(60) before isel.  The emitted function should be tiny: just a
+    // prologue, one MOV-immediate (or XOR+MOV), and an epilogue.  In
+    // particular, no ADD / SUB / IMUL instructions should appear.
+    #[test]
+    fn codegen_constant_fold_eliminates_arithmetic() {
+        use crate::test_utils::objdump_disasm;
+
+        let mut builder = FunctionBuilder::new("blitz_cf_arith", &[], &[Type::I64]);
+        let c3 = builder.iconst(3, Type::I64);
+        let c7 = builder.iconst(7, Type::I64);
+        let c10 = builder.iconst(10, Type::I64);
+        let c4 = builder.iconst(4, Type::I64);
+        let sum = builder.add(c3, c7);
+        let diff = builder.sub(c10, c4);
+        let result = builder.mul(sum, diff);
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("cf_arith finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile cf_arith");
+
+        // The folded constant function should be very small.  A typical
+        // encoding is: push rbp (1) + mov rbp,rsp (3) + mov rax,60 (7) +
+        // pop rbp (1) + ret (1) = 13 bytes.  Give a generous upper bound.
+        assert!(
+            obj.code.len() <= 30,
+            "constant-folded fn should be at most 30 bytes, got {} bytes",
+            obj.code.len()
+        );
+
+        if let Some(disasm) = objdump_disasm(&obj.code) {
+            assert!(
+                !disasm.contains("imul"),
+                "no IMUL expected after constant fold:\n{disasm}"
+            );
+            assert!(
+                !disasm.contains("add"),
+                "no ADD expected after constant fold:\n{disasm}"
+            );
+            assert!(
+                !disasm.contains("sub"),
+                "no SUB expected after constant fold:\n{disasm}"
+            );
+        }
+    }
+
+    // Strength reduction: multiply by a power of two becomes a left shift.
+    //
+    // Build: fn f(x: i64) -> i64 { x * 8 }
+    // The e-graph strength-reduction rules rewrite Mul(x, 8) to Shl(x, 3).
+    // The resulting machine code must contain SHL and must not contain IMUL.
+    #[test]
+    fn codegen_mul_power_of_two_becomes_shift() {
+        use crate::test_utils::objdump_disasm;
+
+        let mut builder = FunctionBuilder::new("blitz_mul8", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let x = params[0];
+        let c8 = builder.iconst(8, Type::I64);
+        let result = builder.mul(x, c8);
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("mul8 finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile mul8");
+
+        if let Some(disasm) = objdump_disasm(&obj.code) {
+            assert!(
+                disasm.contains("shl"),
+                "mul-by-8 should lower to SHL:\n{disasm}"
+            );
+            assert!(
+                !disasm.contains("imul"),
+                "mul-by-8 must not use IMUL after strength reduction:\n{disasm}"
+            );
+        }
+    }
+
+    // Strength reduction: multiply by 3 becomes a LEA (base + 2*base).
+    //
+    // Build: fn f(x: i64) -> i64 { x * 3 }
+    // The isel rules rewrite Mul(x, 3) to Lea[x + x*2], emitting a single
+    // LEA instruction rather than an IMUL.
+    #[test]
+    fn codegen_mul_3_becomes_lea() {
+        use crate::test_utils::objdump_disasm;
+
+        let mut builder = FunctionBuilder::new("blitz_mul3", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let x = params[0];
+        let c3 = builder.iconst(3, Type::I64);
+        let result = builder.mul(x, c3);
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("mul3 finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile mul3");
+
+        if let Some(disasm) = objdump_disasm(&obj.code) {
+            assert!(
+                disasm.contains("lea"),
+                "mul-by-3 should lower to LEA:\n{disasm}"
+            );
+            assert!(
+                !disasm.contains("imul"),
+                "mul-by-3 must not use IMUL after strength reduction:\n{disasm}"
+            );
+        }
+    }
+
+    // Flag fusion: a subtract used as the basis for a comparison should not
+    // generate a separate CMP instruction.
+    //
+    // Build: fn f(a: i64, b: i64) -> i64 { if a > b { a - b } else { 0 } }
+    // The SUB already sets the flags needed by the conditional move, so the
+    // optimizer should fuse them: one SUB, no CMP.
+    #[test]
+    fn codegen_flag_fusion_single_sub() {
+        use crate::ir::condcode::CondCode;
+        use crate::test_utils::objdump_disasm;
+
+        let mut builder = FunctionBuilder::new(
+            "blitz_flag_single_sub",
+            &[Type::I64, Type::I64],
+            &[Type::I64],
+        );
+        let params = builder.params().to_vec();
+        let a = params[0];
+        let b = params[1];
+        let diff = builder.sub(a, b);
+        let zero = builder.iconst(0, Type::I64);
+        let cond = builder.icmp(CondCode::Sgt, diff, zero);
+        let result = builder.select(cond, diff, zero);
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("flag_single_sub finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile flag_single_sub");
+
+        if let Some(disasm) = objdump_disasm(&obj.code) {
+            assert!(
+                disasm.contains("sub"),
+                "expected SUB in disassembly:\n{disasm}"
+            );
+            assert!(
+                !disasm.contains("cmp"),
+                "no CMP expected — flag fusion should reuse SUB flags:\n{disasm}"
+            );
+        }
+    }
+
+    // Strength reduction: unsigned divide by power-of-2 becomes logical shift right.
+    //
+    // Build: fn f(x: i64) -> i64 { x udiv 4 }
+    // The strength-reduction rule rewrites UDiv(a, 2^n) to Shr(a, n).
+    // The emitted code must contain SHR and must not contain DIV or IDIV.
+    #[test]
+    fn codegen_udiv_power_of_two_becomes_shr() {
+        use crate::test_utils::objdump_disasm;
+
+        let mut builder = FunctionBuilder::new("blitz_udiv4", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let x = params[0];
+        let c4 = builder.iconst(4, Type::I64);
+        let result = builder.udiv(x, c4);
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("udiv4 finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile udiv4");
+
+        if let Some(disasm) = objdump_disasm(&obj.code) {
+            assert!(
+                disasm.contains("shr"),
+                "udiv-by-4 should lower to SHR:\n{disasm}"
+            );
+            assert!(
+                !disasm.contains("div"),
+                "udiv-by-4 must not use DIV after strength reduction:\n{disasm}"
+            );
+        }
+    }
+
+    // Algebraic inverse: iconst(7) - iconst(7) folds to 0.
+    //
+    // Build: fn f() -> i64 { 7 - 7 }
+    // The inverse rule Sub(a, a) = 0 fires (both children are the same Iconst class
+    // since the e-graph deduplicates identical constants).  The result is Iconst(0),
+    // so the emitted code should be minimal with no SUB instruction.
+    #[test]
+    fn codegen_algebraic_inverse_eliminated() {
+        use crate::test_utils::objdump_disasm;
+
+        let mut builder = FunctionBuilder::new("blitz_sub_self", &[], &[Type::I64]);
+        let c7 = builder.iconst(7, Type::I64);
+        // Both operands are the same e-class (deduped Iconst(7)), so Sub(c7, c7)
+        // hits the inverse rule Sub(a, a) = 0.
+        let result = builder.sub(c7, c7);
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("sub_self finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile sub_self");
+
+        // Should compile to prologue + xor eax,eax (or mov rax,0) + epilogue.
+        assert!(
+            obj.code.len() <= 20,
+            "7-7 should compile to <=20 bytes after inverse fold, got {} bytes",
+            obj.code.len()
+        );
+
+        if let Some(disasm) = objdump_disasm(&obj.code) {
+            assert!(
+                !disasm.contains("sub"),
+                "no SUB expected after algebraic inverse 7-7=0:\n{disasm}"
+            );
+        }
+    }
+
+    // Peephole: zeroing a register should use XOR rather than MOV-immediate.
+    //
+    // Build: fn f() -> i64 { 0 }
+    // On x86-64 `xor eax, eax` (2 bytes) is the canonical zero-a-register
+    // idiom and is shorter than `mov rax, 0` (7 bytes).  The peephole pass
+    // should emit XOR.
+    //
+    // XOR EAX,EAX encodes as 0x31 0xC0.
+    #[test]
+    fn codegen_peephole_xor_zero() {
+        let mut builder = FunctionBuilder::new("blitz_ret_zero", &[], &[Type::I64]);
+        let c0 = builder.iconst(0, Type::I64);
+        builder.ret(Some(c0));
+        let (func, egraph) = builder.finalize().expect("ret_zero finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile ret_zero");
+
+        // 7-byte MOV-imm64 zero: REX.W (48) + B8 + 8 zero bytes
+        // Check that the code does NOT contain those 7 bytes in sequence.
+        let mov_imm64_zero: &[u8] = &[0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let has_long_mov = obj
+            .code
+            .windows(mov_imm64_zero.len())
+            .any(|w| w == mov_imm64_zero);
+        assert!(
+            !has_long_mov,
+            "zeroing RAX must not use 10-byte MOV-imm64; use XOR instead"
+        );
+
+        // XOR EAX, EAX is 0x31 0xC0 (2 bytes).
+        let xor_eax: &[u8] = &[0x31, 0xC0];
+        let has_xor = obj.code.windows(2).any(|w| w == xor_eax);
+        assert!(
+            has_xor,
+            "expected XOR EAX,EAX (0x31 0xC0) in zero-return function, code: {:02x?}",
+            obj.code
+        );
+    }
+
+    // Optimizer reduces overall code size: sequential strength reductions.
+    //
+    // Build: fn f(x: i64) -> i64 { (x * 4) * 2 }
+    // Optimizations:
+    //   * x * 4  -> shl(x, 2)         (strength reduction, phase 2)
+    //   * shl(x, 2) * 2 -> shl(shl(x,2), 1)  (strength reduction again)
+    // Result: two SHL instructions (or potentially merged), NO IMUL at all.
+    // This tests that strength reduction applies recursively through sub-expressions.
+    #[test]
+    fn codegen_optimizer_reduces_code_size() {
+        use crate::test_utils::objdump_disasm;
+
+        let mut builder = FunctionBuilder::new("blitz_mul4_mul2", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let x = params[0];
+        let c4 = builder.iconst(4, Type::I64);
+        let c2 = builder.iconst(2, Type::I64);
+        // (x * 4) * 2: both multiplies should strength-reduce to shifts.
+        let mul4 = builder.mul(x, c4);
+        let result = builder.mul(mul4, c2);
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("mul4_mul2 finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile mul4_mul2");
+
+        // Prologue + one or two SHLs + epilogue should be well under 40 bytes.
+        assert!(
+            obj.code.len() <= 40,
+            "two sequential mul-by-pow2 should be <=40 bytes, got {} bytes",
+            obj.code.len()
+        );
+
+        if let Some(disasm) = objdump_disasm(&obj.code) {
+            assert!(
+                !disasm.contains("imul"),
+                "no IMUL expected after sequential strength reductions:\n{disasm}"
+            );
+            assert!(
+                disasm.contains("shl"),
+                "expected SHL (both multiplies strength-reduced):\n{disasm}"
+            );
+        }
+    }
 }
