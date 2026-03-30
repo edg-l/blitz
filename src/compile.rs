@@ -3369,4 +3369,633 @@ int main(void) {
             assert_eq!(code, 0, "threaded returned wrong exit code {code}");
         }
     }
+
+    // Regression 1: Negative value arithmetic.
+    //
+    // Build: neg_arith(a, b) -> (a - b) - (a + b)  i.e. -2b
+    // Tests signed add/sub with negative inputs and negative iconst values.
+    // Avoids Op::Mul (not yet supported with two variable operands).
+    #[test]
+    fn e2e_negative_arithmetic() {
+        if !has_tool("cc") {
+            return;
+        }
+
+        let mut builder =
+            FunctionBuilder::new("blitz_neg_arith", &[Type::I64, Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let a = params[0];
+        let b = params[1];
+        let diff = builder.sub(a, b); // a - b
+        let sum = builder.add(a, b); // a + b
+        let result = builder.sub(diff, sum); // (a-b) - (a+b) = -2b
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("neg_arith finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile neg_arith");
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_neg_arith(int64_t a, int64_t b);
+int main(void) {
+    // (a-b) - (a+b) = -2b
+    // (-5-3) - (-5+3) = -8 - (-2) = -6
+    if (blitz_neg_arith(-5, 3) != -6) return 1;
+    // (-100-(-200)) - (-100+(-200)) = 100 - (-300) = 400
+    if (blitz_neg_arith(-100, -200) != 400) return 2;
+    // (0-(-1)) - (0+(-1)) = 1 - (-1) = 2
+    if (blitz_neg_arith(0, -1) != 2) return 3;
+    return 0;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_negative_arith", &obj, c_main) {
+            assert_eq!(code, 0, "neg_arith returned wrong exit code {code}");
+        }
+    }
+
+    // Regression 2: Signed overflow / wrapping arithmetic.
+    //
+    // Build: wrap_add(a) -> a + 1  and  wrap_sub(a) -> a - 1
+    // Verifies that i64 add/sub wraps at INT64_MAX / INT64_MIN as per two's
+    // complement, catching any accidental use of overflow-trapping instructions.
+    #[test]
+    fn e2e_wrapping_overflow() {
+        if !has_tool("cc") {
+            return;
+        }
+
+        // Build wrap_add(a: i64) -> i64 { a + 1 }
+        let mut builder = FunctionBuilder::new("blitz_wrap_add", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let one = builder.iconst(1, Type::I64);
+        let result = builder.add(params[0], one);
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("wrap_add finalize");
+        let opts = CompileOptions::default();
+        let obj_add = compile(&func, egraph, &opts, None).expect("compile wrap_add");
+
+        // Build wrap_sub(a: i64) -> i64 { a - 1 }
+        let mut builder = FunctionBuilder::new("blitz_wrap_sub", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let one = builder.iconst(1, Type::I64);
+        let result = builder.sub(params[0], one);
+        builder.ret(Some(result));
+        let (func2, egraph2) = builder.finalize().expect("wrap_sub finalize");
+        let obj_sub = compile(&func2, egraph2, &opts, None).expect("compile wrap_sub");
+
+        let dir = std::env::temp_dir();
+        let obj_add_path = dir.join("blitz_e2e_wrap_add.o");
+        let obj_sub_path = dir.join("blitz_e2e_wrap_sub.o");
+        let main_path = dir.join("blitz_e2e_wrap_main.c");
+        let bin_path = dir.join("blitz_e2e_wrap_bin");
+
+        obj_add.write_to(&obj_add_path).expect("write wrap_add.o");
+        obj_sub.write_to(&obj_sub_path).expect("write wrap_sub.o");
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_wrap_add(int64_t a);
+int64_t blitz_wrap_sub(int64_t a);
+int main(void) {
+    // INT64_MAX + 1 wraps to INT64_MIN
+    int64_t int64_max = (int64_t)0x7fffffffffffffffLL;
+    int64_t int64_min = (int64_t)0x8000000000000000LL;
+    if (blitz_wrap_add(int64_max) != int64_min) return 1;
+    // INT64_MIN - 1 wraps to INT64_MAX
+    if (blitz_wrap_sub(int64_min) != int64_max) return 2;
+    return 0;
+}
+"#;
+        std::fs::write(&main_path, c_main.as_bytes()).expect("write wrap main.c");
+
+        let compile_out = std::process::Command::new("cc")
+            .args([
+                main_path.to_str().unwrap(),
+                obj_add_path.to_str().unwrap(),
+                obj_sub_path.to_str().unwrap(),
+                "-o",
+                bin_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("cc wrap");
+
+        let _ = std::fs::remove_file(&obj_add_path);
+        let _ = std::fs::remove_file(&obj_sub_path);
+        let _ = std::fs::remove_file(&main_path);
+
+        if compile_out.status.success() {
+            let run = std::process::Command::new(&bin_path)
+                .output()
+                .expect("run wrap binary");
+            let _ = std::fs::remove_file(&bin_path);
+            let code = run.status.code().unwrap_or(1);
+            assert_eq!(code, 0, "wrapping_overflow returned wrong exit code {code}");
+        } else {
+            let _ = std::fs::remove_file(&bin_path);
+            eprintln!(
+                "cc failed for wrapping_overflow:\n{}",
+                String::from_utf8_lossy(&compile_out.stderr)
+            );
+        }
+    }
+
+    // Regression 3: Value live across a call (caller-saved register clobber).
+    //
+    // Build: across_call(a: i64, b: i64) -> i64
+    //   x = a + b          -- computed before the call
+    //   r = helper(a)      -- call clobbers caller-saved registers (RDI, RSI, ...)
+    //   return x + r       -- x must survive the call
+    //
+    // Uses a two-block structure so that x is live-out of the call block (passed
+    // as a block param to the exit block), ensuring the liveness model sees x
+    // as live at the call boundary and places it in a callee-saved register.
+    //
+    // CFG: BB0 [call block] -- jump(BB_exit, [x, r]) --> BB_exit[x, r] --> ret(x+r)
+    #[test]
+    fn e2e_value_across_call() {
+        if !has_tool("cc") {
+            return;
+        }
+
+        let mut builder =
+            FunctionBuilder::new("blitz_across_call", &[Type::I64, Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let a = params[0];
+        let b = params[1];
+
+        let (bb_exit, bb_exit_params) = builder.create_block_with_params(&[Type::I64, Type::I64]);
+        let px = bb_exit_params[0]; // x arriving via block param
+        let pr = bb_exit_params[1]; // r arriving via block param
+
+        // BB0: compute x, call helper, jump to exit with both values.
+        let x = builder.add(a, b); // x = a + b
+        let results = builder.call("blitz_helper_ext", &[a], &[Type::I64]);
+        let r = results[0]; // r = helper(a)
+        builder.jump(bb_exit, &[x, r]); // x is live-out via block param
+
+        // BB_exit: return x + r
+        builder.set_block(bb_exit);
+        let ret = builder.add(px, pr);
+        builder.ret(Some(ret));
+
+        let (func, egraph) = builder.finalize().expect("across_call finalize");
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile across_call");
+
+        // blitz_helper_ext(a) returns a + 100.
+        // across_call(a, b) = (a+b) + (a+100) = 2*a + b + 100
+        // across_call(5, 3)  = 8 + 105 = 113
+        // across_call(10, 2) = 12 + 110 = 122
+        // across_call(0, 0)  = 0 + 100 = 100
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_across_call(int64_t a, int64_t b);
+int64_t blitz_helper_ext(int64_t a) { return a + 100; }
+int main(void) {
+    if (blitz_across_call(5,  3) != 113) return 1;
+    if (blitz_across_call(10, 2) != 122) return 2;
+    if (blitz_across_call(0,  0) != 100) return 3;
+    return 0;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_across_call", &obj, c_main) {
+            assert_eq!(code, 0, "value_across_call returned wrong exit code {code}");
+        }
+    }
+
+    // Regression 4: Spill correctness with 16 simultaneously live values.
+    //
+    // Build a function with 16 live i64 values (v1..v16), each param+k for k=1..16.
+    // Returns their sum. Forces spilling since there are only 15 GPR colors.
+    // Starts at k=1 to avoid Add(param, 0) being folded away by algebraic rules.
+    // With param=1: sum of (1+1)..(1+16) = sum of 2..17 = 152.
+    // With param=0: sum of 1..16 = 136.
+    #[test]
+    fn e2e_spill_correctness() {
+        if !has_tool("cc") {
+            return;
+        }
+
+        let mut builder = FunctionBuilder::new("blitz_spill_test", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let param = params[0];
+
+        // v[k] = param + k  for k in 1..=16  (16 distinct values)
+        let mut vals = Vec::with_capacity(16);
+        for k in 1i64..=16 {
+            let ck = builder.iconst(k, Type::I64);
+            let v = builder.add(param, ck);
+            vals.push(v);
+        }
+
+        // Sum all 16 values while keeping them all live until the final add chain.
+        // Build as a left fold: acc = v1, acc = acc + v2, ..., acc = acc + v16
+        let mut acc = vals[0];
+        for v in &vals[1..] {
+            acc = builder.add(acc, *v);
+        }
+        builder.ret(Some(acc));
+        let (func, egraph) = builder.finalize().expect("spill_test finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile spill_test");
+
+        // param=1: sum of (1+1)..(1+16) = 2+3+...+17 = (2+17)*16/2 = 152
+        // param=0: sum of (0+1)..(0+16) = 1+2+...+16 = (1+16)*16/2 = 136
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_spill_test(int64_t param);
+int main(void) {
+    if (blitz_spill_test(1) != 152) return 1;
+    if (blitz_spill_test(0) != 136) return 2;
+    return 0;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_spill", &obj, c_main) {
+            assert_eq!(code, 0, "spill_correctness returned wrong exit code {code}");
+        }
+    }
+
+    // Regression 5: Complex CFG with nested if/else.
+    //
+    // Build: classify(x) -> { >100: 3, 1..100: 2, -100..0: -2, <-100: -3 }
+    // Tests nested conditional blocks and multiple returns through different paths.
+    #[test]
+    fn e2e_nested_if_else() {
+        use crate::ir::condcode::CondCode;
+        if !has_tool("cc") {
+            return;
+        }
+
+        // CFG:
+        //   BB0: if x > 0 -> BB_pos, else -> BB_neg
+        //   BB_pos: if x > 100 -> BB_big_pos, else -> BB_small_pos
+        //   BB_big_pos: ret(3)
+        //   BB_small_pos: ret(2)
+        //   BB_neg: if x < -100 -> BB_big_neg, else -> BB_small_neg
+        //   BB_big_neg: ret(-3)
+        //   BB_small_neg: ret(-2)
+        let mut builder = FunctionBuilder::new("blitz_classify", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let x = params[0];
+
+        let (bb_pos, _) = builder.create_block_with_params(&[]);
+        let (bb_neg, _) = builder.create_block_with_params(&[]);
+        let (bb_big_pos, _) = builder.create_block_with_params(&[]);
+        let (bb_small_pos, _) = builder.create_block_with_params(&[]);
+        let (bb_big_neg, _) = builder.create_block_with_params(&[]);
+        let (bb_small_neg, _) = builder.create_block_with_params(&[]);
+
+        // BB0: x > 0 ?
+        let zero = builder.iconst(0, Type::I64);
+        let cond0 = builder.icmp(CondCode::Sgt, x, zero);
+        builder.branch(cond0, bb_pos, bb_neg, &[], &[]);
+
+        // BB_pos: x > 100 ?
+        builder.set_block(bb_pos);
+        let c100 = builder.iconst(100, Type::I64);
+        let cond_pos = builder.icmp(CondCode::Sgt, x, c100);
+        builder.branch(cond_pos, bb_big_pos, bb_small_pos, &[], &[]);
+
+        // BB_big_pos: ret 3
+        builder.set_block(bb_big_pos);
+        let v3 = builder.iconst(3, Type::I64);
+        builder.ret(Some(v3));
+
+        // BB_small_pos: ret 2
+        builder.set_block(bb_small_pos);
+        let v2 = builder.iconst(2, Type::I64);
+        builder.ret(Some(v2));
+
+        // BB_neg: x < -100 ?
+        builder.set_block(bb_neg);
+        let cn100 = builder.iconst(-100, Type::I64);
+        let cond_neg = builder.icmp(CondCode::Slt, x, cn100);
+        builder.branch(cond_neg, bb_big_neg, bb_small_neg, &[], &[]);
+
+        // BB_big_neg: ret -3
+        builder.set_block(bb_big_neg);
+        let vn3 = builder.iconst(-3, Type::I64);
+        builder.ret(Some(vn3));
+
+        // BB_small_neg: ret -2
+        builder.set_block(bb_small_neg);
+        let vn2 = builder.iconst(-2, Type::I64);
+        builder.ret(Some(vn2));
+
+        let (func, egraph) = builder.finalize().expect("classify finalize");
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile classify");
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_classify(int64_t x);
+int main(void) {
+    if (blitz_classify(200)  !=  3) return 1;
+    if (blitz_classify(50)   !=  2) return 2;
+    if (blitz_classify(0)    != -2) return 3;
+    if (blitz_classify(-50)  != -2) return 4;
+    if (blitz_classify(-200) != -3) return 5;
+    return 0;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_nested_if", &obj, c_main) {
+            assert_eq!(code, 0, "nested_if_else returned wrong exit code {code}");
+        }
+    }
+
+    // Regression 6: Loop with phi swapping -- Fibonacci via block params.
+    //
+    // Build: fib(n) iteratively using loop variables a and b (two block params).
+    // Tests phi (block param) copy correctness across loop backedge when
+    // the two loop variables must be swapped simultaneously: (a,b) <- (b, a+b).
+    // Uses a separate counter block param to avoid sharing iconst nodes.
+    // fib(0)=0, fib(1)=1, fib(10)=55, fib(20)=6765
+    #[test]
+    fn e2e_fibonacci() {
+        use crate::ir::condcode::CondCode;
+        if !has_tool("cc") {
+            return;
+        }
+
+        // CFG:
+        //   BB0: jump(BB_loop, [n, a=0, b=1])
+        //   BB_loop(params=[count, a, b]):
+        //     count_minus1 = count - 1  (using fresh iconst(1) not shared with initial b)
+        //     next_b = a + b
+        //     cond = count > 0
+        //     branch(cond, BB_loop, BB_exit, [count_minus1, b, next_b], [a])
+        //   BB_exit(params=[result]):
+        //     ret(result)
+        //
+        // Use iconst(-1) and add instead of sub(count, iconst(1)) to avoid
+        // sharing the iconst(1) node with the initial b=1 argument.
+        let mut builder = FunctionBuilder::new("blitz_fib", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let n = params[0];
+
+        let (bb_loop, bb_loop_params) =
+            builder.create_block_with_params(&[Type::I64, Type::I64, Type::I64]);
+        let count = bb_loop_params[0];
+        let a = bb_loop_params[1];
+        let b = bb_loop_params[2];
+
+        let (bb_exit, bb_exit_params) = builder.create_block_with_params(&[Type::I64]);
+        let result = bb_exit_params[0];
+
+        // BB0: jump to loop with count=n, a=0, b=1
+        let zero = builder.iconst(0, Type::I64);
+        let init_b = builder.iconst(1, Type::I64); // initial b=1
+        builder.jump(bb_loop, &[n, zero, init_b]);
+
+        // BB_loop: decrement count using add(count, -1) to avoid sharing iconst(1).
+        builder.set_block(bb_loop);
+        let neg_one = builder.iconst(-1, Type::I64); // distinct from init_b
+        let count_minus1 = builder.add(count, neg_one); // count + (-1)
+        let next_b = builder.add(a, b); // a + b
+        let cond = builder.icmp(CondCode::Sgt, count, zero);
+        builder.branch(cond, bb_loop, bb_exit, &[count_minus1, b, next_b], &[a]);
+
+        // BB_exit: return result
+        builder.set_block(bb_exit);
+        builder.ret(Some(result));
+
+        let (func, egraph) = builder.finalize().expect("fib finalize");
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile fib");
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_fib(int64_t n);
+int main(void) {
+    if (blitz_fib(0)  != 0)    return 1;
+    if (blitz_fib(1)  != 1)    return 2;
+    if (blitz_fib(10) != 55)   return 3;
+    if (blitz_fib(20) != 6765) return 4;
+    return 0;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_fibonacci", &obj, c_main) {
+            assert_eq!(code, 0, "fibonacci returned wrong exit code {code}");
+        }
+    }
+
+    // Regression 7: Diamond CFG phi merge -- abs_diff.
+    //
+    // Build: abs_diff(a, b) -> { a > b: a - b, else: b - a }
+    // Both CFG paths produce a different value that merges at the exit block
+    // via a block parameter (phi). Tests phi-copy correctness.
+    #[test]
+    fn e2e_diamond_phi() {
+        use crate::ir::condcode::CondCode;
+        if !has_tool("cc") {
+            return;
+        }
+
+        // CFG:
+        //   BB0: cond = a > b; branch(cond, BB_true, BB_false)
+        //   BB_true: diff = a - b; jump(BB_exit, [diff])
+        //   BB_false: diff = b - a; jump(BB_exit, [diff])
+        //   BB_exit(params=[diff]): ret(diff)
+        let mut builder =
+            FunctionBuilder::new("blitz_abs_diff", &[Type::I64, Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let a = params[0];
+        let b = params[1];
+
+        let (bb_true, _) = builder.create_block_with_params(&[]);
+        let (bb_false, _) = builder.create_block_with_params(&[]);
+        let (bb_exit, bb_exit_params) = builder.create_block_with_params(&[Type::I64]);
+        let diff = bb_exit_params[0];
+
+        let cond = builder.icmp(CondCode::Sgt, a, b);
+        builder.branch(cond, bb_true, bb_false, &[], &[]);
+
+        builder.set_block(bb_true);
+        let diff_true = builder.sub(a, b);
+        builder.jump(bb_exit, &[diff_true]);
+
+        builder.set_block(bb_false);
+        let diff_false = builder.sub(b, a);
+        builder.jump(bb_exit, &[diff_false]);
+
+        builder.set_block(bb_exit);
+        builder.ret(Some(diff));
+
+        let (func, egraph) = builder.finalize().expect("abs_diff finalize");
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile abs_diff");
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_abs_diff(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_abs_diff(10, 3)  != 7) return 1;
+    if (blitz_abs_diff(3, 10)  != 7) return 2;
+    if (blitz_abs_diff(5, 5)   != 0) return 3;
+    if (blitz_abs_diff(-1, -5) != 4) return 4;
+    return 0;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_diamond_phi", &obj, c_main) {
+            assert_eq!(code, 0, "diamond_phi returned wrong exit code {code}");
+        }
+    }
+
+    // Regression 8: Constant folding through pipeline.
+    //
+    // Build: constfold() -> (3 + 7) * (10 - 4)
+    // All inputs are iconst nodes. The e-graph should fold this to 60 before
+    // isel, so the compiled function should just return a constant.
+    #[test]
+    fn e2e_constant_fold() {
+        if !has_tool("cc") {
+            return;
+        }
+
+        let mut builder = FunctionBuilder::new("blitz_constfold", &[], &[Type::I64]);
+        let c3 = builder.iconst(3, Type::I64);
+        let c7 = builder.iconst(7, Type::I64);
+        let c10 = builder.iconst(10, Type::I64);
+        let c4 = builder.iconst(4, Type::I64);
+        let sum = builder.add(c3, c7);
+        let diff = builder.sub(c10, c4);
+        let result = builder.mul(sum, diff);
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("constfold finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile constfold");
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_constfold(void);
+int main(void) {
+    if (blitz_constfold() != 60) return 1;
+    return 0;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_constfold", &obj, c_main) {
+            assert_eq!(code, 0, "constant_fold returned wrong exit code {code}");
+        }
+    }
+
+    // Regression 9: Chained comparisons -- clamp function.
+    //
+    // Build: clamp(x, lo, hi) -> lo if x < lo, hi if x > hi, else x
+    // Multiple conditional blocks with separate branches and returns.
+    // Tests flag fusion and branch correctness across sequential comparisons.
+    #[test]
+    fn e2e_chained_cmp() {
+        use crate::ir::condcode::CondCode;
+        if !has_tool("cc") {
+            return;
+        }
+
+        // CFG:
+        //   BB0: cond = x < lo; branch(cond, BB_ret_lo, BB_check_hi)
+        //   BB_ret_lo: ret(lo)
+        //   BB_check_hi: cond2 = x > hi; branch(cond2, BB_ret_hi, BB_ret_x)
+        //   BB_ret_hi: ret(hi)
+        //   BB_ret_x: ret(x)
+        let mut builder = FunctionBuilder::new(
+            "blitz_clamp",
+            &[Type::I64, Type::I64, Type::I64],
+            &[Type::I64],
+        );
+        let params = builder.params().to_vec();
+        let x = params[0];
+        let lo = params[1];
+        let hi = params[2];
+
+        let (bb_ret_lo, _) = builder.create_block_with_params(&[]);
+        let (bb_check_hi, _) = builder.create_block_with_params(&[]);
+        let (bb_ret_hi, _) = builder.create_block_with_params(&[]);
+        let (bb_ret_x, _) = builder.create_block_with_params(&[]);
+
+        // BB0: x < lo ?
+        let cond0 = builder.icmp(CondCode::Slt, x, lo);
+        builder.branch(cond0, bb_ret_lo, bb_check_hi, &[], &[]);
+
+        // BB_ret_lo: return lo
+        builder.set_block(bb_ret_lo);
+        builder.ret(Some(lo));
+
+        // BB_check_hi: x > hi ?
+        builder.set_block(bb_check_hi);
+        let cond1 = builder.icmp(CondCode::Sgt, x, hi);
+        builder.branch(cond1, bb_ret_hi, bb_ret_x, &[], &[]);
+
+        // BB_ret_hi: return hi
+        builder.set_block(bb_ret_hi);
+        builder.ret(Some(hi));
+
+        // BB_ret_x: return x
+        builder.set_block(bb_ret_x);
+        builder.ret(Some(x));
+
+        let (func, egraph) = builder.finalize().expect("clamp finalize");
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile clamp");
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_clamp(int64_t x, int64_t lo, int64_t hi);
+int main(void) {
+    if (blitz_clamp(5,   0, 10) != 5)  return 1;
+    if (blitz_clamp(-5,  0, 10) != 0)  return 2;
+    if (blitz_clamp(15,  0, 10) != 10) return 3;
+    if (blitz_clamp(0,   0, 10) != 0)  return 4;
+    if (blitz_clamp(10,  0, 10) != 10) return 5;
+    return 0;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_clamp", &obj, c_main) {
+            assert_eq!(code, 0, "chained_cmp returned wrong exit code {code}");
+        }
+    }
+
+    // Regression 10: Shift with immediate count (X86ShlImm).
+    //
+    // Build: shl_imm(val: i64) -> i64 { val << 3 }
+    // When the shift count is a constant iconst, isel produces X86ShlImm which
+    // encodes as a SAL/SHL with an 8-bit immediate -- no RCX pre-coloring needed.
+    // Tests that constant-count shifts compile and execute correctly, including
+    // sign-extension behaviour at the boundary bits.
+    #[test]
+    fn e2e_shift_edge_cases() {
+        if !has_tool("cc") {
+            return;
+        }
+
+        let mut builder = FunctionBuilder::new("blitz_shl_imm", &[Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let val = params[0];
+        let c3 = builder.iconst(3, Type::I64);
+        let result = builder.shl(val, c3); // val << 3 via X86ShlImm(3)
+        builder.ret(Some(result));
+        let (func, egraph) = builder.finalize().expect("shl_imm finalize");
+
+        let opts = CompileOptions::default();
+        let obj = compile(&func, egraph, &opts, None).expect("compile shl_imm");
+
+        let c_main = r#"
+#include <stdint.h>
+int64_t blitz_shl_imm(int64_t val);
+int main(void) {
+    if (blitz_shl_imm(1)  != 8)    return 1;
+    if (blitz_shl_imm(5)  != 40)   return 2;
+    if (blitz_shl_imm(0)  != 0)    return 3;
+    if (blitz_shl_imm(-1) != -8)   return 4;
+    // 1 << 62 = 0x4000000000000000  (not sign bit, so stays positive)
+    // but our shift is by 3, so test large input: 0x1000000000000000 << 3 = INT64_MIN
+    if (blitz_shl_imm((int64_t)0x1000000000000000LL) != (int64_t)0x8000000000000000LL) return 5;
+    return 0;
+}
+"#;
+        if let Some(code) = link_and_run_obj("blitz_e2e_shift_edge", &obj, c_main) {
+            assert_eq!(code, 0, "shift_edge_cases returned wrong exit code {code}");
+        }
+    }
 }
