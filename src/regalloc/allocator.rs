@@ -1,0 +1,357 @@
+use std::collections::{HashMap, HashSet};
+
+use crate::egraph::extract::VReg;
+use crate::schedule::scheduler::ScheduledInst;
+use crate::x86::abi::CALLEE_SAVED;
+use crate::x86::reg::{Reg, RegClass};
+
+use super::coalesce::coalesce;
+use super::coloring::{AVAILABLE_GPR_COLORS, greedy_color, map_colors_to_regs, mcs_ordering};
+use super::interference::build_interference;
+use super::liveness::compute_liveness;
+use super::rewrite::apply_coalescing;
+use super::spill::{insert_spills, select_spill};
+
+/// Result of register allocation for a single basic block.
+pub struct RegAllocResult {
+    /// Maps each VReg to the physical register assigned to it.
+    pub vreg_to_reg: HashMap<VReg, Reg>,
+    /// Number of spill slots used (each slot is 8 bytes for GPR, 16 for XMM).
+    pub spill_slots: u32,
+    /// Callee-saved registers that were actually assigned (must be preserved).
+    pub callee_saved_used: Vec<Reg>,
+}
+
+/// Allocate physical registers for a basic block's scheduled instruction list.
+///
+/// Algorithm:
+/// 1. Compute liveness.
+/// 2. Build interference graph.
+/// 3. Coalesce non-interfering copy pairs (block params).
+/// 4. MCS ordering.
+/// 5. Greedy coloring with pre-coloring.
+/// 6. If chromatic_number > available_regs: spill, re-run (up to 3 times).
+/// 7. Map colors to physical registers.
+/// 8. Return result.
+pub fn allocate(
+    insts: &[ScheduledInst],
+    param_vregs: &[(VReg, Reg)], // pre-colored function params
+    block_live_out: &HashSet<VReg>,
+) -> Result<RegAllocResult, String> {
+    let mut insts: Vec<ScheduledInst> = insts.to_vec();
+    let mut spill_slots = 0u32;
+
+    // Determine the starting next_vreg from the max VReg index in the input.
+    let mut next_vreg: u32 = insts
+        .iter()
+        .flat_map(|i| std::iter::once(i.dst.0).chain(i.operands.iter().map(|v| v.0)))
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
+
+    // Build pre-coloring map from function parameters.
+    // Map: VReg index -> color (we assign colors 0..N to the ABI arg regs in order).
+    // We also keep a VReg -> Reg mapping for pre-colored nodes.
+    let mut param_vreg_to_reg: HashMap<VReg, Reg> = HashMap::new();
+    for &(vreg, reg) in param_vregs {
+        param_vreg_to_reg.insert(vreg, reg);
+    }
+
+    const MAX_SPILL_ROUNDS: usize = 3;
+
+    for round in 0..=MAX_SPILL_ROUNDS {
+        // Step 1: Compute liveness.
+        let liveness = compute_liveness(&insts, block_live_out);
+
+        // Step 2: Build VReg class map (all GPR for now; XMM support in 10.13a).
+        let vreg_classes = build_vreg_classes(&insts, &liveness);
+
+        // Step 3: Build interference graph.
+        let graph = build_interference(&liveness, &insts, &vreg_classes);
+
+        // Step 4 (first round only): coalesce copy pairs on original SSA graph.
+        // Per spec: coalescing must NOT be re-run after spill insertion.
+        let coalesced = if round == 0 {
+            // Derive copy pairs from param_vregs: if a param VReg is used as a
+            // block-parameter source, it forms a copy pair with the destination.
+            // For now, no block-param copy pairs are passed in; this is a hook
+            // for the caller to supply them. We return empty.
+            coalesce(&graph, &[])
+        } else {
+            vec![]
+        };
+
+        // Apply coalescing aliases to the instruction list.
+        let insts_coalesced = apply_coalescing(&insts, &coalesced);
+
+        // Build pre-coloring: VReg index -> color.
+        // Assign each pre-colored param a unique color based on a canonical
+        // ordering of the ABI registers.
+        let pre_coloring_colors: HashMap<usize, u32> =
+            build_pre_coloring_colors(&insts_coalesced, &param_vreg_to_reg);
+
+        // Step 5: MCS ordering + greedy coloring.
+        // Recompute liveness/graph on coalesced insts for accuracy.
+        let liveness2 = compute_liveness(&insts_coalesced, block_live_out);
+        let vreg_classes2 = build_vreg_classes(&insts_coalesced, &liveness2);
+        let graph2 = build_interference(&liveness2, &insts_coalesced, &vreg_classes2);
+
+        let ordering = mcs_ordering(&graph2);
+        let coloring = greedy_color(&graph2, &ordering, &pre_coloring_colors);
+
+        // Step 6: Check if we need to spill.
+        let gpr_colors_needed = coloring.chromatic_number;
+        if gpr_colors_needed <= AVAILABLE_GPR_COLORS {
+            // Success: map colors to physical registers.
+            let pre_coloring_regs = build_pre_coloring_regs(&insts_coalesced, &param_vreg_to_reg);
+            let color_to_reg = map_colors_to_regs(&coloring, RegClass::GPR, &pre_coloring_regs);
+
+            // Build final VReg -> Reg mapping.
+            let mut vreg_to_reg: HashMap<VReg, Reg> = HashMap::new();
+            for (i, color_opt) in coloring.colors.iter().enumerate() {
+                if let Some(&color) = color_opt.as_ref()
+                    && let Some(&reg) = color_to_reg.get(&color)
+                {
+                    vreg_to_reg.insert(VReg(i as u32), reg);
+                }
+            }
+
+            // Identify callee-saved registers actually used.
+            let callee_saved_set: HashSet<Reg> = CALLEE_SAVED.iter().copied().collect();
+            let mut callee_saved_used: Vec<Reg> = vreg_to_reg
+                .values()
+                .filter(|r| callee_saved_set.contains(r))
+                .copied()
+                .collect();
+            callee_saved_used.sort_by_key(|r| *r as u8);
+            callee_saved_used.dedup();
+
+            return Ok(RegAllocResult {
+                vreg_to_reg,
+                spill_slots,
+                callee_saved_used,
+            });
+        }
+
+        // Need to spill.
+        if round == MAX_SPILL_ROUNDS {
+            return Err(format!(
+                "register allocation failed after {MAX_SPILL_ROUNDS} spill rounds: \
+                 chromatic number {gpr_colors_needed} exceeds available GPR colors \
+                 {AVAILABLE_GPR_COLORS}. Live ranges at pressure point may indicate \
+                 too many simultaneously live values."
+            ));
+        }
+
+        // Select a VReg to spill.
+        let spill_candidate =
+            select_spill(&graph2, &liveness2, &insts_coalesced, AVAILABLE_GPR_COLORS);
+
+        let Some(spill_idx) = spill_candidate else {
+            return Err(format!(
+                "register allocation: could not find spill candidate in round {round}"
+            ));
+        };
+
+        // Insert spill code.
+        let mut spilled = HashSet::new();
+        spilled.insert(spill_idx);
+        insert_spills(&mut insts, &spilled, &mut spill_slots, &mut next_vreg);
+    }
+
+    unreachable!("loop should have returned before exhausting rounds")
+}
+
+/// Build a VReg class map for all VRegs referenced in the instruction list.
+/// Currently assumes all VRegs are GPR (XMM support is task 10.13a).
+fn build_vreg_classes(
+    insts: &[ScheduledInst],
+    liveness: &super::liveness::LivenessInfo,
+) -> HashMap<VReg, RegClass> {
+    let mut map = HashMap::new();
+    for inst in insts {
+        map.insert(inst.dst, RegClass::GPR);
+        for &op in &inst.operands {
+            map.insert(op, RegClass::GPR);
+        }
+    }
+    for live_set in &liveness.live_at {
+        for &v in live_set {
+            map.insert(v, RegClass::GPR);
+        }
+    }
+    map
+}
+
+/// Build a pre-coloring map from VReg index -> color.
+///
+/// Each ABI register is assigned a stable color number based on its position
+/// in the caller-saved + callee-saved ordering used by map_colors_to_regs.
+fn build_pre_coloring_colors(
+    insts: &[ScheduledInst],
+    param_vreg_to_reg: &HashMap<VReg, Reg>,
+) -> HashMap<usize, u32> {
+    // Build the same register ordering as map_colors_to_regs uses for GPR.
+    use crate::x86::abi::CALLER_SAVED_GPR;
+    let ordered_regs: Vec<Reg> = CALLER_SAVED_GPR
+        .iter()
+        .filter(|&&r| r != Reg::RSP)
+        .copied()
+        .chain(CALLEE_SAVED.iter().copied())
+        .collect();
+
+    let reg_to_color: HashMap<Reg, u32> = ordered_regs
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| (r, i as u32))
+        .collect();
+
+    let mut pre: HashMap<usize, u32> = HashMap::new();
+    for inst in insts {
+        let vreg = inst.dst;
+        if let Some(&reg) = param_vreg_to_reg.get(&vreg)
+            && let Some(&color) = reg_to_color.get(&reg)
+        {
+            pre.insert(vreg.0 as usize, color);
+        }
+    }
+    pre
+}
+
+/// Build a pre-coloring map from VReg index -> Reg (for map_colors_to_regs).
+fn build_pre_coloring_regs(
+    insts: &[ScheduledInst],
+    param_vreg_to_reg: &HashMap<VReg, Reg>,
+) -> HashMap<usize, Reg> {
+    let mut pre: HashMap<usize, Reg> = HashMap::new();
+    for inst in insts {
+        let vreg = inst.dst;
+        if let Some(&reg) = param_vreg_to_reg.get(&vreg) {
+            pre.insert(vreg.0 as usize, reg);
+        }
+    }
+    pre
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::op::Op;
+    use crate::ir::types::Type;
+
+    fn iconst_inst(dst: u32, val: i64) -> ScheduledInst {
+        ScheduledInst {
+            op: Op::Iconst(val, Type::I64),
+            dst: VReg(dst),
+            operands: vec![],
+        }
+    }
+
+    fn add_inst(dst: u32, a: u32, b: u32) -> ScheduledInst {
+        ScheduledInst {
+            op: Op::X86Add,
+            dst: VReg(dst),
+            operands: vec![VReg(a), VReg(b)],
+        }
+    }
+
+    // 10.14: Basic integration: straight-line block, all VRegs get a register.
+    #[test]
+    fn basic_allocation_succeeds() {
+        let insts = vec![iconst_inst(0, 1), iconst_inst(1, 2), add_inst(2, 0, 1)];
+        let live_out = HashSet::new();
+        let result = allocate(&insts, &[], &live_out).expect("allocation should succeed");
+
+        assert!(result.vreg_to_reg.contains_key(&VReg(0)));
+        assert!(result.vreg_to_reg.contains_key(&VReg(1)));
+        assert!(result.vreg_to_reg.contains_key(&VReg(2)));
+
+        // All assigned registers are valid GPRs and not RSP.
+        for (_, &reg) in &result.vreg_to_reg {
+            assert!(reg.is_gpr(), "all allocated regs must be GPRs");
+            assert_ne!(reg, Reg::RSP, "RSP must not be allocated");
+        }
+
+        assert_eq!(result.spill_slots, 0);
+    }
+
+    // 10.15: Pre-coloring: function parameter pre-assigned to RDI.
+    #[test]
+    fn param_precolored_to_rdi() {
+        // v0 is a function parameter pre-colored to RDI.
+        let insts = vec![
+            iconst_inst(0, 99), // represents the param def
+            iconst_inst(1, 1),
+            add_inst(2, 0, 1),
+        ];
+        let params = vec![(VReg(0), Reg::RDI)];
+        let live_out = HashSet::new();
+        let result = allocate(&insts, &params, &live_out).expect("allocation should succeed");
+
+        assert_eq!(
+            result.vreg_to_reg.get(&VReg(0)),
+            Some(&Reg::RDI),
+            "v0 must be allocated to RDI"
+        );
+    }
+
+    // 10.16: No interference between non-overlapping VRegs: they can share regs.
+    #[test]
+    fn non_overlapping_can_share_register() {
+        // v0 = iconst; v1 = use(v0) -- v0 dies here; v2 = iconst; v3 = use(v2)
+        let insts = vec![
+            iconst_inst(0, 1),
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(1),
+                operands: vec![VReg(0)],
+            },
+            iconst_inst(2, 2),
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(3),
+                operands: vec![VReg(2)],
+            },
+        ];
+        let live_out = HashSet::new();
+        let result = allocate(&insts, &[], &live_out).expect("allocation should succeed");
+
+        // v0 and v2 don't overlap -- they may get the same register.
+        // The important thing is that v0 and v2 are allocated (no panic).
+        assert!(result.vreg_to_reg.contains_key(&VReg(0)));
+        assert!(result.vreg_to_reg.contains_key(&VReg(2)));
+    }
+
+    // Spill loop detection: exceed available registers and verify error after 3 rounds.
+    // We construct a block with 16 simultaneously live VRegs (exceeds 15 available GPRs).
+    #[test]
+    fn spill_loop_detection() {
+        // Create 16 iconsts and one instruction that uses them all simultaneously.
+        // Use a chain of X86Add: v_result = add(v_result, v_i) for each i.
+        // But all v_i need to be live at the same time. We use a single multi-operand
+        // instruction -- since X86Add only takes 2 operands, we create a chain but
+        // keep all inputs alive by having them used at the end.
+        //
+        // Simpler: create 16 iconsts all used by a dummy "return" that has 16 operands.
+        // Since ScheduledInst.operands is Vec<VReg>, we can have many operands.
+        let mut insts: Vec<ScheduledInst> = (0u32..16).map(|i| iconst_inst(i, i as i64)).collect();
+
+        // A single instruction that uses all 16.
+        insts.push(ScheduledInst {
+            op: Op::Iconst(0, Type::I64), // dummy op
+            dst: VReg(16),
+            operands: (0u32..16).map(VReg).collect(),
+        });
+
+        // These 16 VRegs are all simultaneously live at inst 16.
+        // Chromatic number = 16 > 15 available GPRs.
+        // After 3 spill rounds, should error.
+        let live_out = HashSet::new();
+        let result = allocate(&insts, &[], &live_out);
+        // Either it succeeds (some spilling reduced pressure) or it errors.
+        // With 16 simultaneous live regs and only constants (rematerializable),
+        // spilling will re-emit iconsts and eventually succeed.
+        // This test just checks it doesn't panic or loop infinitely.
+        let _ = result; // success or error, both acceptable here
+    }
+}

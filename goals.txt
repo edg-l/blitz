@@ -1,0 +1,31 @@
+## Current Limitations
+
+### Pipeline
+- Multi-block support is minimal (works for simple conditionals and loops, but no complex CFG)
+- No Call effectful op handling in the encoder (external calls emit relocations but aren't fully wired)
+- Phi elimination uses a simple approach, not battle-tested on complex phi webs
+- Branch relaxation not wired into compile() (only short jumps work, <127 bytes)
+- Single-pass scheduling/regalloc (no cross-block live range splitting)
+
+### Register Allocation
+- Coalescing called with empty copy pairs (never actually eliminates copies)
+- Spill selection has no loop-depth penalty (flat cost model)
+- RCX clobber risk in variable shift lowering (no pre-coloring for CL)
+- No XMM spill/reload emission (XMM class separated in interference graph but FP spill not wired)
+
+### Instruction Selection
+- No Load/Store effectful op lowering to MOV mem instructions
+- No FP arithmetic lowering (Fadd/Fsub etc. have isel stubs but no end-to-end path)
+- No Sext/Zext/Trunc machine lowering
+
+### Code Quality
+- No SIMD, no x87
+- No debug info (DWARF)
+- No unwind tables
+
+## Immediate Goals
+
+1. Wire branch relaxation into the pipeline
+2. Implement Load/Store lowering (memory access is fundamental)
+3. Wire coalescing with real copy pairs from block params
+4. Add loop-depth awareness to spill selection
