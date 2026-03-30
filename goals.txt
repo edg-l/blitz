@@ -1,13 +1,47 @@
-## No Known Limitations
+## Status
 
-All planned features are implemented. The compiler produces correct code
-for all tested patterns (315 tests including 22+ end-to-end tests that
-compile, link with C, and verify runtime results).
+All originally planned features are implemented (315 tests, 22+ e2e).
+The compiler produces correct code for integer, FP, multi-block, and
+spilling scenarios.
 
-## Future Features (out of scope)
+## Next: Production-Grade x86-64 Optimization
 
-1. SIMD / AVX
-2. x87 FP
-3. DWARF debug info
-4. Unwind tables (.eh_frame)
-5. Position-independent code (PIC/PIE)
+For a compiler that "super-optimizes x86-64", these are needed:
+
+### High Priority (code quality parity with LLVM -O1)
+
+1. SIMD/AVX intrinsics and auto-vectorization
+   - SSE2/SSE4.1/AVX2 instruction encoding
+   - Loop vectorization pass (detect parallel iterations)
+   - SLP vectorizer (straight-line packing of scalar ops)
+
+2. DWARF debug info (.debug_info, .debug_line, .debug_abbrev)
+   - Source locations through the pipeline
+   - Variable location tracking across regalloc
+   - Line number tables for gdb/lldb
+
+3. Unwind tables (.eh_frame / .gcc_except_tbl)
+   - CFI directives in prologue/epilogue
+   - Required for C++ interop, signal handlers, profiling tools
+
+4. PIC/PIE support
+   - RIP-relative addressing for globals
+   - GOT/PLT entries for shared library calls
+   - Required for modern Linux distros (default -fPIE)
+
+### Medium Priority (code quality parity with LLVM -O2)
+
+5. GVN (global value numbering) across blocks
+6. LICM (loop-invariant code motion)
+7. Dead store elimination
+8. Alias analysis (at least type-based / restrict)
+9. Inlining decisions (caller/callee size heuristics)
+10. Tail call optimization
+11. Computed jump tables for switch statements
+
+### Lower Priority (nice to have)
+
+12. LTO (link-time optimization) via thin-LTO or full-LTO
+13. Profile-guided optimization (PGO)
+14. Auto-tuning of e-graph iteration limits
+15. x87 FP (legacy, only for long double)
