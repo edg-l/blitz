@@ -1,6 +1,6 @@
 use smallvec::smallvec;
 
-use crate::egraph::egraph::EGraph;
+use crate::egraph::egraph::{EGraph, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
@@ -20,33 +20,6 @@ pub(crate) fn find_iconst(egraph: &EGraph, class_id: ClassId) -> Option<(i64, Ty
         }
     }
     None
-}
-
-/// Snapshot of a class's nodes (op + children) for safe mutation-while-iterating.
-struct NodeSnapshot {
-    class_id: ClassId,
-    op: Op,
-    children: smallvec::SmallVec<[ClassId; 2]>,
-}
-
-/// Build a snapshot of all canonical classes and their nodes.
-fn snapshot_nodes(egraph: &EGraph) -> Vec<NodeSnapshot> {
-    let mut snaps = Vec::new();
-    for i in 0..egraph.classes.len() as u32 {
-        let id = ClassId(i);
-        if egraph.unionfind.find_immutable(id) != id {
-            continue; // non-canonical
-        }
-        let class = egraph.class(id);
-        for node in &class.nodes {
-            snaps.push(NodeSnapshot {
-                class_id: id,
-                op: node.op.clone(),
-                children: node.children.clone(),
-            });
-        }
-    }
-    snaps
 }
 
 fn make_iconst(egraph: &mut EGraph, val: i64, ty: Type) -> ClassId {
@@ -96,7 +69,7 @@ pub fn apply_algebraic_rules(egraph: &mut EGraph) -> bool {
 // Add(a, 0) = a, Mul(a, 1) = a, Or(a, 0) = a, And(a, all_ones) = a
 
 fn apply_identity_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_nodes(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -172,7 +145,7 @@ fn apply_identity_rules(egraph: &mut EGraph) -> bool {
 // Mul(a, 0) = 0, And(a, 0) = 0
 
 fn apply_annihilation_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_nodes(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -207,7 +180,7 @@ fn apply_annihilation_rules(egraph: &mut EGraph) -> bool {
 // And(a, a) = a, Or(a, a) = a
 
 fn apply_idempotence_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_nodes(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -234,7 +207,7 @@ fn apply_idempotence_rules(egraph: &mut EGraph) -> bool {
 // Sub(a, a) = 0, Xor(a, a) = 0
 
 fn apply_inverse_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_nodes(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -268,7 +241,7 @@ fn apply_inverse_rules(egraph: &mut EGraph) -> bool {
 // Sub(0, Sub(0, a)) = a
 
 fn apply_double_negation_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_nodes(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -306,7 +279,7 @@ fn apply_double_negation_rules(egraph: &mut EGraph) -> bool {
 // ── Constant folding ──────────────────────────────────────────────────────────
 
 pub fn apply_constant_folding(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_nodes(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -364,7 +337,7 @@ fn apply_commutativity_rules(egraph: &mut EGraph) -> bool {
     // nodes with commutativity enabled stays well under 50k classes because each
     // Add(a,b) class gains at most one new node (the swapped one), and only when
     // the left child's canonical id is strictly greater than the right child's.
-    let snaps = snapshot_nodes(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {

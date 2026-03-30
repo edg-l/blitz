@@ -1,6 +1,6 @@
 use smallvec::smallvec;
 
-use crate::egraph::egraph::EGraph;
+use crate::egraph::egraph::{EGraph, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::condcode::CondCode;
 use crate::ir::op::{ClassId, Op};
@@ -12,32 +12,6 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_icmp_isel(egraph);
     changed |= apply_select_isel(egraph);
     changed
-}
-
-/// Snapshot of one node for mutation-safe iteration.
-struct Snap {
-    class_id: ClassId,
-    op: Op,
-    children: smallvec::SmallVec<[ClassId; 2]>,
-}
-
-fn snapshot(egraph: &EGraph) -> Vec<Snap> {
-    let mut snaps = Vec::new();
-    for i in 0..egraph.classes.len() as u32 {
-        let id = ClassId(i);
-        if egraph.unionfind.find_immutable(id) != id {
-            continue;
-        }
-        let class = egraph.class(id);
-        for node in &class.nodes {
-            snaps.push(Snap {
-                class_id: id,
-                op: node.op.clone(),
-                children: node.children.clone(),
-            });
-        }
-    }
-    snaps
 }
 
 /// Map IR ALU binary ops to their x86 equivalents.
@@ -54,7 +28,7 @@ fn alu_x86_op(op: &Op) -> Option<Op> {
 
 /// Add(a,b) -> Proj0(X86Add(a,b)), Sub(a,b) -> Proj0(X86Sub(a,b)), etc.
 fn apply_alu_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -93,7 +67,7 @@ fn apply_alu_isel(egraph: &mut EGraph) -> bool {
 
 /// Shl/Sar/Shr -> X86Shl/X86Sar/X86Shr (as Proj0)
 fn apply_shift_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -133,7 +107,7 @@ fn apply_shift_isel(egraph: &mut EGraph) -> bool {
 /// Icmp(cc, a, b) -> Proj1(X86Sub(a, b))
 /// Multiple Icmps on same (a,b) share the same X86Sub.
 fn apply_icmp_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -171,7 +145,7 @@ fn apply_icmp_isel(egraph: &mut EGraph) -> bool {
 /// Select(flags, t, f) -> X86Cmov(cc, flags, t, f)
 /// The cc is taken from the Icmp that produced the flags class.
 fn apply_select_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -204,7 +178,7 @@ fn apply_select_isel(egraph: &mut EGraph) -> bool {
 }
 
 /// Search the flags class for an Icmp node and extract its condition code.
-fn find_cc_in_class(egraph: &EGraph, flags_class: ClassId) -> Option<CondCode> {
+pub(crate) fn find_cc_in_class(egraph: &EGraph, flags_class: ClassId) -> Option<CondCode> {
     let canon = egraph.unionfind.find_immutable(flags_class);
     if canon == ClassId::NONE {
         return None;

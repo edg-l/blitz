@@ -64,73 +64,29 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                     }
                 }
 
-                // Mul(a, 3) = Add(a, Shl(a, 1))
-                if val == 3 {
+                // Mul(a, 3/5/9) = Add(a, Shl(a, 1/2/3))
+                let shift_for_mul: Option<i64> = match val {
+                    3 => Some(1),
+                    5 => Some(2),
+                    9 => Some(3),
+                    _ => None,
+                };
+                if let Some(n) = shift_for_mul {
                     let ty = egraph
                         .class(egraph.unionfind.find_immutable(class_id))
                         .ty
                         .clone();
-                    let one = egraph.add(ENode {
-                        op: Op::Iconst(1, ty),
+                    let n_class = egraph.add(ENode {
+                        op: Op::Iconst(n, ty),
                         children: smallvec![],
                     });
-                    let shl1 = egraph.add(ENode {
+                    let shl = egraph.add(ENode {
                         op: Op::Shl,
-                        children: smallvec![non_const, one],
+                        children: smallvec![non_const, n_class],
                     });
                     let sum = egraph.add(ENode {
                         op: Op::Add,
-                        children: smallvec![non_const, shl1],
-                    });
-                    let canon = egraph.unionfind.find_immutable(class_id);
-                    if egraph.unionfind.find_immutable(sum) != canon {
-                        egraph.merge(class_id, sum);
-                        changed = true;
-                    }
-                }
-
-                // Mul(a, 5) = Add(a, Shl(a, 2))
-                if val == 5 {
-                    let ty = egraph
-                        .class(egraph.unionfind.find_immutable(class_id))
-                        .ty
-                        .clone();
-                    let two = egraph.add(ENode {
-                        op: Op::Iconst(2, ty),
-                        children: smallvec![],
-                    });
-                    let shl2 = egraph.add(ENode {
-                        op: Op::Shl,
-                        children: smallvec![non_const, two],
-                    });
-                    let sum = egraph.add(ENode {
-                        op: Op::Add,
-                        children: smallvec![non_const, shl2],
-                    });
-                    let canon = egraph.unionfind.find_immutable(class_id);
-                    if egraph.unionfind.find_immutable(sum) != canon {
-                        egraph.merge(class_id, sum);
-                        changed = true;
-                    }
-                }
-
-                // Mul(a, 9) = Add(a, Shl(a, 3))
-                if val == 9 {
-                    let ty = egraph
-                        .class(egraph.unionfind.find_immutable(class_id))
-                        .ty
-                        .clone();
-                    let three = egraph.add(ENode {
-                        op: Op::Iconst(3, ty),
-                        children: smallvec![],
-                    });
-                    let shl3 = egraph.add(ENode {
-                        op: Op::Shl,
-                        children: smallvec![non_const, three],
-                    });
-                    let sum = egraph.add(ENode {
-                        op: Op::Add,
-                        children: smallvec![non_const, shl3],
+                        children: smallvec![non_const, shl],
                     });
                     let canon = egraph.unionfind.find_immutable(class_id);
                     if egraph.unionfind.find_immutable(sum) != canon {

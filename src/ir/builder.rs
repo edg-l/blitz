@@ -80,6 +80,17 @@ struct BlockData {
 
 // ── FunctionBuilder ───────────────────────────────────────────────────────────
 
+macro_rules! binop {
+    ($name:ident, $op:expr) => {
+        pub fn $name(&mut self, a: Value, b: Value) -> Value {
+            self.add_node(ENode {
+                op: $op,
+                children: smallvec![a.0, b.0],
+            })
+        }
+    };
+}
+
 pub struct FunctionBuilder {
     name: String,
     param_types: Vec<Type>,
@@ -219,6 +230,24 @@ impl FunctionBuilder {
 
     // ── Pure op builders ──────────────────────────────────────────────────────
 
+    binop!(add, Op::Add);
+    binop!(sub, Op::Sub);
+    binop!(mul, Op::Mul);
+    binop!(udiv, Op::UDiv);
+    binop!(sdiv, Op::SDiv);
+    binop!(urem, Op::URem);
+    binop!(srem, Op::SRem);
+    binop!(and, Op::And);
+    binop!(or, Op::Or);
+    binop!(xor, Op::Xor);
+    binop!(shl, Op::Shl);
+    binop!(shr, Op::Shr);
+    binop!(sar, Op::Sar);
+    binop!(fadd, Op::Fadd);
+    binop!(fsub, Op::Fsub);
+    binop!(fmul, Op::Fmul);
+    binop!(fdiv, Op::Fdiv);
+
     pub fn iconst(&mut self, val: i64, ty: Type) -> Value {
         let node = ENode {
             op: Op::Iconst(val, ty),
@@ -231,110 +260,6 @@ impl FunctionBuilder {
         let node = ENode {
             op: Op::Fconst(val.to_bits()),
             children: smallvec![],
-        };
-        self.add_node(node)
-    }
-
-    pub fn add(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Add,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn sub(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Sub,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn mul(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Mul,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn udiv(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::UDiv,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn sdiv(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::SDiv,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn urem(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::URem,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn srem(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::SRem,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn and(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::And,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn or(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Or,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn xor(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Xor,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn shl(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Shl,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn shr(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Shr,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn sar(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Sar,
-            children: smallvec![a.0, b.0],
         };
         self.add_node(node)
     }
@@ -374,38 +299,6 @@ impl FunctionBuilder {
     pub fn icmp(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
         let node = ENode {
             op: Op::Icmp(cc),
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn fadd(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Fadd,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn fsub(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Fsub,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn fmul(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Fmul,
-            children: smallvec![a.0, b.0],
-        };
-        self.add_node(node)
-    }
-
-    pub fn fdiv(&mut self, a: Value, b: Value) -> Value {
-        let node = ENode {
-            op: Op::Fdiv,
             children: smallvec![a.0, b.0],
         };
         self.add_node(node)

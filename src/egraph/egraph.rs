@@ -1,9 +1,39 @@
 use std::collections::HashMap;
 
+use smallvec::SmallVec;
+
 use crate::egraph::eclass::EClass;
 use crate::egraph::enode::ENode;
 use crate::egraph::unionfind::UnionFind;
-use crate::ir::op::ClassId;
+use crate::ir::op::{ClassId, Op};
+
+/// Snapshot of an e-node for safe iteration during mutation.
+#[derive(Clone)]
+pub struct NodeSnap {
+    pub class_id: ClassId,
+    pub op: Op,
+    pub children: SmallVec<[ClassId; 2]>,
+}
+
+/// Snapshot all canonical e-nodes for iteration.
+pub fn snapshot_all(egraph: &EGraph) -> Vec<NodeSnap> {
+    let mut snaps = Vec::new();
+    for i in 0..egraph.classes.len() as u32 {
+        let id = ClassId(i);
+        if egraph.unionfind.find_immutable(id) != id {
+            continue;
+        }
+        let class = egraph.class(id);
+        for node in &class.nodes {
+            snaps.push(NodeSnap {
+                class_id: id,
+                op: node.op.clone(),
+                children: node.children.clone(),
+            });
+        }
+    }
+    snaps
+}
 
 pub struct EGraph {
     pub(crate) unionfind: UnionFind,

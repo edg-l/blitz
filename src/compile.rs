@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use crate::egraph::EGraph;
 use crate::egraph::cost::{CostModel, OptGoal};
 use crate::egraph::extract::{VReg, VRegInst, extract, vreg_insts_for_block};
+use crate::egraph::isel::find_cc_in_class;
 use crate::egraph::phases::{CompileOptions as EGraphOptions, run_phases};
 use crate::emit::object::{FunctionInfo, ObjectFile};
 use crate::emit::peephole::peephole;
@@ -447,43 +448,40 @@ pub fn compile_module(
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Collect all ClassIds that are roots for extraction (used by effectful ops).
-fn collect_roots(func: &Function) -> Vec<ClassId> {
-    let mut roots: Vec<ClassId> = Vec::new();
-    for block in &func.blocks {
-        for op in &block.ops {
-            match op {
-                EffectfulOp::Load { addr, .. } => {
-                    roots.push(*addr);
-                }
-                EffectfulOp::Store { addr, val } => {
-                    roots.push(*addr);
-                    roots.push(*val);
-                }
-                EffectfulOp::Call { args, .. } => {
-                    roots.extend_from_slice(args);
-                }
-                EffectfulOp::Branch {
-                    cond,
-                    true_args,
-                    false_args,
-                    ..
-                } => {
-                    roots.push(*cond);
-                    roots.extend_from_slice(true_args);
-                    roots.extend_from_slice(false_args);
-                }
-                EffectfulOp::Jump { args, .. } => {
-                    roots.extend_from_slice(args);
-                }
-                EffectfulOp::Ret { val } => {
-                    if let Some(v) = val {
-                        roots.push(*v);
-                    }
+fn push_block_class_ids(block: &crate::ir::function::BasicBlock, out: &mut Vec<ClassId>) {
+    for op in &block.ops {
+        match op {
+            EffectfulOp::Load { addr, .. } => out.push(*addr),
+            EffectfulOp::Store { addr, val } => {
+                out.push(*addr);
+                out.push(*val);
+            }
+            EffectfulOp::Call { args, .. } => out.extend_from_slice(args),
+            EffectfulOp::Branch {
+                cond,
+                true_args,
+                false_args,
+                ..
+            } => {
+                out.push(*cond);
+                out.extend_from_slice(true_args);
+                out.extend_from_slice(false_args);
+            }
+            EffectfulOp::Jump { args, .. } => out.extend_from_slice(args),
+            EffectfulOp::Ret { val } => {
+                if let Some(v) = val {
+                    out.push(*v);
                 }
             }
         }
     }
-    // Deduplicate.
+}
+
+fn collect_roots(func: &Function) -> Vec<ClassId> {
+    let mut roots = Vec::new();
+    for block in &func.blocks {
+        push_block_class_ids(block, &mut roots);
+    }
     roots.sort_by_key(|c| c.0);
     roots.dedup();
     roots
@@ -533,6 +531,65 @@ fn assign_param_vregs_from_map(
     pairs
 }
 
+fn get_dst(name: &str, dst_reg: Option<Reg>) -> Result<Reg, String> {
+    dst_reg.ok_or_else(|| format!("{name}: no register for dst"))
+}
+
+fn get_op(name: &str, operand_regs: &[Option<Reg>], i: usize) -> Result<Reg, String> {
+    operand_regs
+        .get(i)
+        .and_then(|r| *r)
+        .ok_or_else(|| format!("{name}: no register for operand {i}"))
+}
+
+fn lower_binary_alu(
+    name: &str,
+    dst_reg: Option<Reg>,
+    operand_regs: &[Option<Reg>],
+    mk: fn(Operand, Operand) -> MachInst,
+) -> Result<Vec<MachInst>, String> {
+    let dst = get_dst(name, dst_reg)?;
+    let src_a = get_op(name, operand_regs, 0)?;
+    let src_b = get_op(name, operand_regs, 1)?;
+    let mut insts = Vec::new();
+    if dst != src_a {
+        insts.push(MachInst::MovRR {
+            dst: Operand::Reg(dst),
+            src: Operand::Reg(src_a),
+        });
+    }
+    insts.push(mk(Operand::Reg(dst), Operand::Reg(src_b)));
+    Ok(insts)
+}
+
+fn lower_shift_cl(
+    name: &str,
+    dst_reg: Option<Reg>,
+    operand_regs: &[Option<Reg>],
+    mk: fn(Operand) -> MachInst,
+) -> Result<Vec<MachInst>, String> {
+    let dst = get_dst(name, dst_reg)?;
+    let src_a = get_op(name, operand_regs, 0)?;
+    let src_b = get_op(name, operand_regs, 1)?;
+    let mut insts = Vec::new();
+    if dst != src_a {
+        insts.push(MachInst::MovRR {
+            dst: Operand::Reg(dst),
+            src: Operand::Reg(src_a),
+        });
+    }
+    // LIMITATION: Post-regalloc MOV to RCX can clobber a live value.
+    // TODO: Pre-color shift count operand to RCX before register allocation.
+    if src_b != Reg::RCX {
+        insts.push(MachInst::MovRR {
+            dst: Operand::Reg(Reg::RCX),
+            src: Operand::Reg(src_b),
+        });
+    }
+    insts.push(mk(Operand::Reg(dst)));
+    Ok(insts)
+}
+
 /// Convert a single Op to a sequence of MachInsts.
 ///
 /// `dst_vreg` is the VReg being defined; `dst_reg` is the physical reg (if allocated).
@@ -563,231 +620,38 @@ fn lower_op(
         // Their value arrives from predecessor blocks; no instruction is needed here.
         Op::BlockParam(_, _, _) => Ok(vec![]),
 
-        Op::X86Add => {
-            let dst = dst_reg.ok_or_else(|| "X86Add: no register for dst".to_string())?;
-            if operand_regs.len() < 2 {
-                return Err("X86Add requires 2 operands".into());
-            }
-            let src_a =
-                operand_regs[0].ok_or_else(|| "X86Add: no register for operand 0".to_string())?;
-            let src_b =
-                operand_regs[1].ok_or_else(|| "X86Add: no register for operand 1".to_string())?;
-
-            // X86Add produces a Pair; we emit ADD dst, src.
-            // The dst gets the Pair (result + flags). The Proj0 extracts the value.
-            // We emit: mov dst, src_a; add dst, src_b
-            let mut insts = Vec::new();
-            if dst != src_a {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src_a),
-                });
-            }
-            insts.push(MachInst::AddRR {
-                dst: Operand::Reg(dst),
-                src: Operand::Reg(src_b),
-            });
-            Ok(insts)
-        }
-
-        Op::X86Sub => {
-            let dst = dst_reg.ok_or_else(|| "X86Sub: no register for dst".to_string())?;
-            if operand_regs.len() < 2 {
-                return Err("X86Sub requires 2 operands".into());
-            }
-            let src_a =
-                operand_regs[0].ok_or_else(|| "X86Sub: no register for operand 0".to_string())?;
-            let src_b =
-                operand_regs[1].ok_or_else(|| "X86Sub: no register for operand 1".to_string())?;
-
-            let mut insts = Vec::new();
-            if dst != src_a {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src_a),
-                });
-            }
-            insts.push(MachInst::SubRR {
-                dst: Operand::Reg(dst),
-                src: Operand::Reg(src_b),
-            });
-            Ok(insts)
-        }
-
-        Op::X86And => {
-            let dst = dst_reg.ok_or_else(|| "X86And: no register for dst".to_string())?;
-            let src_a = operand_regs
-                .first()
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86And: no register for operand 0".to_string())?;
-            let src_b = operand_regs
-                .get(1)
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86And: no register for operand 1".to_string())?;
-
-            let mut insts = Vec::new();
-            if dst != src_a {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src_a),
-                });
-            }
-            insts.push(MachInst::AndRR {
-                dst: Operand::Reg(dst),
-                src: Operand::Reg(src_b),
-            });
-            Ok(insts)
-        }
-
-        Op::X86Or => {
-            let dst = dst_reg.ok_or_else(|| "X86Or: no register for dst".to_string())?;
-            let src_a = operand_regs
-                .first()
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86Or: no register for operand 0".to_string())?;
-            let src_b = operand_regs
-                .get(1)
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86Or: no register for operand 1".to_string())?;
-
-            let mut insts = Vec::new();
-            if dst != src_a {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src_a),
-                });
-            }
-            insts.push(MachInst::OrRR {
-                dst: Operand::Reg(dst),
-                src: Operand::Reg(src_b),
-            });
-            Ok(insts)
-        }
-
-        Op::X86Xor => {
-            let dst = dst_reg.ok_or_else(|| "X86Xor: no register for dst".to_string())?;
-            let src_a = operand_regs
-                .first()
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86Xor: no register for operand 0".to_string())?;
-            let src_b = operand_regs
-                .get(1)
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86Xor: no register for operand 1".to_string())?;
-
-            let mut insts = Vec::new();
-            if dst != src_a {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src_a),
-                });
-            }
-            insts.push(MachInst::XorRR {
-                dst: Operand::Reg(dst),
-                src: Operand::Reg(src_b),
-            });
-            Ok(insts)
-        }
-
-        Op::X86Shl => {
-            let dst = dst_reg.ok_or_else(|| "X86Shl: no register for dst".to_string())?;
-            let src_a = operand_regs
-                .first()
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86Shl: no register for operand 0".to_string())?;
-            let src_b = operand_regs
-                .get(1)
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86Shl: no register for operand 1".to_string())?;
-
-            let mut insts = Vec::new();
-            if dst != src_a {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src_a),
-                });
-            }
-            // Move shift count to CL if not already there.
-            // LIMITATION: This post-regalloc MOV can clobber a live value in RCX.
-            // The proper fix requires pre-coloring the shift count to RCX in the
-            // register allocator, or using the immediate form (ShlRI) when the
-            // shift amount is a constant (detected before regalloc).
-            // TODO: Pre-color shift count operand to RCX before register allocation.
-            if src_b != Reg::RCX {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(Reg::RCX),
-                    src: Operand::Reg(src_b),
-                });
-            }
-            insts.push(MachInst::ShlRCL {
-                dst: Operand::Reg(dst),
-            });
-            Ok(insts)
-        }
-
-        Op::X86Shr => {
-            let dst = dst_reg.ok_or_else(|| "X86Shr: no register for dst".to_string())?;
-            let src_a = operand_regs
-                .first()
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86Shr: no register for operand 0".to_string())?;
-            let src_b = operand_regs
-                .get(1)
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86Shr: no register for operand 1".to_string())?;
-
-            let mut insts = Vec::new();
-            if dst != src_a {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src_a),
-                });
-            }
-            // LIMITATION: Post-regalloc MOV to RCX can clobber a live value.
-            // TODO: Pre-color shift count operand to RCX before register allocation.
-            if src_b != Reg::RCX {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(Reg::RCX),
-                    src: Operand::Reg(src_b),
-                });
-            }
-            insts.push(MachInst::ShrRCL {
-                dst: Operand::Reg(dst),
-            });
-            Ok(insts)
-        }
-
-        Op::X86Sar => {
-            let dst = dst_reg.ok_or_else(|| "X86Sar: no register for dst".to_string())?;
-            let src_a = operand_regs
-                .first()
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86Sar: no register for operand 0".to_string())?;
-            let src_b = operand_regs
-                .get(1)
-                .and_then(|r| *r)
-                .ok_or_else(|| "X86Sar: no register for operand 1".to_string())?;
-
-            let mut insts = Vec::new();
-            if dst != src_a {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src_a),
-                });
-            }
-            // LIMITATION: Post-regalloc MOV to RCX can clobber a live value.
-            // TODO: Pre-color shift count operand to RCX before register allocation.
-            if src_b != Reg::RCX {
-                insts.push(MachInst::MovRR {
-                    dst: Operand::Reg(Reg::RCX),
-                    src: Operand::Reg(src_b),
-                });
-            }
-            insts.push(MachInst::SarRCL {
-                dst: Operand::Reg(dst),
-            });
-            Ok(insts)
-        }
+        // X86Add produces a Pair (result + flags); Proj0 extracts the value.
+        // We emit: mov dst, src_a; add dst, src_b
+        Op::X86Add => lower_binary_alu("X86Add", dst_reg, operand_regs, |dst, src| {
+            MachInst::AddRR { dst, src }
+        }),
+        Op::X86Sub => lower_binary_alu("X86Sub", dst_reg, operand_regs, |dst, src| {
+            MachInst::SubRR { dst, src }
+        }),
+        Op::X86And => lower_binary_alu("X86And", dst_reg, operand_regs, |dst, src| {
+            MachInst::AndRR { dst, src }
+        }),
+        Op::X86Or => lower_binary_alu("X86Or", dst_reg, operand_regs, |dst, src| MachInst::OrRR {
+            dst,
+            src,
+        }),
+        Op::X86Xor => lower_binary_alu("X86Xor", dst_reg, operand_regs, |dst, src| {
+            MachInst::XorRR { dst, src }
+        }),
+        // Move shift count to CL if not already there.
+        // LIMITATION: This post-regalloc MOV can clobber a live value in RCX.
+        // The proper fix requires pre-coloring the shift count to RCX in the
+        // register allocator, or using the immediate form (ShlRI) when the
+        // shift amount is a constant (detected before regalloc).
+        Op::X86Shl => lower_shift_cl("X86Shl", dst_reg, operand_regs, |dst| MachInst::ShlRCL {
+            dst,
+        }),
+        Op::X86Shr => lower_shift_cl("X86Shr", dst_reg, operand_regs, |dst| MachInst::ShrRCL {
+            dst,
+        }),
+        Op::X86Sar => lower_shift_cl("X86Sar", dst_reg, operand_regs, |dst| MachInst::SarRCL {
+            dst,
+        }),
 
         Op::X86Imul3 => {
             let dst = dst_reg.ok_or_else(|| "X86Imul3: no register for dst".to_string())?;
@@ -993,46 +857,10 @@ fn lower_op(
 
 /// Collect canonical ClassIds referenced by a single block's effectful ops.
 fn collect_block_roots(block: &crate::ir::function::BasicBlock, egraph: &EGraph) -> Vec<ClassId> {
-    let mut roots: Vec<ClassId> = Vec::new();
-    for op in &block.ops {
-        match op {
-            EffectfulOp::Load { addr, .. } => {
-                roots.push(egraph.unionfind.find_immutable(*addr));
-            }
-            EffectfulOp::Store { addr, val } => {
-                roots.push(egraph.unionfind.find_immutable(*addr));
-                roots.push(egraph.unionfind.find_immutable(*val));
-            }
-            EffectfulOp::Call { args, .. } => {
-                for &a in args {
-                    roots.push(egraph.unionfind.find_immutable(a));
-                }
-            }
-            EffectfulOp::Branch {
-                cond,
-                true_args,
-                false_args,
-                ..
-            } => {
-                roots.push(egraph.unionfind.find_immutable(*cond));
-                for &a in true_args {
-                    roots.push(egraph.unionfind.find_immutable(a));
-                }
-                for &a in false_args {
-                    roots.push(egraph.unionfind.find_immutable(a));
-                }
-            }
-            EffectfulOp::Jump { args, .. } => {
-                for &a in args {
-                    roots.push(egraph.unionfind.find_immutable(a));
-                }
-            }
-            EffectfulOp::Ret { val } => {
-                if let Some(v) = val {
-                    roots.push(egraph.unionfind.find_immutable(*v));
-                }
-            }
-        }
+    let mut roots = Vec::new();
+    push_block_class_ids(block, &mut roots);
+    for r in &mut roots {
+        *r = egraph.unionfind.find_immutable(*r);
     }
     roots.sort_by_key(|c| c.0);
     roots.dedup();
@@ -1122,27 +950,6 @@ fn collect_phi_source_vregs(
             }
         }
     }
-}
-
-/// Search a flags e-class for an Icmp node and return its CondCode.
-///
-/// After isel, the flags class contains both the `Proj1` node AND the original
-/// `Icmp` node (merged together). We scan the class for an Icmp to get the CC.
-fn find_cc_in_class(
-    egraph: &EGraph,
-    flags_class: ClassId,
-) -> Option<crate::ir::condcode::CondCode> {
-    let canon = egraph.unionfind.find_immutable(flags_class);
-    if canon == ClassId::NONE {
-        return None;
-    }
-    let class = egraph.class(canon);
-    for node in &class.nodes {
-        if let Op::Icmp(cc) = &node.op {
-            return Some(*cc);
-        }
-    }
-    None
 }
 
 /// Negate a CondCode.

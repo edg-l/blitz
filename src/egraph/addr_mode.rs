@@ -1,7 +1,7 @@
 use smallvec::smallvec;
 
 use crate::egraph::algebraic::find_iconst;
-use crate::egraph::egraph::EGraph;
+use crate::egraph::egraph::{EGraph, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
@@ -13,31 +13,6 @@ pub fn apply_addr_mode_rules(egraph: &mut EGraph) -> bool {
     changed
 }
 
-struct Snap {
-    class_id: ClassId,
-    op: Op,
-    children: smallvec::SmallVec<[ClassId; 2]>,
-}
-
-fn snapshot(egraph: &EGraph) -> Vec<Snap> {
-    let mut snaps = Vec::new();
-    for i in 0..egraph.classes.len() as u32 {
-        let id = ClassId(i);
-        if egraph.unionfind.find_immutable(id) != id {
-            continue;
-        }
-        let class = egraph.class(id);
-        for node in &class.nodes {
-            snaps.push(Snap {
-                class_id: id,
-                op: node.op.clone(),
-                children: node.children.clone(),
-            });
-        }
-    }
-    snaps
-}
-
 /// Valid x86-64 scales.
 fn is_valid_scale(s: u8) -> bool {
     matches!(s, 1 | 2 | 4 | 8)
@@ -46,7 +21,7 @@ fn is_valid_scale(s: u8) -> bool {
 // ── Addr formation rules ──────────────────────────────────────────────────────
 
 fn apply_addr_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -157,7 +132,7 @@ fn apply_addr_rules(egraph: &mut EGraph) -> bool {
 // ── LEA formation rules ───────────────────────────────────────────────────────
 
 fn apply_lea_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
@@ -285,7 +260,7 @@ fn apply_lea_rules(egraph: &mut EGraph) -> bool {
 }
 
 fn apply_three_component_lea(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot(egraph);
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
     for snap in &snaps {
