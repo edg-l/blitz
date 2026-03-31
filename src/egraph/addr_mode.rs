@@ -30,6 +30,15 @@ fn apply_addr_rules(egraph: &mut EGraph) -> bool {
             continue;
         }
 
+        // Addr formation only applies to I64 pointer arithmetic.
+        let class_ty = egraph
+            .class(egraph.unionfind.find_immutable(class_id))
+            .ty
+            .clone();
+        if class_ty != Type::I64 {
+            continue;
+        }
+
         let base = snap.children[0];
         let rhs = snap.children[1];
 

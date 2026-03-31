@@ -2,27 +2,47 @@ use crate::error::TinyErr;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
+    // Type keywords
     Int,
+    Char,
+    Short,
+    Long,
+    Unsigned,
+    Void,
+    // Other keywords
     If,
     Else,
     While,
     Return,
+    Sizeof,
+    // Literals and names
     IntLit(i64),
     Ident(String),
+    // Arithmetic operators
     Plus,
     Minus,
     Star,
     Slash,
     Percent,
+    // Comparison operators
     Eq,
     Ne,
     Lt,
     Gt,
     Le,
     Ge,
+    // Logical operators
     And,
     Or,
     Bang,
+    // Bitwise operators
+    Amp,
+    Pipe,
+    Caret,
+    Shl,
+    Shr,
+    Tilde,
+    // Punctuation
     Assign,
     LParen,
     RParen,
@@ -160,6 +180,10 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     pos += 2;
                     col += 2;
                     Token::Le
+                } else if pos + 1 < chars.len() && chars[pos + 1] == '<' {
+                    pos += 2;
+                    col += 2;
+                    Token::Shl
                 } else {
                     pos += 1;
                     col += 1;
@@ -171,6 +195,10 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     pos += 2;
                     col += 2;
                     Token::Ge
+                } else if pos + 1 < chars.len() && chars[pos + 1] == '>' {
+                    pos += 2;
+                    col += 2;
+                    Token::Shr
                 } else {
                     pos += 1;
                     col += 1;
@@ -183,11 +211,9 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     col += 2;
                     Token::And
                 } else {
-                    return Err(TinyErr {
-                        line,
-                        col,
-                        msg: "expected '&&'".to_string(),
-                    });
+                    pos += 1;
+                    col += 1;
+                    Token::Amp
                 }
             }
             '|' => {
@@ -196,12 +222,20 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     col += 2;
                     Token::Or
                 } else {
-                    return Err(TinyErr {
-                        line,
-                        col,
-                        msg: "expected '||'".to_string(),
-                    });
+                    pos += 1;
+                    col += 1;
+                    Token::Pipe
                 }
+            }
+            '^' => {
+                pos += 1;
+                col += 1;
+                Token::Caret
+            }
+            '~' => {
+                pos += 1;
+                col += 1;
+                Token::Tilde
             }
             c if c.is_ascii_digit() => {
                 let start = pos;
@@ -226,10 +260,16 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 let s: String = chars[start..pos].iter().collect();
                 match s.as_str() {
                     "int" => Token::Int,
+                    "char" => Token::Char,
+                    "short" => Token::Short,
+                    "long" => Token::Long,
+                    "unsigned" => Token::Unsigned,
+                    "void" => Token::Void,
                     "if" => Token::If,
                     "else" => Token::Else,
                     "while" => Token::While,
                     "return" => Token::Return,
+                    "sizeof" => Token::Sizeof,
                     _ => Token::Ident(s),
                 }
             }

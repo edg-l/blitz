@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, Expr, FnDef, Program, Stmt, UnaryOp};
+use crate::ast::{BinOp, CType, Expr, FnDef, Program, Stmt, UnaryOp};
 use crate::error::TinyErr;
 use crate::lexer::{Span, SpannedToken, Token};
 
@@ -50,9 +50,75 @@ impl Parser {
         }
     }
 
+    /// Returns true if the current token starts a type specifier.
+    fn peek_is_type(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Void | Token::Char | Token::Short | Token::Int | Token::Long | Token::Unsigned
+        )
+    }
+
+    /// Parse a type specifier, advancing past all consumed tokens.
+    fn parse_type(&mut self) -> Result<CType, TinyErr> {
+        match self.peek().clone() {
+            Token::Void => {
+                self.advance();
+                Ok(CType::Void)
+            }
+            Token::Char => {
+                self.advance();
+                Ok(CType::Char)
+            }
+            Token::Short => {
+                self.advance();
+                Ok(CType::Short)
+            }
+            Token::Int => {
+                self.advance();
+                Ok(CType::Int)
+            }
+            Token::Long => {
+                self.advance();
+                Ok(CType::Long)
+            }
+            Token::Unsigned => {
+                self.advance();
+                match self.peek() {
+                    Token::Char => {
+                        self.advance();
+                        Ok(CType::UChar)
+                    }
+                    Token::Short => {
+                        self.advance();
+                        Ok(CType::UShort)
+                    }
+                    Token::Int => {
+                        self.advance();
+                        Ok(CType::UInt)
+                    }
+                    Token::Long => {
+                        self.advance();
+                        Ok(CType::ULong)
+                    }
+                    // Bare `unsigned` == `unsigned int` per C standard.
+                    _ => Ok(CType::UInt),
+                }
+            }
+            other => {
+                let span = self.span().clone();
+                Err(TinyErr {
+                    line: span.line,
+                    col: span.col,
+                    msg: format!("expected type, got {other:?}"),
+                })
+            }
+        }
+    }
+
     fn parse_function(&mut self) -> Result<FnDef, TinyErr> {
-        // int name(int p1, int p2, ...) { body }
-        self.expect(Token::Int)?;
+        // <type> name(<type> p1, <type> p2, ...) { body }
+        let return_type = self.parse_type()?;
+
         let name_tok = self.advance().clone();
         let name = match &name_tok.token {
             Token::Ident(s) => s.clone(),
@@ -68,10 +134,10 @@ impl Parser {
         self.expect(Token::LParen)?;
         let mut params = Vec::new();
         while !self.at(Token::RParen) {
-            self.expect(Token::Int)?;
+            let param_type = self.parse_type()?;
             let p = self.advance().clone();
             match &p.token {
-                Token::Ident(s) => params.push(s.clone()),
+                Token::Ident(s) => params.push((param_type, s.clone())),
                 other => {
                     return Err(TinyErr {
                         line: p.span.line,
@@ -89,7 +155,12 @@ impl Parser {
         self.expect(Token::RParen)?;
 
         let body = self.parse_block()?;
-        Ok(FnDef { name, params, body })
+        Ok(FnDef {
+            name,
+            return_type,
+            params,
+            body,
+        })
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, TinyErr> {
@@ -103,12 +174,37 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, TinyErr> {
+        // Check for type-started variable declaration first.
+        if self.peek_is_type() {
+            let ty = self.parse_type()?;
+            let name_tok = self.advance().clone();
+            let name = match &name_tok.token {
+                Token::Ident(s) => s.clone(),
+                other => {
+                    return Err(TinyErr {
+                        line: name_tok.span.line,
+                        col: name_tok.span.col,
+                        msg: format!("expected variable name, got {other:?}"),
+                    });
+                }
+            };
+            self.expect(Token::Assign)?;
+            let init = self.parse_expr()?;
+            self.expect(Token::Semi)?;
+            return Ok(Stmt::VarDecl { ty, name, init });
+        }
+
         match self.peek().clone() {
             Token::Return => {
                 self.advance();
-                let e = self.parse_expr()?;
-                self.expect(Token::Semi)?;
-                Ok(Stmt::Return(e))
+                if self.at(Token::Semi) {
+                    self.advance();
+                    Ok(Stmt::Return(None))
+                } else {
+                    let e = self.parse_expr()?;
+                    self.expect(Token::Semi)?;
+                    Ok(Stmt::Return(Some(e)))
+                }
             }
             Token::If => {
                 self.advance();
@@ -136,28 +232,9 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::While { cond, body })
             }
-            Token::Int => {
-                // Variable declaration: int name = expr;
-                self.advance();
-                let name_tok = self.advance().clone();
-                let name = match &name_tok.token {
-                    Token::Ident(s) => s.clone(),
-                    other => {
-                        return Err(TinyErr {
-                            line: name_tok.span.line,
-                            col: name_tok.span.col,
-                            msg: format!("expected variable name, got {other:?}"),
-                        });
-                    }
-                };
-                self.expect(Token::Assign)?;
-                let init = self.parse_expr()?;
-                self.expect(Token::Semi)?;
-                Ok(Stmt::VarDecl { name, init })
-            }
             Token::Ident(name) => {
-                // Could be assignment or expression statement
-                // Look ahead: if next token is Assign, it's an assignment
+                // Could be assignment or expression statement.
+                // Look ahead: if next token is Assign, it's an assignment.
                 if self.pos + 1 < self.tokens.len()
                     && self.tokens[self.pos + 1].token == Token::Assign
                 {
@@ -184,16 +261,29 @@ impl Parser {
         self.parse_expr_bp(0)
     }
 
-    // Pratt parser: precedences
-    // || -> 1, && -> 2, == != -> 3, < > <= >= -> 4, + - -> 5, * / % -> 6
+    // Pratt parser with C-standard precedence levels:
+    // ||            -> 1,2
+    // &&            -> 3,4
+    // | (bitwise)   -> 5,6
+    // ^ (bitwise)   -> 7,8
+    // & (bitwise)   -> 9,10
+    // == !=         -> 11,12
+    // < > <= >=     -> 13,14
+    // << >>         -> 15,16
+    // + -           -> 17,18
+    // * / %         -> 19,20
     fn infix_bp(tok: &Token) -> Option<(u8, u8)> {
         match tok {
             Token::Or => Some((1, 2)),
             Token::And => Some((3, 4)),
-            Token::Eq | Token::Ne => Some((5, 6)),
-            Token::Lt | Token::Gt | Token::Le | Token::Ge => Some((7, 8)),
-            Token::Plus | Token::Minus => Some((9, 10)),
-            Token::Star | Token::Slash | Token::Percent => Some((11, 12)),
+            Token::Pipe => Some((5, 6)),
+            Token::Caret => Some((7, 8)),
+            Token::Amp => Some((9, 10)),
+            Token::Eq | Token::Ne => Some((11, 12)),
+            Token::Lt | Token::Gt | Token::Le | Token::Ge => Some((13, 14)),
+            Token::Shl | Token::Shr => Some((15, 16)),
+            Token::Plus | Token::Minus => Some((17, 18)),
+            Token::Star | Token::Slash | Token::Percent => Some((19, 20)),
             _ => None,
         }
     }
@@ -221,6 +311,11 @@ impl Parser {
                 Token::Ge => BinOp::Ge,
                 Token::And => BinOp::And,
                 Token::Or => BinOp::Or,
+                Token::Amp => BinOp::BitAnd,
+                Token::Pipe => BinOp::BitOr,
+                Token::Caret => BinOp::BitXor,
+                Token::Shl => BinOp::Shl,
+                Token::Shr => BinOp::Shr,
                 _ => unreachable!(),
             };
             lhs = Expr::BinOp {
@@ -237,7 +332,7 @@ impl Parser {
         match self.peek().clone() {
             Token::Minus => {
                 self.advance();
-                let expr = self.parse_expr_bp(13)?; // higher than any binary op
+                let expr = self.parse_expr_bp(21)?; // higher than any binary op
                 Ok(Expr::UnaryOp {
                     op: UnaryOp::Neg,
                     expr: Box::new(expr),
@@ -245,11 +340,26 @@ impl Parser {
             }
             Token::Bang => {
                 self.advance();
-                let expr = self.parse_expr_bp(13)?;
+                let expr = self.parse_expr_bp(21)?;
                 Ok(Expr::UnaryOp {
                     op: UnaryOp::Not,
                     expr: Box::new(expr),
                 })
+            }
+            Token::Tilde => {
+                self.advance();
+                let expr = self.parse_expr_bp(21)?;
+                Ok(Expr::UnaryOp {
+                    op: UnaryOp::BitNot,
+                    expr: Box::new(expr),
+                })
+            }
+            Token::Sizeof => {
+                self.advance();
+                self.expect(Token::LParen)?;
+                let ty = self.parse_type()?;
+                self.expect(Token::RParen)?;
+                Ok(Expr::Sizeof(ty))
             }
             _ => self.parse_primary(),
         }
@@ -282,10 +392,33 @@ impl Parser {
                 }
             }
             Token::LParen => {
-                self.advance();
-                let e = self.parse_expr()?;
-                self.expect(Token::RParen)?;
-                Ok(e)
+                // Disambiguate: `(type)expr` (cast) vs `(expr)` (grouping).
+                // Type keywords are distinct tokens so we can check pos+1.
+                let next_is_type = self.pos + 1 < self.tokens.len()
+                    && matches!(
+                        self.tokens[self.pos + 1].token,
+                        Token::Void
+                            | Token::Char
+                            | Token::Short
+                            | Token::Int
+                            | Token::Long
+                            | Token::Unsigned
+                    );
+                if next_is_type {
+                    self.advance(); // consume '('
+                    let ty = self.parse_type()?;
+                    self.expect(Token::RParen)?;
+                    let expr = self.parse_expr_bp(21)?; // unary-level
+                    Ok(Expr::Cast {
+                        ty,
+                        expr: Box::new(expr),
+                    })
+                } else {
+                    self.advance(); // consume '('
+                    let e = self.parse_expr()?;
+                    self.expect(Token::RParen)?;
+                    Ok(e)
+                }
             }
             other => {
                 let span = self.span().clone();

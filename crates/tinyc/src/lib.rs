@@ -234,4 +234,152 @@ mod tests {
         // 100 % 7 = 2
         assert_eq!(compile_and_run("int main() { return 100 % 7; }"), Some(2));
     }
+
+    // ── Phase 4: Multiple integer type tests ─────────────────────────────────
+
+    #[test]
+    fn test_char_widening() {
+        let src = "int main() { char c = 42; int x = c; return x; }";
+        assert_eq!(compile_and_run(src), Some(42));
+    }
+
+    #[test]
+    fn test_int_to_long_widening() {
+        let src = "int main() { int x = 5; long y = x; return (int)y; }";
+        assert_eq!(compile_and_run(src), Some(5));
+    }
+
+    #[test]
+    fn test_long_to_char_narrowing() {
+        // 300 & 0xFF = 44, positive in i8
+        let src = "int main() { long x = 300; char c = x; return c; }";
+        assert_eq!(compile_and_run(src), Some(44));
+    }
+
+    #[test]
+    fn test_int_neg1_to_char() {
+        // -1 truncated to i8 = 0xFF, exit code 255
+        let src = "int main() { int x = -1; char c = x; return c; }";
+        assert_eq!(compile_and_run(src), Some(255));
+    }
+
+    #[test]
+    fn test_sizeof_types() {
+        assert_eq!(
+            compile_and_run("int main() { return sizeof(char); }"),
+            Some(1)
+        );
+        assert_eq!(
+            compile_and_run("int main() { return sizeof(short); }"),
+            Some(2)
+        );
+        assert_eq!(
+            compile_and_run("int main() { return sizeof(int); }"),
+            Some(4)
+        );
+        assert_eq!(
+            compile_and_run("int main() { return sizeof(long); }"),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn test_void_function() {
+        let src = "void noop() { return; } int main() { noop(); return 0; }";
+        assert_eq!(compile_and_run(src), Some(0));
+    }
+
+    #[test]
+    fn test_integer_promotion() {
+        // char + char promotes to int, avoids i8 overflow
+        let src = "int main() { char a = 100; char b = 100; return a + b; }";
+        assert_eq!(compile_and_run(src), Some(200));
+    }
+
+    #[test]
+    fn test_explicit_cast() {
+        let src = "int main() { int x = 1000; char c = (char)x; return c; }";
+        // 1000 & 0xFF = 232, sign-extend i8: -24, exit code 232
+        assert_eq!(compile_and_run(src), Some(232));
+    }
+
+    #[test]
+    fn test_cast_widening() {
+        let src = "int main() { char c = 65; int x = (int)c; return x; }";
+        assert_eq!(compile_and_run(src), Some(65));
+    }
+
+    #[test]
+    fn test_bitwise_and() {
+        let src = "int main() { long x = 255; long y = 15; return (int)(x & y); }";
+        assert_eq!(compile_and_run(src), Some(15));
+    }
+
+    #[test]
+    fn test_bitwise_or() {
+        let src = "int main() { long x = 240; long y = 15; return (int)(x | y); }";
+        assert_eq!(compile_and_run(src), Some(255));
+    }
+
+    #[test]
+    fn test_bitwise_xor() {
+        let src = "int main() { long x = 255; long y = 15; return (int)(x ^ y); }";
+        assert_eq!(compile_and_run(src), Some(240));
+    }
+
+    #[test]
+    fn test_shift_left() {
+        let src = "int main() { long x = 1; long y = 4; return (int)(x << y); }";
+        assert_eq!(compile_and_run(src), Some(16));
+    }
+
+    #[test]
+    fn test_shift_right() {
+        let src = "int main() { long x = 256; long y = 4; return (int)(x >> y); }";
+        assert_eq!(compile_and_run(src), Some(16));
+    }
+
+    #[test]
+    fn test_bitwise_not() {
+        let src = "int main() { long x = 255; long mask = 255; return (int)(~x & mask); }";
+        assert_eq!(compile_and_run(src), Some(0));
+    }
+
+    #[test]
+    fn test_mixed_type_arithmetic() {
+        // int * long -> long, cast back to int
+        let src = "int main() { int a = 5; long b = 10; return (int)(a * b); }";
+        assert_eq!(compile_and_run(src), Some(50));
+    }
+
+    #[test]
+    fn test_char_in_arithmetic() {
+        let src = "int main() { char c = 10; return c * c; }";
+        assert_eq!(compile_and_run(src), Some(100));
+    }
+
+    #[test]
+    fn test_multi_type_expression() {
+        let src = "int main() { char a = 2; short b = 3; int c = 4; long d = 5; return (int)(a + b + c + d); }";
+        assert_eq!(compile_and_run(src), Some(14));
+    }
+
+    #[test]
+    fn test_void_implicit_return() {
+        // void function without explicit return
+        let src = "void nothing() { } int main() { nothing(); return 7; }";
+        assert_eq!(compile_and_run(src), Some(7));
+    }
+
+    #[test]
+    fn test_short_variable() {
+        let src = "int main() { short s = 100; return s; }";
+        assert_eq!(compile_and_run(src), Some(100));
+    }
+
+    #[test]
+    fn test_long_variable() {
+        let src = "int main() { long x = 42; return (int)x; }";
+        assert_eq!(compile_and_run(src), Some(42));
+    }
 }

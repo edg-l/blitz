@@ -458,20 +458,21 @@ impl Op {
                 Type::Pair(Box::new(t.clone()), Box::new(t.clone()))
             }
 
-            // ── X86Imul3 (2 children → Pair(I64, Flags)) ────────────────────
+            // ── X86Imul3 (2 children → Pair(childtype, Flags)) ──────────────
             Op::X86Imul3 => {
                 assert_eq!(child_types.len(), 2, "X86Imul3 requires 2 children");
+                let t = &child_types[0];
                 assert!(
-                    child_types[0].is_integer(),
+                    t.is_integer(),
                     "X86Imul3 first operand must be integer, got {:?}",
-                    child_types[0]
+                    t
                 );
-                assert!(
-                    child_types[1].is_integer(),
-                    "X86Imul3 second operand must be integer, got {:?}",
-                    child_types[1]
+                assert_eq!(
+                    &child_types[1], t,
+                    "X86Imul3 operand type mismatch: {:?} vs {:?}",
+                    t, &child_types[1]
                 );
-                Type::Pair(Box::new(Type::I64), Box::new(Type::Flags))
+                Type::Pair(Box::new(t.clone()), Box::new(Type::Flags))
             }
 
             // ── X86Cmov (flags, t, f → t's type) ────────────────────────────
