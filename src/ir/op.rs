@@ -113,19 +113,19 @@ pub enum Op {
         disp: i32,
     },
 
-    /// `imul dst, src, imm` — 3-operand signed multiply; produces `Pair(I64, Flags)`.
+    /// `imul dst, src, imm` — 3-operand signed multiply; produces `Pair(<int_ty>, Flags)`.
     X86Imul3,
 
     /// Signed integer division: `idiv` — takes (dividend, divisor), produces
-    /// `Pair(I64, I64)` where Proj0 = quotient (RAX), Proj1 = remainder (RDX).
+    /// `Pair(<int_ty>, <int_ty>)` where Proj0 = quotient (RAX), Proj1 = remainder (RDX).
     ///
     /// Hardware notes:
     /// - Division by zero raises SIGFPE (x86 #DE exception).
-    /// - INT64_MIN / -1 raises SIGFPE (overflow). Matches C undefined behavior.
+    /// - INT_MIN / -1 raises SIGFPE (overflow). Matches C undefined behavior.
     X86Idiv,
 
     /// Unsigned integer division: `div` — takes (dividend, divisor), produces
-    /// `Pair(I64, I64)` where Proj0 = quotient (RAX), Proj1 = remainder (RDX).
+    /// `Pair(<int_ty>, <int_ty>)` where Proj0 = quotient (RAX), Proj1 = remainder (RDX).
     ///
     /// Hardware notes:
     /// - Division by zero raises SIGFPE (x86 #DE exception).

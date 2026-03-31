@@ -24,9 +24,15 @@ pub fn phi_copies(copies: &[(Reg, Reg, OpSize)], temp: Reg) -> Vec<MachInst> {
     // Build (src, dst) pairs for sequentialization (it doesn't care about size).
     let pairs: Vec<(Reg, Reg)> = filtered.iter().map(|&(s, d, _)| (s, d)).collect();
 
-    // Build a size lookup from (src, dst) -> OpSize.
+    // Build a size lookup: (src, dst) -> OpSize for original pairs, plus a
+    // per-register fallback so that temp-register moves introduced by cycle
+    // breaking inherit the correct OpSize from the original copy.
     let size_map: std::collections::HashMap<(Reg, Reg), OpSize> =
         filtered.iter().map(|&(s, d, sz)| ((s, d), sz)).collect();
+    let reg_size: std::collections::HashMap<Reg, OpSize> = filtered
+        .iter()
+        .flat_map(|&(s, d, sz)| [(s, sz), (d, sz)])
+        .collect();
 
     // Use sequentialize_copies to produce a safe sequential ordering,
     // including temp-register-based cycle breaking.
@@ -35,8 +41,13 @@ pub fn phi_copies(copies: &[(Reg, Reg, OpSize)], temp: Reg) -> Vec<MachInst> {
     seq.into_iter()
         .map(|(src, dst)| {
             // Look up the original OpSize. For temp-register moves (cycle breaking),
-            // the pair won't be in size_map; use S64 as a safe default for temp moves.
-            let size = size_map.get(&(src, dst)).copied().unwrap_or(OpSize::S64);
+            // fall back to the size associated with the non-temp register.
+            let size = size_map
+                .get(&(src, dst))
+                .copied()
+                .or_else(|| reg_size.get(&src).copied())
+                .or_else(|| reg_size.get(&dst).copied())
+                .unwrap_or(OpSize::S64);
             MachInst::MovRR {
                 size,
                 dst: Operand::Reg(dst),

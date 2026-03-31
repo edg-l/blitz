@@ -363,16 +363,23 @@ fn lower_op(
                 .and_then(|r| *r)
                 .ok_or_else(|| "X86Imul3: no register for operand 1".to_string())?;
             // For X86Imul3 without an immediate, fall back to Imul2RR.
+            // x86 IMUL has no byte form; widen S8 to S32. The low byte of
+            // the result is correct for 8-bit multiplication (overflow wraps).
+            let imul_size = if size == OpSize::S8 {
+                OpSize::S32
+            } else {
+                size
+            };
             let mut insts = Vec::new();
             if dst != src_a {
                 insts.push(MachInst::MovRR {
-                    size,
+                    size: imul_size,
                     dst: Operand::Reg(dst),
                     src: Operand::Reg(src_a),
                 });
             }
             insts.push(MachInst::Imul2RR {
-                size,
+                size: imul_size,
                 dst: Operand::Reg(dst),
                 src: Operand::Reg(src_b),
             });
@@ -400,9 +407,16 @@ fn lower_op(
                     src: Operand::Reg(false_reg),
                 });
             }
-            // CMOV has no byte form; S8 will be caught by the encoder.
+            // x86 CMOV has no byte form; widen S8 to S32 (the low byte
+            // still holds the correct value, and the 32-bit cmov works on
+            // the full register without affecting the byte-width result).
+            let cmov_size = if size == OpSize::S8 {
+                OpSize::S32
+            } else {
+                size
+            };
             insts.push(MachInst::Cmov {
-                size,
+                size: cmov_size,
                 cc: *cc,
                 dst: Operand::Reg(dst),
                 src: Operand::Reg(true_reg),
@@ -849,6 +863,9 @@ pub(super) fn lower_block_pure_ops(
         }
 
         // Handle GPR spill sentinels.
+        // S64 is used intentionally for all spill widths: spill slots are 8 bytes,
+        // so the full 64-bit register state is saved and restored. Consumers use
+        // the correct OpSize for subsequent operations, masking upper bits as needed.
         if is_spill_store(inst) {
             let slot = spill_slot_of(inst) as i32;
             if let Some(src_reg) = inst.operands.first().and_then(|&v| get_reg(v)) {

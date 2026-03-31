@@ -134,7 +134,7 @@ pub(super) fn lower_effectful_op(
             func: callee,
             args,
             arg_tys,
-            ret_tys: _,
+            ret_tys,
             results,
         } => {
             // Collect a register for each argument. Missing registers are an error.
@@ -182,8 +182,12 @@ pub(super) fn lower_effectful_op(
             if let Some(&result_cid) = results.first() {
                 if let Some(result_reg) = get_reg(result_cid) {
                     if result_reg != GPR_RETURN_REG {
+                        let ret_size = ret_tys
+                            .first()
+                            .map(|ty| OpSize::from_type(ty))
+                            .unwrap_or(OpSize::S64);
                         insts.push(MachInst::MovRR {
-                            size: OpSize::S64,
+                            size: ret_size,
                             dst: Operand::Reg(result_reg),
                             src: Operand::Reg(GPR_RETURN_REG),
                         });
