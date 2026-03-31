@@ -303,7 +303,7 @@ pub(super) fn lower_terminator(
     }
 }
 
-/// Build (src_reg, dst_reg) phi copy pairs for a jump to `target` with `args`.
+/// Build (src_reg, dst_reg, size) phi copy triples for a jump to `target` with `args`.
 fn build_phi_copies(
     target: BlockId,
     args: &[ClassId],
@@ -312,7 +312,7 @@ fn build_phi_copies(
     block_param_map: &HashMap<(BlockId, u32), ClassId>,
     regalloc: &RegAllocResult,
     func: &Function,
-) -> Result<Vec<(Reg, Reg)>, CompileError> {
+) -> Result<Vec<(Reg, Reg, OpSize)>, CompileError> {
     if args.is_empty() {
         return Ok(vec![]);
     }
@@ -380,7 +380,10 @@ fn build_phi_copies(
                 location: None,
             })?;
 
-        copies.push((src_reg, dst_reg));
+        // Derive OpSize from the block parameter's type.
+        let size = OpSize::from_type(&target_block.param_types[param_idx]);
+
+        copies.push((src_reg, dst_reg, size));
     }
     Ok(copies)
 }

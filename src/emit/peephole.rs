@@ -73,8 +73,14 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
 
     while i < insts.len() {
         match &insts[i] {
-            // 1. Delete mov rX, rX.
-            MachInst::MovRR { dst, src, .. } if dst == src => {
+            // 1. Delete mov rX, rX -- but only for S64.
+            // A S32 `mov eax, eax` zero-extends the upper 32 bits and is NOT a no-op.
+            // S8/S16 partial-register writes also have observable effects.
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst,
+                src,
+            } if dst == src => {
                 i += 1;
                 continue;
             }
@@ -155,6 +161,18 @@ mod tests {
         }];
         let out = peephole(insts);
         assert!(out.is_empty(), "self-move should be deleted");
+    }
+
+    #[test]
+    fn mov_eax_eax_kept_s32() {
+        // S32 self-move zero-extends upper 32 bits; it is NOT a no-op.
+        let insts = vec![MachInst::MovRR {
+            size: OpSize::S32,
+            dst: reg(Reg::RAX),
+            src: reg(Reg::RAX),
+        }];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 1, "S32 self-move must not be deleted");
     }
 
     #[test]

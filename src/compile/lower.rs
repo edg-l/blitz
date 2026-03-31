@@ -803,6 +803,12 @@ fn lower_op(
                 }
             }
         }
+
+        // Spill pseudo-ops are handled separately in lower_block_pure_ops,
+        // not through lower_inst. They should never reach here.
+        Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
+            unreachable!("spill pseudo-ops are handled before lower_inst")
+        }
     }
 }
 

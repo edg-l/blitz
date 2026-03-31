@@ -203,6 +203,16 @@ pub enum Op {
         from: Type,
         to: Type,
     },
+
+    // ── Spill/reload pseudo-ops ──────────────────────────────────────────────
+    /// GPR spill store: operand[0] is the VReg to spill, i64 is the slot index.
+    SpillStore(i64),
+    /// GPR spill load: dst is the reload VReg, i64 is the slot index.
+    SpillLoad(i64),
+    /// XMM spill store: operand[0] is the VReg to spill, i64 is the slot index.
+    XmmSpillStore(i64),
+    /// XMM spill load: dst is the reload VReg, i64 is the slot index.
+    XmmSpillLoad(i64),
 }
 
 impl Op {
@@ -606,6 +616,12 @@ impl Op {
                     &child_types[0]
                 );
                 to.clone()
+            }
+
+            // Spill pseudo-ops are never type-checked via result_type; they are
+            // internal markers consumed by the lowering pass.
+            Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
+                unreachable!("spill pseudo-ops have no result_type")
             }
         }
     }

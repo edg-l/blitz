@@ -7,7 +7,6 @@ use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::reg::RegClass;
 
 use super::global_liveness::GlobalLiveness;
-use super::spill::{SPILL_LOAD_TYPE, SPILL_STORE_TYPE, XMM_SPILL_LOAD_TYPE, XMM_SPILL_STORE_TYPE};
 
 /// Maps cross-block VRegs to dedicated spill slots.
 pub struct CrossBlockSpillMap {
@@ -168,13 +167,13 @@ pub fn rewrite_block_for_splitting(
                 .copied()
                 .map(|c| c == RegClass::XMM)
                 .unwrap_or(false);
-            let load_type = if is_xmm {
-                XMM_SPILL_LOAD_TYPE
+            let load_op = if is_xmm {
+                Op::XmmSpillLoad(slot as i64)
             } else {
-                SPILL_LOAD_TYPE
+                Op::SpillLoad(slot as i64)
             };
             entry_insts.push(ScheduledInst {
-                op: Op::Iconst(slot as i64, load_type),
+                op: load_op,
                 dst: new_vreg,
                 operands: vec![],
             });
@@ -218,16 +217,16 @@ pub fn rewrite_block_for_splitting(
                 .copied()
                 .map(|c| c == RegClass::XMM)
                 .unwrap_or(false);
-            let store_type = if is_xmm {
-                XMM_SPILL_STORE_TYPE
+            let store_op = if is_xmm {
+                Op::XmmSpillStore(slot as i64)
             } else {
-                SPILL_STORE_TYPE
+                Op::SpillStore(slot as i64)
             };
             // Dummy dst VReg for the store instruction.
             let dummy_dst = VReg(*next_vreg);
             *next_vreg += 1;
             rewritten.push(ScheduledInst {
-                op: Op::Iconst(slot as i64, store_type),
+                op: store_op,
                 dst: dummy_dst,
                 operands: vec![v],
             });

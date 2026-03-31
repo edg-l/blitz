@@ -237,6 +237,11 @@ impl CostModel {
             | Op::Fdiv
             | Op::Fsqrt
             | Op::Select => f64::INFINITY,
+
+            // Spill pseudo-ops are never costed by the e-graph.
+            Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
+                unreachable!("spill pseudo-ops are not part of the e-graph")
+            }
         }
     }
 }

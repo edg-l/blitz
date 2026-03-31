@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::egraph::extract::VReg;
 use crate::ir::op::Op;
-use crate::ir::types::Type;
 use crate::schedule::scheduler::ScheduledInst;
 
 use super::interference::InterferenceGraph;
@@ -10,49 +9,36 @@ use super::liveness::LivenessInfo;
 
 // ── Spill/reload pseudo-op markers ───────────────────────────────────────────
 //
-// We encode spills and reloads as special ScheduledInst entries using a
-// sentinel Op. The Op::Iconst is reused as a marker (spill slot index as the
-// immediate) with a special Type sentinel. Instead, we use a simpler approach:
-// keep a separate enum to mark the "kind" of each instruction. Since we cannot
-// easily extend ScheduledInst, we use Op::Iconst with a reserved type sentinel:
+// Spills and reloads are encoded as dedicated Op variants:
+//   Op::SpillStore(slot)    - GPR spill store; operands = [vreg_being_spilled]
+//   Op::SpillLoad(slot)     - GPR spill load;  dst = reload VReg
+//   Op::XmmSpillStore(slot) - XMM spill store; operands = [vreg_being_spilled]
+//   Op::XmmSpillLoad(slot)  - XMM spill load;  dst = reload VReg
 //
-//   SpillStore: represented as a ScheduledInst with op = Op::Iconst(slot, Type::I8)
-//               and operands = [vreg_being_spilled]. dst is a dummy VReg.
-//   SpillLoad:  represented as a ScheduledInst with op = Op::Iconst(slot, Type::I16)
-//               and operands = []. dst is the new reload VReg.
-//
-// These will be lowered to real MovMR/MovRM by the backend. Using I8/I16 as
-// sentinels is safe because no real instruction in this IR produces I8 or I16
-// from an Iconst with the slot index.
-//
-// The slot index is encoded in the Iconst immediate.
-
-pub const SPILL_STORE_TYPE: Type = Type::I8;
-pub const SPILL_LOAD_TYPE: Type = Type::I16;
-
-/// Sentinel types for XMM (FP) spill markers. Must differ from GPR sentinels.
-pub const XMM_SPILL_STORE_TYPE: Type = Type::F32;
-pub const XMM_SPILL_LOAD_TYPE: Type = Type::Flags;
+// These are lowered to real MovMR/MovRM (GPR) or MovsdMR/MovsdRM (XMM) by the backend.
 
 pub fn is_spill_store(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::Iconst(_, t) if *t == SPILL_STORE_TYPE)
+    matches!(&inst.op, Op::SpillStore(_))
 }
 
 pub fn is_spill_load(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::Iconst(_, t) if *t == SPILL_LOAD_TYPE)
+    matches!(&inst.op, Op::SpillLoad(_))
 }
 
 pub fn is_xmm_spill_store(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::Iconst(_, t) if *t == XMM_SPILL_STORE_TYPE)
+    matches!(&inst.op, Op::XmmSpillStore(_))
 }
 
 pub fn is_xmm_spill_load(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::Iconst(_, t) if *t == XMM_SPILL_LOAD_TYPE)
+    matches!(&inst.op, Op::XmmSpillLoad(_))
 }
 
 pub fn spill_slot_of(inst: &ScheduledInst) -> u32 {
     match &inst.op {
-        Op::Iconst(slot, _) => *slot as u32,
+        Op::SpillStore(slot)
+        | Op::SpillLoad(slot)
+        | Op::XmmSpillStore(slot)
+        | Op::XmmSpillLoad(slot) => *slot as u32,
         _ => unreachable!("spill_slot_of called on non-spill inst"),
     }
 }
@@ -248,13 +234,13 @@ pub fn insert_spills(
                         .copied()
                         .map(|c| c == crate::x86::reg::RegClass::XMM)
                         .unwrap_or(false);
-                    let load_type = if is_xmm {
-                        XMM_SPILL_LOAD_TYPE
+                    let load_op = if is_xmm {
+                        Op::XmmSpillLoad(slot as i64)
                     } else {
-                        SPILL_LOAD_TYPE
+                        Op::SpillLoad(slot as i64)
                     };
                     let load_inst = ScheduledInst {
-                        op: Op::Iconst(slot as i64, load_type),
+                        op: load_op,
                         dst: new_vreg,
                         operands: vec![],
                     };
@@ -286,15 +272,15 @@ pub fn insert_spills(
                 .copied()
                 .map(|c| c == crate::x86::reg::RegClass::XMM)
                 .unwrap_or(false);
-            let store_type = if is_xmm {
-                XMM_SPILL_STORE_TYPE
+            let store_op = if is_xmm {
+                Op::XmmSpillStore(slot as i64)
             } else {
-                SPILL_STORE_TYPE
+                Op::SpillStore(slot as i64)
             };
             let dummy_dst = VReg(*next_vreg);
             *next_vreg += 1;
             let store_inst = ScheduledInst {
-                op: Op::Iconst(slot as i64, store_type),
+                op: store_op,
                 dst: dummy_dst,
                 operands: vec![spilled_vreg],
             };

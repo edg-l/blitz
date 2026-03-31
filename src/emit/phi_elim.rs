@@ -4,32 +4,44 @@ use crate::x86::reg::Reg;
 
 /// Insert parallel copies for block parameter passing.
 ///
-/// `copies` is a list of `(src_reg, dst_reg)` pairs from the jump/branch
+/// `copies` is a list of `(src_reg, dst_reg, size)` triples from the jump/branch
 /// arguments to block parameters. `temp` is a free register used to break
 /// copy cycles.
 ///
 /// Returns the `MachInst` sequence to insert before the jump/branch.
-pub fn phi_copies(copies: &[(Reg, Reg)], temp: Reg) -> Vec<MachInst> {
+pub fn phi_copies(copies: &[(Reg, Reg, OpSize)], temp: Reg) -> Vec<MachInst> {
     // Filter out self-copies (src == dst, already coalesced by the register allocator).
-    let filtered: Vec<(Reg, Reg)> = copies
+    let filtered: Vec<(Reg, Reg, OpSize)> = copies
         .iter()
         .copied()
-        .filter(|&(src, dst)| src != dst)
+        .filter(|&(src, dst, _)| src != dst)
         .collect();
 
     if filtered.is_empty() {
         return Vec::new();
     }
 
+    // Build (src, dst) pairs for sequentialization (it doesn't care about size).
+    let pairs: Vec<(Reg, Reg)> = filtered.iter().map(|&(s, d, _)| (s, d)).collect();
+
+    // Build a size lookup from (src, dst) -> OpSize.
+    let size_map: std::collections::HashMap<(Reg, Reg), OpSize> =
+        filtered.iter().map(|&(s, d, sz)| ((s, d), sz)).collect();
+
     // Use sequentialize_copies to produce a safe sequential ordering,
     // including temp-register-based cycle breaking.
-    let seq = sequentialize_copies(&filtered, temp);
+    let seq = sequentialize_copies(&pairs, temp);
 
     seq.into_iter()
-        .map(|(src, dst)| MachInst::MovRR {
-            size: OpSize::S64,
-            dst: Operand::Reg(dst),
-            src: Operand::Reg(src),
+        .map(|(src, dst)| {
+            // Look up the original OpSize. For temp-register moves (cycle breaking),
+            // the pair won't be in size_map; use S64 as a safe default for temp moves.
+            let size = size_map.get(&(src, dst)).copied().unwrap_or(OpSize::S64);
+            MachInst::MovRR {
+                size,
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+            }
         })
         .collect()
 }
@@ -50,7 +62,10 @@ mod tests {
     #[test]
     fn simple_non_conflicting_copies() {
         // RAX -> RCX, RDX -> RSI: no conflict, both emitted.
-        let copies = [(Reg::RAX, Reg::RCX), (Reg::RDX, Reg::RSI)];
+        let copies = [
+            (Reg::RAX, Reg::RCX, OpSize::S64),
+            (Reg::RDX, Reg::RSI, OpSize::S64),
+        ];
         let insts = phi_copies(&copies, Reg::R11);
         assert_eq!(insts.len(), 2);
         // Both moves must appear (order may vary).
@@ -61,7 +76,10 @@ mod tests {
     #[test]
     fn swap_cycle_uses_temp() {
         // RAX <-> RCX swap: requires a temporary.
-        let copies = [(Reg::RAX, Reg::RCX), (Reg::RCX, Reg::RAX)];
+        let copies = [
+            (Reg::RAX, Reg::RCX, OpSize::S64),
+            (Reg::RCX, Reg::RAX, OpSize::S64),
+        ];
         let insts = phi_copies(&copies, Reg::R11);
         // Simulate execution to verify correctness.
         use std::collections::HashMap;
@@ -87,9 +105,9 @@ mod tests {
     fn three_way_cycle() {
         // RAX->RCX, RCX->RDX, RDX->RAX: three-way rotation.
         let copies = [
-            (Reg::RAX, Reg::RCX),
-            (Reg::RCX, Reg::RDX),
-            (Reg::RDX, Reg::RAX),
+            (Reg::RAX, Reg::RCX, OpSize::S64),
+            (Reg::RCX, Reg::RDX, OpSize::S64),
+            (Reg::RDX, Reg::RAX, OpSize::S64),
         ];
         let insts = phi_copies(&copies, Reg::R11);
         use std::collections::HashMap;
@@ -117,7 +135,7 @@ mod tests {
     #[test]
     fn self_copy_eliminated() {
         // RAX -> RAX should produce no instruction.
-        let copies = [(Reg::RAX, Reg::RAX)];
+        let copies = [(Reg::RAX, Reg::RAX, OpSize::S64)];
         let insts = phi_copies(&copies, Reg::R11);
         assert!(insts.is_empty());
     }
@@ -125,14 +143,17 @@ mod tests {
     #[test]
     fn mixed_self_and_non_self() {
         // RAX -> RAX (eliminated), RDX -> RCX (kept).
-        let copies = [(Reg::RAX, Reg::RAX), (Reg::RDX, Reg::RCX)];
+        let copies = [
+            (Reg::RAX, Reg::RAX, OpSize::S64),
+            (Reg::RDX, Reg::RCX, OpSize::S64),
+        ];
         let insts = phi_copies(&copies, Reg::R11);
         assert_eq!(insts.len(), 1);
         assert_eq!(insts[0], mov(Reg::RDX, Reg::RCX));
     }
 
     fn simulate(
-        copies: &[(Reg, Reg)],
+        copies: &[(Reg, Reg, OpSize)],
         initial: &[(Reg, u64)],
     ) -> std::collections::HashMap<Reg, u64> {
         let insts = phi_copies(copies, Reg::R11);
@@ -159,10 +180,10 @@ mod tests {
         // RAX=1, RCX=2, RDX=3, RSI=4
         // After: RCX=1, RDX=2, RSI=3, RAX=4
         let copies = [
-            (Reg::RAX, Reg::RCX),
-            (Reg::RCX, Reg::RDX),
-            (Reg::RDX, Reg::RSI),
-            (Reg::RSI, Reg::RAX),
+            (Reg::RAX, Reg::RCX, OpSize::S64),
+            (Reg::RCX, Reg::RDX, OpSize::S64),
+            (Reg::RDX, Reg::RSI, OpSize::S64),
+            (Reg::RSI, Reg::RAX, OpSize::S64),
         ];
         let initial = [(Reg::RAX, 1), (Reg::RCX, 2), (Reg::RDX, 3), (Reg::RSI, 4)];
         let state = simulate(&copies, &initial);
@@ -176,10 +197,10 @@ mod tests {
     fn multiple_independent_cycles() {
         // Two independent 2-cycles: RAX<->RCX and RDX<->RSI.
         let copies = [
-            (Reg::RAX, Reg::RCX),
-            (Reg::RCX, Reg::RAX),
-            (Reg::RDX, Reg::RSI),
-            (Reg::RSI, Reg::RDX),
+            (Reg::RAX, Reg::RCX, OpSize::S64),
+            (Reg::RCX, Reg::RAX, OpSize::S64),
+            (Reg::RDX, Reg::RSI, OpSize::S64),
+            (Reg::RSI, Reg::RDX, OpSize::S64),
         ];
         let initial = [
             (Reg::RAX, 10),
