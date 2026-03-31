@@ -79,8 +79,9 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
                 continue;
             }
 
-            // 2. mov rX, 0  ->  xor rX, rX.
-            MachInst::MovRI { dst, imm: 0 } => {
+            // 2. mov rX, 0  ->  xor rX, rX (zero idiom, shorter encoding).
+            // Only safe when flags are not live (xor clobbers flags).
+            MachInst::MovRI { dst, imm: 0 } if flags_dead_after(&insts, i) => {
                 result.push(MachInst::XorRR {
                     dst: dst.clone(),
                     src: dst.clone(),

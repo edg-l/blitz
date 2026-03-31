@@ -27,6 +27,7 @@ fn alu_x86_op(op: &Op) -> Option<Op> {
         Op::And => Some(Op::X86And),
         Op::Or => Some(Op::X86Or),
         Op::Xor => Some(Op::X86Xor),
+        Op::Mul => Some(Op::X86Imul3),
         _ => None,
     }
 }

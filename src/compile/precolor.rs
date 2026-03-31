@@ -64,6 +64,17 @@ pub(super) fn add_call_precolors(
     live_out: &mut HashSet<VReg>,
 ) {
     for block in &func.blocks {
+        // Count how many calls are in this block (excluding the terminator).
+        let non_term_count = if block.ops.is_empty() {
+            0
+        } else {
+            block.ops.len() - 1
+        };
+        let call_count = block.ops[..non_term_count]
+            .iter()
+            .filter(|op| matches!(op, EffectfulOp::Call { .. }))
+            .count();
+
         for op in &block.ops {
             if let EffectfulOp::Call { args, results, .. } = op {
                 let arg_types: Vec<Type> = vec![Type::I64; args.len()];
@@ -83,11 +94,18 @@ pub(super) fn add_call_precolors(
                         }
                     }
                 }
-                if let Some(&first_result_cid) = results.first() {
-                    let canon = egraph.unionfind.find_immutable(first_result_cid);
-                    if let Some(&vreg) = class_to_vreg.get(&canon) {
-                        if !param_vregs.iter().any(|&(v, _)| v == vreg) {
-                            param_vregs.push((vreg, GPR_RETURN_REG));
+                // Only precolor the call result to RAX when there is exactly one call
+                // in this block. With multiple calls, result VRegs from earlier calls
+                // must survive subsequent call clobbers, so we let the allocator freely
+                // assign them to callee-saved registers. The lowering will emit a
+                // `mov allocated_reg, rax` to capture the return value when needed.
+                if call_count == 1 {
+                    if let Some(&first_result_cid) = results.first() {
+                        let canon = egraph.unionfind.find_immutable(first_result_cid);
+                        if let Some(&vreg) = class_to_vreg.get(&canon) {
+                            if !param_vregs.iter().any(|&(v, _)| v == vreg) {
+                                param_vregs.push((vreg, GPR_RETURN_REG));
+                            }
                         }
                     }
                 }
@@ -97,13 +115,23 @@ pub(super) fn add_call_precolors(
 }
 
 /// Compute call point indices (local to a block's instruction list) for
-/// caller-saved clobber modeling. Returns `block_sched.len()` as a sentinel
-/// meaning "clobber spans through end of block" -- the allocator treats
-/// these as exclusive upper bounds, not instruction indices.
+/// caller-saved clobber modeling.
+///
+/// Returns one entry per call in the block. Each entry is the schedule
+/// position *after* which the call logically occurs -- i.e. the first
+/// schedule index at which the call result VRegs become live.
+///
+/// For a single call, the sentinel `block_sched.len()` is returned (meaning
+/// "clobber spans the entire block"). For multiple calls, we compute the
+/// earliest schedule position at which each call's arguments are fully
+/// defined, so that values live between calls are forced to callee-saved
+/// registers by the interference graph.
 pub(super) fn collect_call_points_for_block(
     func: &Function,
     block_idx: usize,
     block_sched: &[ScheduledInst],
+    class_to_vreg: &HashMap<ClassId, VReg>,
+    egraph: &EGraph,
 ) -> Vec<usize> {
     let block = &func.blocks[block_idx];
     let non_term_count = if block.ops.is_empty() {
@@ -111,12 +139,50 @@ pub(super) fn collect_call_points_for_block(
     } else {
         block.ops.len() - 1
     };
-    let has_call = block.ops[..non_term_count]
+
+    // Collect all calls (in order) along with their result ClassIds.
+    let calls: Vec<&Vec<ClassId>> = block.ops[..non_term_count]
         .iter()
-        .any(|op| matches!(op, EffectfulOp::Call { .. }));
-    if has_call {
-        vec![block_sched.len()]
-    } else {
-        vec![]
+        .filter_map(|op| {
+            if let EffectfulOp::Call { results, .. } = op {
+                Some(results)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if calls.is_empty() {
+        return vec![];
     }
+
+    if calls.len() == 1 {
+        // Single call: use the sentinel (entire block is the clobber region).
+        return vec![block_sched.len()];
+    }
+
+    // For blocks with multiple calls, find the schedule index of each call's
+    // CallResult node. The call point for call K is the index of its CallResult
+    // in block_sched. The liveness analysis at that index captures VRegs that
+    // are live "just before" the CallResult is defined, which represents VRegs
+    // that are live immediately after call K completes (i.e., they need to
+    // survive the call's clobber).
+    //
+    // For each call, we look up the first result's VReg and find its position
+    // in block_sched. If not found, fall back to the sentinel.
+    let mut call_points: Vec<usize> = Vec::with_capacity(calls.len());
+    for result_cids in &calls {
+        let mut cp = block_sched.len(); // sentinel fallback
+        if let Some(&first_result_cid) = result_cids.first() {
+            let canon = egraph.unionfind.find_immutable(first_result_cid);
+            if let Some(&result_vreg) = class_to_vreg.get(&canon) {
+                // Find the schedule index of this CallResult node.
+                if let Some(pos) = block_sched.iter().position(|inst| inst.dst == result_vreg) {
+                    cp = pos;
+                }
+            }
+        }
+        call_points.push(cp);
+    }
+    call_points
 }
