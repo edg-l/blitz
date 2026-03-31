@@ -1,5 +1,5 @@
-// Usage: tinyc <input.tc> [-o <output>]
-// Compiles a .tc file to a native executable via Blitz backend + cc linker.
+// Usage: tinyc <input.c> [-o <output>]
+// Compiles a .c file to a native executable via Blitz backend + cc linker.
 
 use std::io::Write;
 use std::process::{Command, exit};
@@ -8,7 +8,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: tinyc <input.tc> [-o <output>]");
+        eprintln!("Usage: tinyc <input.c> [-o <output>]");
         exit(1);
     }
 
