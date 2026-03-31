@@ -1,3 +1,4 @@
+use crate::egraph::EGraph;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::op::ClassId;
 use crate::ir::types::Type;
@@ -66,7 +67,6 @@ impl BasicBlock {
 /// The first block is the entry block (no block parameters by convention).
 /// Pure operations live in the e-graph (not here); effectful ops reference
 /// e-class IDs for their pure operands.
-#[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
     pub param_types: Vec<Type>,
@@ -75,6 +75,22 @@ pub struct Function {
     /// The ClassIds of the function's parameters in the e-graph.
     /// Populated by `FunctionBuilder::finalize()`; empty if constructed manually.
     pub param_class_ids: Vec<ClassId>,
+    /// The e-graph containing all pure operations for this function.
+    /// Populated by `FunctionBuilder::finalize()` and consumed by `compile()`.
+    pub egraph: Option<EGraph>,
+}
+
+impl std::fmt::Debug for Function {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Function")
+            .field("name", &self.name)
+            .field("param_types", &self.param_types)
+            .field("return_types", &self.return_types)
+            .field("blocks", &self.blocks)
+            .field("param_class_ids", &self.param_class_ids)
+            .field("egraph", &self.egraph.as_ref().map(|_| "<EGraph>"))
+            .finish()
+    }
 }
 
 impl Function {
@@ -86,6 +102,7 @@ impl Function {
             return_types,
             blocks: Vec::new(),
             param_class_ids: Vec::new(),
+            egraph: None,
         }
     }
 

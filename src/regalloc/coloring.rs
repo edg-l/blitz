@@ -144,13 +144,14 @@ pub fn map_colors_to_regs(
     // Prefer caller-saved first (avoids callee-save push/pop overhead).
     let available: Vec<Reg> = match reg_class {
         RegClass::GPR => {
-            // Caller-saved GPRs (excluding RSP), then callee-saved.
+            // Caller-saved GPRs (excluding RSP), then callee-saved (excluding
+            // RBP, which is always the frame pointer and must not be allocated).
             let mut regs: Vec<Reg> = CALLER_SAVED_GPR
                 .iter()
                 .filter(|&&r| r != Reg::RSP)
                 .copied()
                 .collect();
-            regs.extend(CALLEE_SAVED.iter().copied());
+            regs.extend(CALLEE_SAVED.iter().filter(|&&r| r != Reg::RBP).copied());
             regs
         }
         RegClass::XMM => {
@@ -203,8 +204,9 @@ pub fn map_colors_to_regs(
 
 // ── Available register counts ─────────────────────────────────────────────────
 
-/// Number of usable GPR colors (16 GPRs minus RSP = 15).
-pub const AVAILABLE_GPR_COLORS: u32 = 15;
+/// Number of usable GPR colors (16 GPRs minus RSP and RBP = 14).
+/// RBP is excluded because it is always used as the frame pointer.
+pub const AVAILABLE_GPR_COLORS: u32 = 14;
 
 /// Number of usable XMM colors (16 XMM registers).
 pub const AVAILABLE_XMM_COLORS: u32 = 16;

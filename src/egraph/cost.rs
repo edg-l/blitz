@@ -113,6 +113,14 @@ impl CostModel {
             }
             .weighted(self.goal),
 
+            // ── X86Idiv / X86Div: latency=35, throughput=21, size=5 (64-bit div) ──
+            Op::X86Idiv | Op::X86Div => CostTuple {
+                latency: 35.0,
+                throughput: 21.0,
+                size: 5.0,
+            }
+            .weighted(self.goal),
+
             // ── X86Imul3: latency=3, throughput=1.0, size=4 ──────────────────────
             Op::X86Imul3 => CostTuple {
                 latency: 3.0,

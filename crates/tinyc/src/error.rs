@@ -14,3 +14,13 @@ impl fmt::Display for TinyErr {
 }
 
 impl std::error::Error for TinyErr {}
+
+impl From<blitz::compile::CompileError> for TinyErr {
+    fn from(e: blitz::compile::CompileError) -> Self {
+        TinyErr {
+            line: 0,
+            col: 0,
+            msg: e.to_string(),
+        }
+    }
+}

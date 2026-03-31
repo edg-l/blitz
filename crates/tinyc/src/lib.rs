@@ -12,20 +12,8 @@ pub fn compile_source(src: &str) -> Result<Vec<u8>, TinyErr> {
     let program = parser::Parser::parse(tokens)?;
     let cg = codegen::Codegen::generate(&program)?;
     let opts = blitz::compile::CompileOptions::default();
-    let obj = blitz::compile::compile_module(cg.functions, &opts).map_err(|e| TinyErr {
-        line: 0,
-        col: 0,
-        msg: e.to_string(),
-    })?;
+    let obj = blitz::compile::compile_module(cg.functions, &opts)?;
     Ok(obj.finalize())
-}
-
-/// Returns the C source for the tinyc runtime helpers (div/rem support).
-pub fn runtime_helpers_c() -> &'static str {
-    r#"
-long long __tinyc_sdiv(long long a, long long b) { return a / b; }
-long long __tinyc_srem(long long a, long long b) { return a % b; }
-"#
 }
 
 #[cfg(test)]
@@ -46,8 +34,6 @@ mod tests {
         let suffix = format!("{tid:?}").replace(['(', ')'], "").replace(' ', "_");
         let tmp_dir = std::env::temp_dir();
         let obj_path = tmp_dir.join(format!("tinyc_test_{suffix}.o"));
-        let helpers_c_path = tmp_dir.join(format!("tinyc_helpers_{suffix}.c"));
-        let helpers_obj_path = tmp_dir.join(format!("tinyc_helpers_{suffix}.o"));
         let bin_path = tmp_dir.join(format!("tinyc_test_bin_{suffix}"));
 
         // Write tinyc object file
@@ -56,27 +42,9 @@ mod tests {
             f.write_all(&obj_bytes).expect("write obj bytes");
         }
 
-        // Write and compile helpers C file
-        {
-            let mut f = std::fs::File::create(&helpers_c_path).expect("create helpers C file");
-            f.write_all(super::runtime_helpers_c().as_bytes())
-                .expect("write helpers C");
-        }
-        let helpers_compile = Command::new("cc")
-            .arg("-c")
-            .arg(&helpers_c_path)
-            .arg("-o")
-            .arg(&helpers_obj_path)
-            .status()
-            .expect("compile helpers");
-        if !helpers_compile.success() {
-            panic!("helpers compilation failed");
-        }
-
-        // Link with cc
+        // Link with cc (no runtime helpers needed — division uses native IDIV)
         let link_status = Command::new("cc")
             .arg(&obj_path)
-            .arg(&helpers_obj_path)
             .arg("-o")
             .arg(&bin_path)
             .status()
@@ -91,8 +59,6 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(&obj_path);
-        let _ = std::fs::remove_file(&helpers_c_path);
-        let _ = std::fs::remove_file(&helpers_obj_path);
         let _ = std::fs::remove_file(&bin_path);
 
         status.code()
@@ -226,5 +192,46 @@ mod tests {
         }";
         // 7 + 10 = 17
         assert_eq!(compile_and_run(src), Some(17));
+    }
+
+    // Phase 9.2: Division regression tests — verify native IDIV is correct.
+
+    #[test]
+    fn test_div_basic() {
+        // 17 / 3 = 5
+        assert_eq!(compile_and_run("int main() { return 17 / 3; }"), Some(5));
+    }
+
+    #[test]
+    fn test_mod_basic() {
+        // 17 % 3 = 2
+        assert_eq!(compile_and_run("int main() { return 17 % 3; }"), Some(2));
+    }
+
+    #[test]
+    fn test_div_negative() {
+        // -7 / 2 = -3 (signed truncation toward zero); exit code is (-3) & 0xFF = 253
+        assert_eq!(compile_and_run("int main() { return -7 / 2; }"), Some(253));
+    }
+
+    #[test]
+    fn test_mod_negative() {
+        // -7 % 2 = -1 (sign follows dividend); -1 + 10 = 9 to keep exit code positive
+        assert_eq!(
+            compile_and_run("int main() { int x = -7; int y = 2; return (x % y) + 10; }"),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn test_div_100_7() {
+        // 100 / 7 = 14
+        assert_eq!(compile_and_run("int main() { return 100 / 7; }"), Some(14));
+    }
+
+    #[test]
+    fn test_mod_100_7() {
+        // 100 % 7 = 2
+        assert_eq!(compile_and_run("int main() { return 100 % 7; }"), Some(2));
     }
 }

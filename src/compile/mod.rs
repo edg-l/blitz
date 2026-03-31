@@ -15,7 +15,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::egraph::EGraph;
 use crate::egraph::cost::{CostModel, OptGoal};
 use crate::egraph::extract::{VReg, VRegInst, extract, vreg_insts_for_block};
 use crate::egraph::phases::{CompileOptions as EGraphOptions, run_phases};
@@ -43,8 +42,8 @@ mod lower;
 use lower::lower_block_pure_ops;
 mod precolor;
 use precolor::{
-    add_call_precolors, add_shift_precolors, assign_param_vregs_from_map,
-    collect_call_points_for_block,
+    add_call_precolors, add_div_precolors, add_shift_precolors, assign_param_vregs_from_map,
+    collect_call_points_for_block, collect_div_clobber_points,
 };
 mod terminator;
 use terminator::{lower_terminator, thread_branches};
@@ -120,13 +119,18 @@ pub trait DiagnosticSink {
 // ── compile() ────────────────────────────────────────────────────────────────
 
 /// Compile a single function to an object file.
+///
+/// Consumes the `Function` (including its embedded e-graph).
 pub fn compile(
-    func: &Function,
-    egraph: EGraph,
+    mut func: Function,
     opts: &CompileOptions,
     mut sink: Option<&mut dyn DiagnosticSink>,
 ) -> Result<ObjectFile, CompileError> {
-    let mut egraph = egraph;
+    let mut egraph = func
+        .egraph
+        .take()
+        .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
+    let func = &func;
 
     // Phase 1: E-graph rewrite rules.
     let egraph_opts = EGraphOptions {
@@ -267,6 +271,7 @@ pub fn compile(
 
         let mut all_param_vregs = param_vregs.clone();
         add_shift_precolors(&all_scheduled, &mut all_param_vregs);
+        add_div_precolors(&all_scheduled, &mut all_param_vregs);
         add_call_precolors(
             func,
             &egraph,
@@ -277,6 +282,10 @@ pub fn compile(
 
         let call_points =
             collect_call_points_for_block(func, 0, &all_scheduled, &class_to_vreg, &egraph);
+        let div_points = collect_div_clobber_points(&all_scheduled);
+        // Combine div clobber points with call clobber points for regalloc.
+        let mut combined_points = call_points;
+        combined_points.extend_from_slice(&div_points);
 
         let result = allocate(
             &all_scheduled,
@@ -284,7 +293,7 @@ pub fn compile(
             &live_out,
             &copy_pairs,
             &loop_depths,
-            &call_points,
+            &combined_points,
         )
         .map_err(|e| CompileError {
             phase: "regalloc".into(),
@@ -352,6 +361,7 @@ pub fn compile(
             let all_scheduled: Vec<ScheduledInst> =
                 block_schedules.iter().flatten().cloned().collect();
             add_shift_precolors(&all_scheduled, &mut func_level_param_vregs);
+            add_div_precolors(&all_scheduled, &mut func_level_param_vregs);
         }
         let mut dummy_live_out: HashSet<VReg> = HashSet::new();
         add_call_precolors(
@@ -439,6 +449,10 @@ pub fn compile(
                 &class_to_vreg,
                 &egraph,
             );
+            let block_div_points = collect_div_clobber_points(&split_schedule);
+            // Combine call and div clobber points for regalloc.
+            let mut block_combined_points = block_call_points;
+            block_combined_points.extend_from_slice(&block_div_points);
 
             // Step 8f: Per-block loop depths.
             let block_loop_depths: HashMap<VReg, u32> = loop_depths
@@ -454,7 +468,7 @@ pub fn compile(
                 &block_live_out,
                 &block_copy_pairs,
                 &block_loop_depths,
-                &block_call_points,
+                &block_combined_points,
             )
             .map_err(|e| CompileError {
                 phase: "regalloc".into(),
@@ -710,7 +724,21 @@ pub fn compile(
             )
         };
 
+        // When there are no calls, emit all pure ops (group[0]) before any
+        // loads/stores, so that registers used as address indices are
+        // materialized before the instructions that read them.
         let mut call_k = 0usize;
+        if num_calls == 0 {
+            let pre_insts = lower_group(
+                &groups[0],
+                &regalloc_result,
+                func,
+                &param_vreg_set,
+                &frame_layout,
+            )?;
+            all_insts.extend(pre_insts);
+        }
+
         for (op_idx, op) in non_term_ops.iter().enumerate() {
             if call_op_indices.get(call_k) == Some(&op_idx) {
                 // Emit group[call_k]: pure ops that must come right before call k.
@@ -729,24 +757,26 @@ pub fn compile(
                 all_insts.extend(extra);
                 call_k += 1;
             } else {
-                // Non-call effectful op (load/store): emit any pending pre-ops first, then the op.
-                // For simplicity, emit group[call_k] here too (handles loads/stores before calls).
-                // Actually loads/stores don't reorder relative to pure ops: just emit inline.
+                // Non-call effectful op (load/store): emit inline.
+                // Pure ops are already emitted before this loop (no-call case)
+                // or interleaved with calls (call case).
                 let extra =
                     lower_effectful_op(op, &class_to_vreg, &regalloc_result, &extraction, func)?;
                 all_insts.extend(extra);
             }
         }
-        // Emit the last group (pure ops that depend on the last call's results, or all pure ops
-        // when there are no calls).
-        let post_insts = lower_group(
-            &groups[call_k],
-            &regalloc_result,
-            func,
-            &param_vreg_set,
-            &frame_layout,
-        )?;
-        all_insts.extend(post_insts);
+        // Emit the last group (pure ops that depend on the last call's results).
+        // In the no-call case, group[0] was already emitted above, so this is a no-op.
+        if num_calls > 0 {
+            let post_insts = lower_group(
+                &groups[call_k],
+                &regalloc_result,
+                func,
+                &param_vreg_set,
+                &frame_layout,
+            )?;
+            all_insts.extend(post_insts);
+        }
 
         // Handle the terminator.
         let terminator = block.ops.last().expect("block must have terminator");
@@ -875,9 +905,9 @@ pub fn compile(
 
 /// Compile multiple functions into a single object file.
 ///
-/// Each (Function, EGraph) pair is consumed and compiled independently.
+/// Each `Function` (with its embedded e-graph) is consumed and compiled independently.
 pub fn compile_module(
-    functions: Vec<(Function, EGraph)>,
+    functions: Vec<Function>,
     opts: &CompileOptions,
 ) -> Result<ObjectFile, CompileError> {
     let mut combined_code: Vec<u8> = Vec::new();
@@ -885,8 +915,8 @@ pub fn compile_module(
     let mut combined_funcs: Vec<FunctionInfo> = Vec::new();
     let mut combined_externals: Vec<String> = Vec::new();
 
-    for (func, egraph) in functions {
-        let obj = compile(&func, egraph, opts, None)?;
+    for func in functions {
+        let obj = compile(func, opts, None)?;
 
         // Adjust relocation offsets by the current combined code offset.
         let base_offset = combined_code.len();

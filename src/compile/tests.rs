@@ -3,14 +3,14 @@ use crate::ir::builder::FunctionBuilder;
 use crate::ir::types::Type;
 use crate::test_utils::has_tool;
 
-fn build_identity() -> (Function, EGraph) {
+fn build_identity() -> Function {
     let mut builder = FunctionBuilder::new("identity", &[Type::I64], &[Type::I64]);
     let params = builder.params().to_vec();
     builder.ret(Some(params[0]));
     builder.finalize().expect("identity finalize")
 }
 
-fn build_add() -> (Function, EGraph) {
+fn build_add() -> Function {
     let mut builder = FunctionBuilder::new("add_two", &[Type::I64, Type::I64], &[Type::I64]);
     let params = builder.params().to_vec();
     let sum = builder.add(params[0], params[1]);
@@ -28,13 +28,13 @@ fn diagnostic_sink_receives_stats() {
         }
     }
 
-    let (func, egraph) = build_add();
+    let func = build_add();
     let opts = CompileOptions {
         verbosity: Verbosity::Verbose,
         ..Default::default()
     };
     let mut sink = VecSink(Vec::new());
-    let result = compile(&func, egraph, &opts, Some(&mut sink));
+    let result = compile(func, &opts, Some(&mut sink));
     assert!(result.is_ok(), "compile failed: {:?}", result.err());
     assert!(
         !sink.0.is_empty(),
@@ -51,9 +51,9 @@ fn e2e_identity() {
         return;
     }
 
-    let (func, egraph) = build_identity();
+    let func = build_identity();
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile identity");
+    let obj = compile(func, &opts, None).expect("compile identity");
 
     let dir = std::env::temp_dir();
     let obj_path = dir.join("blitz_e2e_identity.o");
@@ -104,9 +104,9 @@ fn e2e_add() {
         return;
     }
 
-    let (func, egraph) = build_add();
+    let func = build_add();
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile add");
+    let obj = compile(func, &opts, None).expect("compile add");
 
     let dir = std::env::temp_dir();
     let obj_path = dir.join("blitz_e2e_add.o");
@@ -255,10 +255,10 @@ fn e2e_conditional_max() {
     let flags = builder.icmp(CondCode::Sgt, a, b);
     let result = builder.select(flags, a, b);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("max finalize");
+    let func = builder.finalize().expect("max finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile max");
+    let obj = compile(func, &opts, None).expect("compile max");
 
     let c_main = r#"
 #include <stdint.h>
@@ -318,10 +318,10 @@ fn e2e_loop_sum() {
     builder.set_block(bb2);
     builder.ret(Some(result));
 
-    let (func, egraph) = builder.finalize().expect("sum finalize");
+    let func = builder.finalize().expect("sum finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile sum");
+    let obj = compile(func, &opts, None).expect("compile sum");
 
     let c_main = r#"
 #include <stdint.h>
@@ -351,10 +351,10 @@ fn e2e_call_external() {
     // Call external function "double_val(x)" and return result.
     let results = builder.call("double_val", &[x], &[Type::I64]);
     builder.ret(Some(results[0]));
-    let (func, egraph) = builder.finalize().expect("call finalize");
+    let func = builder.finalize().expect("call finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile call");
+    let obj = compile(func, &opts, None).expect("compile call");
 
     let c_main = r#"
 #include <stdint.h>
@@ -392,10 +392,10 @@ fn e2e_addressing_modes() {
     let scaled = builder.shl(idx, two);
     let addr = builder.add(base, scaled);
     builder.ret(Some(addr));
-    let (func, egraph) = builder.finalize().expect("stride finalize");
+    let func = builder.finalize().expect("stride finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile stride_test");
+    let obj = compile(func, &opts, None).expect("compile stride_test");
 
     // Verify correctness.
     let c_main = r#"
@@ -447,9 +447,9 @@ fn e2e_register_pressure() {
     }
     builder.ret(Some(acc));
 
-    let (func, egraph) = builder.finalize().expect("sum20 finalize");
+    let func = builder.finalize().expect("sum20 finalize");
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile sum20");
+    let obj = compile(func, &opts, None).expect("compile sum20");
 
     let c_main = r#"
 #include <stdint.h>
@@ -485,10 +485,10 @@ fn e2e_flag_fusion() {
     let cond = builder.icmp(CondCode::Sgt, diff, zero);
     let result = builder.select(cond, diff, zero);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("flag_fusion finalize");
+    let func = builder.finalize().expect("flag_fusion finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile flag_fusion");
+    let obj = compile(func, &opts, None).expect("compile flag_fusion");
 
     let c_main = r#"
 #include <stdint.h>
@@ -525,12 +525,12 @@ int main(void) {
 fn e2e_snapshot() {
     use crate::test_utils::objdump_disasm;
 
-    let (id_func, id_egraph) = build_identity();
-    let (add_func, add_egraph) = build_add();
+    let id_func = build_identity();
+    let add_func = build_add();
     let opts = CompileOptions::default();
 
-    let id_obj = compile(&id_func, id_egraph, &opts, None).expect("compile identity");
-    let add_obj = compile(&add_func, add_egraph, &opts, None).expect("compile add");
+    let id_obj = compile(id_func, &opts, None).expect("compile identity");
+    let add_obj = compile(add_func, &opts, None).expect("compile add");
 
     // Verify the identity function is minimal: just prologue + mov rax,rdi + epilogue.
     // Expected bytes: 55 48 89 e5 48 89 f8 5d c3
@@ -598,10 +598,10 @@ fn branch_relaxation_uses_short_form_for_nearby_targets() {
     builder.set_block(bb_false);
     builder.ret(Some(b));
 
-    let (func, egraph) = builder.finalize().expect("max_short finalize");
+    let func = builder.finalize().expect("max_short finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile max_short");
+    let obj = compile(func, &opts, None).expect("compile max_short");
 
     // Walk the code bytes and look for near-form jump opcodes.
     // E9 = near JMP; 0F followed by 80..8F = near Jcc.
@@ -642,9 +642,9 @@ fn e2e_sext_i32_to_i64() {
     let params = builder.params().to_vec();
     let extended = builder.sext(params[0], Type::I64);
     builder.ret(Some(extended));
-    let (func, egraph) = builder.finalize().expect("sext finalize");
+    let func = builder.finalize().expect("sext finalize");
     let opts = CompileOptions::default();
-    compile(&func, egraph, &opts, None).expect("compile sext_i32_to_i64");
+    compile(func, &opts, None).expect("compile sext_i32_to_i64");
 }
 
 // Phase 2: zext compiles end-to-end
@@ -654,9 +654,9 @@ fn e2e_zext_i8_to_i64() {
     let params = builder.params().to_vec();
     let extended = builder.zext(params[0], Type::I64);
     builder.ret(Some(extended));
-    let (func, egraph) = builder.finalize().expect("zext finalize");
+    let func = builder.finalize().expect("zext finalize");
     let opts = CompileOptions::default();
-    compile(&func, egraph, &opts, None).expect("compile zext_i8_to_i64");
+    compile(func, &opts, None).expect("compile zext_i8_to_i64");
 }
 
 // Phase 2: trunc compiles end-to-end
@@ -666,9 +666,9 @@ fn e2e_trunc_i64_to_i32() {
     let params = builder.params().to_vec();
     let truncated = builder.trunc(params[0], Type::I32);
     builder.ret(Some(truncated));
-    let (func, egraph) = builder.finalize().expect("trunc finalize");
+    let func = builder.finalize().expect("trunc finalize");
     let opts = CompileOptions::default();
-    compile(&func, egraph, &opts, None).expect("compile trunc_i64_to_i32");
+    compile(func, &opts, None).expect("compile trunc_i64_to_i32");
 }
 
 // Phase 3: load from a pointer argument compiles end-to-end.
@@ -684,9 +684,9 @@ fn e2e_load_from_pointer_arg() {
     let ptr = params[0];
     let val = builder.load(ptr, Type::I64);
     builder.ret(Some(val));
-    let (func, egraph) = builder.finalize().expect("load_ptr finalize");
+    let func = builder.finalize().expect("load_ptr finalize");
     let opts = CompileOptions::default();
-    compile(&func, egraph, &opts, None).expect("compile load_from_pointer_arg");
+    compile(func, &opts, None).expect("compile load_from_pointer_arg");
 }
 
 // Phase 3: store then load — write a value, read it back.
@@ -702,9 +702,9 @@ fn e2e_store_then_load() {
     builder.store(ptr, val);
     let loaded = builder.load(ptr, Type::I64);
     builder.ret(Some(loaded));
-    let (func, egraph) = builder.finalize().expect("store_load finalize");
+    let func = builder.finalize().expect("store_load finalize");
     let opts = CompileOptions::default();
-    compile(&func, egraph, &opts, None).expect("compile store_then_load");
+    compile(func, &opts, None).expect("compile store_then_load");
 }
 
 // Phase 4.3: function with a variable shift compiles end-to-end.
@@ -719,9 +719,9 @@ fn e2e_variable_shift() {
     let count = params[1];
     let shifted = builder.shl(val, count);
     builder.ret(Some(shifted));
-    let (func, egraph) = builder.finalize().expect("shl finalize");
+    let func = builder.finalize().expect("shl finalize");
     let opts = CompileOptions::default();
-    compile(&func, egraph, &opts, None).expect("compile variable_shift");
+    compile(func, &opts, None).expect("compile variable_shift");
 }
 
 // Phase 5.3: Diamond CFG merge with phi copies from both edges.
@@ -780,9 +780,9 @@ fn phi_diamond_cfg_merge_with_copies_from_both_edges() {
     builder.set_block(bb_merge);
     builder.ret(Some(result));
 
-    let (func, egraph) = builder.finalize().expect("diamond finalize");
+    let func = builder.finalize().expect("diamond finalize");
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile phi_diamond");
+    let obj = compile(func, &opts, None).expect("compile phi_diamond");
 
     // Verify: phi_diamond(5, 3) = 5+3 = 8 (true edge: a=5 > b=3, so x=5, y=3)
     //         phi_diamond(2, 7) = 7+2 = 9 (false edge: b=7, a=2, so x=7, y=2)
@@ -838,9 +838,9 @@ fn rpo_fallthrough_eliminates_entry_jump() {
     let ret_zero = builder.iconst(0, Type::I64);
     builder.ret(Some(ret_zero));
 
-    let (func, egraph) = builder.finalize().expect("count_down finalize");
+    let func = builder.finalize().expect("count_down finalize");
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile count_down");
+    let obj = compile(func, &opts, None).expect("compile count_down");
 
     // Verify correctness.
     let c_main = r#"
@@ -871,10 +871,10 @@ fn e2e_fconst_f64() {
     let mut builder = FunctionBuilder::new("blitz_fp_const", &[], &[Type::F64]);
     let c = builder.fconst(2.5f64);
     builder.ret(Some(c));
-    let (func, egraph) = builder.finalize().expect("fp_const finalize");
+    let func = builder.finalize().expect("fp_const finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile fp_const");
+    let obj = compile(func, &opts, None).expect("compile fp_const");
     assert!(!obj.code.is_empty());
 
     let c_main = r#"
@@ -906,10 +906,10 @@ fn e2e_call_8_args() {
     let h = builder.iconst(8, Type::I64);
     let results = builder.call("blitz_sum8_ext", &[a, b, c, d, e, f, g, h], &[Type::I64]);
     builder.ret(Some(results[0]));
-    let (func, egraph) = builder.finalize().expect("call_8args finalize");
+    let func = builder.finalize().expect("call_8args finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile call_8args");
+    let obj = compile(func, &opts, None).expect("compile call_8args");
     assert!(!obj.code.is_empty());
 
     let c_main = r#"
@@ -941,10 +941,10 @@ fn e2e_f32_add() {
     let params = builder.params().to_vec();
     let sum = builder.fadd(params[0], params[1]);
     builder.ret(Some(sum));
-    let (func, egraph) = builder.finalize().expect("f32_add finalize");
+    let func = builder.finalize().expect("f32_add finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile f32_add");
+    let obj = compile(func, &opts, None).expect("compile f32_add");
     assert!(!obj.code.is_empty());
 
     let c_main = r#"
@@ -971,10 +971,10 @@ fn e2e_addr_fusion_load() {
     let addr = builder.add(base, offset);
     let val = builder.load(addr, Type::I64);
     builder.ret(Some(val));
-    let (func, egraph) = builder.finalize().expect("load_offset16 finalize");
+    let func = builder.finalize().expect("load_offset16 finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile load_offset16");
+    let obj = compile(func, &opts, None).expect("compile load_offset16");
     assert!(!obj.code.is_empty());
 
     let c_main = r#"
@@ -1032,9 +1032,9 @@ fn branch_threading_skips_empty_block() {
     let ret_zero = builder.iconst(0, Type::I64);
     builder.ret(Some(ret_zero));
 
-    let (func, egraph) = builder.finalize().expect("threaded finalize");
+    let func = builder.finalize().expect("threaded finalize");
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile threaded");
+    let obj = compile(func, &opts, None).expect("compile threaded");
     assert!(!obj.code.is_empty());
 
     let c_main = r#"
@@ -1072,10 +1072,10 @@ fn e2e_negative_arithmetic() {
     let sum = builder.add(a, b); // a + b
     let result = builder.sub(diff, sum); // (a-b) - (a+b) = -2b
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("neg_arith finalize");
+    let func = builder.finalize().expect("neg_arith finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile neg_arith");
+    let obj = compile(func, &opts, None).expect("compile neg_arith");
 
     let c_main = r#"
 #include <stdint.h>
@@ -1113,9 +1113,9 @@ fn e2e_wrapping_overflow() {
     let one = builder.iconst(1, Type::I64);
     let result = builder.add(params[0], one);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("wrap_add finalize");
+    let func = builder.finalize().expect("wrap_add finalize");
     let opts = CompileOptions::default();
-    let obj_add = compile(&func, egraph, &opts, None).expect("compile wrap_add");
+    let obj_add = compile(func, &opts, None).expect("compile wrap_add");
 
     // Build wrap_sub(a: i64) -> i64 { a - 1 }
     let mut builder = FunctionBuilder::new("blitz_wrap_sub", &[Type::I64], &[Type::I64]);
@@ -1123,8 +1123,8 @@ fn e2e_wrapping_overflow() {
     let one = builder.iconst(1, Type::I64);
     let result = builder.sub(params[0], one);
     builder.ret(Some(result));
-    let (func2, egraph2) = builder.finalize().expect("wrap_sub finalize");
-    let obj_sub = compile(&func2, egraph2, &opts, None).expect("compile wrap_sub");
+    let func2 = builder.finalize().expect("wrap_sub finalize");
+    let obj_sub = compile(func2, &opts, None).expect("compile wrap_sub");
 
     let dir = std::env::temp_dir();
     let obj_add_path = dir.join("blitz_e2e_wrap_add.o");
@@ -1221,9 +1221,9 @@ fn e2e_value_across_call() {
     let ret = builder.add(px, pr);
     builder.ret(Some(ret));
 
-    let (func, egraph) = builder.finalize().expect("across_call finalize");
+    let func = builder.finalize().expect("across_call finalize");
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile across_call");
+    let obj = compile(func, &opts, None).expect("compile across_call");
 
     // blitz_helper_ext(a) returns a + 100.
     // across_call(a, b) = (a+b) + (a+100) = 2*a + b + 100
@@ -1278,10 +1278,10 @@ fn e2e_spill_correctness() {
         acc = builder.add(acc, *v);
     }
     builder.ret(Some(acc));
-    let (func, egraph) = builder.finalize().expect("spill_test finalize");
+    let func = builder.finalize().expect("spill_test finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile spill_test");
+    let obj = compile(func, &opts, None).expect("compile spill_test");
 
     // param=1: sum of (1+1)..(1+16) = 2+3+...+17 = (2+17)*16/2 = 152
     // param=0: sum of (0+1)..(0+16) = 1+2+...+16 = (1+16)*16/2 = 136
@@ -1366,9 +1366,9 @@ fn e2e_nested_if_else() {
     let vn2 = builder.iconst(-2, Type::I64);
     builder.ret(Some(vn2));
 
-    let (func, egraph) = builder.finalize().expect("classify finalize");
+    let func = builder.finalize().expect("classify finalize");
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile classify");
+    let obj = compile(func, &opts, None).expect("compile classify");
 
     let c_main = r#"
 #include <stdint.h>
@@ -1443,9 +1443,9 @@ fn e2e_fibonacci() {
     builder.set_block(bb_exit);
     builder.ret(Some(result));
 
-    let (func, egraph) = builder.finalize().expect("fib finalize");
+    let func = builder.finalize().expect("fib finalize");
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile fib");
+    let obj = compile(func, &opts, None).expect("compile fib");
 
     let c_main = r#"
 #include <stdint.h>
@@ -1504,9 +1504,9 @@ fn e2e_diamond_phi() {
     builder.set_block(bb_exit);
     builder.ret(Some(diff));
 
-    let (func, egraph) = builder.finalize().expect("abs_diff finalize");
+    let func = builder.finalize().expect("abs_diff finalize");
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile abs_diff");
+    let obj = compile(func, &opts, None).expect("compile abs_diff");
 
     let c_main = r#"
 #include <stdint.h>
@@ -1544,10 +1544,10 @@ fn e2e_constant_fold() {
     let diff = builder.sub(c10, c4);
     let result = builder.mul(sum, diff);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("constfold finalize");
+    let func = builder.finalize().expect("constfold finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile constfold");
+    let obj = compile(func, &opts, None).expect("compile constfold");
 
     let c_main = r#"
 #include <stdint.h>
@@ -1616,9 +1616,9 @@ fn e2e_chained_cmp() {
     builder.set_block(bb_ret_x);
     builder.ret(Some(x));
 
-    let (func, egraph) = builder.finalize().expect("clamp finalize");
+    let func = builder.finalize().expect("clamp finalize");
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile clamp");
+    let obj = compile(func, &opts, None).expect("compile clamp");
 
     let c_main = r#"
 #include <stdint.h>
@@ -1656,10 +1656,10 @@ fn e2e_shift_edge_cases() {
     let c3 = builder.iconst(3, Type::I64);
     let result = builder.shl(val, c3); // val << 3 via X86ShlImm(3)
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("shl_imm finalize");
+    let func = builder.finalize().expect("shl_imm finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile shl_imm");
+    let obj = compile(func, &opts, None).expect("compile shl_imm");
 
     let c_main = r#"
 #include <stdint.h>
@@ -1707,10 +1707,10 @@ fn codegen_constant_fold_eliminates_arithmetic() {
     let diff = builder.sub(c10, c4);
     let result = builder.mul(sum, diff);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("cf_arith finalize");
+    let func = builder.finalize().expect("cf_arith finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile cf_arith");
+    let obj = compile(func, &opts, None).expect("compile cf_arith");
 
     // The folded constant function should be very small.  A typical
     // encoding is: push rbp (1) + mov rbp,rsp (3) + mov rax,60 (7) +
@@ -1752,10 +1752,10 @@ fn codegen_mul_power_of_two_becomes_shift() {
     let c8 = builder.iconst(8, Type::I64);
     let result = builder.mul(x, c8);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("mul8 finalize");
+    let func = builder.finalize().expect("mul8 finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile mul8");
+    let obj = compile(func, &opts, None).expect("compile mul8");
 
     if let Some(disasm) = objdump_disasm(&obj.code) {
         assert!(
@@ -1784,10 +1784,10 @@ fn codegen_mul_3_becomes_lea() {
     let c3 = builder.iconst(3, Type::I64);
     let result = builder.mul(x, c3);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("mul3 finalize");
+    let func = builder.finalize().expect("mul3 finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile mul3");
+    let obj = compile(func, &opts, None).expect("compile mul3");
 
     if let Some(disasm) = objdump_disasm(&obj.code) {
         assert!(
@@ -1825,10 +1825,10 @@ fn codegen_flag_fusion_single_sub() {
     let cond = builder.icmp(CondCode::Sgt, diff, zero);
     let result = builder.select(cond, diff, zero);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("flag_single_sub finalize");
+    let func = builder.finalize().expect("flag_single_sub finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile flag_single_sub");
+    let obj = compile(func, &opts, None).expect("compile flag_single_sub");
 
     if let Some(disasm) = objdump_disasm(&obj.code) {
         assert!(
@@ -1857,10 +1857,10 @@ fn codegen_udiv_power_of_two_becomes_shr() {
     let c4 = builder.iconst(4, Type::I64);
     let result = builder.udiv(x, c4);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("udiv4 finalize");
+    let func = builder.finalize().expect("udiv4 finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile udiv4");
+    let obj = compile(func, &opts, None).expect("compile udiv4");
 
     if let Some(disasm) = objdump_disasm(&obj.code) {
         assert!(
@@ -1890,10 +1890,10 @@ fn codegen_algebraic_inverse_eliminated() {
     // hits the inverse rule Sub(a, a) = 0.
     let result = builder.sub(c7, c7);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("sub_self finalize");
+    let func = builder.finalize().expect("sub_self finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile sub_self");
+    let obj = compile(func, &opts, None).expect("compile sub_self");
 
     // Should compile to prologue + xor eax,eax (or mov rax,0) + epilogue.
     assert!(
@@ -1923,10 +1923,10 @@ fn codegen_peephole_xor_zero() {
     let mut builder = FunctionBuilder::new("blitz_ret_zero", &[], &[Type::I64]);
     let c0 = builder.iconst(0, Type::I64);
     builder.ret(Some(c0));
-    let (func, egraph) = builder.finalize().expect("ret_zero finalize");
+    let func = builder.finalize().expect("ret_zero finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile ret_zero");
+    let obj = compile(func, &opts, None).expect("compile ret_zero");
 
     // 7-byte MOV-imm64 zero: REX.W (48) + B8 + 8 zero bytes
     // Check that the code does NOT contain those 7 bytes in sequence.
@@ -1971,10 +1971,10 @@ fn codegen_optimizer_reduces_code_size() {
     let mul4 = builder.mul(x, c4);
     let result = builder.mul(mul4, c2);
     builder.ret(Some(result));
-    let (func, egraph) = builder.finalize().expect("mul4_mul2 finalize");
+    let func = builder.finalize().expect("mul4_mul2 finalize");
 
     let opts = CompileOptions::default();
-    let obj = compile(&func, egraph, &opts, None).expect("compile mul4_mul2");
+    let obj = compile(func, &opts, None).expect("compile mul4_mul2");
 
     // Prologue + one or two SHLs + epilogue should be well under 40 bytes.
     assert!(
@@ -1992,5 +1992,281 @@ fn codegen_optimizer_reduces_code_size() {
             disasm.contains("shl"),
             "expected SHL (both multiplies strength-reduced):\n{disasm}"
         );
+    }
+}
+
+// ── Phase 9: Division e2e tests ───────────────────────────────────────────────
+
+// 9.1a: Signed division — sdiv(17, 3) == 5
+#[test]
+fn e2e_sdiv() {
+    let mut builder = FunctionBuilder::new("blitz_sdiv", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let q = builder.sdiv(params[0], params[1]);
+    builder.ret(Some(q));
+    let func = builder.finalize().expect("sdiv finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile sdiv");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_sdiv(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_sdiv(17, 3) != 5) return 1;
+    if (blitz_sdiv(0, 1) != 0) return 2;
+    if (blitz_sdiv(6, 2) != 3) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_sdiv", &obj, c_main) {
+        assert_eq!(code, 0, "sdiv returned wrong exit code {code}");
+    }
+}
+
+// 9.1b: Signed remainder — srem(17, 3) == 2
+#[test]
+fn e2e_srem() {
+    let mut builder = FunctionBuilder::new("blitz_srem", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let r = builder.srem(params[0], params[1]);
+    builder.ret(Some(r));
+    let func = builder.finalize().expect("srem finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile srem");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_srem(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_srem(17, 3) != 2) return 1;
+    if (blitz_srem(6, 2) != 0) return 2;
+    if (blitz_srem(7, 4) != 3) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_srem", &obj, c_main) {
+        assert_eq!(code, 0, "srem returned wrong exit code {code}");
+    }
+}
+
+// 9.1c: Signed division negative — sdiv(-7, 2) == -3 (truncation toward zero)
+#[test]
+fn e2e_sdiv_negative() {
+    let mut builder = FunctionBuilder::new("blitz_sdiv_neg", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let q = builder.sdiv(params[0], params[1]);
+    builder.ret(Some(q));
+    let func = builder.finalize().expect("sdiv_neg finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile sdiv_neg");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_sdiv_neg(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_sdiv_neg(-7, 2) != -3) return 1;
+    if (blitz_sdiv_neg(-6, 2) != -3) return 2;
+    if (blitz_sdiv_neg(7, -2) != -3) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_sdiv_neg", &obj, c_main) {
+        assert_eq!(code, 0, "sdiv_neg returned wrong exit code {code}");
+    }
+}
+
+// 9.1d: Signed remainder negative — srem(-7, 2) == -1 (sign follows dividend)
+#[test]
+fn e2e_srem_negative() {
+    let mut builder = FunctionBuilder::new("blitz_srem_neg", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let r = builder.srem(params[0], params[1]);
+    builder.ret(Some(r));
+    let func = builder.finalize().expect("srem_neg finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile srem_neg");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_srem_neg(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_srem_neg(-7, 2) != -1) return 1;
+    if (blitz_srem_neg(-6, 2) != 0) return 2;
+    if (blitz_srem_neg(7, -2) != 1) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_srem_neg", &obj, c_main) {
+        assert_eq!(code, 0, "srem_neg returned wrong exit code {code}");
+    }
+}
+
+// 9.1e: Unsigned division — udiv(17, 3) == 5
+#[test]
+fn e2e_udiv() {
+    let mut builder = FunctionBuilder::new("blitz_udiv", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let q = builder.udiv(params[0], params[1]);
+    builder.ret(Some(q));
+    let func = builder.finalize().expect("udiv finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile udiv");
+
+    let c_main = r#"
+#include <stdint.h>
+#include <inttypes.h>
+uint64_t blitz_udiv(uint64_t a, uint64_t b);
+int main(void) {
+    if (blitz_udiv(17, 3) != 5) return 1;
+    if (blitz_udiv(0, 1) != 0) return 2;
+    if (blitz_udiv(100, 7) != 14) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_udiv", &obj, c_main) {
+        assert_eq!(code, 0, "udiv returned wrong exit code {code}");
+    }
+}
+
+// 9.1f: Unsigned remainder — urem(17, 3) == 2
+#[test]
+fn e2e_urem() {
+    let mut builder = FunctionBuilder::new("blitz_urem", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let r = builder.urem(params[0], params[1]);
+    builder.ret(Some(r));
+    let func = builder.finalize().expect("urem finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile urem");
+
+    let c_main = r#"
+#include <stdint.h>
+uint64_t blitz_urem(uint64_t a, uint64_t b);
+int main(void) {
+    if (blitz_urem(17, 3) != 2) return 1;
+    if (blitz_urem(100, 7) != 2) return 2;
+    if (blitz_urem(6, 3) != 0) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_urem", &obj, c_main) {
+        assert_eq!(code, 0, "urem returned wrong exit code {code}");
+    }
+}
+
+// 9.1g: Shared operands — sdiv(a,b) and srem(a,b) in the same function.
+//
+// Both operations on the same (a,b) should share one X86Idiv node via egraph
+// memoization, so the function emits a single IDIV instruction.
+#[test]
+fn e2e_div_and_rem_same_operands() {
+    use crate::test_utils::objdump_disasm;
+
+    // Build: divmod(a, b) -> a/b + a%b
+    let mut builder = FunctionBuilder::new("blitz_divmod", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = params[0];
+    let b = params[1];
+    let q = builder.sdiv(a, b);
+    let r = builder.srem(a, b);
+    let result = builder.add(q, r);
+    builder.ret(Some(result));
+    let func = builder.finalize().expect("divmod finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile divmod");
+
+    // Codegen quality: exactly one IDIV instruction (shared X86Idiv node).
+    if let Some(disasm) = objdump_disasm(&obj.code) {
+        let idiv_count = disasm.lines().filter(|l| l.contains("idiv")).count();
+        assert_eq!(
+            idiv_count, 1,
+            "sdiv+srem on same operands should emit exactly 1 IDIV:\n{disasm}"
+        );
+    }
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_divmod(int64_t a, int64_t b);
+int main(void) {
+    // 17/3=5, 17%3=2, sum=7
+    if (blitz_divmod(17, 3) != 7) return 1;
+    // 10/3=3, 10%3=1, sum=4
+    if (blitz_divmod(10, 3) != 4) return 2;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_divmod", &obj, c_main) {
+        assert_eq!(code, 0, "divmod returned wrong exit code {code}");
+    }
+}
+
+// 9.1h: Division inside a loop — tests regalloc with division in a back-edge.
+//
+// Implements: sum_of_remainders(n) = sum of (i % 3) for i in 1..=n
+#[test]
+fn e2e_div_in_loop() {
+    use crate::ir::condcode::CondCode;
+
+    // sum_rem(n: i64) -> i64
+    //   acc = 0, i = 1
+    //   while i <= n:
+    //     acc += i % 3
+    //     i += 1
+    //   return acc
+    let mut builder = FunctionBuilder::new("blitz_sum_rem", &[Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let n = params[0];
+
+    let (bb_loop, loop_params) = builder.create_block_with_params(&[Type::I64, Type::I64]); // acc, i
+    let acc_in = loop_params[0];
+    let i_in = loop_params[1];
+    let (bb_exit, exit_params) = builder.create_block_with_params(&[Type::I64]); // result
+    let result = exit_params[0];
+
+    // BB0: init acc=0, i=1, jump to loop.
+    let zero = builder.iconst(0, Type::I64);
+    let one = builder.iconst(1, Type::I64);
+    builder.jump(bb_loop, &[zero, one]);
+
+    // BB_loop: acc += i % 3; i += 1; if i <= n goto bb_loop else goto bb_exit.
+    builder.set_block(bb_loop);
+    let three = builder.iconst(3, Type::I64);
+    let rem = builder.srem(i_in, three);
+    let new_acc = builder.add(acc_in, rem);
+    let new_i = builder.add(i_in, one);
+    let cond = builder.icmp(CondCode::Sle, new_i, n);
+    builder.branch(cond, bb_loop, bb_exit, &[new_acc, new_i], &[new_acc]);
+
+    // BB_exit: return result.
+    builder.set_block(bb_exit);
+    builder.ret(Some(result));
+
+    let func = builder.finalize().expect("div_in_loop finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile div_in_loop");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_sum_rem(int64_t n);
+int main(void) {
+    // i=1: 1%3=1, i=2: 2%3=2, i=3: 3%3=0, i=4: 4%3=1; sum(1..4)=4
+    if (blitz_sum_rem(4) != 4) return 1;
+    // i=1..3: 1+2+0=3
+    if (blitz_sum_rem(3) != 3) return 2;
+    // i=1..6: 1+2+0+1+2+0=6
+    if (blitz_sum_rem(6) != 6) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_div_in_loop", &obj, c_main) {
+        assert_eq!(code, 0, "div_in_loop returned wrong exit code {code}");
     }
 }

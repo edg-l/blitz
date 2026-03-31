@@ -11,7 +11,7 @@ use blitz::ir::condcode::CondCode;
 use blitz::ir::types::Type;
 
 /// Build: fn add(a: i64, b: i64) -> i64 { a + b }
-fn build_add() -> (blitz::ir::function::Function, blitz::egraph::EGraph) {
+fn build_add() -> blitz::ir::function::Function {
     let mut b = FunctionBuilder::new("add", &[Type::I64, Type::I64], &[Type::I64]);
     let p = b.params().to_vec();
     let sum = b.add(p[0], p[1]);
@@ -20,7 +20,7 @@ fn build_add() -> (blitz::ir::function::Function, blitz::egraph::EGraph) {
 }
 
 /// Build: fn max(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
-fn build_max() -> (blitz::ir::function::Function, blitz::egraph::EGraph) {
+fn build_max() -> blitz::ir::function::Function {
     let mut b = FunctionBuilder::new("max", &[Type::I64, Type::I64], &[Type::I64]);
     let p = b.params().to_vec();
     let cond = b.icmp(CondCode::Sgt, p[0], p[1]);
@@ -31,7 +31,7 @@ fn build_max() -> (blitz::ir::function::Function, blitz::egraph::EGraph) {
 
 /// Build: fn sum_to(n: i64) -> i64 { 1 + 2 + ... + n }
 /// Uses a loop with block parameters (SSA phi equivalent).
-fn build_sum_to() -> (blitz::ir::function::Function, blitz::egraph::EGraph) {
+fn build_sum_to() -> blitz::ir::function::Function {
     let mut b = FunctionBuilder::new("sum_to", &[Type::I64], &[Type::I64]);
     let n = b.params()[0];
 

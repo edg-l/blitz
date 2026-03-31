@@ -116,6 +116,21 @@ pub enum Op {
     /// `imul dst, src, imm` — 3-operand signed multiply; produces `Pair(I64, Flags)`.
     X86Imul3,
 
+    /// Signed integer division: `idiv` — takes (dividend, divisor), produces
+    /// `Pair(I64, I64)` where Proj0 = quotient (RAX), Proj1 = remainder (RDX).
+    ///
+    /// Hardware notes:
+    /// - Division by zero raises SIGFPE (x86 #DE exception).
+    /// - INT64_MIN / -1 raises SIGFPE (overflow). Matches C undefined behavior.
+    X86Idiv,
+
+    /// Unsigned integer division: `div` — takes (dividend, divisor), produces
+    /// `Pair(I64, I64)` where Proj0 = quotient (RAX), Proj1 = remainder (RDX).
+    ///
+    /// Hardware notes:
+    /// - Division by zero raises SIGFPE (x86 #DE exception).
+    X86Div,
+
     /// Conditional move — `cmov(cc, flags, t, f)` → `Pair` is not produced; returns the value type.
     X86Cmov(CondCode),
 
@@ -424,6 +439,23 @@ impl Op {
                 assert_eq!(child_types[0], Type::I64, "{self:?} requires I64 base");
                 assert_eq!(child_types[1], Type::I64, "{self:?} requires I64 index");
                 Type::I64
+            }
+
+            // ── X86Idiv / X86Div (2 integer children → Pair(I64, I64)) ────────
+            // Proj0 = quotient (RAX), Proj1 = remainder (RDX).
+            Op::X86Idiv | Op::X86Div => {
+                assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
+                let t = &child_types[0];
+                assert!(
+                    t.is_integer(),
+                    "{self:?} requires integer operands, got {t:?}"
+                );
+                assert_eq!(
+                    &child_types[1], t,
+                    "{self:?} operand type mismatch: {:?} vs {:?}",
+                    t, &child_types[1]
+                );
+                Type::Pair(Box::new(t.clone()), Box::new(t.clone()))
             }
 
             // ── X86Imul3 (2 children → Pair(I64, Flags)) ────────────────────

@@ -120,12 +120,15 @@ fn lower_fp_binary_ss(
 /// Convert a single Op to a sequence of MachInsts.
 ///
 /// `dst_vreg` is the VReg being defined; `dst_reg` is the physical reg (if allocated).
+/// `div_dst_vregs` is the set of VRegs defined by X86Idiv/X86Div instructions,
+/// used to detect division Proj1 nodes.
 fn lower_op(
     op: &Op,
     dst_vreg: VReg,
     dst_reg: Option<Reg>,
-    _operand_vregs: &[VReg],
+    operand_vregs: &[VReg],
     operand_regs: &[Option<Reg>],
+    div_dst_vregs: &HashSet<VReg>,
 ) -> Result<Vec<MachInst>, String> {
     let _ = dst_vreg; // used for context in errors
     match op {
@@ -224,6 +227,77 @@ fn lower_op(
                 dst: Operand::Reg(dst),
                 imm: *imm,
             });
+            Ok(insts)
+        }
+
+        Op::X86Idiv => {
+            // Lowering deferred to Phase 5; pre-coloring ensures dividend is in RAX.
+            // Full implementation: cqo; idiv divisor
+            let divisor = get_op("X86Idiv", operand_regs, 1)?;
+            debug_assert!(
+                divisor != Reg::RAX && divisor != Reg::RDX,
+                "X86Idiv: divisor should not be in RAX/RDX after pre-coloring"
+            );
+            let dividend = get_op("X86Idiv", operand_regs, 0)?;
+            let mut insts = Vec::new();
+            if dividend != Reg::RAX {
+                insts.push(MachInst::MovRR {
+                    dst: Operand::Reg(Reg::RAX),
+                    src: Operand::Reg(dividend),
+                });
+            }
+            insts.push(MachInst::Cqo);
+            if divisor == Reg::RAX || divisor == Reg::RDX {
+                debug_assert!(false, "X86Idiv: divisor in RAX/RDX — pre-coloring failure");
+                insts.push(MachInst::MovRR {
+                    dst: Operand::Reg(Reg::R11),
+                    src: Operand::Reg(divisor),
+                });
+                insts.push(MachInst::Idiv {
+                    src: Operand::Reg(Reg::R11),
+                });
+            } else {
+                insts.push(MachInst::Idiv {
+                    src: Operand::Reg(divisor),
+                });
+            }
+            Ok(insts)
+        }
+
+        Op::X86Div => {
+            // Lowering deferred to Phase 5; pre-coloring ensures dividend is in RAX.
+            // Full implementation: xor rdx,rdx; div divisor
+            let divisor = get_op("X86Div", operand_regs, 1)?;
+            debug_assert!(
+                divisor != Reg::RAX && divisor != Reg::RDX,
+                "X86Div: divisor should not be in RAX/RDX after pre-coloring"
+            );
+            let dividend = get_op("X86Div", operand_regs, 0)?;
+            let mut insts = Vec::new();
+            if dividend != Reg::RAX {
+                insts.push(MachInst::MovRR {
+                    dst: Operand::Reg(Reg::RAX),
+                    src: Operand::Reg(dividend),
+                });
+            }
+            insts.push(MachInst::XorRR {
+                dst: Operand::Reg(Reg::RDX),
+                src: Operand::Reg(Reg::RDX),
+            });
+            if divisor == Reg::RAX || divisor == Reg::RDX {
+                debug_assert!(false, "X86Div: divisor in RAX/RDX — pre-coloring failure");
+                insts.push(MachInst::MovRR {
+                    dst: Operand::Reg(Reg::R11),
+                    src: Operand::Reg(divisor),
+                });
+                insts.push(MachInst::Div {
+                    src: Operand::Reg(Reg::R11),
+                });
+            } else {
+                insts.push(MachInst::Div {
+                    src: Operand::Reg(divisor),
+                });
+            }
             Ok(insts)
         }
 
@@ -369,29 +443,61 @@ fn lower_op(
         }
 
         // Projections: Proj0 and Proj1 extract values from Pairs.
-        // Proj0 extracts the first element (the value), Proj1 extracts flags.
-        // Since the Pair's register holds the full value (the ADD instruction
-        // defines a register that holds the result), Proj0 is effectively a
-        // register copy if the src and dst differ.
         Op::Proj0 => {
-            if let (Some(dst), Some(Some(src))) = (dst_reg, operand_regs.first()) {
-                if dst == *src {
-                    Ok(vec![]) // No-op: dst and src are the same register.
-                } else {
-                    Ok(vec![MachInst::MovRR {
+            let is_div_proj0 = operand_vregs
+                .first()
+                .map(|v| div_dst_vregs.contains(v))
+                .unwrap_or(false);
+            if is_div_proj0 {
+                // For X86Idiv/X86Div Proj0: quotient lives in RAX after IDIV/DIV.
+                // The pair VReg register is irrelevant; emit mov dst, rax if dst != rax.
+                if let Some(dst) = dst_reg
+                    && dst != Reg::RAX
+                {
+                    return Ok(vec![MachInst::MovRR {
                         dst: Operand::Reg(dst),
-                        src: Operand::Reg(*src),
-                    }])
+                        src: Operand::Reg(Reg::RAX),
+                    }]);
                 }
-            } else {
-                // Proj0 with no dst register: it might be a flags projection that's unused.
                 Ok(vec![])
+            } else {
+                // For X86Add/X86Sub etc. Proj0: the pair VReg holds the result.
+                // Proj0 is a register copy if src and dst differ.
+                if let (Some(dst), Some(Some(src))) = (dst_reg, operand_regs.first()) {
+                    if dst == *src {
+                        Ok(vec![]) // No-op: dst and src are the same register.
+                    } else {
+                        Ok(vec![MachInst::MovRR {
+                            dst: Operand::Reg(dst),
+                            src: Operand::Reg(*src),
+                        }])
+                    }
+                } else {
+                    // Proj0 with no dst register: flags projection that's unused.
+                    Ok(vec![])
+                }
             }
         }
 
         Op::Proj1 => {
-            // Proj1 extracts the flags component — flags live in the CPU flags register,
-            // not in a GPR. No MachInst needed since flags are implicit.
+            // For Proj1-of-flags (X86Sub/X86Add etc.): flags live in the CPU flags
+            // register, not in a GPR. No MachInst needed.
+            //
+            // For Proj1-of-division (X86Idiv/X86Div): the remainder lives in RDX
+            // after the idiv instruction. Emit mov dst, rdx if dst != rdx.
+            let is_div_proj1 = operand_vregs
+                .first()
+                .map(|v| div_dst_vregs.contains(v))
+                .unwrap_or(false);
+            if is_div_proj1
+                && let Some(dst) = dst_reg
+                && dst != Reg::RDX
+            {
+                return Ok(vec![MachInst::MovRR {
+                    dst: Operand::Reg(dst),
+                    src: Operand::Reg(Reg::RDX),
+                }]);
+            }
             Ok(vec![])
         }
 
@@ -621,6 +727,13 @@ pub(super) fn lower_block_pure_ops(
     let mut result: Vec<MachInst> = Vec::new();
     let get_reg = |vreg: VReg| -> Option<Reg> { regalloc.vreg_to_reg.get(&vreg).copied() };
 
+    // Build set of VRegs defined by X86Idiv/X86Div for Proj1 lowering.
+    let div_dst_vregs: HashSet<VReg> = insts
+        .iter()
+        .filter(|i| matches!(i.op, Op::X86Idiv | Op::X86Div))
+        .map(|i| i.dst)
+        .collect();
+
     for inst in insts {
         // Skip function param VRegs (pre-colored to ABI arg regs).
         if param_vreg_set.contains(&inst.dst) {
@@ -710,16 +823,23 @@ pub(super) fn lower_block_pure_ops(
         let dst_reg_opt = get_reg(inst.dst);
         let op_regs: Vec<Option<Reg>> = inst.operands.iter().map(|&v| get_reg(v)).collect();
 
-        let machinsts = lower_op(&inst.op, inst.dst, dst_reg_opt, &inst.operands, &op_regs)
-            .map_err(|msg| CompileError {
-                phase: "lowering".into(),
-                message: msg,
-                location: Some(IrLocation {
-                    function: func.name.clone(),
-                    block: None,
-                    inst: None,
-                }),
-            })?;
+        let machinsts = lower_op(
+            &inst.op,
+            inst.dst,
+            dst_reg_opt,
+            &inst.operands,
+            &op_regs,
+            &div_dst_vregs,
+        )
+        .map_err(|msg| CompileError {
+            phase: "lowering".into(),
+            message: msg,
+            location: Some(IrLocation {
+                function: func.name.clone(),
+                block: None,
+                inst: None,
+            }),
+        })?;
         result.extend(machinsts);
     }
     Ok(result)

@@ -29,10 +29,10 @@ pub(super) fn assign_param_vregs_from_map(
     for (param_idx, &class_id) in func.param_class_ids.iter().enumerate() {
         // Canonicalize the class_id after run_phases merges.
         let canon = egraph.unionfind.find_immutable(class_id);
-        if let Some(&vreg) = class_to_vreg.get(&canon) {
-            if let ArgLoc::Reg(reg) = arg_locs[param_idx] {
-                pairs.push((vreg, reg));
-            }
+        if let Some(&vreg) = class_to_vreg.get(&canon)
+            && let ArgLoc::Reg(reg) = arg_locs[param_idx]
+        {
+            pairs.push((vreg, reg));
         }
     }
 
@@ -99,19 +99,74 @@ pub(super) fn add_call_precolors(
                 // must survive subsequent call clobbers, so we let the allocator freely
                 // assign them to callee-saved registers. The lowering will emit a
                 // `mov allocated_reg, rax` to capture the return value when needed.
-                if call_count == 1 {
-                    if let Some(&first_result_cid) = results.first() {
-                        let canon = egraph.unionfind.find_immutable(first_result_cid);
-                        if let Some(&vreg) = class_to_vreg.get(&canon) {
-                            if !param_vregs.iter().any(|&(v, _)| v == vreg) {
-                                param_vregs.push((vreg, GPR_RETURN_REG));
-                            }
-                        }
+                if call_count == 1
+                    && let Some(&first_result_cid) = results.first()
+                {
+                    let canon = egraph.unionfind.find_immutable(first_result_cid);
+                    if let Some(&vreg) = class_to_vreg.get(&canon)
+                        && !param_vregs.iter().any(|&(v, _)| v == vreg)
+                    {
+                        param_vregs.push((vreg, GPR_RETURN_REG));
                     }
                 }
             }
         }
     }
+}
+
+/// Pre-color division operands and projections to RAX/RDX.
+///
+/// - For each X86Idiv/X86Div in the schedule: operand 0 (dividend) → RAX.
+/// - For each Proj0 projecting from an X86Idiv/X86Div VReg: Proj0 dst → RAX (quotient).
+/// - For each Proj1 projecting from an X86Idiv/X86Div VReg: Proj1 dst → RDX (remainder).
+/// - The X86Idiv/X86Div Pair node itself is NOT pre-colored.
+pub(super) fn add_div_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(VReg, Reg)>) {
+    // Collect VRegs defined by X86Idiv/X86Div instructions.
+    let mut div_dst_vregs: HashSet<VReg> = HashSet::new();
+    for inst in insts {
+        if !matches!(inst.op, Op::X86Idiv | Op::X86Div) {
+            continue;
+        }
+        div_dst_vregs.insert(inst.dst);
+        // Pre-color dividend (operand 0) to RAX.
+        if let Some(&dividend) = inst.operands.first()
+            && !param_vregs.iter().any(|&(v, _)| v == dividend)
+        {
+            param_vregs.push((dividend, Reg::RAX));
+        }
+    }
+
+    // Pre-color Proj0 nodes that project from a div result to RAX (quotient).
+    // Proj1 (remainder) is NOT pre-colored to RDX: the lowering emits
+    // `mov dst, rdx` so the remainder can live in any register, which avoids
+    // conflicts when the remainder flows into a loop back edge as a divisor.
+    for inst in insts {
+        if inst.op == Op::Proj0
+            && let Some(&src) = inst.operands.first()
+            && div_dst_vregs.contains(&src)
+            && !param_vregs.iter().any(|&(v, _)| v == inst.dst)
+        {
+            param_vregs.push((inst.dst, Reg::RAX));
+        }
+    }
+}
+
+/// Collect the schedule indices of X86Idiv/X86Div instructions.
+///
+/// Each such index is used as a "div point" so that RDX is modeled as clobbered
+/// at that position (same mechanism as call clobber points).
+pub(super) fn collect_div_clobber_points(insts: &[ScheduledInst]) -> Vec<usize> {
+    insts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, inst)| {
+            if matches!(inst.op, Op::X86Idiv | Op::X86Div) {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Compute call point indices (local to a block's instruction list) for

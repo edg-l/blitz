@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use blitz::egraph::EGraph;
 use blitz::ir::builder::{FunctionBuilder, Value};
 use blitz::ir::condcode::CondCode;
 use blitz::ir::function::Function;
@@ -10,7 +9,7 @@ use crate::ast::{BinOp, Expr, FnDef, Program, Stmt, UnaryOp};
 use crate::error::TinyErr;
 
 pub struct Codegen {
-    pub functions: Vec<(Function, EGraph)>,
+    pub functions: Vec<Function>,
 }
 
 impl Codegen {
@@ -26,7 +25,6 @@ impl Codegen {
 struct FnCtx<'b> {
     builder: &'b mut FunctionBuilder,
     locals: HashMap<String, Value>,
-    terminated: bool,
 }
 
 impl<'b> FnCtx<'b> {
@@ -34,25 +32,19 @@ impl<'b> FnCtx<'b> {
         FnCtx {
             builder,
             locals: HashMap::new(),
-            terminated: false,
         }
     }
 
     fn set_block(&mut self, block: blitz::ir::effectful::BlockId) {
         self.builder.set_block(block);
-        self.terminated = false;
+    }
+
+    fn is_terminated(&self) -> bool {
+        self.builder.is_current_block_terminated()
     }
 
     fn iconst(&mut self, v: i64) -> Value {
-        self.builder.iconst(v, Type::I64)
-    }
-
-    /// Emit icmp, then select(flags, 1, 0) to produce i64 result.
-    fn cmp_to_i64(&mut self, cc: CondCode, l: Value, r: Value) -> Value {
-        let flags = self.builder.icmp(cc, l, r);
-        let one = self.iconst(1);
-        let zero = self.iconst(0);
-        self.builder.select(flags, one, zero)
+        self.builder.const_i64(v)
     }
 
     /// Convert an i64 condition value to Flags for use in branch.
@@ -116,14 +108,11 @@ impl<'b> FnCtx<'b> {
             Expr::UnaryOp { op, expr } => {
                 let val = self.compile_expr(expr)?;
                 match op {
-                    UnaryOp::Neg => {
-                        let zero = self.iconst(0);
-                        Ok(self.builder.sub(zero, val))
-                    }
+                    UnaryOp::Neg => Ok(self.builder.neg(val)),
                     UnaryOp::Not => {
                         // !x == (x == 0)
                         let zero = self.iconst(0);
-                        Ok(self.cmp_to_i64(CondCode::Eq, val, zero))
+                        Ok(self.builder.icmp_val(CondCode::Eq, val, zero))
                     }
                 }
             }
@@ -135,18 +124,18 @@ impl<'b> FnCtx<'b> {
                         let l = self.compile_expr(lhs)?;
                         let r = self.compile_expr(rhs)?;
                         let zero = self.iconst(0);
-                        let lf = self.cmp_to_i64(CondCode::Ne, l, zero);
+                        let lf = self.builder.icmp_val(CondCode::Ne, l, zero);
                         let zero2 = self.iconst(0);
-                        let rf = self.cmp_to_i64(CondCode::Ne, r, zero2);
+                        let rf = self.builder.icmp_val(CondCode::Ne, r, zero2);
                         Ok(self.builder.and(lf, rf))
                     }
                     BinOp::Or => {
                         let l = self.compile_expr(lhs)?;
                         let r = self.compile_expr(rhs)?;
                         let zero = self.iconst(0);
-                        let lf = self.cmp_to_i64(CondCode::Ne, l, zero);
+                        let lf = self.builder.icmp_val(CondCode::Ne, l, zero);
                         let zero2 = self.iconst(0);
-                        let rf = self.cmp_to_i64(CondCode::Ne, r, zero2);
+                        let rf = self.builder.icmp_val(CondCode::Ne, r, zero2);
                         Ok(self.builder.or(lf, rf))
                     }
                     _ => {
@@ -156,22 +145,14 @@ impl<'b> FnCtx<'b> {
                             BinOp::Add => Ok(self.builder.add(l, r)),
                             BinOp::Sub => Ok(self.builder.sub(l, r)),
                             BinOp::Mul => Ok(self.builder.mul(l, r)),
-                            BinOp::Div => {
-                                let results =
-                                    self.builder.call("__tinyc_sdiv", &[l, r], &[Type::I64]);
-                                Ok(results[0])
-                            }
-                            BinOp::Mod => {
-                                let results =
-                                    self.builder.call("__tinyc_srem", &[l, r], &[Type::I64]);
-                                Ok(results[0])
-                            }
-                            BinOp::Eq => Ok(self.cmp_to_i64(CondCode::Eq, l, r)),
-                            BinOp::Ne => Ok(self.cmp_to_i64(CondCode::Ne, l, r)),
-                            BinOp::Lt => Ok(self.cmp_to_i64(CondCode::Slt, l, r)),
-                            BinOp::Gt => Ok(self.cmp_to_i64(CondCode::Sgt, l, r)),
-                            BinOp::Le => Ok(self.cmp_to_i64(CondCode::Sle, l, r)),
-                            BinOp::Ge => Ok(self.cmp_to_i64(CondCode::Sge, l, r)),
+                            BinOp::Div => Ok(self.builder.sdiv(l, r)),
+                            BinOp::Mod => Ok(self.builder.srem(l, r)),
+                            BinOp::Eq => Ok(self.builder.icmp_val(CondCode::Eq, l, r)),
+                            BinOp::Ne => Ok(self.builder.icmp_val(CondCode::Ne, l, r)),
+                            BinOp::Lt => Ok(self.builder.icmp_val(CondCode::Slt, l, r)),
+                            BinOp::Gt => Ok(self.builder.icmp_val(CondCode::Sgt, l, r)),
+                            BinOp::Le => Ok(self.builder.icmp_val(CondCode::Sle, l, r)),
+                            BinOp::Ge => Ok(self.builder.icmp_val(CondCode::Sge, l, r)),
                             BinOp::And | BinOp::Or => unreachable!(),
                         }
                     }
@@ -189,7 +170,7 @@ impl<'b> FnCtx<'b> {
     }
 }
 
-fn compile_fn(fn_def: &FnDef) -> Result<(Function, EGraph), TinyErr> {
+fn compile_fn(fn_def: &FnDef) -> Result<Function, TinyErr> {
     let param_types: Vec<Type> = fn_def.params.iter().map(|_| Type::I64).collect();
     let mut builder = FunctionBuilder::new(&fn_def.name, &param_types, &[Type::I64]);
 
@@ -203,10 +184,9 @@ fn compile_fn(fn_def: &FnDef) -> Result<(Function, EGraph), TinyErr> {
     compile_stmts(&mut ctx, &fn_def.body)?;
 
     // Implicit return 0 if not terminated
-    if !ctx.terminated {
+    if !ctx.is_terminated() {
         let zero = ctx.iconst(0);
         ctx.builder.ret(Some(zero));
-        ctx.terminated = true;
     }
 
     builder.finalize().map_err(|e| TinyErr {
@@ -218,7 +198,7 @@ fn compile_fn(fn_def: &FnDef) -> Result<(Function, EGraph), TinyErr> {
 
 fn compile_stmts(ctx: &mut FnCtx, stmts: &[Stmt]) -> Result<(), TinyErr> {
     for stmt in stmts {
-        if ctx.terminated {
+        if ctx.is_terminated() {
             break;
         }
         compile_stmt(ctx, stmt)?;
@@ -231,7 +211,6 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         Stmt::Return(expr) => {
             let val = ctx.compile_expr(expr)?;
             ctx.builder.ret(Some(val));
-            ctx.terminated = true;
         }
         Stmt::ExprStmt(expr) => {
             ctx.compile_expr(expr)?;
@@ -280,13 +259,12 @@ fn compile_if(
     // Branch to then/else (merge_block args will be wired after we know its id)
     // We branch without args to then/else; they'll jump to merge with args.
     ctx.builder.branch(flags, then_block, else_block, &[], &[]);
-    ctx.terminated = true;
 
     // Codegen then block
     ctx.set_block(then_block);
     ctx.locals = pre_locals.clone();
     compile_stmts(ctx, then_body)?;
-    let then_terminated = ctx.terminated;
+    let then_terminated = ctx.is_terminated();
     let then_locals = ctx.locals.clone();
 
     // Codegen else block
@@ -295,13 +273,13 @@ fn compile_if(
     if let Some(else_stmts) = else_body {
         compile_stmts(ctx, else_stmts)?;
     }
-    let else_terminated = ctx.terminated;
+    let else_terminated = ctx.is_terminated();
     let else_locals = ctx.locals.clone();
 
     if then_terminated && else_terminated {
         // Both branches terminate: no merge needed, no reachable continuation.
         // Mark as terminated; the current block (else_block) is already terminated.
-        ctx.terminated = true;
+
         return Ok(());
     }
 
@@ -360,7 +338,6 @@ fn compile_while(ctx: &mut FnCtx, cond: &Expr, body: &[Stmt]) -> Result<(), Tiny
     // Jump from current block to header with initial values
     let init_args: Vec<Value> = live_vars.iter().map(|v| pre_locals[v]).collect();
     ctx.builder.jump(header_block, &init_args);
-    ctx.terminated = true;
 
     // Header block: update locals to header params, evaluate cond, branch
     ctx.set_block(header_block);
@@ -374,13 +351,12 @@ fn compile_while(ctx: &mut FnCtx, cond: &Expr, body: &[Stmt]) -> Result<(), Tiny
 
     // Branch: body_block if true, exit_block if false (no args to either).
     ctx.builder.branch(flags, body_block, exit_block, &[], &[]);
-    ctx.terminated = true;
 
     // Body block: codegen body, then jump back to header with updated values.
     ctx.set_block(body_block);
     // locals remain as set from header block above (header_params)
     compile_stmts(ctx, body)?;
-    let body_terminated = ctx.terminated;
+    let body_terminated = ctx.is_terminated();
     let body_locals = ctx.locals.clone();
 
     if !body_terminated {

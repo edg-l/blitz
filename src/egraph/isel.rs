@@ -16,6 +16,56 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_sext_zext_trunc_isel(egraph);
     changed |= apply_bitcast_isel(egraph);
     changed |= apply_fp_isel(egraph);
+    changed |= apply_div_isel(egraph);
+    changed
+}
+
+/// SDiv(a,b) -> Proj0(X86Idiv(a,b))
+/// SRem(a,b) -> Proj1(X86Idiv(a,b))
+/// UDiv(a,b) -> Proj0(X86Div(a,b))
+/// URem(a,b) -> Proj1(X86Div(a,b))
+///
+/// Egraph memoization ensures that SDiv and SRem on the same operands share
+/// one X86Idiv node.
+fn apply_div_isel(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
+    let mut changed = false;
+
+    for snap in &snaps {
+        let class_id = snap.class_id;
+        if snap.children.len() != 2 {
+            continue;
+        }
+
+        let (x86_op, use_proj0) = match &snap.op {
+            Op::SDiv => (Op::X86Idiv, true),
+            Op::SRem => (Op::X86Idiv, false),
+            Op::UDiv => (Op::X86Div, true),
+            Op::URem => (Op::X86Div, false),
+            _ => continue,
+        };
+
+        let a = snap.children[0];
+        let b = snap.children[1];
+
+        // Create (or reuse) X86Idiv/X86Div(a, b) — memo dedup handles sharing.
+        let div_node = egraph.add(ENode {
+            op: x86_op,
+            children: smallvec![a, b],
+        });
+
+        let proj = egraph.add(ENode {
+            op: if use_proj0 { Op::Proj0 } else { Op::Proj1 },
+            children: smallvec![div_node],
+        });
+
+        let canon = egraph.unionfind.find_immutable(class_id);
+        let proj_canon = egraph.unionfind.find_immutable(proj);
+        if canon != proj_canon {
+            egraph.merge(class_id, proj);
+            changed = true;
+        }
+    }
     changed
 }
 

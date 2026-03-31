@@ -200,6 +200,49 @@ impl FunctionBuilder {
         &self.entry_params
     }
 
+    /// Return the current insertion block, if any.
+    pub fn current_block(&self) -> Option<BlockId> {
+        self.current_block
+    }
+
+    /// Return true if the current block already has a terminator.
+    pub fn is_current_block_terminated(&self) -> bool {
+        let Some(id) = self.current_block else {
+            return false;
+        };
+        self.blocks
+            .iter()
+            .find(|b| b.id == id)
+            .map(|b| b.terminated)
+            .unwrap_or(false)
+    }
+
+    /// Return the result type of `val` by inspecting its e-class.
+    fn type_of(&self, val: Value) -> Type {
+        let canon = self.egraph.unionfind.find_immutable(val.0);
+        self.egraph.class(canon).ty.clone()
+    }
+
+    /// Emit `0 - val` (unary negation) with the same type as `val`.
+    pub fn neg(&mut self, val: Value) -> Value {
+        let ty = self.type_of(val);
+        let zero = self.iconst(0, ty);
+        self.sub(zero, val)
+    }
+
+    /// Emit an `i64` constant. Shorthand for `iconst(val, Type::I64)`.
+    pub fn const_i64(&mut self, val: i64) -> Value {
+        self.iconst(val, Type::I64)
+    }
+
+    /// Emit `icmp(cc, a, b)` followed by `select(flags, 1, 0)`, returning an I64.
+    pub fn icmp_val(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
+        let flags = self.icmp(cc, a, b);
+        let one = self.iconst(1, Type::I64);
+        let zero = self.iconst(0, Type::I64);
+        self.select(flags, one, zero)
+    }
+
     /// Get the ClassIds for the function's parameters.
     pub fn param_class_ids(&self) -> Vec<crate::ir::op::ClassId> {
         self.entry_params.iter().map(|v| v.0).collect()
@@ -512,9 +555,11 @@ impl FunctionBuilder {
 
     // ── Finalize ──────────────────────────────────────────────────────────────
 
-    /// Validate and finalize the function. Returns the Function and the EGraph
-    /// (which is needed for the compilation pipeline).
-    pub fn finalize(self) -> Result<(Function, EGraph), BuildError> {
+    /// Validate and finalize the function.
+    ///
+    /// The resulting `Function` contains the e-graph in `func.egraph` and is
+    /// ready to be passed to `compile()`.
+    pub fn finalize(self) -> Result<Function, BuildError> {
         if self.blocks.is_empty() {
             return Err(BuildError::NoBlocks);
         }
@@ -550,9 +595,10 @@ impl FunctionBuilder {
             return_types: self.return_types,
             blocks: basic_blocks,
             param_class_ids,
+            egraph: Some(self.egraph),
         };
 
-        Ok((func, self.egraph))
+        Ok(func)
     }
 }
 
@@ -579,7 +625,7 @@ mod tests {
             "finalize should succeed: {:?}",
             result.err()
         );
-        let (func, _egraph) = result.unwrap();
+        let func = result.unwrap();
         assert_eq!(func.name, "add");
         assert_eq!(func.param_types, vec![Type::I64, Type::I64]);
         assert_eq!(func.return_types, vec![Type::I64]);
@@ -612,7 +658,7 @@ mod tests {
             "finalize should succeed: {:?}",
             result.err()
         );
-        let (func, _egraph) = result.unwrap();
+        let func = result.unwrap();
         assert!(func.is_well_formed());
         assert_eq!(func.blocks.len(), 2);
     }
@@ -654,6 +700,50 @@ mod tests {
         let (_bb2, _params2) = builder.create_block_with_params(&[Type::I64, Type::I64]);
         // Jump with only 1 arg when 2 expected.
         builder.jump(_bb2, &[params[0]]);
+    }
+
+    #[test]
+    fn current_block_returns_entry() {
+        let builder = FunctionBuilder::new("test", &[], &[]);
+        assert_eq!(builder.current_block(), Some(0));
+    }
+
+    #[test]
+    fn is_current_block_terminated_false_then_true() {
+        let mut builder = FunctionBuilder::new("test", &[], &[]);
+        assert!(!builder.is_current_block_terminated());
+        builder.ret(None);
+        assert!(builder.is_current_block_terminated());
+    }
+
+    #[test]
+    fn neg_emits_sub_zero() {
+        let mut builder = FunctionBuilder::new("neg_test", &[Type::I64], &[Type::I64]);
+        let p = builder.params()[0];
+        let n = builder.neg(p);
+        builder.ret(Some(n));
+        let result = builder.finalize();
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[test]
+    fn const_i64_shorthand() {
+        let mut builder = FunctionBuilder::new("const_test", &[], &[Type::I64]);
+        let v = builder.const_i64(42);
+        builder.ret(Some(v));
+        let result = builder.finalize();
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[test]
+    fn icmp_val_returns_i64() {
+        let mut builder =
+            FunctionBuilder::new("icmp_val_test", &[Type::I64, Type::I64], &[Type::I64]);
+        let params = builder.params().to_vec();
+        let r = builder.icmp_val(CondCode::Slt, params[0], params[1]);
+        builder.ret(Some(r));
+        let result = builder.finalize();
+        assert!(result.is_ok(), "{:?}", result.err());
     }
 
     // create_block_with_params returns correct number of values.
