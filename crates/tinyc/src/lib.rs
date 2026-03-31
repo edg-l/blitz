@@ -382,4 +382,68 @@ mod tests {
         let src = "int main() { long x = 42; return (int)x; }";
         assert_eq!(compile_and_run(src), Some(42));
     }
+
+    // ── Phase 6: Sub-64-bit type e2e tests ──────────────────────────────────
+
+    #[test]
+    fn test_char_arithmetic() {
+        // char addition with small values that fit in i8
+        let src = "int main() { char a = 10; char b = 20; return a + b; }";
+        assert_eq!(compile_and_run(src), Some(30));
+    }
+
+    #[test]
+    fn test_char_subtraction() {
+        let src = "int main() { char a = 50; char b = 20; return a - b; }";
+        assert_eq!(compile_and_run(src), Some(30));
+    }
+
+    #[test]
+    fn test_char_multiply() {
+        let src = "int main() { char a = 6; char b = 7; return a * b; }";
+        assert_eq!(compile_and_run(src), Some(42));
+    }
+
+    #[test]
+    fn test_short_arithmetic() {
+        // 100 + 50 = 150, fits in exit code range
+        let src = "int main() { short a = 100; short b = 50; return a + b; }";
+        assert_eq!(compile_and_run(src), Some(150));
+    }
+
+    #[test]
+    fn test_short_subtraction() {
+        let src = "int main() { short a = 500; short b = 200; return (int)(a - b); }";
+        // 300 fits in exit code range if we cast to int
+        // Actually exit codes are mod 256, so return (a-b) & 0xFF
+        // Let's keep it simple: 300 & 0xFF = 44
+        // Better: use a value that fits in 0..255
+        assert_eq!(compile_and_run(src), Some(44));
+    }
+
+    #[test]
+    fn test_short_multiply() {
+        let src = "int main() { short a = 12; short b = 10; return a * b; }";
+        // 120 fits in exit code
+        assert_eq!(compile_and_run(src), Some(120));
+    }
+
+    #[test]
+    fn test_int_division() {
+        let src = "int main() { int a = 100; int b = 7; return a / b; }";
+        assert_eq!(compile_and_run(src), Some(14));
+    }
+
+    #[test]
+    fn test_int_modulo() {
+        let src = "int main() { int a = 100; int b = 7; return a % b; }";
+        assert_eq!(compile_and_run(src), Some(2));
+    }
+
+    #[test]
+    fn test_int_division_negative() {
+        // -7 / 2 = -3 (truncation toward zero); exit code: (-3) & 0xFF = 253
+        let src = "int main() { int a = -7; int b = 2; return a / b; }";
+        assert_eq!(compile_and_run(src), Some(253));
+    }
 }

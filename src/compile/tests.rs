@@ -2389,3 +2389,656 @@ int main(void) {
         assert_eq!(code, 0, "rbp_alloc returned wrong exit code {code}");
     }
 }
+
+// ── Phase 6: Sub-64-bit backend end-to-end tests ────────────────────────────
+
+// Task 6.1: I32 And (the original bug that motivated the sub-64-bit backend).
+#[test]
+fn e2e_i32_and() {
+    // Build: i32_and(a: i64, b: i64) -> i64
+    //   trunc a to i32, trunc b to i32, and them, sext result to i64
+    let mut builder = FunctionBuilder::new("blitz_i32_and", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a32 = builder.trunc(params[0], Type::I32);
+    let b32 = builder.trunc(params[1], Type::I32);
+    let result32 = builder.and(a32, b32);
+    let result64 = builder.sext(result32, Type::I64);
+    builder.ret(Some(result64));
+    let func = builder.finalize().expect("i32_and finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_and");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_and(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_and(0xFF, 0x0F) != 0x0F) return 1;
+    if (blitz_i32_and(0xAA, 0x55) != 0x00) return 2;
+    if (blitz_i32_and(0xFF, 0xFF) != 0xFF) return 3;
+    if (blitz_i32_and(0, 0xFF) != 0) return 4;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_and", &obj, c_main) {
+        assert_eq!(code, 0, "i32_and returned wrong exit code {code}");
+    }
+}
+
+// Task 6.2: I32 full arithmetic suite.
+
+#[test]
+fn e2e_i32_add() {
+    let mut builder = FunctionBuilder::new("blitz_i32_add", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I32);
+    let b = builder.trunc(params[1], Type::I32);
+    let r = builder.add(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i32_add finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_add");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_add(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_add(10, 20) != 30) return 1;
+    if (blitz_i32_add(0, 0) != 0) return 2;
+    if (blitz_i32_add(-5, 3) != -2) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_add", &obj, c_main) {
+        assert_eq!(code, 0, "i32_add returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i32_sub() {
+    let mut builder = FunctionBuilder::new("blitz_i32_sub", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I32);
+    let b = builder.trunc(params[1], Type::I32);
+    let r = builder.sub(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i32_sub finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_sub");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_sub(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_sub(30, 10) != 20) return 1;
+    if (blitz_i32_sub(5, 5) != 0) return 2;
+    if (blitz_i32_sub(3, 10) != -7) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_sub", &obj, c_main) {
+        assert_eq!(code, 0, "i32_sub returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i32_mul() {
+    let mut builder = FunctionBuilder::new("blitz_i32_mul", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I32);
+    let b = builder.trunc(params[1], Type::I32);
+    let r = builder.mul(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i32_mul finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_mul");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_mul(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_mul(6, 7) != 42) return 1;
+    if (blitz_i32_mul(0, 100) != 0) return 2;
+    if (blitz_i32_mul(-3, 4) != -12) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_mul", &obj, c_main) {
+        assert_eq!(code, 0, "i32_mul returned wrong exit code {code}");
+    }
+}
+
+// Task 6.3: I32 signed division (CDQ should be used, not CQO).
+#[test]
+fn e2e_i32_sdiv() {
+    use crate::test_utils::objdump_disasm;
+
+    let mut builder = FunctionBuilder::new("blitz_i32_sdiv", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I32);
+    let b = builder.trunc(params[1], Type::I32);
+    let r = builder.sdiv(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i32_sdiv finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_sdiv");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_sdiv(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_sdiv(42, 6) != 7) return 1;
+    if (blitz_i32_sdiv(17, 3) != 5) return 2;
+    if (blitz_i32_sdiv(-15, 3) != -5) return 3;
+    if (blitz_i32_sdiv(100, 7) != 14) return 4;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_sdiv", &obj, c_main) {
+        assert_eq!(code, 0, "i32_sdiv returned wrong exit code {code}");
+    }
+
+    // Verify CDQ (0x99) is present and CQO (0x48 0x99) is not.
+    if let Some(disasm) = objdump_disasm(&obj.code) {
+        assert!(
+            disasm.contains("cdq") || disasm.contains("cltd"),
+            "I32 division should use CDQ, not CQO:\n{disasm}"
+        );
+    }
+}
+
+#[test]
+fn e2e_i32_udiv() {
+    let mut builder = FunctionBuilder::new("blitz_i32_udiv", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I32);
+    let b = builder.trunc(params[1], Type::I32);
+    let r = builder.udiv(a, b);
+    let r64 = builder.zext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i32_udiv finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_udiv");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_udiv(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_udiv(42, 6) != 7) return 1;
+    if (blitz_i32_udiv(100, 10) != 10) return 2;
+    if (blitz_i32_udiv(7, 2) != 3) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_udiv", &obj, c_main) {
+        assert_eq!(code, 0, "i32_udiv returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i32_or() {
+    let mut builder = FunctionBuilder::new("blitz_i32_or", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I32);
+    let b = builder.trunc(params[1], Type::I32);
+    let r = builder.or(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i32_or finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_or");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_or(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_or(0xF0, 0x0F) != 0xFF) return 1;
+    if (blitz_i32_or(0, 0) != 0) return 2;
+    if (blitz_i32_or(0xAA, 0x55) != 0xFF) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_or", &obj, c_main) {
+        assert_eq!(code, 0, "i32_or returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i32_xor() {
+    let mut builder = FunctionBuilder::new("blitz_i32_xor", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I32);
+    let b = builder.trunc(params[1], Type::I32);
+    let r = builder.xor(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i32_xor finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_xor");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_xor(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_xor(0xFF, 0x0F) != 0xF0) return 1;
+    if (blitz_i32_xor(0xAA, 0xAA) != 0) return 2;
+    if (blitz_i32_xor(0, 0xFF) != 0xFF) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_xor", &obj, c_main) {
+        assert_eq!(code, 0, "i32_xor returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i32_shl() {
+    let mut builder = FunctionBuilder::new("blitz_i32_shl", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I32);
+    let b = builder.trunc(params[1], Type::I32);
+    let r = builder.shl(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i32_shl finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_shl");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_shl(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_shl(1, 4) != 16) return 1;
+    if (blitz_i32_shl(0xFF, 8) != 0xFF00) return 2;
+    if (blitz_i32_shl(1, 0) != 1) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_shl", &obj, c_main) {
+        assert_eq!(code, 0, "i32_shl returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i32_sar() {
+    let mut builder = FunctionBuilder::new("blitz_i32_sar", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I32);
+    let b = builder.trunc(params[1], Type::I32);
+    let r = builder.sar(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i32_sar finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_sar");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_sar(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_sar(256, 4) != 16) return 1;
+    if (blitz_i32_sar(-16, 2) != -4) return 2;
+    if (blitz_i32_sar(1, 0) != 1) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_sar", &obj, c_main) {
+        assert_eq!(code, 0, "i32_sar returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i32_icmp() {
+    use crate::ir::condcode::CondCode;
+
+    // Build: i32_icmp(a, b) returns 1 if a > b (signed), else 0.
+    let mut builder = FunctionBuilder::new("blitz_i32_icmp", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I32);
+    let b = builder.trunc(params[1], Type::I32);
+    let cond = builder.icmp(CondCode::Sgt, a, b);
+    // Select 1 or 0 based on the comparison.
+    let one = builder.iconst(1, Type::I64);
+    let zero = builder.iconst(0, Type::I64);
+    let r = builder.select(cond, one, zero);
+    builder.ret(Some(r));
+    let func = builder.finalize().expect("i32_icmp finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_icmp");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_icmp(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i32_icmp(10, 5) != 1) return 1;
+    if (blitz_i32_icmp(5, 10) != 0) return 2;
+    if (blitz_i32_icmp(5, 5) != 0) return 3;
+    if (blitz_i32_icmp(-1, 0) != 0) return 4;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_icmp", &obj, c_main) {
+        assert_eq!(code, 0, "i32_icmp returned wrong exit code {code}");
+    }
+}
+
+// Task 6.4-6.5: I16 arithmetic tests.
+
+#[test]
+fn e2e_i16_add() {
+    let mut builder = FunctionBuilder::new("blitz_i16_add", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I16);
+    let b = builder.trunc(params[1], Type::I16);
+    let r = builder.add(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i16_add finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i16_add");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i16_add(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i16_add(100, 200) != 300) return 1;
+    if (blitz_i16_add(0, 0) != 0) return 2;
+    if (blitz_i16_add(-10, 3) != -7) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i16_add", &obj, c_main) {
+        assert_eq!(code, 0, "i16_add returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i16_sub() {
+    let mut builder = FunctionBuilder::new("blitz_i16_sub", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I16);
+    let b = builder.trunc(params[1], Type::I16);
+    let r = builder.sub(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i16_sub finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i16_sub");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i16_sub(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i16_sub(300, 100) != 200) return 1;
+    if (blitz_i16_sub(50, 50) != 0) return 2;
+    if (blitz_i16_sub(10, 20) != -10) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i16_sub", &obj, c_main) {
+        assert_eq!(code, 0, "i16_sub returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i16_and() {
+    let mut builder = FunctionBuilder::new("blitz_i16_and", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I16);
+    let b = builder.trunc(params[1], Type::I16);
+    let r = builder.and(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i16_and finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i16_and");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i16_and(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i16_and(0xFF00, 0x00FF) != 0) return 1;
+    if (blitz_i16_and(0xFFFF, 0x00FF) != 0x00FF) return 2;
+    if (blitz_i16_and(0x1234, 0xFF00) != 0x1200) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i16_and", &obj, c_main) {
+        assert_eq!(code, 0, "i16_and returned wrong exit code {code}");
+    }
+}
+
+// Task 6.6-6.7: I8 arithmetic tests.
+
+#[test]
+fn e2e_i8_add() {
+    let mut builder = FunctionBuilder::new("blitz_i8_add", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I8);
+    let b = builder.trunc(params[1], Type::I8);
+    let r = builder.add(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i8_add finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i8_add");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i8_add(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i8_add(10, 20) != 30) return 1;
+    if (blitz_i8_add(0, 0) != 0) return 2;
+    if (blitz_i8_add(100, 27) != 127) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i8_add", &obj, c_main) {
+        assert_eq!(code, 0, "i8_add returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i8_sub() {
+    let mut builder = FunctionBuilder::new("blitz_i8_sub", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I8);
+    let b = builder.trunc(params[1], Type::I8);
+    let r = builder.sub(a, b);
+    let r64 = builder.sext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i8_sub finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i8_sub");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i8_sub(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i8_sub(50, 20) != 30) return 1;
+    if (blitz_i8_sub(10, 10) != 0) return 2;
+    if (blitz_i8_sub(5, 10) != -5) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i8_sub", &obj, c_main) {
+        assert_eq!(code, 0, "i8_sub returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_i8_and() {
+    let mut builder = FunctionBuilder::new("blitz_i8_and", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = builder.trunc(params[0], Type::I8);
+    let b = builder.trunc(params[1], Type::I8);
+    let r = builder.and(a, b);
+    let r64 = builder.zext(r, Type::I64);
+    builder.ret(Some(r64));
+    let func = builder.finalize().expect("i8_and finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i8_and");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i8_and(int64_t a, int64_t b);
+int main(void) {
+    if (blitz_i8_and(0xFF, 0x0F) != 0x0F) return 1;
+    if (blitz_i8_and(0xAA, 0x55) != 0x00) return 2;
+    if (blitz_i8_and(0xFF, 0xFF) != 0xFF) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i8_and", &obj, c_main) {
+        assert_eq!(code, 0, "i8_and returned wrong exit code {code}");
+    }
+}
+
+// Task 6.8: Mixed-width operations (Sext, Zext, Trunc) with correctness verification.
+
+#[test]
+fn e2e_sext_i32_to_i64_negative() {
+    // Verify sign extension of a negative I32 value to I64.
+    let mut builder = FunctionBuilder::new("blitz_sext32", &[Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let truncated = builder.trunc(params[0], Type::I32);
+    let extended = builder.sext(truncated, Type::I64);
+    builder.ret(Some(extended));
+    let func = builder.finalize().expect("sext32 finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile sext32");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_sext32(int64_t x);
+int main(void) {
+    // Positive value: low 32 bits = 42, sext should give 42
+    if (blitz_sext32(42) != 42) return 1;
+    // Negative I32: 0xFFFFFFFF = -1 in 32-bit, sext to -1 in 64-bit
+    if (blitz_sext32(0xFFFFFFFF) != -1) return 2;
+    // 0x80000000 = INT32_MIN, sext should give -2147483648 in 64-bit
+    if (blitz_sext32(0x80000000LL) != -2147483648LL) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_sext32", &obj, c_main) {
+        assert_eq!(code, 0, "sext32 returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_trunc_i64_to_i32_roundtrip() {
+    // Trunc I64 to I32, then sext back. Verifies truncation drops high bits.
+    let mut builder = FunctionBuilder::new("blitz_trunc64", &[Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let t32 = builder.trunc(params[0], Type::I32);
+    let back = builder.sext(t32, Type::I64);
+    builder.ret(Some(back));
+    let func = builder.finalize().expect("trunc64 finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile trunc64");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_trunc64(int64_t x);
+int main(void) {
+    // Value fits in I32: should round-trip
+    if (blitz_trunc64(100) != 100) return 1;
+    // High bits discarded: 0x100000005 truncates to 5
+    if (blitz_trunc64(0x100000005LL) != 5) return 2;
+    // Negative: -1 should round-trip
+    if (blitz_trunc64(-1) != -1) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_trunc64", &obj, c_main) {
+        assert_eq!(code, 0, "trunc64 returned wrong exit code {code}");
+    }
+}
+
+#[test]
+fn e2e_zext_i8_to_i64_values() {
+    // Zext I8 to I64: high bits should be zero, not sign-extended.
+    let mut builder = FunctionBuilder::new("blitz_zext8", &[Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let t8 = builder.trunc(params[0], Type::I8);
+    let ext = builder.zext(t8, Type::I64);
+    builder.ret(Some(ext));
+    let func = builder.finalize().expect("zext8 finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile zext8");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_zext8(int64_t x);
+int main(void) {
+    if (blitz_zext8(42) != 42) return 1;
+    // 0xFF as I8 = -1 signed, but zext should give 255
+    if (blitz_zext8(0xFF) != 255) return 2;
+    // 0x80 as I8 = -128 signed, but zext should give 128
+    if (blitz_zext8(0x80) != 128) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_zext8", &obj, c_main) {
+        assert_eq!(code, 0, "zext8 returned wrong exit code {code}");
+    }
+}
+
+// Task 6.9: Spill correctness for I32 values with many live variables.
+#[test]
+fn e2e_i32_spill_pressure() {
+    // Create 20 I32 constants, keep them all live, then sum them.
+    // This forces regalloc to spill some I32 values.
+    let mut builder = FunctionBuilder::new("blitz_i32_sum20", &[], &[Type::I64]);
+
+    let vals: Vec<_> = (1i64..=20).map(|v| builder.iconst(v, Type::I32)).collect();
+
+    let mut acc = vals[0];
+    for &v in &vals[1..] {
+        acc = builder.add(acc, v);
+    }
+    // sext to I64 for return
+    let r64 = builder.sext(acc, Type::I64);
+    builder.ret(Some(r64));
+
+    let func = builder.finalize().expect("i32_sum20 finalize");
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile i32_sum20");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_i32_sum20(void);
+int main(void) {
+    // 1+2+...+20 = 210
+    if (blitz_i32_sum20() != 210) return 1;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_i32_sum20", &obj, c_main) {
+        assert_eq!(code, 0, "i32_sum20 returned wrong exit code {code}");
+    }
+}
