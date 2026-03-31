@@ -5,7 +5,7 @@ pub mod function;
 pub mod op;
 pub mod types;
 
-pub use builder::{BuildError, FunctionBuilder, Value};
+pub use builder::{BuildError, FunctionBuilder, Value, Variable};
 pub use condcode::CondCode;
 pub use effectful::{BlockId, EffectfulOp, Symbol};
 pub use function::{BasicBlock, Function};

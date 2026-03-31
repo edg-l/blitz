@@ -58,4 +58,13 @@ impl EffectfulOp {
             EffectfulOp::Branch { .. } | EffectfulOp::Jump { .. } | EffectfulOp::Ret { .. }
         )
     }
+
+    /// Returns a mutable reference to this op if it is a terminator.
+    pub fn as_terminator_mut(&mut self) -> Option<&mut Self> {
+        if self.is_terminator() {
+            Some(self)
+        } else {
+            None
+        }
+    }
 }

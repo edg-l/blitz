@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use smallvec::smallvec;
 
 use crate::egraph::{EGraph, ENode};
@@ -17,6 +19,27 @@ impl Value {
     pub fn class_id(self) -> ClassId {
         self.0
     }
+}
+
+// ── Variable handle ──────────────────────────────────────────────────────────
+
+/// A mutable variable handle for the SSA variable API.
+///
+/// Frontends declare variables with `FunctionBuilder::declare_var()`, define them
+/// with `def_var()`, and read them with `use_var()`. The builder automatically
+/// constructs SSA block parameters and wires jump/branch arguments using the
+/// Braun et al. algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Variable(pub u32);
+
+// ── Predecessor edge kind ────────────────────────────────────────────────────
+
+/// Records which arm of a terminator produced a particular predecessor edge.
+#[derive(Debug, Clone, Copy)]
+enum PredEdge {
+    Jump,
+    BranchTrue,
+    BranchFalse,
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -40,6 +63,9 @@ pub enum BuildError {
     },
     NoBlocks,
     UndefinedValue,
+    UnsealedBlock {
+        block: BlockId,
+    },
 }
 
 impl std::fmt::Display for BuildError {
@@ -61,6 +87,9 @@ impl std::fmt::Display for BuildError {
             }
             BuildError::NoBlocks => write!(f, "function has no blocks"),
             BuildError::UndefinedValue => write!(f, "undefined value"),
+            BuildError::UnsealedBlock { block } => {
+                write!(f, "block {block} was never sealed")
+            }
         }
     }
 }
@@ -101,6 +130,14 @@ pub struct FunctionBuilder {
     next_block_id: BlockId,
     /// Entry block parameter values (function arguments).
     entry_params: Vec<Value>,
+
+    // ── SSA variable API state (Braun et al.) ────────────────────────────────
+    next_var: u32,
+    var_types: Vec<Type>,
+    var_defs: HashMap<(BlockId, Variable), Value>,
+    sealed_blocks: HashSet<BlockId>,
+    incomplete_phis: HashMap<BlockId, Vec<(Variable, Value)>>,
+    predecessors: HashMap<BlockId, Vec<(BlockId, PredEdge)>>,
 }
 
 impl FunctionBuilder {
@@ -133,6 +170,12 @@ impl FunctionBuilder {
             terminated: false,
         };
 
+        let mut sealed_blocks = HashSet::new();
+        sealed_blocks.insert(0); // entry block has no predecessors, always sealed
+
+        let mut predecessors = HashMap::new();
+        predecessors.insert(0, Vec::new()); // entry block: no predecessors
+
         FunctionBuilder {
             name: name.to_string(),
             param_types: param_types.to_vec(),
@@ -142,6 +185,12 @@ impl FunctionBuilder {
             current_block: Some(0),
             next_block_id: 1,
             entry_params,
+            next_var: 0,
+            var_types: Vec::new(),
+            var_defs: HashMap::new(),
+            sealed_blocks,
+            incomplete_phis: HashMap::new(),
+            predecessors,
         }
     }
 
@@ -454,7 +503,9 @@ impl FunctionBuilder {
 
     /// Emit a conditional branch.
     ///
-    /// Panics if the block is already terminated.
+    /// Panics if the block is already terminated. Arg counts are validated
+    /// at `finalize()` time (deferred to support the SSA variable API which
+    /// may add block params after terminators are emitted).
     pub fn branch(
         &mut self,
         cond: Value,
@@ -463,33 +514,7 @@ impl FunctionBuilder {
         true_args: &[Value],
         false_args: &[Value],
     ) {
-        // Validate arg counts against block param counts.
-        let true_expected = self
-            .blocks
-            .iter()
-            .find(|b| b.id == bb_true)
-            .map(|b| b.param_types.len())
-            .unwrap_or(0);
-        let false_expected = self
-            .blocks
-            .iter()
-            .find(|b| b.id == bb_false)
-            .map(|b| b.param_types.len())
-            .unwrap_or(0);
-
-        assert_eq!(
-            true_args.len(),
-            true_expected,
-            "branch to block {bb_true}: expected {true_expected} args, got {}",
-            true_args.len()
-        );
-        assert_eq!(
-            false_args.len(),
-            false_expected,
-            "branch to block {bb_false}: expected {false_expected} args, got {}",
-            false_args.len()
-        );
-
+        let current = self.current_block.expect("no current block set");
         let block = self.current_block_mut();
         assert!(
             !block.terminated,
@@ -504,26 +529,24 @@ impl FunctionBuilder {
             false_args: false_args.iter().map(|v| v.0).collect(),
         });
         block.terminated = true;
+
+        // Record predecessor edges.
+        self.predecessors
+            .entry(bb_true)
+            .or_default()
+            .push((current, PredEdge::BranchTrue));
+        self.predecessors
+            .entry(bb_false)
+            .or_default()
+            .push((current, PredEdge::BranchFalse));
     }
 
     /// Emit an unconditional jump to `target` with arguments.
     ///
-    /// Panics if the block is already terminated.
+    /// Panics if the block is already terminated. Arg counts are validated
+    /// at `finalize()` time (deferred to support the SSA variable API).
     pub fn jump(&mut self, target: BlockId, args: &[Value]) {
-        let expected = self
-            .blocks
-            .iter()
-            .find(|b| b.id == target)
-            .map(|b| b.param_types.len())
-            .unwrap_or(0);
-
-        assert_eq!(
-            args.len(),
-            expected,
-            "jump to block {target}: expected {expected} args, got {}",
-            args.len()
-        );
-
+        let current = self.current_block.expect("no current block set");
         let block = self.current_block_mut();
         assert!(
             !block.terminated,
@@ -535,6 +558,12 @@ impl FunctionBuilder {
             args: args.iter().map(|v| v.0).collect(),
         });
         block.terminated = true;
+
+        // Record predecessor edge.
+        self.predecessors
+            .entry(target)
+            .or_default()
+            .push((current, PredEdge::Jump));
     }
 
     /// Emit a return with an optional value.
@@ -553,6 +582,231 @@ impl FunctionBuilder {
         block.terminated = true;
     }
 
+    // ── SSA variable API (Braun et al.) ─────────────────────────────────────
+
+    /// Declare a new mutable variable of the given type.
+    pub fn declare_var(&mut self, ty: Type) -> Variable {
+        let var = Variable(self.next_var);
+        self.next_var += 1;
+        self.var_types.push(ty);
+        var
+    }
+
+    /// Define (or redefine) a variable in the current block.
+    pub fn def_var(&mut self, var: Variable, val: Value) {
+        let block = self.current_block.expect("no current block set");
+        self.var_defs.insert((block, var), val);
+    }
+
+    /// Read the current SSA value of a variable.
+    ///
+    /// If the variable was not defined in the current block, the Braun algorithm
+    /// walks predecessors and inserts block parameters (phis) as needed.
+    pub fn use_var(&mut self, var: Variable) -> Value {
+        let block = self.current_block.expect("no current block set");
+        self.read_variable(var, block)
+    }
+
+    /// Mark a block as sealed: all its predecessors are now known.
+    ///
+    /// **Precondition:** every predecessor block must have already emitted its
+    /// terminator (jump/branch) before sealing. The Braun algorithm resolves
+    /// incomplete phis by walking predecessor terminators.
+    pub fn seal_block(&mut self, block: BlockId) {
+        assert!(
+            !self.sealed_blocks.contains(&block),
+            "block {block} is already sealed"
+        );
+
+        // Resolve all incomplete phis for this block.
+        let incomplete = self.incomplete_phis.remove(&block).unwrap_or_default();
+        for (var, phi) in incomplete {
+            let preds: Vec<(BlockId, PredEdge)> =
+                self.predecessors.get(&block).cloned().unwrap_or_default();
+            for &(pred_block, edge) in &preds {
+                let val = self.read_variable(var, pred_block);
+                self.append_jump_arg_for_edge(pred_block, edge, val);
+            }
+            self.try_remove_trivial_phi(block, phi);
+        }
+
+        self.sealed_blocks.insert(block);
+    }
+
+    /// Braun et al. core: recursively resolve a variable's reaching definition.
+    fn read_variable(&mut self, var: Variable, block: BlockId) -> Value {
+        // 1. Local definition in this block?
+        if let Some(&val) = self.var_defs.get(&(block, var)) {
+            return val;
+        }
+
+        // 2. Block not sealed? Create incomplete phi placeholder.
+        if !self.sealed_blocks.contains(&block) {
+            let ty = self.var_types[var.0 as usize].clone();
+            let phi = self.add_block_param(block, ty);
+            self.var_defs.insert((block, var), phi);
+            self.incomplete_phis
+                .entry(block)
+                .or_default()
+                .push((var, phi));
+            return phi;
+        }
+
+        // 3. Sealed block -- resolve through predecessors.
+        let preds: Vec<(BlockId, PredEdge)> =
+            self.predecessors.get(&block).cloned().unwrap_or_default();
+
+        let val = if preds.is_empty() {
+            panic!(
+                "use of undefined variable {:?} in block {} (no predecessors)",
+                var, block
+            );
+        } else if preds.len() == 1 {
+            // Single predecessor -- no phi needed, recurse directly.
+            self.read_variable(var, preds[0].0)
+        } else {
+            // Multiple predecessors -- need a phi (block param).
+            let ty = self.var_types[var.0 as usize].clone();
+            let phi = self.add_block_param(block, ty);
+
+            // Store BEFORE recursing to break cycles (loops).
+            self.var_defs.insert((block, var), phi);
+
+            // Wire args from each predecessor.
+            for &(pred_block, edge) in &preds {
+                let pred_val = self.read_variable(var, pred_block);
+                self.append_jump_arg_for_edge(pred_block, edge, pred_val);
+            }
+
+            self.try_remove_trivial_phi(block, phi)
+        };
+
+        // Cache result for single-predecessor case.
+        self.var_defs.insert((block, var), val);
+        val
+    }
+
+    /// Incrementally add a block parameter, creating an Op::BlockParam e-node.
+    fn add_block_param(&mut self, block: BlockId, ty: Type) -> Value {
+        let block_data = self
+            .blocks
+            .iter()
+            .find(|b| b.id == block)
+            .expect("block not found");
+        let param_idx = block_data.param_types.len() as u32;
+
+        let node = ENode {
+            op: Op::BlockParam(block, param_idx, ty.clone()),
+            children: smallvec![],
+        };
+        let cid = self.egraph.add(node);
+        let val = Value(cid);
+
+        // Re-borrow block_data mutably after egraph mutation.
+        let block_data = self
+            .blocks
+            .iter_mut()
+            .find(|b| b.id == block)
+            .expect("block not found");
+        block_data.param_types.push(ty);
+        block_data.param_values.push(val);
+        val
+    }
+
+    /// Append a value to a predecessor's terminator args targeting a specific block.
+    fn append_jump_arg_for_edge(&mut self, from_block: BlockId, edge: PredEdge, arg: Value) {
+        let block = self
+            .blocks
+            .iter_mut()
+            .find(|b| b.id == from_block)
+            .expect("from_block not found");
+        let term = block
+            .ops
+            .last_mut()
+            .and_then(|op| op.as_terminator_mut())
+            .expect("from_block has no terminator");
+        match (term, edge) {
+            (EffectfulOp::Jump { args, .. }, PredEdge::Jump) => {
+                args.push(arg.0);
+            }
+            (EffectfulOp::Branch { true_args, .. }, PredEdge::BranchTrue) => {
+                true_args.push(arg.0);
+            }
+            (EffectfulOp::Branch { false_args, .. }, PredEdge::BranchFalse) => {
+                false_args.push(arg.0);
+            }
+            _ => panic!("edge kind does not match terminator type"),
+        }
+    }
+
+    /// If all operands to a phi (block param) are the same value (ignoring the
+    /// phi itself), replace it via e-graph union. Returns the replacement value
+    /// or the phi itself if non-trivial.
+    fn try_remove_trivial_phi(&mut self, block: BlockId, phi: Value) -> Value {
+        let block_data = self.blocks.iter().find(|b| b.id == block).unwrap();
+        let param_idx = block_data
+            .param_values
+            .iter()
+            .position(|v| v.0 == phi.0)
+            .expect("phi not found in block params");
+
+        let preds: Vec<(BlockId, PredEdge)> =
+            self.predecessors.get(&block).cloned().unwrap_or_default();
+
+        let phi_canon = self.egraph.unionfind.find_immutable(phi.0);
+        let mut same: Option<Value> = None;
+
+        for &(pred_block, edge) in &preds {
+            let pred_data = self.blocks.iter().find(|b| b.id == pred_block).unwrap();
+            let term = pred_data.ops.last().expect("predecessor has no terminator");
+            let arg_cid = match (term, edge) {
+                (EffectfulOp::Jump { args, .. }, PredEdge::Jump) => args[param_idx],
+                (EffectfulOp::Branch { true_args, .. }, PredEdge::BranchTrue) => {
+                    true_args[param_idx]
+                }
+                (EffectfulOp::Branch { false_args, .. }, PredEdge::BranchFalse) => {
+                    false_args[param_idx]
+                }
+                _ => panic!("edge kind does not match terminator"),
+            };
+
+            let arg_canon = self.egraph.unionfind.find_immutable(arg_cid);
+            if arg_canon == phi_canon {
+                continue; // skip self-references
+            }
+
+            match same {
+                None => same = Some(Value(arg_cid)),
+                Some(s) => {
+                    let s_canon = self.egraph.unionfind.find_immutable(s.0);
+                    if arg_canon != s_canon {
+                        // Non-trivial phi: at least two distinct operands.
+                        return phi;
+                    }
+                }
+            }
+        }
+
+        match same {
+            None => {
+                // All operands are the phi itself -- unreachable / undefined.
+                panic!("phi has no non-self operands (undefined variable in unreachable code)");
+            }
+            Some(replacement) => {
+                // Trivial phi: all operands are the same. Union in e-graph.
+                self.egraph.unionfind.union(phi.0, replacement.0);
+                // Update var_defs that point to phi.
+                for val in self.var_defs.values_mut() {
+                    let val_canon = self.egraph.unionfind.find_immutable(val.0);
+                    if val_canon == phi_canon {
+                        *val = replacement;
+                    }
+                }
+                replacement
+            }
+        }
+    }
+
     // ── Finalize ──────────────────────────────────────────────────────────────
 
     /// Validate and finalize the function.
@@ -568,6 +822,73 @@ impl FunctionBuilder {
         for block in &self.blocks {
             if !block.terminated {
                 return Err(BuildError::NoTerminator { block: block.id });
+            }
+        }
+
+        // Validate all blocks are sealed (only when variable API is in use).
+        if self.next_var > 0 {
+            for block in &self.blocks {
+                if !self.sealed_blocks.contains(&block.id) {
+                    return Err(BuildError::UnsealedBlock { block: block.id });
+                }
+            }
+        }
+
+        // Validate arg counts match target block param counts (deferred from jump/branch).
+        for block in &self.blocks {
+            if let Some(term) = block.ops.last() {
+                match term {
+                    EffectfulOp::Jump { target, args } => {
+                        let expected = self
+                            .blocks
+                            .iter()
+                            .find(|b| b.id == *target)
+                            .map(|b| b.param_types.len())
+                            .unwrap_or(0);
+                        if args.len() != expected {
+                            return Err(BuildError::ArgCountMismatch {
+                                block: *target,
+                                expected,
+                                got: args.len(),
+                            });
+                        }
+                    }
+                    EffectfulOp::Branch {
+                        bb_true,
+                        bb_false,
+                        true_args,
+                        false_args,
+                        ..
+                    } => {
+                        let true_expected = self
+                            .blocks
+                            .iter()
+                            .find(|b| b.id == *bb_true)
+                            .map(|b| b.param_types.len())
+                            .unwrap_or(0);
+                        if true_args.len() != true_expected {
+                            return Err(BuildError::ArgCountMismatch {
+                                block: *bb_true,
+                                expected: true_expected,
+                                got: true_args.len(),
+                            });
+                        }
+                        let false_expected = self
+                            .blocks
+                            .iter()
+                            .find(|b| b.id == *bb_false)
+                            .map(|b| b.param_types.len())
+                            .unwrap_or(0);
+                        if false_args.len() != false_expected {
+                            return Err(BuildError::ArgCountMismatch {
+                                block: *bb_false,
+                                expected: false_expected,
+                                got: false_args.len(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -691,15 +1012,21 @@ mod tests {
         builder.ret(None); // should panic
     }
 
-    // Jump arg count mismatch panics.
+    // Jump arg count mismatch detected at finalize.
     #[test]
-    #[should_panic(expected = "expected 2 args")]
-    fn jump_arg_count_mismatch_panics() {
+    fn jump_arg_count_mismatch_at_finalize() {
         let mut builder = FunctionBuilder::new("mismatch", &[Type::I64], &[]);
         let params = builder.params().to_vec();
-        let (_bb2, _params2) = builder.create_block_with_params(&[Type::I64, Type::I64]);
+        let (bb2, _params2) = builder.create_block_with_params(&[Type::I64, Type::I64]);
         // Jump with only 1 arg when 2 expected.
-        builder.jump(_bb2, &[params[0]]);
+        builder.jump(bb2, &[params[0]]);
+        builder.set_block(bb2);
+        builder.ret(None);
+        let result = builder.finalize();
+        assert!(
+            matches!(result, Err(BuildError::ArgCountMismatch { .. })),
+            "expected ArgCountMismatch, got {result:?}"
+        );
     }
 
     #[test]
@@ -764,5 +1091,185 @@ mod tests {
 
         let result = builder.finalize();
         assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    // ── Variable API tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn var_api_straight_line() {
+        let mut b = FunctionBuilder::new("test", &[], &[Type::I64]);
+        let x = b.declare_var(Type::I64);
+        let five = b.iconst(5, Type::I64);
+        b.def_var(x, five);
+        let val = b.use_var(x);
+        b.ret(Some(val));
+        let f = b.finalize();
+        assert!(f.is_ok(), "{:?}", f.err());
+    }
+
+    #[test]
+    fn var_api_diamond() {
+        let mut b = FunctionBuilder::new("test", &[Type::I64], &[Type::I64]);
+        let p = b.params()[0];
+        let x = b.declare_var(Type::I64);
+        b.def_var(x, p);
+
+        let zero = b.iconst(0, Type::I64);
+        let cond = b.icmp(CondCode::Sgt, p, zero);
+        let bb_then = b.create_block();
+        let bb_else = b.create_block();
+        let bb_merge = b.create_block();
+
+        b.branch(cond, bb_then, bb_else, &[], &[]);
+
+        // Then: redefine x
+        b.set_block(bb_then);
+        b.seal_block(bb_then);
+        let ten = b.iconst(10, Type::I64);
+        b.def_var(x, ten);
+        b.jump(bb_merge, &[]);
+
+        // Else: x not modified
+        b.set_block(bb_else);
+        b.seal_block(bb_else);
+        b.jump(bb_merge, &[]);
+
+        // Merge: use_var should create a block param
+        b.seal_block(bb_merge);
+        b.set_block(bb_merge);
+        let result = b.use_var(x);
+        b.ret(Some(result));
+
+        let f = b.finalize();
+        assert!(f.is_ok(), "{:?}", f.err());
+        let func = f.unwrap();
+        // Merge block should have 1 block param (the phi for x)
+        assert_eq!(func.blocks[3].param_types.len(), 1);
+    }
+
+    #[test]
+    fn var_api_while_loop() {
+        let mut b = FunctionBuilder::new("test", &[Type::I64], &[Type::I64]);
+        let n = b.params()[0];
+        let i_var = b.declare_var(Type::I64);
+        let acc_var = b.declare_var(Type::I64);
+        let zero = b.iconst(0, Type::I64);
+        b.def_var(i_var, zero);
+        b.def_var(acc_var, zero);
+
+        let header = b.create_block();
+        let body = b.create_block();
+        let exit = b.create_block();
+
+        b.jump(header, &[]);
+
+        // Header (don't seal yet -- back edge not known)
+        b.set_block(header);
+        let i = b.use_var(i_var);
+        let cond = b.icmp(CondCode::Slt, i, n);
+        b.branch(cond, body, exit, &[], &[]);
+
+        // Body
+        b.set_block(body);
+        b.seal_block(body);
+        let acc = b.use_var(acc_var);
+        let i = b.use_var(i_var);
+        let new_acc = b.add(acc, i);
+        let one = b.iconst(1, Type::I64);
+        let new_i = b.add(i, one);
+        b.def_var(acc_var, new_acc);
+        b.def_var(i_var, new_i);
+        b.jump(header, &[]);
+
+        // Now seal header (both predecessors known)
+        b.seal_block(header);
+
+        // Exit
+        b.set_block(exit);
+        b.seal_block(exit);
+        let result = b.use_var(acc_var);
+        b.ret(Some(result));
+
+        let f = b.finalize();
+        assert!(f.is_ok(), "{:?}", f.err());
+    }
+
+    #[test]
+    fn var_api_trivial_phi_elimination() {
+        let mut b = FunctionBuilder::new("test", &[Type::I64], &[Type::I64]);
+        let p = b.params()[0];
+        let x = b.declare_var(Type::I64);
+        b.def_var(x, p);
+
+        let zero = b.iconst(0, Type::I64);
+        let cond = b.icmp(CondCode::Sgt, p, zero);
+        let bb_then = b.create_block();
+        let bb_else = b.create_block();
+        let bb_merge = b.create_block();
+
+        b.branch(cond, bb_then, bb_else, &[], &[]);
+
+        // Neither branch modifies x
+        b.set_block(bb_then);
+        b.seal_block(bb_then);
+        b.jump(bb_merge, &[]);
+
+        b.set_block(bb_else);
+        b.seal_block(bb_else);
+        b.jump(bb_merge, &[]);
+
+        b.seal_block(bb_merge);
+        b.set_block(bb_merge);
+        let result = b.use_var(x);
+        b.ret(Some(result));
+
+        let f = b.finalize();
+        assert!(f.is_ok(), "{:?}", f.err());
+        // The trivial phi should have been eliminated via e-graph union,
+        // but the block param may still exist structurally. What matters
+        // is that the function compiles correctly.
+    }
+
+    #[test]
+    fn var_api_unsealed_block_error() {
+        let mut b = FunctionBuilder::new("test", &[], &[Type::I64]);
+        let x = b.declare_var(Type::I64);
+        let zero = b.iconst(0, Type::I64);
+        b.def_var(x, zero);
+        let block = b.create_block();
+        b.jump(block, &[]);
+        b.set_block(block);
+        let val = b.use_var(x);
+        b.ret(Some(val));
+        // block is never sealed
+        let result = b.finalize();
+        assert!(
+            matches!(result, Err(BuildError::UnsealedBlock { .. })),
+            "expected UnsealedBlock, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "undefined variable")]
+    fn var_api_undefined_variable_panics() {
+        let mut b = FunctionBuilder::new("test", &[], &[Type::I64]);
+        let x = b.declare_var(Type::I64);
+        // Never define x, try to use it in entry block
+        let _ = b.use_var(x);
+    }
+
+    #[test]
+    fn var_api_multiple_defs_same_block() {
+        // Last write wins within a block
+        let mut b = FunctionBuilder::new("test", &[], &[Type::I64]);
+        let x = b.declare_var(Type::I64);
+        let one = b.iconst(1, Type::I64);
+        let two = b.iconst(2, Type::I64);
+        b.def_var(x, one);
+        b.def_var(x, two);
+        let val = b.use_var(x);
+        b.ret(Some(val));
+        let f = b.finalize();
+        assert!(f.is_ok(), "{:?}", f.err());
     }
 }
