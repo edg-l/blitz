@@ -99,14 +99,26 @@ pub fn assign_args(param_types: &[Type]) -> Vec<ArgLoc> {
 #[derive(Debug, Clone)]
 pub struct FrameLayout {
     /// Total bytes subtracted from RSP in the prologue (after callee-saved pushes).
+    /// Zero for leaf functions and for red-zone functions.
     pub frame_size: u32,
-    /// Offset from RBP to the start of the spill area (always negative).
+    /// Offset from `spill_base` to the first spill slot.
+    /// - When `uses_frame_pointer`: negative offset from RBP.
+    /// - When `!uses_frame_pointer && use_red_zone`: negative offset from RSP (into red zone).
+    /// - When `!uses_frame_pointer && !use_red_zone`: non-negative offset from RSP (within frame).
     pub spill_offset: i32,
     /// Which callee-saved registers are actually used and must be preserved.
     pub callee_saved: Vec<Reg>,
     pub uses_frame_pointer: bool,
     /// Space reserved for stack arguments passed to callees.
     pub outgoing_arg_space: u32,
+    /// True if the function has no calls, no callee-saved registers, and no spills.
+    /// When true, the prologue and epilogue emit nothing (only a bare `ret`).
+    pub is_leaf: bool,
+    /// True when we can use the System V AMD64 red zone (128 bytes below RSP) for spills
+    /// instead of adjusting RSP. Only valid for leaf functions with no callee-saved registers.
+    pub use_red_zone: bool,
+    /// The base register for spill slot addressing (RBP when frame pointer is used, RSP otherwise).
+    pub spill_base: Reg,
 }
 
 /// Compute the stack frame layout.
@@ -114,45 +126,93 @@ pub struct FrameLayout {
 /// Stack state on entry to the prologue (after the caller's CALL):
 ///   RSP % 16 == 8  (return address occupies 8 bytes)
 ///
-/// The prologue pushes RBP (8 bytes → RSP % 16 == 0), then pushes each
-/// callee-saved register (8 bytes each).  The total pushed callee-saved bytes
-/// plus `frame_size` (sub RSP) must keep RSP 16-byte aligned at the point
-/// where a nested CALL would execute.
+/// With frame pointer: the prologue pushes RBP (RSP % 16 == 0), then callee-saved
+/// registers. Without frame pointer: on entry RSP % 16 == 8, alignment must account
+/// for only the callee-saved pushes.
+///
+/// `has_calls`: true if the function body contains any call instructions.
+/// `force_frame_pointer`: force emission of push rbp / mov rbp,rsp even when not needed.
 pub fn compute_frame_layout(
     spill_slots: u32,
     callee_saved_used: &[Reg],
     outgoing_arg_space: u32,
+    has_calls: bool,
+    force_frame_pointer: bool,
 ) -> FrameLayout {
-    // After push RBP: RSP % 16 == 0.
-    // Each callee-saved push shifts RSP by 8.
+    let uses_frame_pointer = force_frame_pointer;
     let n_callee = callee_saved_used.len() as u32;
-    let callee_push_bytes = n_callee * 8;
 
-    // Raw bytes needed for spills and outgoing args.
-    let raw = spill_slots * 8 + outgoing_arg_space;
+    // Leaf: no calls, no callee-saved, no spills.
+    let is_leaf = !has_calls && callee_saved_used.is_empty() && spill_slots == 0;
 
-    // After the callee-saved pushes RSP % 16 may be 0 or 8.
-    // We need (callee_push_bytes + frame_size) % 16 == 0
-    // so that RSP is 16-byte aligned after `sub rsp, frame_size`.
-    let misalign = (callee_push_bytes + raw) % 16;
-    let frame_size = if misalign == 0 {
-        raw
+    // Red zone: usable only for leaf-like functions (no calls, no callee-saved pushed).
+    // We must not push callee-saved regs when using the red zone because the ABI guarantees
+    // only the 128 bytes *below* the current RSP, and any push would shift RSP.
+    let use_red_zone = !has_calls
+        && callee_saved_used.is_empty()
+        && !force_frame_pointer
+        && spill_slots > 0
+        && spill_slots * 8 <= 128;
+
+    let (frame_size, spill_offset) = if is_leaf {
+        // Nothing needed: no frame allocated, no spill area.
+        (0, 0)
+    } else if use_red_zone {
+        // No RSP adjustment. Spill slots live in the red zone below RSP.
+        // Layout: slot 0 at [RSP - spill_slots*8], slot 1 at [RSP - spill_slots*8 + 8], ...
+        //         slot N-1 at [RSP - 8]. All fit within the 128-byte red zone.
+        // spill_offset = -(spill_slots as i32 * 8)
+        (0, -(spill_slots as i32 * 8))
+    } else if uses_frame_pointer {
+        // With frame pointer: push rbp shifts RSP to RSP % 16 == 0.
+        // Each callee-saved push shifts RSP by 8.
+        // We need (callee_push_bytes + frame_size) % 16 == 0.
+        let raw = spill_slots * 8 + outgoing_arg_space;
+        let callee_push_bytes = n_callee * 8;
+        let misalign = (callee_push_bytes + raw) % 16;
+        let fs = if misalign == 0 {
+            raw
+        } else {
+            raw + (16 - misalign)
+        };
+        // Spills are addressed as [RBP - (n_callee*8 + spill_slots*8)].
+        let so = -((n_callee as i32 + spill_slots as i32) * 8);
+        (fs, so)
     } else {
-        raw + (16 - misalign)
+        // Without frame pointer: on entry RSP % 16 == 8 (return address pushed).
+        // After callee-saved pushes: total pushed = 8 (ret addr) + n_callee * 8.
+        // We need (8 + n_callee*8 + frame_size) % 16 == 0.
+        let raw = spill_slots * 8 + outgoing_arg_space;
+        let total_pushed_before_sub = 8 + n_callee * 8;
+        let misalign = (total_pushed_before_sub + raw) % 16;
+        let fs = if misalign == 0 {
+            raw
+        } else {
+            raw + (16 - misalign)
+        };
+        // Spills are at [RSP + outgoing_arg_space] after `sub rsp, frame_size`.
+        let so = outgoing_arg_space as i32;
+        (fs, so)
     };
 
-    // Spill area starts below the callee-saved register pushes.
-    // Callee-saved regs are pushed after `mov rbp, rsp`, so they sit between
-    // RBP and the spill area. The correct RBP-relative offset is:
-    //   -(n_callee * 8 + spill_slots * 8)
-    let spill_offset = -((n_callee as i32 + spill_slots as i32) * 8);
+    let spill_base = if uses_frame_pointer {
+        Reg::RBP
+    } else if use_red_zone {
+        // Red zone: spills below RSP (negative offsets from RSP).
+        Reg::RSP
+    } else {
+        Reg::RSP
+    };
 
     FrameLayout {
         frame_size,
         spill_offset,
         callee_saved: callee_saved_used.to_vec(),
-        uses_frame_pointer: true,
+        uses_frame_pointer,
         outgoing_arg_space,
+        is_leaf,
+        use_red_zone,
+        spill_base,
     }
 }
 
@@ -160,19 +220,21 @@ pub fn compute_frame_layout(
 
 /// Emit the function prologue.
 ///
-/// Sequence:
-///   push rbp
-///   mov rbp, rsp          (if uses_frame_pointer)
-///   push <callee-saved>…  (in declaration order)
-///   sub rsp, frame_size   (if non-zero)
+/// For leaf functions (`is_leaf == true`): emits nothing.
+///
+/// Otherwise:
+///   push rbp; mov rbp, rsp  (only if `uses_frame_pointer`)
+///   push <callee-saved>…    (in declaration order)
+///   sub rsp, frame_size     (if non-zero and not using red zone)
 pub fn emit_prologue(encoder: &mut Encoder, layout: &FrameLayout) {
-    // push rbp
-    encoder.encode_inst(&MachInst::Push {
-        src: Operand::Reg(Reg::RBP),
-    });
+    if layout.is_leaf {
+        return;
+    }
 
     if layout.uses_frame_pointer {
-        // mov rbp, rsp
+        encoder.encode_inst(&MachInst::Push {
+            src: Operand::Reg(Reg::RBP),
+        });
         encoder.encode_inst(&MachInst::MovRR {
             dst: Operand::Reg(Reg::RBP),
             src: Operand::Reg(Reg::RSP),
@@ -186,8 +248,8 @@ pub fn emit_prologue(encoder: &mut Encoder, layout: &FrameLayout) {
         });
     }
 
-    // Reserve the frame.
-    if layout.frame_size > 0 {
+    // Reserve the frame (skipped for red zone functions and when frame_size is 0).
+    if layout.frame_size > 0 && !layout.use_red_zone {
         encoder.encode_inst(&MachInst::SubRI {
             dst: Operand::Reg(Reg::RSP),
             imm: layout.frame_size as i32,
@@ -199,13 +261,20 @@ pub fn emit_prologue(encoder: &mut Encoder, layout: &FrameLayout) {
 
 /// Emit the function epilogue.
 ///
-/// Sequence:
-///   add rsp, frame_size   (if non-zero)
+/// For leaf functions (`is_leaf == true`): emits only `ret`.
+///
+/// Otherwise:
+///   add rsp, frame_size   (if non-zero and not using red zone)
 ///   pop <callee-saved>…   (reverse order)
-///   pop rbp               (if pushed)
+///   pop rbp               (only if `uses_frame_pointer`)
 ///   ret
 pub fn emit_epilogue(encoder: &mut Encoder, layout: &FrameLayout) {
-    if layout.frame_size > 0 {
+    if layout.is_leaf {
+        encoder.encode_inst(&MachInst::Ret);
+        return;
+    }
+
+    if layout.frame_size > 0 && !layout.use_red_zone {
         encoder.encode_inst(&MachInst::AddRI {
             dst: Operand::Reg(Reg::RSP),
             imm: layout.frame_size as i32,
@@ -219,10 +288,11 @@ pub fn emit_epilogue(encoder: &mut Encoder, layout: &FrameLayout) {
         });
     }
 
-    // pop rbp
-    encoder.encode_inst(&MachInst::Pop {
-        dst: Operand::Reg(Reg::RBP),
-    });
+    if layout.uses_frame_pointer {
+        encoder.encode_inst(&MachInst::Pop {
+            dst: Operand::Reg(Reg::RBP),
+        });
+    }
 
     encoder.encode_inst(&MachInst::Ret);
 }
@@ -452,39 +522,130 @@ mod tests {
 
     #[test]
     fn frame_layout_no_spills_no_callee_saved() {
-        let layout = compute_frame_layout(0, &[], 0);
+        // No calls, no spills, no callee-saved: leaf function, frame_size == 0.
+        let layout = compute_frame_layout(0, &[], 0, false, false);
         assert_eq!(layout.frame_size, 0);
         assert!(layout.callee_saved.is_empty());
+        assert!(layout.is_leaf);
     }
 
     #[test]
-    fn frame_layout_two_spill_slots() {
-        // 2 spill slots = 16 bytes. After push RBP (RSP%16==0), 0 callee-saved pushes.
-        // 16 bytes is already 16-byte aligned.
-        let layout = compute_frame_layout(2, &[], 0);
+    fn frame_layout_two_spill_slots_with_fp() {
+        // Force frame pointer. 2 spill slots = 16 bytes. After push RBP (RSP%16==0),
+        // 0 callee-saved pushes. 16 bytes is already 16-byte aligned.
+        let layout = compute_frame_layout(2, &[], 0, true, true);
         assert_eq!(layout.frame_size, 16);
+        assert!(layout.uses_frame_pointer);
     }
 
     #[test]
-    fn frame_layout_alignment_with_one_callee_saved() {
-        // 1 callee-saved push = 8 bytes (RSP%16 == 8 after push RBP + 1 push).
+    fn frame_layout_alignment_with_one_callee_saved_with_fp() {
+        // Force frame pointer. 1 callee-saved push = 8 bytes (RSP%16 == 8 after push RBP + 1 push).
         // If spill_slots=0, outgoing=0: raw=0, callee_push=8, misalign=8 → pad 8.
-        let layout = compute_frame_layout(0, &[Reg::RBX], 0);
+        let layout = compute_frame_layout(0, &[Reg::RBX], 0, true, true);
         assert_eq!(layout.frame_size, 8);
     }
 
     #[test]
-    fn frame_layout_outgoing_arg_space() {
-        // outgoing_arg_space = 16 (two stack args), no spills, no callee-saved.
+    fn frame_layout_outgoing_arg_space_with_fp() {
+        // Force frame pointer. outgoing_arg_space = 16 (two stack args), no spills, no callee-saved.
         // raw=16, callee_push=0, misalign=0 → frame_size=16.
-        let layout = compute_frame_layout(0, &[], 16);
+        let layout = compute_frame_layout(0, &[], 16, true, true);
         assert_eq!(layout.frame_size, 16);
     }
 
     #[test]
-    fn frame_layout_spill_offset() {
-        let layout = compute_frame_layout(3, &[], 0);
+    fn frame_layout_spill_offset_with_fp() {
+        // Force frame pointer. 3 spill slots, no callee-saved.
+        // spill_offset = -(0 + 3)*8 = -24.
+        let layout = compute_frame_layout(3, &[], 0, true, true);
         assert_eq!(layout.spill_offset, -24);
+        assert!(layout.uses_frame_pointer);
+    }
+
+    #[test]
+    fn frame_layout_leaf_no_prologue() {
+        // No calls, no spills, no callee-saved: pure leaf.
+        let layout = compute_frame_layout(0, &[], 0, false, false);
+        assert!(layout.is_leaf);
+        assert!(!layout.uses_frame_pointer);
+        assert_eq!(layout.frame_size, 0);
+        assert!(!layout.use_red_zone);
+    }
+
+    #[test]
+    fn frame_layout_red_zone_eligible() {
+        // No calls, 2 spill slots, no callee-saved: use red zone.
+        // slot 0 at [RSP - 2*8] = [RSP - 16], slot 1 at [RSP - 8].
+        let layout = compute_frame_layout(2, &[], 0, false, false);
+        assert!(layout.use_red_zone);
+        assert!(!layout.is_leaf);
+        assert_eq!(layout.frame_size, 0);
+        assert_eq!(layout.spill_offset, -16); // -(2 * 8)
+        assert_eq!(layout.spill_base, Reg::RSP);
+    }
+
+    #[test]
+    fn frame_layout_red_zone_ineligible_has_calls() {
+        // Has calls: red zone must not be used.
+        let layout = compute_frame_layout(2, &[], 0, true, false);
+        assert!(!layout.use_red_zone);
+    }
+
+    #[test]
+    fn frame_layout_red_zone_ineligible_too_many_spills() {
+        // 17 spill slots * 8 = 136 bytes > 128: red zone ineligible.
+        let layout = compute_frame_layout(17, &[], 0, false, false);
+        assert!(!layout.use_red_zone);
+    }
+
+    #[test]
+    fn frame_layout_red_zone_ineligible_callee_saved() {
+        // Has callee-saved registers: red zone must not be used.
+        let layout = compute_frame_layout(2, &[Reg::RBX], 0, false, false);
+        assert!(!layout.use_red_zone);
+    }
+
+    #[test]
+    fn frame_layout_no_fp_alignment() {
+        // Without frame pointer, has_calls=true, 0 spills, 1 callee-saved (RBX).
+        // On entry RSP%16==8. total_pushed_before_sub = 8 + 8 = 16. raw=0. misalign=0. frame_size=0.
+        let layout = compute_frame_layout(0, &[Reg::RBX], 0, true, false);
+        assert!(!layout.uses_frame_pointer);
+        assert_eq!(layout.frame_size, 0);
+        assert_eq!(layout.spill_base, Reg::RSP);
+    }
+
+    #[test]
+    fn frame_layout_no_fp_spill_offset() {
+        // Without frame pointer, has_calls=true, 2 spills, no callee-saved.
+        // total_pushed_before_sub = 8. raw=16. misalign=(8+16)%16=8 → frame_size=16+8=24.
+        // spill_offset = outgoing_arg_space = 0.
+        let layout = compute_frame_layout(2, &[], 0, true, false);
+        assert!(!layout.uses_frame_pointer);
+        assert_eq!(layout.spill_offset, 0);
+        assert_eq!(layout.spill_base, Reg::RSP);
+        // frame_size: total_pushed=8, raw=16, misalign=24%16=8, frame_size=16+8=24.
+        assert_eq!(layout.frame_size, 24);
+    }
+
+    #[test]
+    fn frame_layout_force_frame_pointer() {
+        // force_frame_pointer=true: uses_frame_pointer must be true regardless.
+        let layout = compute_frame_layout(0, &[], 0, false, true);
+        assert!(layout.uses_frame_pointer);
+    }
+
+    #[test]
+    fn frame_layout_backward_compat_force_fp() {
+        // Force frame pointer: same as old behavior.
+        // 3 callee-saved, 4 spills.
+        // callee_push = 24, raw = 32, misalign = 56%16 = 8 → frame_size = 40.
+        // spill_offset = -(3+4)*8 = -56.
+        let layout = compute_frame_layout(4, &[Reg::RBX, Reg::R12, Reg::R13], 0, true, true);
+        assert_eq!(layout.frame_size, 40);
+        assert_eq!(layout.spill_offset, -56);
+        assert!(layout.uses_frame_pointer);
     }
 
     // ── sequentialize_copies ─────────────────────────────────────────────────
@@ -551,12 +712,12 @@ mod tests {
 
     #[test]
     fn prologue_epilogue_bytes() {
-        // 3 callee-saved regs (RBX, R12, R13), 32 bytes of spill space.
-        // compute_frame_layout(4 spill slots, [RBX, R12, R13], 0):
+        // 3 callee-saved regs (RBX, R12, R13), 32 bytes of spill space, force frame pointer.
+        // compute_frame_layout(4 spill slots, [RBX, R12, R13], 0, has_calls=true, force_fp=true):
         //   callee_push = 3*8 = 24, raw = 4*8 = 32
         //   misalign = (24+32) % 16 = 56 % 16 = 8 → frame_size = 32+8 = 40
         let callee_saved = [Reg::RBX, Reg::R12, Reg::R13];
-        let layout = compute_frame_layout(4, &callee_saved, 0);
+        let layout = compute_frame_layout(4, &callee_saved, 0, true, true);
         assert_eq!(layout.frame_size, 40);
 
         let mut enc = Encoder::new();

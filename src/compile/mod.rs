@@ -59,6 +59,11 @@ pub struct CompileOptions {
     pub enable_peephole: bool,
     pub enable_nop_alignment: bool,
     pub verbosity: Verbosity,
+    /// Force the frame pointer (push rbp / mov rbp, rsp / pop rbp) to always be emitted.
+    /// Defaults to `false`: the frame pointer is omitted when not needed, freeing RBP as a
+    /// general-purpose register. Set to `true` for debuggability or when a frame pointer is
+    /// required (e.g. kernel code).
+    pub force_frame_pointer: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +83,7 @@ impl Default for CompileOptions {
             enable_peephole: true,
             enable_nop_alignment: false,
             verbosity: Verbosity::Silent,
+            force_frame_pointer: false,
         }
     }
 }
@@ -116,6 +122,17 @@ pub trait DiagnosticSink {
     fn phase_stats(&mut self, phase: &str, stats: &str);
 }
 
+// ── Helper functions ──────────────────────────────────────────────────────────
+
+/// Returns true if any block in `func` contains a Call effectful operation.
+fn func_has_calls(func: &Function) -> bool {
+    func.blocks.iter().any(|b| {
+        b.ops
+            .iter()
+            .any(|op| matches!(op, EffectfulOp::Call { .. }))
+    })
+}
+
 // ── compile() ────────────────────────────────────────────────────────────────
 
 /// Compile a single function to an object file.
@@ -131,6 +148,10 @@ pub fn compile(
         .take()
         .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
     let func = &func;
+
+    // Detect whether this function contains any call instructions.
+    // This is needed for frame layout decisions (leaf detection, red zone eligibility).
+    let has_calls = func_has_calls(func);
 
     // Phase 1: E-graph rewrite rules.
     let egraph_opts = EGraphOptions {
@@ -294,6 +315,7 @@ pub fn compile(
             &copy_pairs,
             &loop_depths,
             &combined_points,
+            opts.force_frame_pointer,
         )
         .map_err(|e| CompileError {
             phase: "regalloc".into(),
@@ -469,6 +491,7 @@ pub fn compile(
                 &block_copy_pairs,
                 &block_loop_depths,
                 &block_combined_points,
+                opts.force_frame_pointer,
             )
             .map_err(|e| CompileError {
                 phase: "regalloc".into(),
@@ -540,6 +563,8 @@ pub fn compile(
         regalloc_result.spill_slots,
         &regalloc_result.callee_saved_used,
         0,
+        has_calls,
+        opts.force_frame_pointer,
     );
 
     // Phase 7: Per-block MachInst lowering + phi elimination + terminator emission.

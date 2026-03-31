@@ -16,6 +16,20 @@ use crate::x86::reg::Reg;
 
 use super::{CompileError, IrLocation};
 
+/// Compute the memory address for spill slot `slot` (0-based) given the frame layout.
+///
+/// When `uses_frame_pointer` is true, spills are addressed as `[RBP + spill_offset + slot*8]`
+/// (spill_offset is negative). When false, spills are `[RSP + spill_offset + slot*8]`
+/// (spill_offset is non-negative for normal frames, negative for red-zone frames).
+fn spill_addr(frame_layout: &FrameLayout, slot: i32) -> Addr {
+    Addr {
+        base: Some(frame_layout.spill_base),
+        index: None,
+        scale: 1,
+        disp: frame_layout.spill_offset + slot * 8,
+    }
+}
+
 fn get_dst(name: &str, dst_reg: Option<Reg>) -> Result<Reg, String> {
     dst_reg.ok_or_else(|| format!("{name}: no register for dst"))
 }
@@ -755,15 +769,9 @@ pub(super) fn lower_block_pure_ops(
         // Handle GPR spill sentinels.
         if is_spill_store(inst) {
             let slot = spill_slot_of(inst) as i32;
-            let disp = frame_layout.spill_offset + slot * 8;
             if let Some(src_reg) = inst.operands.first().and_then(|&v| get_reg(v)) {
                 result.push(MachInst::MovMR {
-                    addr: Addr {
-                        base: Some(Reg::RBP),
-                        index: None,
-                        scale: 1,
-                        disp,
-                    },
+                    addr: spill_addr(frame_layout, slot),
                     src: Operand::Reg(src_reg),
                 });
             }
@@ -771,16 +779,10 @@ pub(super) fn lower_block_pure_ops(
         }
         if is_spill_load(inst) {
             let slot = spill_slot_of(inst) as i32;
-            let disp = frame_layout.spill_offset + slot * 8;
             if let Some(dst_reg) = get_reg(inst.dst) {
                 result.push(MachInst::MovRM {
                     dst: Operand::Reg(dst_reg),
-                    addr: Addr {
-                        base: Some(Reg::RBP),
-                        index: None,
-                        scale: 1,
-                        disp,
-                    },
+                    addr: spill_addr(frame_layout, slot),
                 });
             }
             continue;
@@ -789,15 +791,9 @@ pub(super) fn lower_block_pure_ops(
         // Handle XMM spill sentinels.
         if is_xmm_spill_store(inst) {
             let slot = spill_slot_of(inst) as i32;
-            let disp = frame_layout.spill_offset + slot * 8;
             if let Some(src_reg) = inst.operands.first().and_then(|&v| get_reg(v)) {
                 result.push(MachInst::MovsdMR {
-                    addr: Addr {
-                        base: Some(Reg::RBP),
-                        index: None,
-                        scale: 1,
-                        disp,
-                    },
+                    addr: spill_addr(frame_layout, slot),
                     src: Operand::Reg(src_reg),
                 });
             }
@@ -805,16 +801,10 @@ pub(super) fn lower_block_pure_ops(
         }
         if is_xmm_spill_load(inst) {
             let slot = spill_slot_of(inst) as i32;
-            let disp = frame_layout.spill_offset + slot * 8;
             if let Some(dst_reg) = get_reg(inst.dst) {
                 result.push(MachInst::MovsdRM {
                     dst: Operand::Reg(dst_reg),
-                    addr: Addr {
-                        base: Some(Reg::RBP),
-                        index: None,
-                        scale: 1,
-                        disp,
-                    },
+                    addr: spill_addr(frame_layout, slot),
                 });
             }
             continue;

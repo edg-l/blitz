@@ -124,10 +124,12 @@ pub fn greedy_color(
 ///
 /// Excludes RSP. Pre-colored VRegs fix certain color->reg mappings.
 /// For remaining colors: assigns caller-saved first, then callee-saved.
+/// When `uses_frame_pointer` is false, RBP is included as an allocatable GPR.
 pub fn map_colors_to_regs(
     coloring: &ColoringResult,
     reg_class: RegClass,
     pre_coloring: &HashMap<usize, Reg>,
+    uses_frame_pointer: bool,
 ) -> HashMap<u32, Reg> {
     let mut color_to_reg: HashMap<u32, Reg> = HashMap::new();
 
@@ -143,17 +145,7 @@ pub fn map_colors_to_regs(
     // Build an ordered list of available physical registers for this class.
     // Prefer caller-saved first (avoids callee-save push/pop overhead).
     let available: Vec<Reg> = match reg_class {
-        RegClass::GPR => {
-            // Caller-saved GPRs (excluding RSP), then callee-saved (excluding
-            // RBP, which is always the frame pointer and must not be allocated).
-            let mut regs: Vec<Reg> = CALLER_SAVED_GPR
-                .iter()
-                .filter(|&&r| r != Reg::RSP)
-                .copied()
-                .collect();
-            regs.extend(CALLEE_SAVED.iter().filter(|&&r| r != Reg::RBP).copied());
-            regs
-        }
+        RegClass::GPR => allocatable_gpr_order(uses_frame_pointer),
         RegClass::XMM => {
             // XMM0-XMM15 (all caller-saved in SysV ABI).
             vec![
@@ -204,9 +196,37 @@ pub fn map_colors_to_regs(
 
 // ── Available register counts ─────────────────────────────────────────────────
 
-/// Number of usable GPR colors (16 GPRs minus RSP and RBP = 14).
-/// RBP is excluded because it is always used as the frame pointer.
-pub const AVAILABLE_GPR_COLORS: u32 = 14;
+/// Returns the ordered list of allocatable GPR registers.
+///
+/// Caller-saved registers are listed first (cheaper: no push/pop needed).
+/// Callee-saved registers follow. When `uses_frame_pointer` is false, RBP is
+/// appended last as a last-resort callee-saved general-purpose register.
+///
+/// This ordering must be kept consistent across `map_colors_to_regs`,
+/// `build_pre_coloring_colors`, and `add_call_clobber_interferences` so that
+/// color numbers correspond to the same physical register in all uses.
+pub fn allocatable_gpr_order(uses_frame_pointer: bool) -> Vec<Reg> {
+    // Caller-saved GPRs (no RSP).
+    let mut regs: Vec<Reg> = CALLER_SAVED_GPR
+        .iter()
+        .filter(|&&r| r != Reg::RSP)
+        .copied()
+        .collect();
+    // Callee-saved GPRs (RBP is excluded from the fixed list here; added below conditionally).
+    regs.extend(CALLEE_SAVED.iter().filter(|&&r| r != Reg::RBP).copied());
+    if !uses_frame_pointer {
+        // When the frame pointer is omitted, RBP becomes an ordinary callee-saved GPR.
+        // It is placed last so it is used only when all other registers are exhausted.
+        regs.push(Reg::RBP);
+    }
+    regs
+}
+
+/// Number of usable GPR colors when the frame pointer is used (RBP reserved): 14.
+/// Number of usable GPR colors when the frame pointer is omitted (RBP allocatable): 15.
+pub fn available_gpr_colors(uses_frame_pointer: bool) -> u32 {
+    if uses_frame_pointer { 14 } else { 15 }
+}
 
 /// Number of usable XMM colors (16 XMM registers).
 pub const AVAILABLE_XMM_COLORS: u32 = 16;
@@ -311,7 +331,7 @@ mod tests {
         let graph = make_graph(2, &[(0, 1)]);
         let ordering = mcs_ordering(&graph);
         let result = greedy_color(&graph, &ordering, &HashMap::new());
-        let color_to_reg = map_colors_to_regs(&result, RegClass::GPR, &HashMap::new());
+        let color_to_reg = map_colors_to_regs(&result, RegClass::GPR, &HashMap::new(), true);
 
         // Two colors, two distinct registers.
         let r0 = color_to_reg[&0];
@@ -320,5 +340,33 @@ mod tests {
         assert!(r0.is_gpr() && r1.is_gpr());
         assert_ne!(r0, Reg::RSP);
         assert_ne!(r1, Reg::RSP);
+    }
+
+    // map_colors_to_regs: RBP is not allocated when uses_frame_pointer=true.
+    #[test]
+    fn color_to_reg_no_rbp_with_frame_pointer() {
+        let graph = make_graph(2, &[(0, 1)]);
+        let ordering = mcs_ordering(&graph);
+        let result = greedy_color(&graph, &ordering, &HashMap::new());
+        let color_to_reg = map_colors_to_regs(&result, RegClass::GPR, &HashMap::new(), true);
+        for &reg in color_to_reg.values() {
+            assert_ne!(
+                reg,
+                Reg::RBP,
+                "RBP must not be allocated when frame pointer is used"
+            );
+        }
+    }
+
+    // map_colors_to_regs: RBP can be allocated when uses_frame_pointer=false.
+    #[test]
+    fn color_to_reg_rbp_available_without_frame_pointer() {
+        // available_gpr_colors(false) = 15; if we need exactly 15 colors, color 14 -> RBP.
+        assert_eq!(available_gpr_colors(false), 15);
+        assert_eq!(available_gpr_colors(true), 14);
+        let order = allocatable_gpr_order(false);
+        assert_eq!(order.last(), Some(&Reg::RBP));
+        let order_fp = allocatable_gpr_order(true);
+        assert!(!order_fp.contains(&Reg::RBP));
     }
 }

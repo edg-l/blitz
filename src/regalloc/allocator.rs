@@ -7,7 +7,9 @@ use crate::x86::abi::{CALLEE_SAVED, CALLER_SAVED_GPR};
 use crate::x86::reg::{Reg, RegClass};
 
 use super::coalesce::coalesce;
-use super::coloring::{AVAILABLE_GPR_COLORS, greedy_color, map_colors_to_regs, mcs_ordering};
+use super::coloring::{
+    allocatable_gpr_order, available_gpr_colors, greedy_color, map_colors_to_regs, mcs_ordering,
+};
 use super::interference::build_interference;
 use super::liveness::compute_liveness;
 use super::rewrite::apply_coalescing;
@@ -29,6 +31,8 @@ pub struct RegAllocResult {
 /// in compile.rs. Cross-block live ranges are handled by the caller via spill/reload
 /// insertion (`rewrite_block_for_splitting`) before this function is invoked.
 ///
+/// `uses_frame_pointer`: when false, RBP is included in the allocatable GPR set (15 regs total).
+///
 /// Algorithm:
 /// 1. Compute liveness.
 /// 2. Build interference graph.
@@ -45,6 +49,7 @@ pub fn allocate(
     copy_pairs: &[(VReg, VReg)], // phi copy pairs for coalescing
     loop_depths: &std::collections::HashMap<VReg, u32>, // loop-depth info for spill selection
     call_points: &[usize],       // instruction indices after which a call occurs
+    uses_frame_pointer: bool,
 ) -> Result<RegAllocResult, String> {
     let mut insts: Vec<ScheduledInst> = insts.to_vec();
     let mut spill_slots = 0u32;
@@ -76,8 +81,13 @@ pub fn allocate(
 
         // Step 3: Build interference graph.
         let graph = build_interference(&liveness, &insts, &vreg_classes);
-        let (graph, _) =
-            add_call_clobber_interferences(graph, &liveness, call_points, &mut next_vreg);
+        let (graph, _) = add_call_clobber_interferences(
+            graph,
+            &liveness,
+            call_points,
+            &mut next_vreg,
+            uses_frame_pointer,
+        );
 
         // Step 4 (first round only): coalesce copy pairs on original SSA graph.
         // Per spec: coalescing must NOT be re-run after spill insertion.
@@ -99,15 +109,20 @@ pub fn allocate(
         // Assign each pre-colored param a unique color based on a canonical
         // ordering of the ABI registers.
         let pre_coloring_colors: HashMap<usize, u32> =
-            build_pre_coloring_colors(&insts_coalesced, &param_vreg_to_reg);
+            build_pre_coloring_colors(&insts_coalesced, &param_vreg_to_reg, uses_frame_pointer);
 
         // Step 5: MCS ordering + greedy coloring.
         // Recompute liveness/graph on coalesced insts for accuracy.
         let liveness2 = compute_liveness(&insts_coalesced, block_live_out);
         let vreg_classes2 = build_vreg_classes(&insts_coalesced, &liveness2);
         let graph2 = build_interference(&liveness2, &insts_coalesced, &vreg_classes2);
-        let (graph2, phantom_precolors) =
-            add_call_clobber_interferences(graph2, &liveness2, call_points, &mut next_vreg);
+        let (graph2, phantom_precolors) = add_call_clobber_interferences(
+            graph2,
+            &liveness2,
+            call_points,
+            &mut next_vreg,
+            uses_frame_pointer,
+        );
 
         // Merge phantom pre-colorings (caller-saved phantoms at call sites) with
         // param pre-colorings.
@@ -119,11 +134,17 @@ pub fn allocate(
 
         // Step 6: Check if we need to spill.
         let gpr_colors_needed = coloring.chromatic_number;
+        let avail = available_gpr_colors(uses_frame_pointer);
 
-        if gpr_colors_needed <= AVAILABLE_GPR_COLORS {
+        if gpr_colors_needed <= avail {
             // Success: map colors to physical registers.
             let pre_coloring_regs = build_pre_coloring_regs(&insts_coalesced, &param_vreg_to_reg);
-            let color_to_reg = map_colors_to_regs(&coloring, RegClass::GPR, &pre_coloring_regs);
+            let color_to_reg = map_colors_to_regs(
+                &coloring,
+                RegClass::GPR,
+                &pre_coloring_regs,
+                uses_frame_pointer,
+            );
 
             // Build final VReg -> Reg mapping.
             let mut vreg_to_reg: HashMap<VReg, Reg> = HashMap::new();
@@ -157,19 +178,14 @@ pub fn allocate(
             return Err(format!(
                 "register allocation failed after {MAX_SPILL_ROUNDS} spill rounds: \
                  chromatic number {gpr_colors_needed} exceeds available GPR colors \
-                 {AVAILABLE_GPR_COLORS}. Live ranges at pressure point may indicate \
+                 {avail}. Live ranges at pressure point may indicate \
                  too many simultaneously live values."
             ));
         }
 
         // Select a VReg to spill.
-        let spill_candidate = select_spill(
-            &graph2,
-            &liveness2,
-            &insts_coalesced,
-            AVAILABLE_GPR_COLORS,
-            loop_depths,
-        );
+        let spill_candidate =
+            select_spill(&graph2, &liveness2, &insts_coalesced, avail, loop_depths);
 
         let Some(spill_idx) = spill_candidate else {
             return Err(format!(
@@ -207,19 +223,15 @@ fn add_call_clobber_interferences(
     liveness: &super::liveness::LivenessInfo,
     call_points: &[usize],
     next_vreg: &mut u32,
+    uses_frame_pointer: bool,
 ) -> (super::interference::InterferenceGraph, HashMap<usize, u32>) {
     if call_points.is_empty() {
         return (graph, HashMap::new());
     }
 
-    // Build the same register ordering as map_colors_to_regs uses for GPR so that
-    // the color numbers assigned to phantoms correspond to caller-saved registers.
-    let ordered_regs: Vec<Reg> = CALLER_SAVED_GPR
-        .iter()
-        .filter(|&&r| r != Reg::RSP)
-        .copied()
-        .chain(CALLEE_SAVED.iter().copied())
-        .collect();
+    // Use the same register ordering as map_colors_to_regs so that the color numbers
+    // assigned to phantom VRegs correspond to the correct physical registers.
+    let ordered_regs = allocatable_gpr_order(uses_frame_pointer);
     let reg_to_color: HashMap<Reg, u32> = ordered_regs
         .iter()
         .enumerate()
@@ -326,20 +338,15 @@ fn build_vreg_classes(
 /// Build a pre-coloring map from VReg index -> color.
 ///
 /// Each ABI register is assigned a stable color number based on its position
-/// in the caller-saved + callee-saved ordering used by map_colors_to_regs.
+/// in the register ordering used by `map_colors_to_regs` (via `allocatable_gpr_order`).
+/// `uses_frame_pointer` must match what was passed to `allocate` so that color numbers
+/// correspond to the same physical registers.
 fn build_pre_coloring_colors(
     insts: &[ScheduledInst],
     param_vreg_to_reg: &HashMap<VReg, Reg>,
+    uses_frame_pointer: bool,
 ) -> HashMap<usize, u32> {
-    // Build the same register ordering as map_colors_to_regs uses for GPR.
-    use crate::x86::abi::CALLER_SAVED_GPR;
-    let ordered_regs: Vec<Reg> = CALLER_SAVED_GPR
-        .iter()
-        .filter(|&&r| r != Reg::RSP)
-        .copied()
-        .chain(CALLEE_SAVED.iter().copied())
-        .collect();
-
+    let ordered_regs = allocatable_gpr_order(uses_frame_pointer);
     let reg_to_color: HashMap<Reg, u32> = ordered_regs
         .iter()
         .enumerate()
@@ -407,6 +414,7 @@ mod tests {
             &[],
             &std::collections::HashMap::new(),
             &[],
+            false,
         )
         .expect("allocation should succeed");
 
@@ -441,6 +449,7 @@ mod tests {
             &[],
             &std::collections::HashMap::new(),
             &[],
+            false,
         )
         .expect("allocation should succeed");
 
@@ -477,6 +486,7 @@ mod tests {
             &[],
             &std::collections::HashMap::new(),
             &[],
+            false,
         )
         .expect("allocation should succeed");
 
@@ -518,6 +528,7 @@ mod tests {
             &[],
             &std::collections::HashMap::new(),
             &[],
+            false,
         );
         // Either it succeeds (some spilling reduced pressure) or it errors.
         // With 16 simultaneous live regs and only constants (rematerializable),
@@ -562,6 +573,7 @@ mod tests {
             &copy_pairs,
             &std::collections::HashMap::new(),
             &[],
+            false,
         )
         .expect("allocation with copy pairs should succeed");
 
@@ -598,6 +610,7 @@ mod tests {
             &[],
             &std::collections::HashMap::new(),
             &[],
+            false,
         )
         .expect("allocation with shift pre-coloring should succeed");
 

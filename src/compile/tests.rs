@@ -532,13 +532,11 @@ fn e2e_snapshot() {
     let id_obj = compile(id_func, &opts, None).expect("compile identity");
     let add_obj = compile(add_func, &opts, None).expect("compile add");
 
-    // Verify the identity function is minimal: just prologue + mov rax,rdi + epilogue.
-    // Expected bytes: 55 48 89 e5 48 89 f8 5d c3
+    // Verify the identity function is minimal: leaf function with no calls or spills.
+    // With frame pointer omission (default), the prologue and epilogue are absent.
+    // Expected bytes: 48 89 f8 c3  (mov rax, rdi; ret)
     let expected_identity: &[u8] = &[
-        0x55, // push rbp
-        0x48, 0x89, 0xe5, // mov rbp, rsp
         0x48, 0x89, 0xf8, // mov rax, rdi
-        0x5d, // pop rbp
         0xc3, // ret
     ];
     assert_eq!(
@@ -2268,5 +2266,126 @@ int main(void) {
 "#;
     if let Some(code) = link_and_run_obj("blitz_e2e_div_in_loop", &obj, c_main) {
         assert_eq!(code, 0, "div_in_loop returned wrong exit code {code}");
+    }
+}
+
+// ── Prologue/epilogue improvement tests ───────────────────────────────────────
+
+// Leaf function with no calls, no spills: prologue and epilogue must be absent.
+// The output should be just the function body (mov rax, rdi; ret).
+#[test]
+fn e2e_leaf_no_prologue() {
+    let func = build_identity();
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile identity");
+
+    // push rbp = 0x55; sub rsp = 0x48 0x83 0xEC
+    // Verify none of these appear at the start.
+    assert!(
+        !obj.code.starts_with(&[0x55]),
+        "leaf function must not start with push rbp (0x55): {:?}",
+        &obj.code
+    );
+    assert!(
+        !obj.code.windows(3).any(|w| w == [0x48, 0x83, 0xec]),
+        "leaf function must not contain sub rsp: {:?}",
+        &obj.code
+    );
+
+    // Expected: mov rax, rdi (48 89 f8) then ret (c3).
+    let expected: &[u8] = &[0x48, 0x89, 0xf8, 0xc3];
+    assert_eq!(
+        &obj.code, expected,
+        "leaf identity bytes should be [mov rax,rdi; ret]"
+    );
+}
+
+// Function with force_frame_pointer=false (default) that calls another function.
+// Verify no `push rbp` at the start of the output.
+#[test]
+fn e2e_frame_pointer_omission() {
+    let mut builder = FunctionBuilder::new("fp_omit_caller", &[Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let results = builder.call("identity_ext", &[params[0]], &[Type::I64]);
+    builder.ret(Some(results[0]));
+    let func = builder.finalize().expect("fp_omit_caller finalize");
+
+    let opts = CompileOptions {
+        force_frame_pointer: false,
+        ..Default::default()
+    };
+    let obj = compile(func, &opts, None).expect("compile fp_omit_caller");
+
+    // With force_frame_pointer=false, no push rbp (0x55) at start.
+    assert!(
+        !obj.code.starts_with(&[0x55]),
+        "fp omission: output must not start with push rbp (0x55): {:?}",
+        &obj.code
+    );
+}
+
+// Function with force_frame_pointer=true: verify `push rbp; mov rbp, rsp` is present.
+#[test]
+fn e2e_force_frame_pointer() {
+    let mut builder = FunctionBuilder::new("fp_force_caller", &[Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let results = builder.call("identity_ext", &[params[0]], &[Type::I64]);
+    builder.ret(Some(results[0]));
+    let func = builder.finalize().expect("fp_force_caller finalize");
+
+    let opts = CompileOptions {
+        force_frame_pointer: true,
+        ..Default::default()
+    };
+    let obj = compile(func, &opts, None).expect("compile fp_force_caller");
+
+    // With force_frame_pointer=true: push rbp (55) then mov rbp, rsp (48 89 e5).
+    assert!(
+        obj.code.starts_with(&[0x55, 0x48, 0x89, 0xe5]),
+        "force_frame_pointer: output must start with push rbp; mov rbp,rsp: {:?}",
+        &obj.code
+    );
+}
+
+// Function with no frame pointer: RBP should be usable as a general-purpose register
+// and the function should produce correct results when linked and run.
+#[test]
+fn e2e_rbp_allocatable() {
+    if !has_tool("cc") {
+        return;
+    }
+
+    // Build a function that chains additions: result = n*6.
+    // With force_frame_pointer=false (15 allocatable GPRs including RBP),
+    // the function should compile and execute correctly.
+    let mut builder = FunctionBuilder::new("blitz_rbp_alloc", &[Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let n = params[0];
+    let a = builder.add(n, n); // a = n*2
+    let b = builder.add(a, n); // b = n*3
+    let c = builder.add(b, n); // c = n*4
+    let d = builder.add(c, n); // d = n*5
+    let e = builder.add(d, n); // e = n*6
+    builder.ret(Some(e));
+    let func = builder.finalize().expect("rbp_alloc finalize");
+
+    let opts = CompileOptions {
+        force_frame_pointer: false,
+        ..Default::default()
+    };
+    let obj = compile(func, &opts, None).expect("compile rbp_alloc");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_rbp_alloc(int64_t n);
+int main(void) {
+    if (blitz_rbp_alloc(7) != 42) return 1;
+    if (blitz_rbp_alloc(1) != 6) return 2;
+    if (blitz_rbp_alloc(0) != 0) return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_rbp_alloc", &obj, c_main) {
+        assert_eq!(code, 0, "rbp_alloc returned wrong exit code {code}");
     }
 }
