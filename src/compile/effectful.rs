@@ -96,11 +96,24 @@ pub(super) fn lower_effectful_op(
                     }),
                 })?;
             let addr = build_mem_addr(canon_addr, addr_reg, extraction, class_to_vreg, regalloc);
-            Ok(vec![MachInst::MovRM {
-                size: load_size,
-                dst: Operand::Reg(result_reg),
-                addr,
-            }])
+            // S8/S16 loads must use zero-extending loads (MovzxBRM/MovzxWRM) to
+            // avoid partial register writes that leave upper bits unchanged.
+            let inst = match load_size {
+                OpSize::S8 => MachInst::MovzxBRM {
+                    dst: Operand::Reg(result_reg),
+                    addr,
+                },
+                OpSize::S16 => MachInst::MovzxWRM {
+                    dst: Operand::Reg(result_reg),
+                    addr,
+                },
+                _ => MachInst::MovRM {
+                    size: load_size,
+                    dst: Operand::Reg(result_reg),
+                    addr,
+                },
+            };
+            Ok(vec![inst])
         }
         EffectfulOp::Store { addr, val, ty } => {
             let canon_addr = *addr;

@@ -287,6 +287,16 @@ pub enum MachInst {
         dst: Operand,
         src: Operand,
     },
+    /// Zero-extend byte from memory to 64-bit register: MOVZX r64, byte ptr [addr]
+    MovzxBRM {
+        dst: Operand,
+        addr: Addr,
+    },
+    /// Zero-extend word from memory to 64-bit register: MOVZX r64, word ptr [addr]
+    MovzxWRM {
+        dst: Operand,
+        addr: Addr,
+    },
     /// Sign-extend word to 64-bit
     MovsxWR {
         dst: Operand,

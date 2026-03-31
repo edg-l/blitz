@@ -85,9 +85,11 @@ fn lower_shift_cl(
     // The shift count operand is pre-colored to RCX before register allocation
     // when possible. If the count VReg was already pre-colored to another register
     // (e.g., because it is a function parameter in RSI), emit a MOV to RCX now.
+    // Use S64 to cleanly write the full register and avoid partial register writes,
+    // even though only CL (low byte) is read by the shift instruction.
     if src_b != Reg::RCX {
         insts.push(MachInst::MovRR {
-            size,
+            size: OpSize::S64,
             dst: Operand::Reg(Reg::RCX),
             src: Operand::Reg(src_b),
         });
@@ -570,6 +572,11 @@ fn lower_op(
                 if size == OpSize::S8 {
                     // I8 remainder: AH contains the result. Shift AX right by 8
                     // to move AH into AL, then optionally copy to dst.
+                    //
+                    // WARNING: This ShrRI clobbers AL (the quotient from Proj0).
+                    // Correctness relies on the scheduler ordering all Proj0 uses
+                    // (the quotient in AL) before this Proj1 extraction. If Proj0
+                    // is consumed after this point, the value will be corrupted.
                     let mut insts = vec![MachInst::ShrRI {
                         size: OpSize::S16,
                         dst: Operand::Reg(Reg::RAX),

@@ -459,52 +459,55 @@ impl Encoder {
     /// `rax_shortcut` is the opcode for the RAX+imm32 shortcut.
     fn encode_alu_ri(&mut self, size: OpSize, slash_n: u8, rax_op: u8, dst: Reg, imm: i32) {
         let d = dst.hw_enc();
-        let w = size == OpSize::S64;
-        match size {
-            OpSize::S64 | OpSize::S32 | OpSize::S16 => {
-                self.emit_size_prefix(size);
-                if Self::fits_i8(imm) {
-                    if w {
-                        self.emit_rex(true, 0, 0, d);
-                    } else {
-                        self.maybe_emit_rex(false, 0, 0, d);
-                    }
-                    self.emit_byte(0x83);
-                    self.emit_modrm(0b11, slash_n, d);
-                    self.emit_byte(imm as i8 as u8);
-                } else if dst == Reg::RAX {
-                    if w {
-                        self.emit_rex(true, 0, 0, 0);
-                    } else {
-                        self.maybe_emit_rex(false, 0, 0, 0);
-                    }
-                    self.emit_byte(rax_op);
-                    if size == OpSize::S16 {
-                        self.emit_le16(imm as u16);
-                    } else {
-                        self.emit_le32(imm);
-                    }
-                } else {
-                    if w {
-                        self.emit_rex(true, 0, 0, d);
-                    } else {
-                        self.maybe_emit_rex(false, 0, 0, d);
-                    }
-                    self.emit_byte(0x81);
-                    self.emit_modrm(0b11, slash_n, d);
-                    if size == OpSize::S16 {
-                        self.emit_le16(imm as u16);
-                    } else {
-                        self.emit_le32(imm);
-                    }
-                }
+
+        if size == OpSize::S8 {
+            // S8 ALWAYS uses 0x80 /n ib. Never 0x83.
+            self.emit_rex_for_size(size, 0, 0, d);
+            self.emit_byte(0x80);
+            self.emit_modrm(0b11, slash_n, d);
+            self.emit_byte(imm as u8);
+            return;
+        }
+
+        // S16, S32, S64: emit operand-size prefix (0x66 for S16) and REX as needed.
+        let needs_rex_w = size == OpSize::S64;
+        self.emit_size_prefix(size);
+
+        // Helper closure to emit the appropriate REX prefix.
+        let emit_rex = |enc: &mut Self, reg_field: u8, rm_field: u8| {
+            if needs_rex_w {
+                enc.emit_rex(true, reg_field, 0, rm_field);
+            } else {
+                enc.maybe_emit_rex(false, reg_field, 0, rm_field);
             }
-            OpSize::S8 => {
-                // S8 ALWAYS uses 0x80 /n ib. Never 0x83.
-                self.emit_rex_for_size(size, 0, 0, d);
-                self.emit_byte(0x80);
-                self.emit_modrm(0b11, slash_n, d);
-                self.emit_byte(imm as u8);
+        };
+
+        let imm_width = if size == OpSize::S16 { 2 } else { 4 };
+
+        if Self::fits_i8(imm) {
+            // Sign-extended imm8: 0x83 /n ib
+            emit_rex(self, 0, d);
+            self.emit_byte(0x83);
+            self.emit_modrm(0b11, slash_n, d);
+            self.emit_byte(imm as i8 as u8);
+        } else if dst == Reg::RAX {
+            // RAX short form: rax_op + imm16/imm32
+            emit_rex(self, 0, 0);
+            self.emit_byte(rax_op);
+            if imm_width == 2 {
+                self.emit_le16(imm as u16);
+            } else {
+                self.emit_le32(imm);
+            }
+        } else {
+            // General form: 0x81 /n + imm16/imm32
+            emit_rex(self, 0, d);
+            self.emit_byte(0x81);
+            self.emit_modrm(0b11, slash_n, d);
+            if imm_width == 2 {
+                self.emit_le16(imm as u16);
+            } else {
+                self.emit_le32(imm);
             }
         }
     }
@@ -930,6 +933,10 @@ impl Encoder {
     }
 
     /// CBW: sign-extend AL to AX (0x66 0x98).
+    ///
+    /// In 64-bit mode, bare opcode 0x98 is CWDE (sign-extend EAX to RAX).
+    /// The 0x66 operand-size override prefix selects the 16-bit form (CBW),
+    /// which sign-extends AL into AX as needed for 8-bit division setup.
     pub fn encode_cbw(&mut self) {
         self.emit_byte(0x66);
         self.emit_byte(0x98);
@@ -1045,6 +1052,28 @@ impl Encoder {
         self.emit_byte(0x0F);
         self.emit_byte(0xB7);
         self.emit_modrm(0b11, d, s);
+    }
+
+    /// MOVZX r64, byte ptr [addr]: REX.W + 0F B6 /r with memory operand.
+    pub fn encode_movzx_brm(&mut self, dst: Reg, addr: &Addr) {
+        let d = dst.hw_enc();
+        let idx = addr.index.map_or(0u8, |r| r.hw_enc());
+        let base = addr.base.map_or(0u8, |r| r.hw_enc());
+        self.emit_rex(true, d, idx, base);
+        self.emit_byte(0x0F);
+        self.emit_byte(0xB6);
+        self.emit_addr(d, addr);
+    }
+
+    /// MOVZX r64, word ptr [addr]: REX.W + 0F B7 /r with memory operand.
+    pub fn encode_movzx_wrm(&mut self, dst: Reg, addr: &Addr) {
+        let d = dst.hw_enc();
+        let idx = addr.index.map_or(0u8, |r| r.hw_enc());
+        let base = addr.base.map_or(0u8, |r| r.hw_enc());
+        self.emit_rex(true, d, idx, base);
+        self.emit_byte(0x0F);
+        self.emit_byte(0xB7);
+        self.emit_addr(d, addr);
     }
 
     pub fn encode_movsx_wr(&mut self, dst: Reg, src: Reg) {
@@ -1444,6 +1473,12 @@ impl Encoder {
             }
             MachInst::MovsxWR { dst, src } => {
                 self.encode_movsx_wr(Self::expect_reg(dst), Self::expect_reg(src));
+            }
+            MachInst::MovzxBRM { dst, addr } => {
+                self.encode_movzx_brm(Self::expect_reg(dst), addr);
+            }
+            MachInst::MovzxWRM { dst, addr } => {
+                self.encode_movzx_wrm(Self::expect_reg(dst), addr);
             }
             MachInst::MovsxDR { dst, src } => {
                 self.encode_movsx_dr(Self::expect_reg(dst), Self::expect_reg(src));
@@ -1889,6 +1924,56 @@ mod tests {
         let mut e = enc();
         e.encode_movsx_dr(Reg::RAX, Reg::RCX);
         check(&e.buf, &[0x48, 0x63, 0xC1]);
+    }
+
+    #[test]
+    fn movzx_brm_base_disp() {
+        // movzx rax, byte ptr [rcx + 8]
+        // REX.W(48) + 0F B6 + ModRM(mod01,reg0,rm1) + disp8(08)
+        let mut e = enc();
+        let addr = Addr::new(Some(Reg::RCX), None, 1, 8);
+        e.encode_movzx_brm(Reg::RAX, &addr);
+        check(&e.buf, &[0x48, 0x0F, 0xB6, 0x41, 0x08]);
+    }
+
+    #[test]
+    fn movzx_brm_base_index_scale() {
+        // movzx rax, byte ptr [rbx + rcx*4 + 16]
+        // REX.W(48) + 0F B6 + ModRM(mod01,reg0,rm4=SIB) + SIB(ss2,idx1,base3) + disp8(10)
+        let mut e = enc();
+        let addr = Addr::new(Some(Reg::RBX), Some(Reg::RCX), 4, 16);
+        e.encode_movzx_brm(Reg::RAX, &addr);
+        check(&e.buf, &[0x48, 0x0F, 0xB6, 0x44, 0x8B, 0x10]);
+    }
+
+    #[test]
+    fn movzx_wrm_base_disp() {
+        // movzx rax, word ptr [rcx + 8]
+        // REX.W(48) + 0F B7 + ModRM(mod01,reg0,rm1) + disp8(08)
+        let mut e = enc();
+        let addr = Addr::new(Some(Reg::RCX), None, 1, 8);
+        e.encode_movzx_wrm(Reg::RAX, &addr);
+        check(&e.buf, &[0x48, 0x0F, 0xB7, 0x41, 0x08]);
+    }
+
+    #[test]
+    fn movzx_wrm_base_index_scale() {
+        // movzx rax, word ptr [rbx + rcx*4 + 16]
+        // REX.W(48) + 0F B7 + ModRM(mod01,reg0,rm4=SIB) + SIB(ss2,idx1,base3) + disp8(10)
+        let mut e = enc();
+        let addr = Addr::new(Some(Reg::RBX), Some(Reg::RCX), 4, 16);
+        e.encode_movzx_wrm(Reg::RAX, &addr);
+        check(&e.buf, &[0x48, 0x0F, 0xB7, 0x44, 0x8B, 0x10]);
+    }
+
+    #[test]
+    fn movzx_brm_r8_base_disp() {
+        // movzx rax, byte ptr [r8 + 4]
+        // REX.WB(49) + 0F B6 + ModRM(mod01,reg0,rm0=r8&7) + disp8(04)
+        let mut e = enc();
+        let addr = Addr::new(Some(Reg::R8), None, 1, 4);
+        e.encode_movzx_brm(Reg::RAX, &addr);
+        check(&e.buf, &[0x49, 0x0F, 0xB6, 0x40, 0x04]);
     }
 
     // 7.21 NOP ───────────────────────────────────────────────────────────────

@@ -70,6 +70,11 @@ pub fn extract(
     // Iterative extraction: repeat until all classes are extracted or no progress.
     // This handles cycles from constant-folding merges (e.g., And(a, b) where b
     // was merged into the result class).
+    //
+    // Worst-case complexity: at most O(|classes|) iterations. Each iteration that
+    // makes progress extracts at least one new class (increasing memo.len()), so
+    // the loop terminates after at most |order| rounds, or earlier if no progress
+    // is made (stuck on unresolvable cycles).
     let mut remaining: Vec<ClassId> = order.clone();
     loop {
         let prev_len = memo.len();

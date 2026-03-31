@@ -436,6 +436,9 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
         .collect();
 
     // Sequentialize register copies to handle cycles.
+    // S64 is intentional per the SystemV AMD64 ABI: the caller is responsible for
+    // zero/sign-extending sub-word values to fill the full 64-bit register before
+    // the call. Using S64 here avoids partial register writes.
     let seq = sequentialize_copies(&reg_copies, temp);
     for (src, dst) in seq {
         insts.push(MachInst::MovRR {
