@@ -1,11 +1,42 @@
 use crate::egraph::extract::VReg;
 use crate::ir::condcode::CondCode;
+use crate::ir::types::Type;
 
 use super::addr::Addr;
 use super::reg::Reg;
 
 pub type LabelId = u32;
 pub type Symbol = String;
+
+/// Operand size for width-dependent x86-64 instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpSize {
+    S8,
+    S16,
+    S32,
+    S64,
+}
+
+impl OpSize {
+    pub fn from_type(ty: &Type) -> Self {
+        match ty {
+            Type::I8 => OpSize::S8,
+            Type::I16 => OpSize::S16,
+            Type::I32 => OpSize::S32,
+            Type::I64 => OpSize::S64,
+            _ => panic!("OpSize::from_type: unsupported type {ty:?}"),
+        }
+    }
+
+    pub fn byte_width(self) -> u32 {
+        match self {
+            OpSize::S8 => 1,
+            OpSize::S16 => 2,
+            OpSize::S32 => 4,
+            OpSize::S64 => 8,
+        }
+    }
+}
 
 /// A physical register or virtual register operand.
 ///
@@ -25,90 +56,110 @@ pub enum Operand {
 pub enum MachInst {
     // ── Data movement ─────────────────────────────────────────────────────────
     MovRR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },
     MovRI {
+        size: OpSize,
         dst: Operand,
         imm: i64,
     },
     /// Load: dst = [addr]
     MovRM {
+        size: OpSize,
         dst: Operand,
         addr: Addr,
     },
     /// Store: [addr] = src
     MovMR {
+        size: OpSize,
         addr: Addr,
         src: Operand,
     },
 
     // ── ALU reg-reg ───────────────────────────────────────────────────────────
     AddRR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },
     AddRI {
+        size: OpSize,
         dst: Operand,
         imm: i32,
     },
     AddRM {
+        size: OpSize,
         dst: Operand,
         addr: Addr,
     },
     SubRR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },
     SubRI {
+        size: OpSize,
         dst: Operand,
         imm: i32,
     },
     AndRR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },
     OrRR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },
     XorRR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },
 
     // ── Shifts ────────────────────────────────────────────────────────────────
     ShlRI {
+        size: OpSize,
         dst: Operand,
         imm: u8,
     },
     ShrRI {
+        size: OpSize,
         dst: Operand,
         imm: u8,
     },
     SarRI {
+        size: OpSize,
         dst: Operand,
         imm: u8,
     },
     /// Shift left by CL
     ShlRCL {
+        size: OpSize,
         dst: Operand,
     },
     /// Shift right (logical) by CL
     ShrRCL {
+        size: OpSize,
         dst: Operand,
     },
     /// Shift right (arithmetic) by CL
     SarRCL {
+        size: OpSize,
         dst: Operand,
     },
 
     // ── Multiply ──────────────────────────────────────────────────────────────
     Imul2RR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },
     Imul3RRI {
+        size: OpSize,
         dst: Operand,
         src: Operand,
         imm: i32,
@@ -116,24 +167,29 @@ pub enum MachInst {
 
     // ── LEA ───────────────────────────────────────────────────────────────────
     Lea {
+        size: OpSize,
         dst: Operand,
         addr: Addr,
     },
 
     // ── Compare / Test ────────────────────────────────────────────────────────
     CmpRR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },
     CmpRI {
+        size: OpSize,
         dst: Operand,
         imm: i32,
     },
     TestRR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },
     TestRI {
+        size: OpSize,
         dst: Operand,
         imm: i32,
     },
@@ -168,6 +224,7 @@ pub enum MachInst {
         dst: Operand,
     },
     Cmov {
+        size: OpSize,
         cc: CondCode,
         dst: Operand,
         src: Operand,
@@ -178,24 +235,34 @@ pub enum MachInst {
     Cdq,
     /// Sign-extend RAX into RDX:RAX (64-bit)
     Cqo,
+    /// CWD: sign-extend AX into DX:AX (16-bit)
+    Cwd,
+    /// CBW: sign-extend AL into AX (8-bit)
+    Cbw,
     Idiv {
+        size: OpSize,
         src: Operand,
     },
     Div {
+        size: OpSize,
         src: Operand,
     },
 
     // ── Unary ─────────────────────────────────────────────────────────────────
     Neg {
+        size: OpSize,
         dst: Operand,
     },
     Not {
+        size: OpSize,
         dst: Operand,
     },
     Inc {
+        size: OpSize,
         dst: Operand,
     },
     Dec {
+        size: OpSize,
         dst: Operand,
     },
 

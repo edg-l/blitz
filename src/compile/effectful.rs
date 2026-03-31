@@ -8,7 +8,7 @@ use crate::ir::types::Type;
 use crate::regalloc::allocator::RegAllocResult;
 use crate::x86::abi::{ArgLoc, GPR_RETURN_REG, assign_args, setup_call_args};
 use crate::x86::addr::Addr;
-use crate::x86::inst::{MachInst, Operand};
+use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
 use super::{CompileError, IrLocation};
@@ -101,6 +101,7 @@ pub(super) fn lower_effectful_op(
                 })?;
             let addr = build_mem_addr(canon_addr, addr_reg, extraction, class_to_vreg, regalloc);
             Ok(vec![MachInst::MovRM {
+                size: OpSize::S64,
                 dst: Operand::Reg(result_reg),
                 addr,
             }])
@@ -127,6 +128,7 @@ pub(super) fn lower_effectful_op(
             })?;
             let addr = build_mem_addr(canon_addr, addr_reg, extraction, class_to_vreg, regalloc);
             Ok(vec![MachInst::MovMR {
+                size: OpSize::S64,
                 addr,
                 src: Operand::Reg(val_reg),
             }])
@@ -170,6 +172,7 @@ pub(super) fn lower_effectful_op(
             // Clean up stack arguments after the call.
             if n_stack > 0 {
                 insts.push(MachInst::AddRI {
+                    size: OpSize::S64,
                     dst: Operand::Reg(Reg::RSP),
                     imm: (n_stack as i32) * 8,
                 });
@@ -185,6 +188,7 @@ pub(super) fn lower_effectful_op(
                 if let Some(result_reg) = get_reg(result_cid) {
                     if result_reg != GPR_RETURN_REG {
                         insts.push(MachInst::MovRR {
+                            size: OpSize::S64,
                             dst: Operand::Reg(result_reg),
                             src: Operand::Reg(GPR_RETURN_REG),
                         });

@@ -10,7 +10,7 @@ use crate::ir::function::Function;
 use crate::ir::op::ClassId;
 use crate::regalloc::allocator::RegAllocResult;
 use crate::x86::abi::GPR_RETURN_REG;
-use crate::x86::inst::{LabelId, MachInst, Operand};
+use crate::x86::inst::{LabelId, MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
 use super::{BlockItem, CompileError, IrLocation};
@@ -149,6 +149,7 @@ pub(super) fn lower_terminator(
                 if let Some(ret_reg) = get_reg(ret_cid) {
                     if ret_reg != GPR_RETURN_REG {
                         items.push(BlockItem::Inst(MachInst::MovRR {
+                            size: OpSize::S64,
                             dst: Operand::Reg(GPR_RETURN_REG),
                             src: Operand::Reg(ret_reg),
                         }));

@@ -11,7 +11,7 @@ use crate::regalloc::spill::{
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::FrameLayout;
 use crate::x86::addr::Addr;
-use crate::x86::inst::{MachInst, Operand};
+use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
 use super::{CompileError, IrLocation};
@@ -53,6 +53,7 @@ fn lower_binary_alu(
     let mut insts = Vec::new();
     if dst != src_a {
         insts.push(MachInst::MovRR {
+            size: OpSize::S64,
             dst: Operand::Reg(dst),
             src: Operand::Reg(src_a),
         });
@@ -74,6 +75,7 @@ fn lower_shift_cl(
     // Move value to shift into dst if needed.
     if dst != src_a {
         insts.push(MachInst::MovRR {
+            size: OpSize::S64,
             dst: Operand::Reg(dst),
             src: Operand::Reg(src_a),
         });
@@ -83,6 +85,7 @@ fn lower_shift_cl(
     // (e.g., because it is a function parameter in RSI), emit a MOV to RCX now.
     if src_b != Reg::RCX {
         insts.push(MachInst::MovRR {
+            size: OpSize::S64,
             dst: Operand::Reg(Reg::RCX),
             src: Operand::Reg(src_b),
         });
@@ -149,6 +152,7 @@ fn lower_op(
         Op::Iconst(val, _ty) => {
             let dst = dst_reg.ok_or_else(|| "Iconst: no register for dst".to_string())?;
             Ok(vec![MachInst::MovRI {
+                size: OpSize::S64,
                 dst: Operand::Reg(dst),
                 imm: *val,
             }])
@@ -167,30 +171,50 @@ fn lower_op(
         // X86Add produces a Pair (result + flags); Proj0 extracts the value.
         // We emit: mov dst, src_a; add dst, src_b
         Op::X86Add => lower_binary_alu("X86Add", dst_reg, operand_regs, |dst, src| {
-            MachInst::AddRR { dst, src }
+            MachInst::AddRR {
+                size: OpSize::S64,
+                dst,
+                src,
+            }
         }),
         Op::X86Sub => lower_binary_alu("X86Sub", dst_reg, operand_regs, |dst, src| {
-            MachInst::SubRR { dst, src }
+            MachInst::SubRR {
+                size: OpSize::S64,
+                dst,
+                src,
+            }
         }),
         Op::X86And => lower_binary_alu("X86And", dst_reg, operand_regs, |dst, src| {
-            MachInst::AndRR { dst, src }
+            MachInst::AndRR {
+                size: OpSize::S64,
+                dst,
+                src,
+            }
         }),
         Op::X86Or => lower_binary_alu("X86Or", dst_reg, operand_regs, |dst, src| MachInst::OrRR {
+            size: OpSize::S64,
             dst,
             src,
         }),
         Op::X86Xor => lower_binary_alu("X86Xor", dst_reg, operand_regs, |dst, src| {
-            MachInst::XorRR { dst, src }
+            MachInst::XorRR {
+                size: OpSize::S64,
+                dst,
+                src,
+            }
         }),
         // Variable shifts use CL (RCX). The shift count VReg is pre-colored to RCX
         // before register allocation, so src_b is guaranteed to be RCX here.
         Op::X86Shl => lower_shift_cl("X86Shl", dst_reg, operand_regs, |dst| MachInst::ShlRCL {
+            size: OpSize::S64,
             dst,
         }),
         Op::X86Shr => lower_shift_cl("X86Shr", dst_reg, operand_regs, |dst| MachInst::ShrRCL {
+            size: OpSize::S64,
             dst,
         }),
         Op::X86Sar => lower_shift_cl("X86Sar", dst_reg, operand_regs, |dst| MachInst::SarRCL {
+            size: OpSize::S64,
             dst,
         }),
 
@@ -201,11 +225,13 @@ fn lower_op(
             let mut insts = Vec::new();
             if dst != src {
                 insts.push(MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(dst),
                     src: Operand::Reg(src),
                 });
             }
             insts.push(MachInst::ShlRI {
+                size: OpSize::S64,
                 dst: Operand::Reg(dst),
                 imm: *imm,
             });
@@ -217,11 +243,13 @@ fn lower_op(
             let mut insts = Vec::new();
             if dst != src {
                 insts.push(MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(dst),
                     src: Operand::Reg(src),
                 });
             }
             insts.push(MachInst::ShrRI {
+                size: OpSize::S64,
                 dst: Operand::Reg(dst),
                 imm: *imm,
             });
@@ -233,11 +261,13 @@ fn lower_op(
             let mut insts = Vec::new();
             if dst != src {
                 insts.push(MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(dst),
                     src: Operand::Reg(src),
                 });
             }
             insts.push(MachInst::SarRI {
+                size: OpSize::S64,
                 dst: Operand::Reg(dst),
                 imm: *imm,
             });
@@ -256,6 +286,7 @@ fn lower_op(
             let mut insts = Vec::new();
             if dividend != Reg::RAX {
                 insts.push(MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(Reg::RAX),
                     src: Operand::Reg(dividend),
                 });
@@ -264,14 +295,17 @@ fn lower_op(
             if divisor == Reg::RAX || divisor == Reg::RDX {
                 debug_assert!(false, "X86Idiv: divisor in RAX/RDX — pre-coloring failure");
                 insts.push(MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(Reg::R11),
                     src: Operand::Reg(divisor),
                 });
                 insts.push(MachInst::Idiv {
+                    size: OpSize::S64,
                     src: Operand::Reg(Reg::R11),
                 });
             } else {
                 insts.push(MachInst::Idiv {
+                    size: OpSize::S64,
                     src: Operand::Reg(divisor),
                 });
             }
@@ -290,25 +324,30 @@ fn lower_op(
             let mut insts = Vec::new();
             if dividend != Reg::RAX {
                 insts.push(MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(Reg::RAX),
                     src: Operand::Reg(dividend),
                 });
             }
             insts.push(MachInst::XorRR {
+                size: OpSize::S64,
                 dst: Operand::Reg(Reg::RDX),
                 src: Operand::Reg(Reg::RDX),
             });
             if divisor == Reg::RAX || divisor == Reg::RDX {
                 debug_assert!(false, "X86Div: divisor in RAX/RDX — pre-coloring failure");
                 insts.push(MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(Reg::R11),
                     src: Operand::Reg(divisor),
                 });
                 insts.push(MachInst::Div {
+                    size: OpSize::S64,
                     src: Operand::Reg(Reg::R11),
                 });
             } else {
                 insts.push(MachInst::Div {
+                    size: OpSize::S64,
                     src: Operand::Reg(divisor),
                 });
             }
@@ -329,11 +368,13 @@ fn lower_op(
             let mut insts = Vec::new();
             if dst != src_a {
                 insts.push(MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(dst),
                     src: Operand::Reg(src_a),
                 });
             }
             insts.push(MachInst::Imul2RR {
+                size: OpSize::S64,
                 dst: Operand::Reg(dst),
                 src: Operand::Reg(src_b),
             });
@@ -356,11 +397,13 @@ fn lower_op(
             // Load the false value into dst first, then conditionally overwrite.
             if dst != false_reg {
                 insts.push(MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(dst),
                     src: Operand::Reg(false_reg),
                 });
             }
             insts.push(MachInst::Cmov {
+                size: OpSize::S64,
                 cc: *cc,
                 dst: Operand::Reg(dst),
                 src: Operand::Reg(true_reg),
@@ -387,6 +430,7 @@ fn lower_op(
                 .and_then(|r| *r)
                 .ok_or_else(|| "X86Lea2: no register for index".to_string())?;
             Ok(vec![MachInst::Lea {
+                size: OpSize::S64,
                 dst: Operand::Reg(dst),
                 addr: Addr {
                     base: Some(base),
@@ -408,6 +452,7 @@ fn lower_op(
                 .and_then(|r| *r)
                 .ok_or_else(|| "X86Lea3: no register for index".to_string())?;
             Ok(vec![MachInst::Lea {
+                size: OpSize::S64,
                 dst: Operand::Reg(dst),
                 addr: Addr {
                     base: Some(base),
@@ -426,6 +471,7 @@ fn lower_op(
                 .ok_or_else(|| "X86Lea4: no register for base".to_string())?;
             let idx_reg = operand_regs.get(1).and_then(|r| *r);
             Ok(vec![MachInst::Lea {
+                size: OpSize::S64,
                 dst: Operand::Reg(dst),
                 addr: Addr {
                     base: Some(base),
@@ -446,6 +492,7 @@ fn lower_op(
                 .ok_or_else(|| "Addr: no register for base".to_string())?;
             let idx_reg = operand_regs.get(1).and_then(|r| *r);
             Ok(vec![MachInst::Lea {
+                size: OpSize::S64,
                 dst: Operand::Reg(dst),
                 addr: Addr {
                     base: Some(base),
@@ -469,6 +516,7 @@ fn lower_op(
                     && dst != Reg::RAX
                 {
                     return Ok(vec![MachInst::MovRR {
+                        size: OpSize::S64,
                         dst: Operand::Reg(dst),
                         src: Operand::Reg(Reg::RAX),
                     }]);
@@ -482,6 +530,7 @@ fn lower_op(
                         Ok(vec![]) // No-op: dst and src are the same register.
                     } else {
                         Ok(vec![MachInst::MovRR {
+                            size: OpSize::S64,
                             dst: Operand::Reg(dst),
                             src: Operand::Reg(*src),
                         }])
@@ -508,6 +557,7 @@ fn lower_op(
                 && dst != Reg::RDX
             {
                 return Ok(vec![MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(dst),
                     src: Operand::Reg(Reg::RDX),
                 }]);
@@ -577,6 +627,7 @@ fn lower_op(
             let dst = dst_reg.ok_or_else(|| "Fconst: no register for dst".to_string())?;
             Ok(vec![
                 MachInst::MovRI {
+                    size: OpSize::S64,
                     dst: Operand::Reg(Reg::R11),
                     imm: *bits as i64,
                 },
@@ -662,6 +713,7 @@ fn lower_op(
                         return Ok(vec![]);
                     }
                     MachInst::MovRR {
+                        size: OpSize::S64,
                         dst: Operand::Reg(dst),
                         src: Operand::Reg(src),
                     }
@@ -685,6 +737,7 @@ fn lower_op(
                 Ok(vec![])
             } else {
                 Ok(vec![MachInst::MovRR {
+                    size: OpSize::S64,
                     dst: Operand::Reg(dst),
                     src: Operand::Reg(src),
                 }])
@@ -717,6 +770,7 @@ fn lower_op(
                 // Same class (int->int or float->float): register copy.
                 if from.is_integer() {
                     Ok(vec![MachInst::MovRR {
+                        size: OpSize::S64,
                         dst: Operand::Reg(dst),
                         src: Operand::Reg(src),
                     }])
@@ -771,6 +825,7 @@ pub(super) fn lower_block_pure_ops(
             let slot = spill_slot_of(inst) as i32;
             if let Some(src_reg) = inst.operands.first().and_then(|&v| get_reg(v)) {
                 result.push(MachInst::MovMR {
+                    size: OpSize::S64,
                     addr: spill_addr(frame_layout, slot),
                     src: Operand::Reg(src_reg),
                 });
@@ -781,6 +836,7 @@ pub(super) fn lower_block_pure_ops(
             let slot = spill_slot_of(inst) as i32;
             if let Some(dst_reg) = get_reg(inst.dst) {
                 result.push(MachInst::MovRM {
+                    size: OpSize::S64,
                     dst: Operand::Reg(dst_reg),
                     addr: spill_addr(frame_layout, slot),
                 });

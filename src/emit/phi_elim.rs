@@ -1,5 +1,5 @@
 use crate::x86::abi::sequentialize_copies;
-use crate::x86::inst::{MachInst, Operand};
+use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
 /// Insert parallel copies for block parameter passing.
@@ -27,6 +27,7 @@ pub fn phi_copies(copies: &[(Reg, Reg)], temp: Reg) -> Vec<MachInst> {
 
     seq.into_iter()
         .map(|(src, dst)| MachInst::MovRR {
+            size: OpSize::S64,
             dst: Operand::Reg(dst),
             src: Operand::Reg(src),
         })
@@ -40,6 +41,7 @@ mod tests {
 
     fn mov(src: Reg, dst: Reg) -> MachInst {
         MachInst::MovRR {
+            size: OpSize::S64,
             dst: Operand::Reg(dst),
             src: Operand::Reg(src),
         }
@@ -70,6 +72,7 @@ mod tests {
             if let MachInst::MovRR {
                 dst: Operand::Reg(d),
                 src: Operand::Reg(s),
+                ..
             } = inst
             {
                 let v = state[s];
@@ -98,6 +101,7 @@ mod tests {
             if let MachInst::MovRR {
                 dst: Operand::Reg(d),
                 src: Operand::Reg(s),
+                ..
             } = inst
             {
                 let v = state[s];
@@ -139,6 +143,7 @@ mod tests {
             if let MachInst::MovRR {
                 dst: Operand::Reg(d),
                 src: Operand::Reg(s),
+                ..
             } = inst
             {
                 let v = state[s];

@@ -2,7 +2,7 @@
 
 use crate::ir::types::Type;
 use crate::x86::encode::Encoder;
-use crate::x86::inst::{MachInst, Operand};
+use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
 // ── 8.1 Calling convention data ───────────────────────────────────────────────
@@ -236,6 +236,7 @@ pub fn emit_prologue(encoder: &mut Encoder, layout: &FrameLayout) {
             src: Operand::Reg(Reg::RBP),
         });
         encoder.encode_inst(&MachInst::MovRR {
+            size: OpSize::S64,
             dst: Operand::Reg(Reg::RBP),
             src: Operand::Reg(Reg::RSP),
         });
@@ -251,6 +252,7 @@ pub fn emit_prologue(encoder: &mut Encoder, layout: &FrameLayout) {
     // Reserve the frame (skipped for red zone functions and when frame_size is 0).
     if layout.frame_size > 0 && !layout.use_red_zone {
         encoder.encode_inst(&MachInst::SubRI {
+            size: OpSize::S64,
             dst: Operand::Reg(Reg::RSP),
             imm: layout.frame_size as i32,
         });
@@ -276,6 +278,7 @@ pub fn emit_epilogue(encoder: &mut Encoder, layout: &FrameLayout) {
 
     if layout.frame_size > 0 && !layout.use_red_zone {
         encoder.encode_inst(&MachInst::AddRI {
+            size: OpSize::S64,
             dst: Operand::Reg(Reg::RSP),
             imm: layout.frame_size as i32,
         });
@@ -436,6 +439,7 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
     let seq = sequentialize_copies(&reg_copies, temp);
     for (src, dst) in seq {
         insts.push(MachInst::MovRR {
+            size: OpSize::S64,
             dst: Operand::Reg(dst),
             src: Operand::Reg(src),
         });

@@ -1,4 +1,4 @@
-use crate::x86::inst::MachInst;
+use crate::x86::inst::{MachInst, OpSize};
 
 /// Returns true if `inst` is a conditional or unconditional jump instruction.
 fn is_jcc(inst: &MachInst) -> bool {
@@ -74,15 +74,16 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
     while i < insts.len() {
         match &insts[i] {
             // 1. Delete mov rX, rX.
-            MachInst::MovRR { dst, src } if dst == src => {
+            MachInst::MovRR { dst, src, .. } if dst == src => {
                 i += 1;
                 continue;
             }
 
             // 2. mov rX, 0  ->  xor rX, rX (zero idiom, shorter encoding).
             // Only safe when flags are not live (xor clobbers flags).
-            MachInst::MovRI { dst, imm: 0 } if flags_dead_after(&insts, i) => {
+            MachInst::MovRI { size, dst, imm: 0 } if flags_dead_after(&insts, i) => {
                 result.push(MachInst::XorRR {
+                    size: *size,
                     dst: dst.clone(),
                     src: dst.clone(),
                 });
@@ -91,8 +92,11 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
             }
 
             // 3. cmp rX, 0 followed by Jcc  ->  test rX, rX followed by Jcc.
-            MachInst::CmpRI { dst, imm: 0 } if i + 1 < insts.len() && is_jcc(&insts[i + 1]) => {
+            MachInst::CmpRI { size, dst, imm: 0 }
+                if i + 1 < insts.len() && is_jcc(&insts[i + 1]) =>
+            {
                 result.push(MachInst::TestRR {
+                    size: *size,
                     dst: dst.clone(),
                     src: dst.clone(),
                 });
@@ -102,15 +106,21 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
             }
 
             // 4. add rX, 1  ->  inc rX  (when flags are dead).
-            MachInst::AddRI { dst, imm: 1 } if flags_dead_after(&insts, i) => {
-                result.push(MachInst::Inc { dst: dst.clone() });
+            MachInst::AddRI { size, dst, imm: 1 } if flags_dead_after(&insts, i) => {
+                result.push(MachInst::Inc {
+                    size: *size,
+                    dst: dst.clone(),
+                });
                 i += 1;
                 continue;
             }
 
             // 5. sub rX, 1  ->  dec rX  (when flags are dead).
-            MachInst::SubRI { dst, imm: 1 } if flags_dead_after(&insts, i) => {
-                result.push(MachInst::Dec { dst: dst.clone() });
+            MachInst::SubRI { size, dst, imm: 1 } if flags_dead_after(&insts, i) => {
+                result.push(MachInst::Dec {
+                    size: *size,
+                    dst: dst.clone(),
+                });
                 i += 1;
                 continue;
             }
@@ -139,6 +149,7 @@ mod tests {
     #[test]
     fn mov_rax_rax_deleted() {
         let insts = vec![MachInst::MovRR {
+            size: OpSize::S64,
             dst: reg(Reg::RAX),
             src: reg(Reg::RAX),
         }];
@@ -149,6 +160,7 @@ mod tests {
     #[test]
     fn mov_different_regs_kept() {
         let insts = vec![MachInst::MovRR {
+            size: OpSize::S64,
             dst: reg(Reg::RCX),
             src: reg(Reg::RAX),
         }];
@@ -159,6 +171,7 @@ mod tests {
     #[test]
     fn mov_rax_zero_becomes_xor() {
         let insts = vec![MachInst::MovRI {
+            size: OpSize::S64,
             dst: reg(Reg::RAX),
             imm: 0,
         }];
@@ -167,6 +180,7 @@ mod tests {
         assert_eq!(
             out[0],
             MachInst::XorRR {
+                size: OpSize::S64,
                 dst: reg(Reg::RAX),
                 src: reg(Reg::RAX),
             }
@@ -176,6 +190,7 @@ mod tests {
     #[test]
     fn mov_nonzero_imm_kept() {
         let insts = vec![MachInst::MovRI {
+            size: OpSize::S64,
             dst: reg(Reg::RAX),
             imm: 42,
         }];
@@ -189,6 +204,7 @@ mod tests {
         let label: LabelId = 1;
         let insts = vec![
             MachInst::CmpRI {
+                size: OpSize::S64,
                 dst: reg(Reg::RAX),
                 imm: 0,
             },
@@ -202,6 +218,7 @@ mod tests {
         assert_eq!(
             out[0],
             MachInst::TestRR {
+                size: OpSize::S64,
                 dst: reg(Reg::RAX),
                 src: reg(Reg::RAX),
             }
@@ -220,6 +237,7 @@ mod tests {
         // cmp rax, 0 not followed by Jcc -> no transformation.
         let insts = vec![
             MachInst::CmpRI {
+                size: OpSize::S64,
                 dst: reg(Reg::RAX),
                 imm: 0,
             },
@@ -235,6 +253,7 @@ mod tests {
         // add rax, 1 followed by ret -> flags dead -> inc rax.
         let insts = vec![
             MachInst::AddRI {
+                size: OpSize::S64,
                 dst: reg(Reg::RAX),
                 imm: 1,
             },
@@ -242,13 +261,20 @@ mod tests {
         ];
         let out = peephole(insts);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0], MachInst::Inc { dst: reg(Reg::RAX) });
+        assert_eq!(
+            out[0],
+            MachInst::Inc {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX)
+            }
+        );
     }
 
     #[test]
     fn sub_one_becomes_dec_when_flags_dead() {
         let insts = vec![
             MachInst::SubRI {
+                size: OpSize::S64,
                 dst: reg(Reg::RCX),
                 imm: 1,
             },
@@ -256,7 +282,13 @@ mod tests {
         ];
         let out = peephole(insts);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0], MachInst::Dec { dst: reg(Reg::RCX) });
+        assert_eq!(
+            out[0],
+            MachInst::Dec {
+                size: OpSize::S64,
+                dst: reg(Reg::RCX)
+            }
+        );
     }
 
     #[test]
@@ -264,6 +296,7 @@ mod tests {
         // add rax, 1 followed by je -> flags are live -> keep as AddRI.
         let insts = vec![
             MachInst::AddRI {
+                size: OpSize::S64,
                 dst: reg(Reg::RAX),
                 imm: 1,
             },
@@ -282,10 +315,12 @@ mod tests {
         // add rax, 1 followed by another flag-writing instruction -> flags dead.
         let insts = vec![
             MachInst::AddRI {
+                size: OpSize::S64,
                 dst: reg(Reg::RAX),
                 imm: 1,
             },
             MachInst::SubRI {
+                size: OpSize::S64,
                 dst: reg(Reg::RCX),
                 imm: 2,
             },
@@ -297,6 +332,7 @@ mod tests {
     fn flags_live_before_jcc() {
         let insts = vec![
             MachInst::AddRI {
+                size: OpSize::S64,
                 dst: reg(Reg::RAX),
                 imm: 1,
             },
