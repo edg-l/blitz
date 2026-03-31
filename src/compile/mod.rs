@@ -16,13 +16,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::egraph::cost::{CostModel, OptGoal};
-use crate::egraph::extract::{VReg, VRegInst, extract, vreg_insts_for_block};
+use crate::egraph::extract::{VReg, VRegInst, build_vreg_types, extract, vreg_insts_for_block};
 use crate::egraph::phases::{CompileOptions as EGraphOptions, run_phases};
 use crate::emit::object::{FunctionInfo, ObjectFile};
 use crate::emit::peephole::peephole;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
+use crate::ir::types::Type;
 use crate::regalloc::allocator::{RegAllocResult, allocate};
 use crate::regalloc::rewrite::rewrite_vregs;
 use crate::schedule::scheduler::{ScheduleDag, ScheduledInst, schedule};
@@ -241,6 +242,9 @@ pub fn compile(
             vreg_insts_for_block(&extraction, &all_roots, &mut class_to_vreg, &mut next_vreg);
         block_vreg_insts[block_idx] = insts;
     }
+
+    // Build VReg -> Type map from the egraph's per-class type info.
+    let vreg_types = build_vreg_types(&class_to_vreg, &egraph);
 
     // Phase 4: Schedule per block (indexed by block index, same as block_vreg_insts).
     let mut block_schedules: Vec<Vec<ScheduledInst>> = vec![Vec::new(); func.blocks.len()];
@@ -738,7 +742,8 @@ pub fn compile(
                            regalloc_result: &RegAllocResult,
                            func: &Function,
                            param_vreg_set: &HashSet<VReg>,
-                           frame_layout: &crate::x86::abi::FrameLayout|
+                           frame_layout: &crate::x86::abi::FrameLayout,
+                           vreg_types: &HashMap<VReg, Type>|
          -> Result<Vec<MachInst>, CompileError> {
             lower_block_pure_ops(
                 &group.iter().map(|&i| i.clone()).collect::<Vec<_>>(),
@@ -746,6 +751,7 @@ pub fn compile(
                 func,
                 param_vreg_set,
                 frame_layout,
+                vreg_types,
             )
         };
 
@@ -760,6 +766,7 @@ pub fn compile(
                 func,
                 &param_vreg_set,
                 &frame_layout,
+                &vreg_types,
             )?;
             all_insts.extend(pre_insts);
         }
@@ -774,6 +781,7 @@ pub fn compile(
                     func,
                     &param_vreg_set,
                     &frame_layout,
+                    &vreg_types,
                 )?;
                 all_insts.extend(pre_insts);
                 // Emit call k.
@@ -799,6 +807,7 @@ pub fn compile(
                 func,
                 &param_vreg_set,
                 &frame_layout,
+                &vreg_types,
             )?;
             all_insts.extend(post_insts);
         }

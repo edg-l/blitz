@@ -4,7 +4,6 @@ use crate::egraph::extract::{ExtractionResult, VReg};
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
-use crate::ir::types::Type;
 use crate::regalloc::allocator::RegAllocResult;
 use crate::x86::abi::{ArgLoc, GPR_RETURN_REG, assign_args, setup_call_args};
 use crate::x86::addr::Addr;
@@ -72,11 +71,8 @@ pub(super) fn lower_effectful_op(
     };
 
     match op {
-        EffectfulOp::Load {
-            addr,
-            result,
-            ty: _,
-        } => {
+        EffectfulOp::Load { addr, result, ty } => {
+            let load_size = OpSize::from_type(ty);
             let canon_addr = *addr;
             let addr_reg = get_reg(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
@@ -101,12 +97,12 @@ pub(super) fn lower_effectful_op(
                 })?;
             let addr = build_mem_addr(canon_addr, addr_reg, extraction, class_to_vreg, regalloc);
             Ok(vec![MachInst::MovRM {
-                size: OpSize::S64,
+                size: load_size,
                 dst: Operand::Reg(result_reg),
                 addr,
             }])
         }
-        EffectfulOp::Store { addr, val } => {
+        EffectfulOp::Store { addr, val, ty } => {
             let canon_addr = *addr;
             let addr_reg = get_reg(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
@@ -126,9 +122,10 @@ pub(super) fn lower_effectful_op(
                     inst: None,
                 }),
             })?;
+            let store_size = OpSize::from_type(ty);
             let addr = build_mem_addr(canon_addr, addr_reg, extraction, class_to_vreg, regalloc);
             Ok(vec![MachInst::MovMR {
-                size: OpSize::S64,
+                size: store_size,
                 addr,
                 src: Operand::Reg(val_reg),
             }])
@@ -136,6 +133,7 @@ pub(super) fn lower_effectful_op(
         EffectfulOp::Call {
             func: callee,
             args,
+            arg_tys,
             ret_tys: _,
             results,
         } => {
@@ -153,13 +151,10 @@ pub(super) fn lower_effectful_op(
                 })?;
                 arg_regs.push(r);
             }
-            // All args treated as I64 for ABI assignment (correct for GPR-only calls;
-            // FP args via XMM will be handled when arg type tracking is added).
-            let arg_types: Vec<Type> = vec![Type::I64; arg_regs.len()];
-            let mut insts = setup_call_args(&arg_types, &arg_regs, Reg::R11);
+            let mut insts = setup_call_args(arg_tys, &arg_regs, Reg::R11);
 
             // Count stack args so we can clean up RSP after the call.
-            let locs = assign_args(&arg_types);
+            let locs = assign_args(arg_tys);
             let n_stack = locs
                 .iter()
                 .filter(|l| matches!(l, ArgLoc::Stack { .. }))

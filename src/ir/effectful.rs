@@ -20,15 +20,22 @@ pub enum EffectfulOp {
     },
 
     /// Store a value e-class to an address e-class.
-    Store { addr: ClassId, val: ClassId },
+    /// `ty` is the type of the value being stored (determines store width).
+    Store {
+        addr: ClassId,
+        val: ClassId,
+        ty: Type,
+    },
 
     /// Call a named function with the given argument e-classes.
+    /// `arg_tys` lists the types of the arguments (determines ABI register assignment).
     /// `ret_tys` lists the types of the return values.
     /// `results` holds the e-graph ClassIds of the `Op::CallResult` nodes that
     /// represent the return values in the pure-op world (one per ret_ty).
     Call {
         func: Symbol,
         args: Vec<ClassId>,
+        arg_tys: Vec<Type>,
         ret_tys: Vec<Type>,
         results: Vec<ClassId>,
     },

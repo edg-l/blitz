@@ -447,10 +447,12 @@ impl FunctionBuilder {
 
     /// Emit a store of `val` to `addr`.
     pub fn store(&mut self, addr: Value, val: Value) {
+        let ty = self.type_of(val);
         let block = self.current_block_mut();
         block.ops.push(EffectfulOp::Store {
             addr: addr.0,
             val: val.0,
+            ty,
         });
     }
 
@@ -491,10 +493,14 @@ impl FunctionBuilder {
         // Collect ClassIds of the CallResult nodes for storage in the effectful op.
         let result_class_ids: Vec<ClassId> = ret_vals.iter().map(|v| v.0).collect();
 
+        // Derive argument types from the egraph's per-class type info.
+        let arg_tys: Vec<Type> = args.iter().map(|v| self.type_of(*v)).collect();
+
         let block = self.current_block_mut();
         block.ops.push(EffectfulOp::Call {
             func: func.to_string(),
             args: args.iter().map(|v| v.0).collect(),
+            arg_tys,
             ret_tys: ret_tys.to_vec(),
             results: result_class_ids,
         });

@@ -5,7 +5,6 @@ use crate::egraph::extract::VReg;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
-use crate::ir::types::Type;
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::{ArgLoc, GPR_RETURN_REG, assign_args};
 use crate::x86::reg::Reg;
@@ -76,9 +75,14 @@ pub(super) fn add_call_precolors(
             .count();
 
         for op in &block.ops {
-            if let EffectfulOp::Call { args, results, .. } = op {
-                let arg_types: Vec<Type> = vec![Type::I64; args.len()];
-                let locs = assign_args(&arg_types);
+            if let EffectfulOp::Call {
+                args,
+                arg_tys,
+                results,
+                ..
+            } = op
+            {
+                let locs = assign_args(arg_tys);
                 for (&cid, loc) in args.iter().zip(locs.iter()) {
                     let canon = egraph.unionfind.find_immutable(cid);
                     if let Some(&vreg) = class_to_vreg.get(&canon) {

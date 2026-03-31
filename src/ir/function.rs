@@ -249,6 +249,7 @@ mod tests {
         bb.ops.push(EffectfulOp::Store {
             addr: ClassId(1),
             val: ClassId(2),
+            ty: Type::I64,
         });
         bb.ops.push(EffectfulOp::Branch {
             cond: ClassId(3),

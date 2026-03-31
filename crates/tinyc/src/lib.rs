@@ -311,37 +311,37 @@ mod tests {
 
     #[test]
     fn test_bitwise_and() {
-        let src = "int main() { long x = 255; long y = 15; return (int)(x & y); }";
+        let src = "int main() { int x = 255; int y = 15; return x & y; }";
         assert_eq!(compile_and_run(src), Some(15));
     }
 
     #[test]
     fn test_bitwise_or() {
-        let src = "int main() { long x = 240; long y = 15; return (int)(x | y); }";
+        let src = "int main() { int x = 240; int y = 15; return x | y; }";
         assert_eq!(compile_and_run(src), Some(255));
     }
 
     #[test]
     fn test_bitwise_xor() {
-        let src = "int main() { long x = 255; long y = 15; return (int)(x ^ y); }";
+        let src = "int main() { int x = 255; int y = 15; return x ^ y; }";
         assert_eq!(compile_and_run(src), Some(240));
     }
 
     #[test]
     fn test_shift_left() {
-        let src = "int main() { long x = 1; long y = 4; return (int)(x << y); }";
+        let src = "int main() { int x = 1; int y = 4; return x << y; }";
         assert_eq!(compile_and_run(src), Some(16));
     }
 
     #[test]
     fn test_shift_right() {
-        let src = "int main() { long x = 256; long y = 4; return (int)(x >> y); }";
+        let src = "int main() { int x = 256; int y = 4; return x >> y; }";
         assert_eq!(compile_and_run(src), Some(16));
     }
 
     #[test]
     fn test_bitwise_not() {
-        let src = "int main() { long x = 255; long mask = 255; return (int)(~x & mask); }";
+        let src = "int main() { int x = 255; int mask = 255; return ~x & mask; }";
         assert_eq!(compile_and_run(src), Some(0));
     }
 

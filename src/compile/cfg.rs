@@ -103,7 +103,7 @@ fn push_block_class_ids(block: &BasicBlock, out: &mut Vec<ClassId>) {
                 out.push(*addr);
                 out.push(*result);
             }
-            EffectfulOp::Store { addr, val } => {
+            EffectfulOp::Store { addr, val, .. } => {
                 out.push(*addr);
                 out.push(*val);
             }

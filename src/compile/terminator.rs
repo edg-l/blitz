@@ -148,8 +148,14 @@ pub(super) fn lower_terminator(
             if let Some(&ret_cid) = val.as_ref() {
                 if let Some(ret_reg) = get_reg(ret_cid) {
                     if ret_reg != GPR_RETURN_REG {
+                        // Use the function's return type for the MOV size.
+                        let ret_size = func
+                            .return_types
+                            .first()
+                            .map(OpSize::from_type)
+                            .unwrap_or(OpSize::S64);
                         items.push(BlockItem::Inst(MachInst::MovRR {
-                            size: OpSize::S64,
+                            size: ret_size,
                             dst: Operand::Reg(GPR_RETURN_REG),
                             src: Operand::Reg(ret_reg),
                         }));

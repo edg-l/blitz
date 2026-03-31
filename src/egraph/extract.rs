@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::egraph::cost::CostModel;
 use crate::egraph::egraph::EGraph;
 use crate::ir::op::{ClassId, Op};
+use crate::ir::types::Type;
 
 // ── Extraction error ──────────────────────────────────────────────────────────
 
@@ -66,76 +67,97 @@ pub fn extract(
 
     let mut memo: HashMap<ClassId, ExtractedNode> = HashMap::new();
 
-    for class_id in &order {
-        let class = egraph.class(*class_id);
-        let mut best: Option<ExtractedNode> = None;
+    // Iterative extraction: repeat until all classes are extracted or no progress.
+    // This handles cycles from constant-folding merges (e.g., And(a, b) where b
+    // was merged into the result class).
+    let mut remaining: Vec<ClassId> = order.clone();
+    loop {
+        let prev_len = memo.len();
+        let mut still_remaining = Vec::new();
 
-        for node in &class.nodes {
-            let own_cost = cost_model.cost(&node.op);
-            if own_cost == f64::INFINITY {
+        for class_id in &remaining {
+            if memo.contains_key(class_id) {
                 continue;
             }
+            let class = egraph.class(*class_id);
+            let mut best: Option<ExtractedNode> = None;
 
-            // Sum children costs; skip NONE sentinels.
-            let mut child_cost_sum = 0.0;
-            let mut children_canonical: Vec<ClassId> = Vec::with_capacity(node.children.len());
-            let mut ok = true;
-
-            for &child in &node.children {
-                if child == ClassId::NONE {
-                    children_canonical.push(ClassId::NONE);
+            for node in &class.nodes {
+                let own_cost = cost_model.cost(&node.op);
+                if own_cost == f64::INFINITY {
                     continue;
                 }
-                let canon = egraph.unionfind.find_immutable(child);
-                children_canonical.push(canon);
-                match memo.get(&canon) {
-                    Some(ext) => child_cost_sum += ext.cost,
-                    None => {
-                        // Child not in reachable set — shouldn't happen for a well-formed
-                        // egraph, but treat as infinite cost.
-                        ok = false;
-                        break;
+
+                let mut child_cost_sum = 0.0;
+                let mut children_canonical: Vec<ClassId> = Vec::with_capacity(node.children.len());
+                let mut ok = true;
+
+                for &child in &node.children {
+                    if child == ClassId::NONE {
+                        children_canonical.push(ClassId::NONE);
+                        continue;
                     }
+                    let canon = egraph.unionfind.find_immutable(child);
+                    children_canonical.push(canon);
+                    match memo.get(&canon) {
+                        Some(ext) => child_cost_sum += ext.cost,
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+
+                if !ok {
+                    continue;
+                }
+
+                let total = own_cost + child_cost_sum;
+                let candidate = ExtractedNode {
+                    op: node.op.clone(),
+                    children: children_canonical,
+                    cost: total,
+                };
+
+                match &best {
+                    None => best = Some(candidate),
+                    Some(prev) if total < prev.cost => best = Some(candidate),
+                    _ => {}
                 }
             }
 
-            if !ok {
-                continue;
-            }
-
-            let total = own_cost + child_cost_sum;
-            let candidate = ExtractedNode {
-                op: node.op.clone(),
-                children: children_canonical,
-                cost: total,
-            };
-
-            match &best {
-                None => best = Some(candidate),
-                Some(prev) if total < prev.cost => best = Some(candidate),
-                _ => {}
+            match best {
+                Some(ext) => {
+                    memo.insert(*class_id, ext);
+                }
+                None => {
+                    still_remaining.push(*class_id);
+                }
             }
         }
 
-        match best {
-            Some(ext) => {
-                memo.insert(*class_id, ext);
-            }
-            None => {
-                // All nodes had infinite cost.
-                let ops: Vec<Op> = class.nodes.iter().map(|n| n.op.clone()).collect();
-                let op_names: Vec<String> = ops.iter().map(|o| format!("{o:?}")).collect();
-                return Err(ExtractionError {
-                    class_id: *class_id,
-                    ops,
-                    message: format!(
-                        "e-class {:?}: no legal x86-64 lowering for {}",
-                        class_id,
-                        op_names.join(", ")
-                    ),
-                });
-            }
+        if still_remaining.is_empty() || memo.len() == prev_len {
+            // Either all extracted, or no progress (stuck).
+            remaining = still_remaining;
+            break;
         }
+        remaining = still_remaining;
+    }
+
+    // Report error for any unextracted classes.
+    for class_id in &remaining {
+        let class = egraph.class(*class_id);
+        let ops: Vec<Op> = class.nodes.iter().map(|n| n.op.clone()).collect();
+        let op_names: Vec<String> = ops.iter().map(|o| format!("{o:?}")).collect();
+        return Err(ExtractionError {
+            class_id: *class_id,
+            ops,
+            message: format!(
+                "e-class {:?}: no legal x86-64 lowering for {}",
+                class_id,
+                op_names.join(", ")
+            ),
+        });
     }
 
     Ok(ExtractionResult { choices: memo })
@@ -350,6 +372,22 @@ pub fn vreg_insts_for_block(
         });
     }
     insts
+}
+
+/// Build a map from VReg to its IR Type by looking up each VReg's e-class type
+/// in the egraph. The egraph stores a `ty: Type` on every e-class, so this is
+/// a straightforward lookup rather than a bottom-up type inference pass.
+pub fn build_vreg_types(
+    class_to_vreg: &HashMap<ClassId, VReg>,
+    egraph: &EGraph,
+) -> HashMap<VReg, Type> {
+    let mut vreg_types = HashMap::with_capacity(class_to_vreg.len());
+    for (&class_id, &vreg) in class_to_vreg {
+        let canon = egraph.unionfind.find_immutable(class_id);
+        let ty = egraph.class(canon).ty.clone();
+        vreg_types.insert(vreg, ty);
+    }
+    vreg_types
 }
 
 fn vreg_dfs(

@@ -351,68 +351,69 @@ impl Encoder {
 
     /// MOV r/m, r  — used as the canonical RR form.
     pub fn encode_mov_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
+        let d = dst.hw_enc();
+        let s = src.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                let s = src.hw_enc();
-                self.emit_rex(true, s, 0, d);
-                self.emit_byte(0x89);
-                self.emit_modrm(0b11, s, d);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, s, 0, d),
+            OpSize::S32 => self.maybe_emit_rex(false, s, 0, d),
+            _ => todo!("S16/S8 mov_rr encoding"),
         }
+        self.emit_byte(0x89);
+        self.emit_modrm(0b11, s, d);
     }
 
     /// MOV r, imm.
     pub fn encode_mov_ri(&mut self, size: OpSize, dst: Reg, imm: i64) {
+        let d = dst.hw_enc();
         match size {
             OpSize::S64 => {
-                let d = dst.hw_enc();
                 if Self::fits_i32(imm) {
-                    // REX.W + C7 /0 + imm32
                     self.emit_rex(true, 0, 0, d);
                     self.emit_byte(0xC7);
                     self.emit_modrm(0b11, 0, d);
                     self.emit_le32(imm as i32);
                 } else {
-                    // REX.W + B8+rd + imm64
                     self.emit_rex(true, 0, 0, d);
                     self.emit_byte(0xB8 | (d & 7));
                     self.emit_le64(imm);
                 }
             }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S32 => {
+                // B8+rd + imm32 (no REX.W; upper 32 bits auto-zeroed)
+                self.maybe_emit_rex(false, 0, 0, d);
+                self.emit_byte(0xB8 | (d & 7));
+                self.emit_le32(imm as i32);
+            }
+            _ => todo!("S16/S8 mov_ri encoding"),
         }
     }
 
     /// MOV r, r/m  (load from memory).
     pub fn encode_mov_rm(&mut self, size: OpSize, dst: Reg, addr: &Addr) {
+        let d = dst.hw_enc();
+        let idx = addr.index.map_or(0u8, |r| r.hw_enc());
+        let base = addr.base.map_or(0u8, |r| r.hw_enc());
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                let idx = addr.index.map_or(0u8, |r| r.hw_enc());
-                let base = addr.base.map_or(0u8, |r| r.hw_enc());
-                self.emit_rex(true, d, idx, base);
-                self.emit_byte(0x8B);
-                self.emit_addr(d, addr);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, d, idx, base),
+            OpSize::S32 => self.maybe_emit_rex(false, d, idx, base),
+            _ => todo!("S16/S8 mov_rm encoding"),
         }
+        self.emit_byte(0x8B);
+        self.emit_addr(d, addr);
     }
 
     /// MOV r/m, r  (store to memory).
     pub fn encode_mov_mr(&mut self, size: OpSize, addr: &Addr, src: Reg) {
+        let s = src.hw_enc();
+        let idx = addr.index.map_or(0u8, |r| r.hw_enc());
+        let base = addr.base.map_or(0u8, |r| r.hw_enc());
         match size {
-            OpSize::S64 => {
-                let s = src.hw_enc();
-                let idx = addr.index.map_or(0u8, |r| r.hw_enc());
-                let base = addr.base.map_or(0u8, |r| r.hw_enc());
-                self.emit_rex(true, s, idx, base);
-                self.emit_byte(0x89);
-                self.emit_addr(s, addr);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, s, idx, base),
+            OpSize::S32 => self.maybe_emit_rex(false, s, idx, base),
+            _ => todo!("S16/S8 mov_mr encoding"),
         }
+        self.emit_byte(0x89);
+        self.emit_addr(s, addr);
     }
 
     // ── ALU helpers ───────────────────────────────────────────────────────
@@ -420,62 +421,70 @@ impl Encoder {
     /// Encode a reg-reg ALU op.
     /// `opcode` is the r/m, r form (e.g. 0x01 for ADD).
     fn encode_alu_rr(&mut self, size: OpSize, opcode: u8, dst: Reg, src: Reg) {
+        let d = dst.hw_enc();
+        let s = src.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                let s = src.hw_enc();
-                self.emit_rex(true, s, 0, d);
-                self.emit_byte(opcode);
-                self.emit_modrm(0b11, s, d);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, s, 0, d),
+            OpSize::S32 => self.maybe_emit_rex(false, s, 0, d),
+            _ => todo!("S16/S8 alu_rr encoding"),
         }
+        self.emit_byte(opcode);
+        self.emit_modrm(0b11, s, d);
     }
 
     /// Encode reg-imm ALU op (ADD/SUB/AND/OR/XOR/CMP).
     /// `/n` is the ModRM /n value.
     /// `rax_shortcut` is the opcode for the RAX+imm32 shortcut.
     fn encode_alu_ri(&mut self, size: OpSize, slash_n: u8, rax_op: u8, dst: Reg, imm: i32) {
+        let d = dst.hw_enc();
+        let w = size == OpSize::S64;
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
+            OpSize::S64 | OpSize::S32 => {
                 if Self::fits_i8(imm) {
-                    // 83 /n ib
-                    self.emit_rex(true, 0, 0, d);
+                    if w {
+                        self.emit_rex(true, 0, 0, d);
+                    } else {
+                        self.maybe_emit_rex(false, 0, 0, d);
+                    }
                     self.emit_byte(0x83);
                     self.emit_modrm(0b11, slash_n, d);
                     self.emit_byte(imm as i8 as u8);
                 } else if dst == Reg::RAX {
-                    // RAX shortcut: REX.W + <rax_op> id
-                    self.emit_rex(true, 0, 0, 0);
+                    if w {
+                        self.emit_rex(true, 0, 0, 0);
+                    } else {
+                        self.maybe_emit_rex(false, 0, 0, 0);
+                    }
                     self.emit_byte(rax_op);
                     self.emit_le32(imm);
                 } else {
-                    // 81 /n id
-                    self.emit_rex(true, 0, 0, d);
+                    if w {
+                        self.emit_rex(true, 0, 0, d);
+                    } else {
+                        self.maybe_emit_rex(false, 0, 0, d);
+                    }
                     self.emit_byte(0x81);
                     self.emit_modrm(0b11, slash_n, d);
                     self.emit_le32(imm);
                 }
             }
-            _ => todo!("sub-64-bit encoding"),
+            _ => todo!("S16/S8 alu_ri encoding"),
         }
     }
 
     /// Encode reg-mem ALU op.
     /// `opcode` is the r, r/m form (e.g. 0x03 for ADD).
     fn encode_alu_rm(&mut self, size: OpSize, opcode: u8, dst: Reg, addr: &Addr) {
+        let d = dst.hw_enc();
+        let idx = addr.index.map_or(0u8, |r| r.hw_enc());
+        let base = addr.base.map_or(0u8, |r| r.hw_enc());
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                let idx = addr.index.map_or(0u8, |r| r.hw_enc());
-                let base = addr.base.map_or(0u8, |r| r.hw_enc());
-                self.emit_rex(true, d, idx, base);
-                self.emit_byte(opcode);
-                self.emit_addr(d, addr);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, d, idx, base),
+            OpSize::S32 => self.maybe_emit_rex(false, d, idx, base),
+            _ => todo!("S16/S8 alu_rm encoding"),
         }
+        self.emit_byte(opcode);
+        self.emit_addr(d, addr);
     }
 
     pub fn encode_add_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
@@ -519,71 +528,73 @@ impl Encoder {
     }
 
     pub fn encode_test_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
+        let d = dst.hw_enc();
+        let s = src.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                let s = src.hw_enc();
-                self.emit_rex(true, s, 0, d);
-                self.emit_byte(0x85);
-                self.emit_modrm(0b11, s, d);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, s, 0, d),
+            OpSize::S32 => self.maybe_emit_rex(false, s, 0, d),
+            _ => todo!("S16/S8 test_rr encoding"),
         }
+        self.emit_byte(0x85);
+        self.emit_modrm(0b11, s, d);
     }
 
     pub fn encode_test_ri(&mut self, size: OpSize, dst: Reg, imm: i32) {
+        let d = dst.hw_enc();
+        let w = size == OpSize::S64;
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
+            OpSize::S64 | OpSize::S32 => {
                 if dst == Reg::RAX {
-                    // RAX shortcut: REX.W + A9 id
-                    self.emit_rex(true, 0, 0, 0);
+                    if w {
+                        self.emit_rex(true, 0, 0, 0);
+                    } else {
+                        self.maybe_emit_rex(false, 0, 0, 0);
+                    }
                     self.emit_byte(0xA9);
                     self.emit_le32(imm);
                 } else {
-                    // REX.W + F7 /0 id
-                    self.emit_rex(true, 0, 0, d);
+                    if w {
+                        self.emit_rex(true, 0, 0, d);
+                    } else {
+                        self.maybe_emit_rex(false, 0, 0, d);
+                    }
                     self.emit_byte(0xF7);
                     self.emit_modrm(0b11, 0, d);
                     self.emit_le32(imm);
                 }
             }
-            _ => todo!("sub-64-bit encoding"),
+            _ => todo!("S16/S8 test_ri encoding"),
         }
     }
 
     // ── Shifts ────────────────────────────────────────────────────────────
 
     fn encode_shift_ri(&mut self, size: OpSize, slash_n: u8, dst: Reg, imm: u8) {
+        let d = dst.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                self.emit_rex(true, 0, 0, d);
-                if imm == 1 {
-                    // D1 /n (shift by 1 short form)
-                    self.emit_byte(0xD1);
-                    self.emit_modrm(0b11, slash_n, d);
-                } else {
-                    // C1 /n ib
-                    self.emit_byte(0xC1);
-                    self.emit_modrm(0b11, slash_n, d);
-                    self.emit_byte(imm);
-                }
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, 0, 0, d),
+            OpSize::S32 => self.maybe_emit_rex(false, 0, 0, d),
+            _ => todo!("S16/S8 shift_ri encoding"),
+        }
+        if imm == 1 {
+            self.emit_byte(0xD1);
+            self.emit_modrm(0b11, slash_n, d);
+        } else {
+            self.emit_byte(0xC1);
+            self.emit_modrm(0b11, slash_n, d);
+            self.emit_byte(imm);
         }
     }
 
     fn encode_shift_cl(&mut self, size: OpSize, slash_n: u8, dst: Reg) {
+        let d = dst.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                self.emit_rex(true, 0, 0, d);
-                self.emit_byte(0xD3);
-                self.emit_modrm(0b11, slash_n, d);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, 0, 0, d),
+            OpSize::S32 => self.maybe_emit_rex(false, 0, 0, d),
+            _ => todo!("S16/S8 shift_cl encoding"),
         }
+        self.emit_byte(0xD3);
+        self.emit_modrm(0b11, slash_n, d);
     }
 
     pub fn encode_shl_ri(&mut self, size: OpSize, dst: Reg, imm: u8) {
@@ -613,55 +624,50 @@ impl Encoder {
     // ── IMUL ──────────────────────────────────────────────────────────────
 
     pub fn encode_imul2_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
+        let d = dst.hw_enc();
+        let s = src.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                let s = src.hw_enc();
-                self.emit_rex(true, d, 0, s);
-                self.emit_byte(0x0F);
-                self.emit_byte(0xAF);
-                self.emit_modrm(0b11, d, s);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, d, 0, s),
+            OpSize::S32 => self.maybe_emit_rex(false, d, 0, s),
+            _ => todo!("S16/S8 imul2_rr encoding"),
         }
+        self.emit_byte(0x0F);
+        self.emit_byte(0xAF);
+        self.emit_modrm(0b11, d, s);
     }
 
     pub fn encode_imul3_rri(&mut self, size: OpSize, dst: Reg, src: Reg, imm: i32) {
+        let d = dst.hw_enc();
+        let s = src.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                let s = src.hw_enc();
-                self.emit_rex(true, d, 0, s);
-                if Self::fits_i8(imm) {
-                    // 6B /r ib
-                    self.emit_byte(0x6B);
-                    self.emit_modrm(0b11, d, s);
-                    self.emit_byte(imm as i8 as u8);
-                } else {
-                    // 69 /r id
-                    self.emit_byte(0x69);
-                    self.emit_modrm(0b11, d, s);
-                    self.emit_le32(imm);
-                }
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, d, 0, s),
+            OpSize::S32 => self.maybe_emit_rex(false, d, 0, s),
+            _ => todo!("S16/S8 imul3_rri encoding"),
+        }
+        if Self::fits_i8(imm) {
+            self.emit_byte(0x6B);
+            self.emit_modrm(0b11, d, s);
+            self.emit_byte(imm as i8 as u8);
+        } else {
+            self.emit_byte(0x69);
+            self.emit_modrm(0b11, d, s);
+            self.emit_le32(imm);
         }
     }
 
     // ── LEA ───────────────────────────────────────────────────────────────
 
     pub fn encode_lea(&mut self, size: OpSize, dst: Reg, addr: &Addr) {
+        let d = dst.hw_enc();
+        let idx = addr.index.map_or(0u8, |r| r.hw_enc());
+        let base = addr.base.map_or(0u8, |r| r.hw_enc());
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                let idx = addr.index.map_or(0u8, |r| r.hw_enc());
-                let base = addr.base.map_or(0u8, |r| r.hw_enc());
-                self.emit_rex(true, d, idx, base);
-                self.emit_byte(0x8D);
-                self.emit_addr(d, addr);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, d, idx, base),
+            OpSize::S32 => self.maybe_emit_rex(false, d, idx, base),
+            _ => todo!("S16/S8 lea encoding"),
         }
+        self.emit_byte(0x8D);
+        self.emit_addr(d, addr);
     }
 
     // ── PUSH / POP ────────────────────────────────────────────────────────
@@ -808,18 +814,18 @@ impl Encoder {
     }
 
     pub fn encode_cmov(&mut self, size: OpSize, cc: CondCode, dst: Reg, src: Reg) {
+        let tttn = Self::cc_byte(cc);
+        let d = dst.hw_enc();
+        let s = src.hw_enc();
         match size {
-            OpSize::S64 => {
-                let tttn = Self::cc_byte(cc);
-                let d = dst.hw_enc();
-                let s = src.hw_enc();
-                self.emit_rex(true, d, 0, s);
-                self.emit_byte(0x0F);
-                self.emit_byte(0x40 | tttn);
-                self.emit_modrm(0b11, d, s);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, d, 0, s),
+            OpSize::S32 => self.maybe_emit_rex(false, d, 0, s),
+            OpSize::S8 => panic!("CMOV has no byte form"),
+            OpSize::S16 => todo!("S16 cmov encoding"),
         }
+        self.emit_byte(0x0F);
+        self.emit_byte(0x40 | tttn);
+        self.emit_modrm(0b11, d, s);
     }
 
     // ── CDQ / CQO / IDIV / DIV / NEG / NOT ───────────────────────────────
@@ -848,77 +854,71 @@ impl Encoder {
     }
 
     pub fn encode_idiv(&mut self, size: OpSize, src: Reg) {
+        let s = src.hw_enc();
         match size {
-            OpSize::S64 => {
-                let s = src.hw_enc();
-                self.emit_rex(true, 0, 0, s);
-                self.emit_byte(0xF7);
-                self.emit_modrm(0b11, 7, s);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, 0, 0, s),
+            OpSize::S32 => self.maybe_emit_rex(false, 0, 0, s),
+            _ => todo!("S16/S8 idiv encoding"),
         }
+        self.emit_byte(0xF7);
+        self.emit_modrm(0b11, 7, s);
     }
 
     pub fn encode_div(&mut self, size: OpSize, src: Reg) {
+        let s = src.hw_enc();
         match size {
-            OpSize::S64 => {
-                let s = src.hw_enc();
-                self.emit_rex(true, 0, 0, s);
-                self.emit_byte(0xF7);
-                self.emit_modrm(0b11, 6, s);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, 0, 0, s),
+            OpSize::S32 => self.maybe_emit_rex(false, 0, 0, s),
+            _ => todo!("S16/S8 div encoding"),
         }
+        self.emit_byte(0xF7);
+        self.emit_modrm(0b11, 6, s);
     }
 
     pub fn encode_neg(&mut self, size: OpSize, dst: Reg) {
+        let d = dst.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                self.emit_rex(true, 0, 0, d);
-                self.emit_byte(0xF7);
-                self.emit_modrm(0b11, 3, d);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, 0, 0, d),
+            OpSize::S32 => self.maybe_emit_rex(false, 0, 0, d),
+            _ => todo!("S16/S8 neg encoding"),
         }
+        self.emit_byte(0xF7);
+        self.emit_modrm(0b11, 3, d);
     }
 
     pub fn encode_not(&mut self, size: OpSize, dst: Reg) {
+        let d = dst.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                self.emit_rex(true, 0, 0, d);
-                self.emit_byte(0xF7);
-                self.emit_modrm(0b11, 2, d);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, 0, 0, d),
+            OpSize::S32 => self.maybe_emit_rex(false, 0, 0, d),
+            _ => todo!("S16/S8 not encoding"),
         }
+        self.emit_byte(0xF7);
+        self.emit_modrm(0b11, 2, d);
     }
 
     /// INC r/m
     pub fn encode_inc(&mut self, size: OpSize, dst: Reg) {
+        let d = dst.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                self.emit_rex(true, 0, 0, d);
-                self.emit_byte(0xFF);
-                self.emit_modrm(0b11, 0, d);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, 0, 0, d),
+            OpSize::S32 => self.maybe_emit_rex(false, 0, 0, d),
+            _ => todo!("S16/S8 inc encoding"),
         }
+        self.emit_byte(0xFF);
+        self.emit_modrm(0b11, 0, d);
     }
 
     /// DEC r/m
     pub fn encode_dec(&mut self, size: OpSize, dst: Reg) {
+        let d = dst.hw_enc();
         match size {
-            OpSize::S64 => {
-                let d = dst.hw_enc();
-                self.emit_rex(true, 0, 0, d);
-                self.emit_byte(0xFF);
-                self.emit_modrm(0b11, 1, d);
-            }
-            _ => todo!("sub-64-bit encoding"),
+            OpSize::S64 => self.emit_rex(true, 0, 0, d),
+            OpSize::S32 => self.maybe_emit_rex(false, 0, 0, d),
+            _ => todo!("S16/S8 dec encoding"),
         }
+        self.emit_byte(0xFF);
+        self.emit_modrm(0b11, 1, d);
     }
 
     // ── MOVZX / MOVSX ─────────────────────────────────────────────────────
