@@ -419,7 +419,13 @@ pub fn compile(
     // Hoist Param ops to the front of the entry block's schedule.
     if !block_schedules.is_empty() {
         let sched = &mut block_schedules[0];
-        sched.sort_by_key(|inst| if matches!(inst.op, Op::Param(_, _)) { 0u8 } else { 1 });
+        sched.sort_by_key(|inst| {
+            if matches!(inst.op, Op::Param(_, _)) {
+                0u8
+            } else {
+                1
+            }
+        });
     }
 
     // Phase 5: Register allocation -- per-block with cross-block live range splitting.
@@ -810,7 +816,7 @@ pub fn compile(
                 let non_term_ops = &block.ops[..non_term_count];
                 if non_term_count > 0 {
                     // Build block_class_to_vreg with renames applied.
-                    let bcv: HashMap<ClassId, VReg> = class_to_vreg
+                    let mut bcv: HashMap<ClassId, VReg> = class_to_vreg
                         .iter()
                         .map(|(&cid, &vreg)| {
                             let renamed = rename.get(&vreg).copied().unwrap_or(vreg);
@@ -829,6 +835,49 @@ pub fn compile(
                         &mut shared_next_vreg,
                         &mut spill_slot_counter,
                     );
+                    // Step 8a-effectful: Ensure effectful op operands are in
+                    // the schedule. Effectful ops reference e-class operands
+                    // via EffectfulUse markers. If an operand's VReg is not in
+                    // this block's schedule (because global liveness didn't
+                    // detect it as cross-block live), insert a remat instruction.
+                    {
+                        let sched_vregs: HashSet<VReg> =
+                            split_schedule.iter().map(|i| i.dst).collect();
+                        for op in non_term_ops {
+                            let cids: Vec<ClassId> = match op {
+                                EffectfulOp::Store { addr, val, .. } => vec![*addr, *val],
+                                EffectfulOp::Load { addr, .. } => vec![*addr],
+                                EffectfulOp::Call { args, .. } => args.clone(),
+                                _ => continue,
+                            };
+                            for cid in cids {
+                                let canon = egraph.unionfind.find_immutable(cid);
+                                if let Some(&vreg) = bcv.get(&canon) {
+                                    if sched_vregs.contains(&vreg) {
+                                        continue;
+                                    }
+                                    // Try original (pre-rename) VReg for def lookup.
+                                    let orig_vreg =
+                                        class_to_vreg.get(&canon).copied().unwrap_or(vreg);
+                                    if let Some(def) =
+                                        def_insts.get(&vreg).or_else(|| def_insts.get(&orig_vreg))
+                                    {
+                                        if crate::regalloc::spill::is_rematerializable(def) {
+                                            let new_vreg = VReg(shared_next_vreg);
+                                            shared_next_vreg += 1;
+                                            split_schedule.push(ScheduledInst {
+                                                op: def.op.clone(),
+                                                dst: new_vreg,
+                                                operands: def.operands.clone(),
+                                            });
+                                            bcv.insert(canon, new_vreg);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Re-insert EffectfulUse markers with post-rename VRegs.
                     insert_effectful_use_markers(
                         &mut split_schedule,

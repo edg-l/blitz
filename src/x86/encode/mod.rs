@@ -209,7 +209,7 @@ impl Encoder {
             (Some(base), None) => {
                 let base_enc = base.hw_enc();
 
-                if base_enc == 4 {
+                if base_enc & 7 == 4 {
                     // RSP/R12: must use SIB even without an index.
                     let mod_ = if !has_disp {
                         0b00
@@ -225,7 +225,7 @@ impl Encoder {
                         0b10 => self.emit_le32(disp),
                         _ => {}
                     }
-                } else if base_enc == 5 {
+                } else if base_enc & 7 == 5 {
                     // RBP/R13: mod=00 means RIP-relative; force mod=01 even with disp=0.
                     let mod_ = if !has_disp {
                         0b01
@@ -263,9 +263,9 @@ impl Encoder {
                 let base_enc = base.hw_enc();
                 let idx_enc = idx.hw_enc();
 
-                let mod_ = if base_enc == 5 {
+                let mod_ = if base_enc & 7 == 5 {
                     // RBP/R13 base with SIB: mod=00 still encodes disp32.
-                    // But to encode zero displacement with RBP base we need mod=01.
+                    // But to encode zero displacement with RBP/R13 base we need mod=01.
                     if !has_disp {
                         0b01
                     } else if Self::fits_i8(disp) {

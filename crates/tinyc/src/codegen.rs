@@ -438,15 +438,20 @@ impl<'b> FnCtx<'b> {
                         let merge_val = merge_params[0];
 
                         let zero_i32 = self.builder.iconst(0, Type::I32);
-                        self.builder.branch(lcond, bb_rhs, bb_merge, &[], &[zero_i32]);
+                        self.builder
+                            .branch(lcond, bb_rhs, bb_merge, &[], &[zero_i32]);
 
+                        self.builder.seal_block(bb_rhs);
                         self.builder.set_block(bb_rhs);
                         let (r, rt) = self.compile_expr(rhs)?;
                         let (r, rt) = self.emit_promote(r, &rt);
                         let rzero = self.builder.iconst(0, rt.to_ir_type().unwrap());
                         let rbool = self.emit_icmp_val(CondCode::Ne, r, rzero);
-                        self.builder.jump(bb_merge, &[rbool]);
+                        if !self.builder.is_current_block_terminated() {
+                            self.builder.jump(bb_merge, &[rbool]);
+                        }
 
+                        self.builder.seal_block(bb_merge);
                         self.builder.set_block(bb_merge);
                         Ok((merge_val, CType::Int))
                     }
@@ -463,15 +468,20 @@ impl<'b> FnCtx<'b> {
                         let merge_val = merge_params[0];
 
                         let one_i32 = self.builder.iconst(1, Type::I32);
-                        self.builder.branch(lcond, bb_merge, bb_rhs, &[one_i32], &[]);
+                        self.builder
+                            .branch(lcond, bb_merge, bb_rhs, &[one_i32], &[]);
 
+                        self.builder.seal_block(bb_rhs);
                         self.builder.set_block(bb_rhs);
                         let (r, rt) = self.compile_expr(rhs)?;
                         let (r, rt) = self.emit_promote(r, &rt);
                         let rzero = self.builder.iconst(0, rt.to_ir_type().unwrap());
                         let rbool = self.emit_icmp_val(CondCode::Ne, r, rzero);
-                        self.builder.jump(bb_merge, &[rbool]);
+                        if !self.builder.is_current_block_terminated() {
+                            self.builder.jump(bb_merge, &[rbool]);
+                        }
 
+                        self.builder.seal_block(bb_merge);
                         self.builder.set_block(bb_merge);
                         Ok((merge_val, CType::Int))
                     }

@@ -88,7 +88,15 @@ pub(super) fn add_call_precolors(
                     if let Some(&vreg) = class_to_vreg.get(&canon) {
                         match loc {
                             ArgLoc::Reg(reg) => {
-                                if !param_vregs.iter().any(|&(v, _)| v == vreg) {
+                                // Only pre-color call args when there is exactly one
+                                // call in the block. With multiple calls, a VReg used
+                                // as an argument in one call may be live across another
+                                // call. Pre-coloring it to a caller-saved ABI register
+                                // conflicts with call-clobber phantom interferences,
+                                // causing the allocator to assign incompatible colors.
+                                // The lowering emits explicit MOVs to shuffle registers
+                                // into the correct ABI positions before each call.
+                                if call_count == 1 && !param_vregs.iter().any(|&(v, _)| v == vreg) {
                                     param_vregs.push((vreg, *reg));
                                 }
                             }
