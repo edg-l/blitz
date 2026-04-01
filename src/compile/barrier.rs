@@ -70,7 +70,13 @@ pub(super) fn assign_barrier_groups(
                 min_group = min_group.max(og);
             }
         }
-        if let Some(&arg_barrier_k) = vreg_to_arg_of_barrier.get(&inst.dst) {
+        // Barrier results (LoadResult, CallResult) are anchored to the group
+        // right after their producing barrier. They must NOT be pushed later by
+        // vreg_to_arg (which reflects consuming barriers); EffectfulUse markers
+        // handle keeping them alive until their consumers.
+        if let Some(&barrier_k) = vreg_to_result_of_barrier.get(&inst.dst) {
+            min_group = min_group.max(barrier_k + 1);
+        } else if let Some(&arg_barrier_k) = vreg_to_arg_of_barrier.get(&inst.dst) {
             min_group = min_group.max(arg_barrier_k);
         }
         vreg_group.insert(inst.dst, min_group);
