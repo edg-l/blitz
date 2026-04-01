@@ -1112,3 +1112,124 @@ fn test_high_register_pressure() {
         }"#;
     assert_eq!(compile_and_run(src), Some(42));
 }
+
+// ── LoadResult / CallResult barrier-group regression tests ───────────────────
+//
+// These tests exercise the two bugs that were fixed in assign_barrier_groups:
+//
+//   Bug 1: LoadResult/CallResult VRegs got wrong barrier groups (group 0 or
+//     the consuming barrier's group). Fix: anchor them at barrier_k + 1.
+//
+//   Bug 2: Within a barrier group, LoadResult/CallResult VRegs could appear
+//     AFTER pure ops, causing regalloc to think their register was free.
+//     Fix: sort barrier results to front of their group.
+
+// Triple swap through pointers — stresses multiple simultaneous LoadResults.
+//
+// Three loads and three stores in one function body create three generations
+// of LoadResults that must be assigned to distinct groups and appear before
+// their consuming pure ops in the schedule.
+#[test]
+fn test_triple_swap_via_pointers() {
+    let src = r#"
+        int triple_sum(int *a, int *b, int *c) {
+            int va = *a;
+            int vb = *b;
+            int vc = *c;
+            *a = vb;
+            *b = vc;
+            *c = va;
+            return *a + *b + *c;
+        }
+        int main() {
+            int x = 1;
+            int y = 2;
+            int z = 3;
+            int s = triple_sum(&x, &y, &z);
+            return s - 6;
+        }"#;
+    // loads 1,2,3 then stores 2,3,1; reloads are 2+3+1=6; result - 6 = 0
+    assert_eq!(compile_and_run(src), Some(0));
+}
+
+// Load-then-compute — load a value and use it alongside another load result.
+//
+// Stresses LoadResult + pure op same-group ordering (Bug 2): both the
+// load result and an Iconst live in the same barrier group, and the load
+// result must appear first so regalloc sees it alive.
+#[test]
+fn test_load_then_compute_with_second_load() {
+    let src = r#"
+        int main() {
+            int a = 10;
+            int b = 20;
+            int *pa = &a;
+            int *pb = &b;
+            int x = *pa + 5;
+            int y = *pb * 2;
+            return x + y - 55;
+        }"#;
+    // x = 10 + 5 = 15, y = 20 * 2 = 40, sum = 55, 55 - 55 = 0
+    assert_eq!(compile_and_run(src), Some(0));
+}
+
+// Call result used in expression — tests CallResult barrier-group assignment.
+//
+// Before the fix, CallResult could get group 0 (no operands path) or be
+// moved to the consuming barrier's group by vreg_to_arg. The result is used
+// in an arithmetic expression alongside another value.
+#[test]
+fn test_call_result_in_expression() {
+    let src = r#"
+        int double_it(int x) { return x + x; }
+        int main() {
+            int a = 7;
+            int b = 3;
+            int r = double_it(a) + b;
+            return r - 17;
+        }"#;
+    // double_it(7) = 14, 14 + 3 = 17, 17 - 17 = 0
+    assert_eq!(compile_and_run(src), Some(0));
+}
+
+// Many loads in one expression — reads from 4 pointers and combines results.
+//
+// Maximum pressure on LoadResult group ordering: four LoadResults must each
+// get distinct correct groups and appear before pure ops that use them.
+// Before the fix, even two wrong groups could corrupt register allocation.
+#[test]
+fn test_four_loads_in_expression() {
+    let src = r#"
+        int sum_four(int *a, int *b, int *c, int *d) {
+            return *a + *b + *c + *d;
+        }
+        int main() {
+            int w = 1;
+            int x = 2;
+            int y = 3;
+            int z = 4;
+            return sum_four(&w, &x, &y, &z) - 10;
+        }"#;
+    // 1+2+3+4 = 10, 10 - 10 = 0
+    assert_eq!(compile_and_run(src), Some(0));
+}
+
+// Load result mixed with call — stresses both LoadResult and CallResult groups.
+//
+// A load happens before a call, and the loaded value must survive across the
+// call (caller-saved register clobber). The call result is then combined with
+// the loaded value. Both barrier-group bugs could manifest here.
+#[test]
+fn test_load_value_across_call() {
+    let src = r#"
+        int increment(int x) { return x + 1; }
+        int main() {
+            int val = 41;
+            int *p = &val;
+            int loaded = *p;
+            int r = increment(loaded);
+            return r;
+        }"#;
+    // loaded = 41, increment(41) = 42
+    assert_eq!(compile_and_run(src), Some(42));
+}

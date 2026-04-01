@@ -3119,6 +3119,379 @@ int main(void) {
     }
 }
 
+// ── assign_barrier_groups unit tests ─────────────────────────────────────────
+//
+// These tests exercise the two bugs that were fixed:
+//
+// Bug 1: LoadResult/CallResult VRegs were being assigned to wrong barrier
+//   groups. Fix: anchor them at barrier_k + 1 and skip vreg_to_arg promotion.
+//
+// Bug 2: within a barrier group, LoadResult/CallResult VRegs could appear
+//   AFTER pure ops. Fix: sort barrier results to front of their group.
+
+// Bug 1a: LoadResult gets group barrier_k + 1, even when also in vreg_to_arg.
+//
+// Before the fix, vreg_to_arg would push the LoadResult's group to the
+// consuming barrier's group (e.g. 2), rather than pinning it at barrier_k+1
+// (e.g. 1). This caused regalloc to believe the register was free too early.
+#[test]
+fn assign_barrier_groups_load_result_anchored_at_barrier_plus_one() {
+    // LoadResult from barrier 0 (should land in group 1).
+    // It is also in vreg_to_arg at barrier 2 (would push it to group 2 in the old code).
+    let sched = vec![
+        make_inst(0, Op::LoadResult(0, Type::I64), &[]),
+        make_inst(1, Op::Iconst(10, Type::I64), &[]),
+        make_inst(2, Op::X86Add, &[0, 1]),
+    ];
+    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    // vreg_to_arg says VReg(0) is consumed by barrier 2 — the old bug would
+    // use this to move the LoadResult group from 1 to 2.
+    let vreg_to_arg = HashMap::from([(VReg(0), 2usize)]);
+
+    let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
+
+    // LoadResult must stay at group 1 (barrier 0 + 1), not be pushed to 2.
+    assert_eq!(
+        groups[&VReg(0)],
+        1,
+        "LoadResult should be anchored at barrier_k+1=1, not pushed to vreg_to_arg group"
+    );
+}
+
+// Bug 1b: Multiple LoadResults from different barriers get distinct correct groups.
+#[test]
+fn assign_barrier_groups_multiple_load_results_distinct_groups() {
+    // Barrier 0 produces VReg(0), barrier 1 produces VReg(1).
+    let sched = vec![
+        make_inst(0, Op::LoadResult(0, Type::I64), &[]),
+        make_inst(1, Op::LoadResult(1, Type::I64), &[]),
+        make_inst(2, Op::X86Add, &[0, 1]),
+    ];
+    let vreg_to_result = HashMap::from([(VReg(0), 0usize), (VReg(1), 1usize)]);
+    let vreg_to_arg = HashMap::new();
+
+    let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
+
+    assert_eq!(groups[&VReg(0)], 1, "LoadResult from barrier 0 -> group 1");
+    assert_eq!(groups[&VReg(1)], 2, "LoadResult from barrier 1 -> group 2");
+    // Consumer depends on both, so its group must be >= max(1, 2) = 2.
+    assert!(
+        groups[&VReg(2)] >= 2,
+        "consumer of both LoadResults must be in group >= 2, got {}",
+        groups[&VReg(2)]
+    );
+}
+
+// Bug 1c: CallResult gets the correct group (barrier_k + 1), not group 0.
+#[test]
+fn assign_barrier_groups_call_result_anchored_at_barrier_plus_one() {
+    // CallResult from barrier 2 (should land in group 3).
+    let sched = vec![
+        make_inst(0, Op::Iconst(1, Type::I64), &[]),
+        make_inst(1, Op::Iconst(2, Type::I64), &[]),
+        make_inst(2, Op::CallResult(0, Type::I64), &[]),
+        make_inst(3, Op::X86Add, &[2, 1]),
+    ];
+    let vreg_to_result = HashMap::from([(VReg(2), 2usize)]);
+    let vreg_to_arg = HashMap::new();
+
+    let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
+
+    assert_eq!(
+        groups[&VReg(2)],
+        3,
+        "CallResult from barrier 2 should be in group 3"
+    );
+}
+
+// Bug 1d: A pure op that depends on a LoadResult is placed AFTER the
+//   LoadResult's group. Before the fix, the LoadResult could be in the wrong
+//   group which caused the pure op's group to also be wrong.
+#[test]
+fn assign_barrier_groups_pure_op_after_load_result_group() {
+    // LoadResult at barrier 0 -> group 1.
+    // Pure add depends on it -> must be >= group 1.
+    let sched = vec![
+        make_inst(0, Op::LoadResult(0, Type::I64), &[]),
+        make_inst(1, Op::X86Add, &[0, 0]),
+    ];
+    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = HashMap::new();
+
+    let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
+
+    assert_eq!(groups[&VReg(0)], 1, "LoadResult in group 1");
+    assert!(
+        groups[&VReg(1)] >= 1,
+        "pure op consuming LoadResult must be in group >= 1, got {}",
+        groups[&VReg(1)]
+    );
+}
+
+// Bug 1e: LoadResult in vreg_to_arg as a different barrier is NOT promoted
+//   beyond barrier_k + 1 by the backward propagation pass.
+#[test]
+fn assign_barrier_groups_load_result_backward_pass_skipped() {
+    // LoadResult at barrier 0, anchored at group 1.
+    // A pure consumer that would be in a later group should NOT pull the
+    // LoadResult backward-pass into a later group (barrier results are skipped
+    // in the backward propagation).
+    let sched = vec![
+        make_inst(0, Op::LoadResult(0, Type::I64), &[]),
+        make_inst(1, Op::Iconst(0, Type::I64), &[]),
+        make_inst(2, Op::Iconst(0, Type::I64), &[]),
+        make_inst(3, Op::X86Add, &[0, 2]),
+    ];
+    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    // vreg_to_arg pushes VReg(0) to barrier 3, but LoadResult must stay at 1.
+    let vreg_to_arg = HashMap::from([(VReg(0), 3usize)]);
+
+    let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
+
+    // LoadResult stays pinned at 1 — backward propagation must skip it.
+    assert_eq!(
+        groups[&VReg(0)],
+        1,
+        "LoadResult must not be moved by backward propagation pass"
+    );
+}
+
+// ── assign_barrier_groups sort-order regression tests ────────────────────────
+//
+// Bug 2 was about LoadResults appearing AFTER pure ops within the same group
+// in the schedule, which caused regalloc to think the register was free.
+// The fix sorts barrier results to the front of their group in the schedule.
+// These tests verify the group assignments (not schedule order directly) are
+// such that regalloc would see the LoadResult before pure ops in the same group.
+
+// Verify LoadResult with no operands gets group barrier_k+1 even when
+// there are many preceding pure ops that could otherwise "fill" group 1.
+#[test]
+fn assign_barrier_groups_load_result_not_pushed_behind_pure_ops() {
+    // Many pure ops in group 0, then a LoadResult from barrier 0, then a consumer.
+    let sched = vec![
+        make_inst(10, Op::Iconst(1, Type::I64), &[]),
+        make_inst(11, Op::Iconst(2, Type::I64), &[]),
+        make_inst(12, Op::X86Add, &[10, 11]),
+        make_inst(0, Op::LoadResult(0, Type::I64), &[]), // barrier 0 result
+        make_inst(13, Op::X86Add, &[0, 12]),             // uses LoadResult
+    ];
+    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = HashMap::new();
+
+    let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
+
+    // LoadResult must be at group 1 regardless of pure op group placements.
+    assert_eq!(
+        groups[&VReg(0)],
+        1,
+        "LoadResult should be at group 1, not pushed after pure ops"
+    );
+}
+
+// ── IR-level e2e regression tests for LoadResult/CallResult group bugs ────────
+
+// Regression: load result used in arithmetic with a second load result.
+//
+// Before the fix, the two LoadResults could be assigned to the same wrong group
+// as each other or as subsequent pure ops, causing regalloc to think registers
+// were free when they were not.
+#[test]
+fn e2e_two_loads_then_add() {
+    // Build: two_loads_add(ptr_a: *i64, ptr_b: *i64) -> *ptr_a + *ptr_b
+    let mut builder =
+        FunctionBuilder::new("blitz_two_loads_add", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let ptr_a = params[0];
+    let ptr_b = params[1];
+    let a = builder.load(ptr_a, Type::I64);
+    let b = builder.load(ptr_b, Type::I64);
+    let sum = builder.add(a, b);
+    builder.ret(Some(sum));
+    let func = builder.finalize().expect("two_loads_add finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile two_loads_add");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_two_loads_add(int64_t *a, int64_t *b);
+int main(void) {
+    int64_t x = 10, y = 32;
+    if (blitz_two_loads_add(&x, &y) != 42) return 1;
+    int64_t neg = -7, pos = 50;
+    if (blitz_two_loads_add(&neg, &pos) != 43) return 2;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_two_loads_add", &obj, c_main) {
+        assert_eq!(code, 0, "two_loads_add returned wrong exit code {code}");
+    }
+}
+
+// Regression: three loads combined in one expression.
+//
+// Three simultaneous LoadResults stress both the group-assignment bug (Bug 1)
+// and the sort-order bug (Bug 2): all three must be in distinct groups and
+// must appear before pure ops that consume them.
+#[test]
+fn e2e_three_loads_combined() {
+    // Build: three_loads(p0, p1, p2) -> *p0 + *p1 + *p2
+    let mut builder = FunctionBuilder::new(
+        "blitz_three_loads",
+        &[Type::I64, Type::I64, Type::I64],
+        &[Type::I64],
+    );
+    let params = builder.params().to_vec();
+    let v0 = builder.load(params[0], Type::I64);
+    let v1 = builder.load(params[1], Type::I64);
+    let v2 = builder.load(params[2], Type::I64);
+    let sum01 = builder.add(v0, v1);
+    let sum = builder.add(sum01, v2);
+    builder.ret(Some(sum));
+    let func = builder.finalize().expect("three_loads finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile three_loads");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_three_loads(int64_t *a, int64_t *b, int64_t *c);
+int main(void) {
+    int64_t a = 1, b = 10, c = 100;
+    if (blitz_three_loads(&a, &b, &c) != 111) return 1;
+    int64_t x = 7, y = 8, z = 9;
+    if (blitz_three_loads(&x, &y, &z) != 24) return 2;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_three_loads", &obj, c_main) {
+        assert_eq!(code, 0, "three_loads returned wrong exit code {code}");
+    }
+}
+
+// Regression: load result used alongside a pure computation.
+//
+// Stresses Bug 2 (sort order): the LoadResult and a pure Iconst are in the
+// same barrier group. The LoadResult must appear BEFORE the pure op so that
+// regalloc sees the register live at the right point.
+#[test]
+fn e2e_load_result_with_pure_same_group() {
+    // Build: load_plus_const(ptr: *i64) -> *ptr + 100
+    let mut builder = FunctionBuilder::new("blitz_load_plus_const", &[Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let ptr = params[0];
+    let loaded = builder.load(ptr, Type::I64);
+    let c = builder.iconst(100, Type::I64);
+    let result = builder.add(loaded, c);
+    builder.ret(Some(result));
+    let func = builder.finalize().expect("load_plus_const finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile load_plus_const");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_load_plus_const(int64_t *ptr);
+int main(void) {
+    int64_t v = 42;
+    if (blitz_load_plus_const(&v) != 142) return 1;
+    int64_t neg = -10;
+    if (blitz_load_plus_const(&neg) != 90) return 2;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_load_plus_const", &obj, c_main) {
+        assert_eq!(code, 0, "load_plus_const returned wrong exit code {code}");
+    }
+}
+
+// Regression: call result used in arithmetic with pre-call value (CallResult group).
+//
+// Tests that CallResult is assigned to group barrier_k+1, not 0 or some later
+// group. The pre-call value (x = a + b) must survive across the call, and the
+// call result must be in a separate group so regalloc allocates distinct regs.
+#[test]
+fn e2e_call_result_arithmetic() {
+    // Build: call_arith(a, b) -> (a + b) + helper(a)
+    // helper doubles its argument.
+    let mut builder =
+        FunctionBuilder::new("blitz_call_arith", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = builder.params().to_vec();
+    let a = params[0];
+    let b = params[1];
+    let presum = builder.add(a, b);
+    let results = builder.call("blitz_double_ext", &[a], &[Type::I64]);
+    let call_result = results[0];
+    let final_sum = builder.add(presum, call_result);
+    builder.ret(Some(final_sum));
+    let func = builder.finalize().expect("call_arith finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile call_arith");
+
+    // call_arith(5, 3) = (5+3) + double(5) = 8 + 10 = 18
+    // call_arith(0, 0) = 0 + 0 = 0
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_call_arith(int64_t a, int64_t b);
+int64_t blitz_double_ext(int64_t x) { return x + x; }
+int main(void) {
+    if (blitz_call_arith(5, 3) != 18) return 1;
+    if (blitz_call_arith(0, 0) != 0)  return 2;
+    if (blitz_call_arith(1, 2) != 5)  return 3;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_call_arith", &obj, c_main) {
+        assert_eq!(code, 0, "call_arith returned wrong exit code {code}");
+    }
+}
+
+// Regression: four loads combined — maximum LoadResult group pressure.
+//
+// Four LoadResults must each get distinct correct groups. Both Bug 1 (wrong
+// group) and Bug 2 (wrong sort order) would manifest here: wrong groups would
+// cause wrong register lifetimes, and wrong order would cause regalloc to
+// reuse a register that is still live.
+#[test]
+fn e2e_four_loads_combined() {
+    // Build: four_loads(p0, p1, p2, p3) -> *p0 + *p1 + *p2 + *p3
+    let mut builder = FunctionBuilder::new(
+        "blitz_four_loads",
+        &[Type::I64, Type::I64, Type::I64, Type::I64],
+        &[Type::I64],
+    );
+    let params = builder.params().to_vec();
+    let v0 = builder.load(params[0], Type::I64);
+    let v1 = builder.load(params[1], Type::I64);
+    let v2 = builder.load(params[2], Type::I64);
+    let v3 = builder.load(params[3], Type::I64);
+    let s01 = builder.add(v0, v1);
+    let s23 = builder.add(v2, v3);
+    let total = builder.add(s01, s23);
+    builder.ret(Some(total));
+    let func = builder.finalize().expect("four_loads finalize");
+
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile four_loads");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_four_loads(int64_t *a, int64_t *b, int64_t *c, int64_t *d);
+int main(void) {
+    int64_t a = 1, b = 2, c = 3, d = 4;
+    if (blitz_four_loads(&a, &b, &c, &d) != 10) return 1;
+    int64_t w = 10, x = 20, y = 30, z = 40;
+    if (blitz_four_loads(&w, &x, &y, &z) != 100) return 2;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_four_loads", &obj, c_main) {
+        assert_eq!(code, 0, "four_loads returned wrong exit code {code}");
+    }
+}
+
 // ── insert_early_barrier_spills unit tests ──────────────────────────────────
 
 use crate::schedule::scheduler::ScheduledInst;
