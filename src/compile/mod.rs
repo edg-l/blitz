@@ -120,10 +120,12 @@ fn assign_barrier_groups(
         }
         vreg_group.insert(inst.dst, min_group);
     }
-    // Note: no backward propagation. The forward pass places each instruction
-    // at the earliest valid group. Pulling deps later would break correctness
-    // when a value is consumed by an early barrier (e.g. Store at barrier 0)
-    // but also used by a later pure op (in group 2+).
+    // Note: backward propagation (pulling deps closer to consumers) is
+    // intentionally omitted. It interacts poorly with effectful ops whose
+    // operands are not in the scheduled instruction list -- the cap logic
+    // only covers direct barrier operands, not transitive dependencies
+    // through spill/reload chains. The forward pass is sufficient for
+    // correctness; register pressure is managed by the allocator.
     vreg_group
 }
 
@@ -317,8 +319,30 @@ pub fn compile(
         }
         all_roots.sort_by_key(|c| c.0);
         all_roots.dedup();
-        let insts =
+        let mut insts =
             vreg_insts_for_block(&extraction, &all_roots, &mut class_to_vreg, &mut next_vreg);
+
+        // Per-block fixup: ensure block params of this block use Op::BlockParam,
+        // not whatever the global extraction chose. The global extraction picks
+        // one op per e-class, but BlockParam is only meaningful in its own block.
+        // Only fix up VRegInsts that were emitted in THIS block (not ones from
+        // prior blocks -- cross-block splitting handles those via spill/reload).
+        for pidx in 0..block.param_types.len() as u32 {
+            if let Some(&cid) = block_param_map.get(&(block_id, pidx)) {
+                let canon = egraph.unionfind.find_immutable(cid);
+                if let Some(&vreg) = class_to_vreg.get(&canon) {
+                    if let Some(inst) = insts.iter_mut().find(|i| i.dst == vreg) {
+                        inst.op = Op::BlockParam(
+                            block_id,
+                            pidx,
+                            block.param_types[pidx as usize].clone(),
+                        );
+                        inst.operands.clear();
+                    }
+                }
+            }
+        }
+
         block_vreg_insts[block_idx] = insts;
     }
 
