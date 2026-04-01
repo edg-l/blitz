@@ -28,5 +28,15 @@ pub fn compile_to_object(src: &str) -> Result<blitz::emit::object::ObjectFile, T
     Ok(obj)
 }
 
+/// Compile a TinyC source string to IR text.
+pub fn compile_to_ir(src: &str) -> Result<String, TinyErr> {
+    let tokens = lexer::tokenize(src)?;
+    let program = parser::Parser::parse(tokens)?;
+    let cg = codegen::Codegen::generate(&program)?;
+    let opts = blitz::compile::CompileOptions::default();
+    let ir = blitz::compile::compile_module_to_ir(cg.functions, &opts)?;
+    Ok(ir)
+}
+
 #[cfg(test)]
 mod tests;

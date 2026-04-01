@@ -3,6 +3,7 @@ pub mod condcode;
 pub mod effectful;
 pub mod function;
 pub mod op;
+pub mod print;
 pub mod types;
 pub mod variable;
 

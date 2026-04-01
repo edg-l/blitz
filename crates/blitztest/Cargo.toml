@@ -1,0 +1,11 @@
+[package]
+name = "blitztest"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "blitztest"
+path = "src/main.rs"
+
+[dependencies]
+regex = "1"
