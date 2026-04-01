@@ -18,11 +18,11 @@ impl std::fmt::Display for CheckError {
 }
 
 /// Run CHECK directives against output text.
-pub fn run_checks(output: &str, checks: &[CheckPattern]) -> Result<(), CheckError> {
+pub fn run_checks(output: &str, checks: &[&CheckPattern]) -> Result<(), CheckError> {
     let lines: Vec<&str> = output.lines().collect();
     let mut pos: usize = 0;
 
-    for (check_idx, check) in checks.iter().enumerate() {
+    for (check_idx, &check) in checks.iter().enumerate() {
         match check.kind {
             CheckKind::Check => {
                 let found = lines[pos..]
@@ -105,7 +105,7 @@ pub fn run_checks(output: &str, checks: &[CheckPattern]) -> Result<(), CheckErro
 /// Find the end of the scan range for CHECK-NOT: the line where the next
 /// Check or CheckLabel would match, or the end of the output.
 fn find_next_positive_check_end(
-    checks: &[CheckPattern],
+    checks: &[&CheckPattern],
     current_idx: usize,
     lines: &[&str],
     pos: usize,
@@ -139,18 +139,22 @@ mod tests {
         }
     }
 
+    fn as_refs(checks: &[CheckPattern]) -> Vec<&CheckPattern> {
+        checks.iter().collect()
+    }
+
     #[test]
     fn check_finds_substring() {
         let output = "line1\nline2 hello world\nline3\n";
         let checks = vec![make_check(CheckKind::Check, "hello", 1)];
-        assert!(run_checks(output, &checks).is_ok());
+        assert!(run_checks(output, &as_refs(&checks)).is_ok());
     }
 
     #[test]
     fn check_not_found() {
         let output = "line1\nline2\nline3\n";
         let checks = vec![make_check(CheckKind::Check, "missing", 1)];
-        assert!(run_checks(output, &checks).is_err());
+        assert!(run_checks(output, &as_refs(&checks)).is_err());
     }
 
     #[test]
@@ -160,7 +164,7 @@ mod tests {
             make_check(CheckKind::Check, "alpha", 1),
             make_check(CheckKind::CheckNext, "beta", 2),
         ];
-        assert!(run_checks(output, &checks).is_ok());
+        assert!(run_checks(output, &as_refs(&checks)).is_ok());
     }
 
     #[test]
@@ -170,21 +174,21 @@ mod tests {
             make_check(CheckKind::Check, "alpha", 1),
             make_check(CheckKind::CheckNext, "beta", 2),
         ];
-        assert!(run_checks(output, &checks).is_err());
+        assert!(run_checks(output, &as_refs(&checks)).is_err());
     }
 
     #[test]
     fn check_not_fails_when_pattern_present() {
         let output = "good\nbad\ngood\n";
         let checks = vec![make_check(CheckKind::CheckNot, "bad", 1)];
-        assert!(run_checks(output, &checks).is_err());
+        assert!(run_checks(output, &as_refs(&checks)).is_err());
     }
 
     #[test]
     fn check_not_passes_when_absent() {
         let output = "good\nfine\ngreat\n";
         let checks = vec![make_check(CheckKind::CheckNot, "bad", 1)];
-        assert!(run_checks(output, &checks).is_ok());
+        assert!(run_checks(output, &as_refs(&checks)).is_ok());
     }
 
     #[test]
@@ -194,6 +198,6 @@ mod tests {
             make_check(CheckKind::CheckLabel, "header2", 1),
             make_check(CheckKind::Check, "beta", 2),
         ];
-        assert!(run_checks(output, &checks).is_ok());
+        assert!(run_checks(output, &as_refs(&checks)).is_ok());
     }
 }
