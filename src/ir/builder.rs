@@ -21,26 +21,8 @@ impl Value {
     }
 }
 
-// ── Variable handle ──────────────────────────────────────────────────────────
-
-/// A mutable variable handle for the SSA variable API.
-///
-/// Frontends declare variables with `FunctionBuilder::declare_var()`, define them
-/// with `def_var()`, and read them with `use_var()`. The builder automatically
-/// constructs SSA block parameters and wires jump/branch arguments using the
-/// Braun et al. algorithm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Variable(pub u32);
-
-// ── Predecessor edge kind ────────────────────────────────────────────────────
-
-/// Records which arm of a terminator produced a particular predecessor edge.
-#[derive(Debug, Clone, Copy)]
-enum PredEdge {
-    Jump,
-    BranchTrue,
-    BranchFalse,
-}
+pub(crate) use crate::ir::variable::PredEdge;
+pub use crate::ir::variable::Variable;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -98,13 +80,13 @@ impl std::error::Error for BuildError {}
 
 // ── BlockData ─────────────────────────────────────────────────────────────────
 
-struct BlockData {
-    id: BlockId,
-    param_types: Vec<Type>,
+pub(crate) struct BlockData {
+    pub(crate) id: BlockId,
+    pub(crate) param_types: Vec<Type>,
     #[allow(dead_code)]
-    param_values: Vec<Value>,
-    ops: Vec<EffectfulOp>,
-    terminated: bool,
+    pub(crate) param_values: Vec<Value>,
+    pub(crate) ops: Vec<EffectfulOp>,
+    pub(crate) terminated: bool,
 }
 
 // ── FunctionBuilder ───────────────────────────────────────────────────────────
@@ -124,9 +106,9 @@ pub struct FunctionBuilder {
     name: String,
     param_types: Vec<Type>,
     return_types: Vec<Type>,
-    egraph: EGraph,
-    blocks: Vec<BlockData>,
-    current_block: Option<BlockId>,
+    pub(crate) egraph: EGraph,
+    pub(crate) blocks: Vec<BlockData>,
+    pub(crate) current_block: Option<BlockId>,
     next_block_id: BlockId,
     /// Entry block parameter values (function arguments).
     entry_params: Vec<Value>,
@@ -135,12 +117,12 @@ pub struct FunctionBuilder {
     stack_slots: Vec<StackSlotData>,
 
     // ── SSA variable API state (Braun et al.) ────────────────────────────────
-    next_var: u32,
-    var_types: Vec<Type>,
-    var_defs: HashMap<(BlockId, Variable), Value>,
-    sealed_blocks: HashSet<BlockId>,
-    incomplete_phis: HashMap<BlockId, Vec<(Variable, Value)>>,
-    predecessors: HashMap<BlockId, Vec<(BlockId, PredEdge)>>,
+    pub(crate) next_var: u32,
+    pub(crate) var_types: Vec<Type>,
+    pub(crate) var_defs: HashMap<(BlockId, Variable), Value>,
+    pub(crate) sealed_blocks: HashSet<BlockId>,
+    pub(crate) incomplete_phis: HashMap<BlockId, Vec<(Variable, Value)>>,
+    pub(crate) predecessors: HashMap<BlockId, Vec<(BlockId, PredEdge)>>,
 }
 
 impl FunctionBuilder {
@@ -607,231 +589,6 @@ impl FunctionBuilder {
             val: val.map(|v| v.0),
         });
         block.terminated = true;
-    }
-
-    // ── SSA variable API (Braun et al.) ─────────────────────────────────────
-
-    /// Declare a new mutable variable of the given type.
-    pub fn declare_var(&mut self, ty: Type) -> Variable {
-        let var = Variable(self.next_var);
-        self.next_var += 1;
-        self.var_types.push(ty);
-        var
-    }
-
-    /// Define (or redefine) a variable in the current block.
-    pub fn def_var(&mut self, var: Variable, val: Value) {
-        let block = self.current_block.expect("no current block set");
-        self.var_defs.insert((block, var), val);
-    }
-
-    /// Read the current SSA value of a variable.
-    ///
-    /// If the variable was not defined in the current block, the Braun algorithm
-    /// walks predecessors and inserts block parameters (phis) as needed.
-    pub fn use_var(&mut self, var: Variable) -> Value {
-        let block = self.current_block.expect("no current block set");
-        self.read_variable(var, block)
-    }
-
-    /// Mark a block as sealed: all its predecessors are now known.
-    ///
-    /// **Precondition:** every predecessor block must have already emitted its
-    /// terminator (jump/branch) before sealing. The Braun algorithm resolves
-    /// incomplete phis by walking predecessor terminators.
-    pub fn seal_block(&mut self, block: BlockId) {
-        assert!(
-            !self.sealed_blocks.contains(&block),
-            "block {block} is already sealed"
-        );
-
-        // Resolve all incomplete phis for this block.
-        let incomplete = self.incomplete_phis.remove(&block).unwrap_or_default();
-        for (var, phi) in incomplete {
-            let preds: Vec<(BlockId, PredEdge)> =
-                self.predecessors.get(&block).cloned().unwrap_or_default();
-            for &(pred_block, edge) in &preds {
-                let val = self.read_variable(var, pred_block);
-                self.append_jump_arg_for_edge(pred_block, edge, val);
-            }
-            self.try_remove_trivial_phi(block, phi);
-        }
-
-        self.sealed_blocks.insert(block);
-    }
-
-    /// Braun et al. core: recursively resolve a variable's reaching definition.
-    fn read_variable(&mut self, var: Variable, block: BlockId) -> Value {
-        // 1. Local definition in this block?
-        if let Some(&val) = self.var_defs.get(&(block, var)) {
-            return val;
-        }
-
-        // 2. Block not sealed? Create incomplete phi placeholder.
-        if !self.sealed_blocks.contains(&block) {
-            let ty = self.var_types[var.0 as usize].clone();
-            let phi = self.add_block_param(block, ty);
-            self.var_defs.insert((block, var), phi);
-            self.incomplete_phis
-                .entry(block)
-                .or_default()
-                .push((var, phi));
-            return phi;
-        }
-
-        // 3. Sealed block -- resolve through predecessors.
-        let preds: Vec<(BlockId, PredEdge)> =
-            self.predecessors.get(&block).cloned().unwrap_or_default();
-
-        let val = if preds.is_empty() {
-            panic!(
-                "use of undefined variable {:?} in block {} (no predecessors)",
-                var, block
-            );
-        } else if preds.len() == 1 {
-            // Single predecessor -- no phi needed, recurse directly.
-            self.read_variable(var, preds[0].0)
-        } else {
-            // Multiple predecessors -- need a phi (block param).
-            let ty = self.var_types[var.0 as usize].clone();
-            let phi = self.add_block_param(block, ty);
-
-            // Store BEFORE recursing to break cycles (loops).
-            self.var_defs.insert((block, var), phi);
-
-            // Wire args from each predecessor.
-            for &(pred_block, edge) in &preds {
-                let pred_val = self.read_variable(var, pred_block);
-                self.append_jump_arg_for_edge(pred_block, edge, pred_val);
-            }
-
-            self.try_remove_trivial_phi(block, phi)
-        };
-
-        // Cache result for single-predecessor case.
-        self.var_defs.insert((block, var), val);
-        val
-    }
-
-    /// Incrementally add a block parameter, creating an Op::BlockParam e-node.
-    fn add_block_param(&mut self, block: BlockId, ty: Type) -> Value {
-        let block_data = self
-            .blocks
-            .iter()
-            .find(|b| b.id == block)
-            .expect("block not found");
-        let param_idx = block_data.param_types.len() as u32;
-
-        let node = ENode {
-            op: Op::BlockParam(block, param_idx, ty.clone()),
-            children: smallvec![],
-        };
-        let cid = self.egraph.add(node);
-        let val = Value(cid);
-
-        // Re-borrow block_data mutably after egraph mutation.
-        let block_data = self
-            .blocks
-            .iter_mut()
-            .find(|b| b.id == block)
-            .expect("block not found");
-        block_data.param_types.push(ty);
-        block_data.param_values.push(val);
-        val
-    }
-
-    /// Append a value to a predecessor's terminator args targeting a specific block.
-    fn append_jump_arg_for_edge(&mut self, from_block: BlockId, edge: PredEdge, arg: Value) {
-        let block = self
-            .blocks
-            .iter_mut()
-            .find(|b| b.id == from_block)
-            .expect("from_block not found");
-        let term = block
-            .ops
-            .last_mut()
-            .and_then(|op| op.as_terminator_mut())
-            .expect("from_block has no terminator");
-        match (term, edge) {
-            (EffectfulOp::Jump { args, .. }, PredEdge::Jump) => {
-                args.push(arg.0);
-            }
-            (EffectfulOp::Branch { true_args, .. }, PredEdge::BranchTrue) => {
-                true_args.push(arg.0);
-            }
-            (EffectfulOp::Branch { false_args, .. }, PredEdge::BranchFalse) => {
-                false_args.push(arg.0);
-            }
-            _ => panic!("edge kind does not match terminator type"),
-        }
-    }
-
-    /// If all operands to a phi (block param) are the same value (ignoring the
-    /// phi itself), replace it via e-graph union. Returns the replacement value
-    /// or the phi itself if non-trivial.
-    fn try_remove_trivial_phi(&mut self, block: BlockId, phi: Value) -> Value {
-        let block_data = self.blocks.iter().find(|b| b.id == block).unwrap();
-        let param_idx = block_data
-            .param_values
-            .iter()
-            .position(|v| v.0 == phi.0)
-            .expect("phi not found in block params");
-
-        let preds: Vec<(BlockId, PredEdge)> =
-            self.predecessors.get(&block).cloned().unwrap_or_default();
-
-        let phi_canon = self.egraph.unionfind.find_immutable(phi.0);
-        let mut same: Option<Value> = None;
-
-        for &(pred_block, edge) in &preds {
-            let pred_data = self.blocks.iter().find(|b| b.id == pred_block).unwrap();
-            let term = pred_data.ops.last().expect("predecessor has no terminator");
-            let arg_cid = match (term, edge) {
-                (EffectfulOp::Jump { args, .. }, PredEdge::Jump) => args[param_idx],
-                (EffectfulOp::Branch { true_args, .. }, PredEdge::BranchTrue) => {
-                    true_args[param_idx]
-                }
-                (EffectfulOp::Branch { false_args, .. }, PredEdge::BranchFalse) => {
-                    false_args[param_idx]
-                }
-                _ => panic!("edge kind does not match terminator"),
-            };
-
-            let arg_canon = self.egraph.unionfind.find_immutable(arg_cid);
-            if arg_canon == phi_canon {
-                continue; // skip self-references
-            }
-
-            match same {
-                None => same = Some(Value(arg_cid)),
-                Some(s) => {
-                    let s_canon = self.egraph.unionfind.find_immutable(s.0);
-                    if arg_canon != s_canon {
-                        // Non-trivial phi: at least two distinct operands.
-                        return phi;
-                    }
-                }
-            }
-        }
-
-        match same {
-            None => {
-                // All operands are the phi itself -- unreachable / undefined.
-                panic!("phi has no non-self operands (undefined variable in unreachable code)");
-            }
-            Some(replacement) => {
-                // Trivial phi: all operands are the same. Union in e-graph.
-                self.egraph.unionfind.union(phi.0, replacement.0);
-                // Update var_defs that point to phi.
-                for val in self.var_defs.values_mut() {
-                    let val_canon = self.egraph.unionfind.find_immutable(val.0);
-                    if val_canon == phi_canon {
-                        *val = replacement;
-                    }
-                }
-                replacement
-            }
-        }
     }
 
     // ── Finalize ──────────────────────────────────────────────────────────────
