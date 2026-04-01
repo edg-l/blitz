@@ -167,6 +167,11 @@ pub enum Op {
     /// `sqrtss dst, src` — sqrt(f32) → f32.
     X86Sqrtss,
 
+    // ── Stack slot address ─────────────────────────────────────────────────────
+    /// Address of stack slot N. Zero children, returns I64.
+    /// Lowered to an LEA from the frame pointer.
+    StackAddr(u32),
+
     // ── Load result placeholder ───────────────────────────────────────────────
     /// Placeholder node representing the result of a Load effectful op.
     /// The `u32` is a unique identifier (block_id * 1000 + load_index) to
@@ -326,6 +331,10 @@ impl Op {
             Op::CallResult(_idx, ty) => {
                 assert_eq!(child_types.len(), 0, "CallResult requires 0 children");
                 ty.clone()
+            }
+            Op::StackAddr(_) => {
+                assert_eq!(child_types.len(), 0, "StackAddr requires 0 children");
+                Type::I64
             }
 
             // ── Comparison ────────────────────────────────────────────────────

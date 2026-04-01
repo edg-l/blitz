@@ -124,10 +124,24 @@ pub fn extract(
                     cost: total,
                 };
 
-                match &best {
-                    None => best = Some(candidate),
-                    Some(prev) if total < prev.cost => best = Some(candidate),
-                    _ => {}
+                let prefer = match &best {
+                    None => true,
+                    Some(prev) if total < prev.cost => true,
+                    // Tiebreaker: prefer StackAddr over BlockParam. When both
+                    // are in the same e-class (pointer variable = stack_addr),
+                    // StackAddr is always correct (emits LEA), while BlockParam
+                    // is only valid in its specific block.
+                    Some(prev)
+                        if total == prev.cost
+                            && matches!(candidate.op, Op::StackAddr(_))
+                            && matches!(prev.op, Op::BlockParam(..)) =>
+                    {
+                        true
+                    }
+                    _ => false,
+                };
+                if prefer {
+                    best = Some(candidate);
                 }
             }
 

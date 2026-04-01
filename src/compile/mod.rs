@@ -34,8 +34,9 @@ use crate::x86::reg::Reg;
 
 mod cfg;
 use cfg::{
-    build_block_param_class_map, collect_block_roots, collect_externals, collect_phi_source_vregs,
-    collect_roots, compute_copy_pairs, compute_loop_depths, compute_rpo,
+    build_block_param_class_map, collect_block_effectful_operand_vregs, collect_block_roots,
+    collect_effectful_operand_vregs, collect_externals, collect_phi_source_vregs, collect_roots,
+    compute_copy_pairs, compute_effectful_uses_per_block, compute_loop_depths, compute_rpo,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -48,6 +49,83 @@ use precolor::{
 };
 mod terminator;
 use terminator::{lower_terminator, thread_branches};
+
+use crate::egraph::egraph::EGraph;
+
+/// Build barrier maps: which VRegs are produced/consumed by each effectful op.
+fn build_barrier_maps(
+    non_term_ops: &[EffectfulOp],
+    egraph: &EGraph,
+    class_to_vreg: &HashMap<ClassId, VReg>,
+) -> (HashMap<VReg, usize>, HashMap<VReg, usize>) {
+    let mut vreg_to_result: HashMap<VReg, usize> = HashMap::new();
+    let mut vreg_to_arg: HashMap<VReg, usize> = HashMap::new();
+    // Helper: mark a ClassId as consumed by barrier_k (earliest consumer wins).
+    let mut mark_arg = |cid: ClassId, barrier_k: usize| {
+        let canon = egraph.unionfind.find_immutable(cid);
+        if let Some(&vreg) = class_to_vreg.get(&canon) {
+            let entry = vreg_to_arg.entry(vreg).or_insert(barrier_k);
+            *entry = (*entry).min(barrier_k);
+        }
+    };
+    for (barrier_k, op) in non_term_ops.iter().enumerate() {
+        match op {
+            EffectfulOp::Load { addr, result, .. } => {
+                let canon = egraph.unionfind.find_immutable(*result);
+                if let Some(&vreg) = class_to_vreg.get(&canon) {
+                    vreg_to_result.insert(vreg, barrier_k);
+                }
+                mark_arg(*addr, barrier_k);
+            }
+            EffectfulOp::Store { addr, val, .. } => {
+                mark_arg(*addr, barrier_k);
+                mark_arg(*val, barrier_k);
+            }
+            EffectfulOp::Call { args, results, .. } => {
+                for &result_cid in results {
+                    let canon = egraph.unionfind.find_immutable(result_cid);
+                    if let Some(&vreg) = class_to_vreg.get(&canon) {
+                        vreg_to_result.insert(vreg, barrier_k);
+                    }
+                }
+                for &arg_cid in args {
+                    mark_arg(arg_cid, barrier_k);
+                }
+            }
+            _ => {}
+        }
+    }
+    (vreg_to_result, vreg_to_arg)
+}
+
+/// Assign each scheduled instruction to a barrier group and return the group mapping.
+fn assign_barrier_groups(
+    sched: &[ScheduledInst],
+    vreg_to_result_of_barrier: &HashMap<VReg, usize>,
+    vreg_to_arg_of_barrier: &HashMap<VReg, usize>,
+) -> HashMap<VReg, usize> {
+    let mut vreg_group: HashMap<VReg, usize> = HashMap::new();
+    for inst in sched {
+        let mut min_group: usize = 0;
+        for &operand_vreg in &inst.operands {
+            if let Some(&barrier_k) = vreg_to_result_of_barrier.get(&operand_vreg) {
+                min_group = min_group.max(barrier_k + 1);
+            }
+            if let Some(&og) = vreg_group.get(&operand_vreg) {
+                min_group = min_group.max(og);
+            }
+        }
+        if let Some(&arg_barrier_k) = vreg_to_arg_of_barrier.get(&inst.dst) {
+            min_group = min_group.max(arg_barrier_k);
+        }
+        vreg_group.insert(inst.dst, min_group);
+    }
+    // Note: no backward propagation. The forward pass places each instruction
+    // at the earliest valid group. Pulling deps later would break correctness
+    // when a value is consumed by an early barrier (e.g. Store at barrier 0)
+    // but also used by a later pure op (in group 2+).
+    vreg_group
+}
 
 // ── Public options / error types ──────────────────────────────────────────────
 
@@ -144,6 +222,7 @@ pub fn compile(
     opts: &CompileOptions,
     mut sink: Option<&mut dyn DiagnosticSink>,
 ) -> Result<ObjectFile, CompileError> {
+    let user_stack_slots = func.stack_slots.len() as u32;
     let mut egraph = func
         .egraph
         .take()
@@ -260,6 +339,44 @@ pub fn compile(
         s.phase_stats("schedule", &format!("insts={total_insts}"));
     }
 
+    // Phase 4b: Reorder each block's schedule to respect effectful op barriers.
+    //
+    // Effectful ops (loads, stores, calls) impose ordering constraints on pure ops:
+    // pure ops that consume a LoadResult must come after the corresponding Load,
+    // and pure ops that are inputs to a Call must come before the Call. The
+    // scheduler doesn't know about effectful ops, so we reorder the schedule
+    // here so the regalloc sees correct liveness.
+    for block_idx in 0..func.blocks.len() {
+        let block = &func.blocks[block_idx];
+        let non_term_count = if block.ops.is_empty() {
+            0
+        } else {
+            block.ops.len() - 1
+        };
+        if non_term_count == 0 {
+            continue; // No effectful ops to constrain ordering.
+        }
+        let non_term_ops = &block.ops[..non_term_count];
+
+        // Build barrier maps: which VRegs are produced/consumed by each barrier.
+        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
+            build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
+
+        let sched = &block_schedules[block_idx];
+        let vreg_group =
+            assign_barrier_groups(sched, &vreg_to_result_of_barrier, &vreg_to_arg_of_barrier);
+
+        // Stable-sort by group to reorder while preserving within-group order.
+        let mut indexed: Vec<(usize, &ScheduledInst)> = sched.iter().enumerate().collect();
+        indexed.sort_by_key(|(orig_idx, inst)| {
+            let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
+            (g, *orig_idx)
+        });
+        let reordered: Vec<ScheduledInst> =
+            indexed.into_iter().map(|(_, inst)| inst.clone()).collect();
+        block_schedules[block_idx] = reordered;
+    }
+
     // Phase 5: Register allocation -- per-block with cross-block live range splitting.
     //
     // Single-block fast path: skip global liveness and run allocate() directly.
@@ -284,12 +401,13 @@ pub fn compile(
         .unwrap_or(0);
 
     // Single-block fast path skips global liveness.
-    let (regalloc_result, block_rewritten) = if func.blocks.len() == 1 {
+    let (regalloc_result, block_rewritten, block_rename_maps) = if func.blocks.len() == 1 {
         // --- Single-block fast path ---
         let all_scheduled: Vec<ScheduledInst> = block_schedules.iter().flatten().cloned().collect();
 
         let mut live_out: HashSet<VReg> = HashSet::new();
         collect_phi_source_vregs(func, &egraph, &class_to_vreg, &mut live_out);
+        collect_effectful_operand_vregs(func, &egraph, &class_to_vreg, &mut live_out);
         for &(vreg, _reg) in &param_vregs {
             live_out.insert(vreg);
         }
@@ -332,7 +450,8 @@ pub fn compile(
         })?;
 
         let rewritten = vec![rewrite_vregs(&all_scheduled, &result.vreg_to_reg)];
-        (result, rewritten)
+        let rename_maps: Vec<HashMap<VReg, VReg>> = vec![HashMap::new()];
+        (result, rewritten, rename_maps)
     } else {
         // --- Multi-block path ---
 
@@ -344,11 +463,15 @@ pub fn compile(
             &class_to_vreg,
         );
 
+        // Step 1b: Compute per-block effectful VReg uses (Load/Store operands).
+        let effectful_uses = compute_effectful_uses_per_block(func, &egraph, &class_to_vreg);
+
         // Step 2: Compute global liveness.
         let global_liveness = crate::regalloc::global_liveness::compute_global_liveness(
             &block_schedules,
             &cfg_succs,
             &phi_uses,
+            &effectful_uses,
         );
 
         // Step 3: Determine block params per block (excluded from reload insertion).
@@ -405,12 +528,19 @@ pub fn compile(
         let mut spill_slot_counter = cross_block_slots;
         let mut block_rewritten_storage: Vec<Vec<ScheduledInst>> =
             vec![Vec::new(); func.blocks.len()];
+        let mut block_rename_maps: Vec<HashMap<VReg, VReg>> =
+            vec![HashMap::new(); func.blocks.len()];
 
         for &block_idx in &rpo_order {
             let block = &func.blocks[block_idx];
 
             // Step 8a: Insert cross-block spill/reload code.
-            let (split_schedule, _rename) = crate::regalloc::split::rewrite_block_for_splitting(
+            let block_effectful_uses = if block_idx < effectful_uses.len() {
+                &effectful_uses[block_idx]
+            } else {
+                &HashSet::new()
+            };
+            let (split_schedule, rename) = crate::regalloc::split::rewrite_block_for_splitting(
                 &block_schedules[block_idx],
                 block_idx,
                 &global_liveness,
@@ -420,6 +550,7 @@ pub fn compile(
                 &mut shared_next_vreg,
                 &block_param_vregs_per_block[block_idx],
                 &vreg_classes,
+                block_effectful_uses,
             );
 
             // Step 8a-reorder: Move all BlockParam instructions to the front of
@@ -442,11 +573,26 @@ pub fn compile(
             //   - block param VRegs for this block: forces them into the interference
             //     graph so they are not coalesced away, ensuring build_phi_copies can
             //     find their physical registers in merged_vreg_to_reg.
-            let block_live_out: HashSet<VReg> = phi_uses[block_idx]
+            let mut block_live_out: HashSet<VReg> = phi_uses[block_idx]
                 .iter()
                 .chain(block_param_vregs_per_block[block_idx].iter())
                 .copied()
                 .collect();
+            // Collect effectful op operands (Load addr, Store addr/val) and apply
+            // the split rename map so the per-block regalloc sees the renamed VRegs.
+            {
+                let mut raw_effectful_live: HashSet<VReg> = HashSet::new();
+                collect_block_effectful_operand_vregs(
+                    &func.blocks[block_idx],
+                    &egraph,
+                    &class_to_vreg,
+                    &mut raw_effectful_live,
+                );
+                for v in raw_effectful_live {
+                    let renamed = rename.get(&v).copied().unwrap_or(v);
+                    block_live_out.insert(renamed);
+                }
+            }
 
             // Step 8c: Filter pre-colorings to VRegs in this block's schedule.
             let split_vreg_set: HashSet<VReg> = split_schedule
@@ -534,6 +680,7 @@ pub fn compile(
             let rewritten_insts = rewrite_vregs(&split_schedule, &block_result.vreg_to_reg);
             spill_slot_counter += block_result.spill_slots;
             block_rewritten_storage[block_idx] = rewritten_insts;
+            block_rename_maps[block_idx] = rename;
         }
 
         merged_callee_saved.sort_by_key(|r| *r as u8);
@@ -545,7 +692,7 @@ pub fn compile(
             callee_saved_used: merged_callee_saved,
         };
 
-        (merged_result, block_rewritten_storage)
+        (merged_result, block_rewritten_storage, block_rename_maps)
     };
 
     if let Some(s) = sink.as_mut() {
@@ -569,6 +716,7 @@ pub fn compile(
         0,
         has_calls,
         opts.force_frame_pointer,
+        user_stack_slots,
     );
 
     // Phase 7: Per-block MachInst lowering + phi elimination + terminator emission.
@@ -590,6 +738,24 @@ pub fn compile(
             .get(rpo_pos + 1)
             .map(|&next_idx| func.blocks[next_idx].id);
 
+        // Build a block-local class_to_vreg that applies cross-block renames.
+        // When a VReg was renamed (SpillLoad/remat) in this block, effectful ops
+        // must use the renamed VReg to get the correct physical register.
+        let block_class_to_vreg: HashMap<ClassId, VReg> = {
+            let renames = &block_rename_maps[block_idx];
+            if renames.is_empty() {
+                class_to_vreg.clone()
+            } else {
+                class_to_vreg
+                    .iter()
+                    .map(|(&cid, &vreg)| {
+                        let renamed = renames.get(&vreg).copied().unwrap_or(vreg);
+                        (cid, renamed)
+                    })
+                    .collect()
+            }
+        };
+
         // Handle non-terminator effectful ops (loads, stores, calls).
         let non_term_count = if block.ops.is_empty() {
             0
@@ -598,144 +764,26 @@ pub fn compile(
         };
         let non_term_ops = &block.ops[..non_term_count];
 
-        // Build maps for interleaving pure ops with calls:
-        //   vreg_to_result_of_call[vreg] = K  means vreg is produced by call K
-        //   vreg_to_arg_of_call[vreg]    = K  means vreg is an argument to call K
-        //
-        // Pure ops are placed in groups:
-        //   group[0]   = before any call
-        //   group[K+1] = after call K (because they use its result, or transitively)
-        //
-        // Additionally, an inst that computes an argument for call K is placed in
-        // group[K] so it is emitted immediately before call K, preventing a later
-        // call's arg-setup from clobbering the earlier call's arg register.
-        let mut vreg_to_result_of_call: HashMap<VReg, usize> = HashMap::new();
-        let mut vreg_to_arg_of_call: HashMap<VReg, usize> = HashMap::new();
-        let mut call_op_indices: Vec<usize> = Vec::new();
-        for (op_idx, op) in non_term_ops.iter().enumerate() {
-            if let EffectfulOp::Call { args, results, .. } = op {
-                let call_k = call_op_indices.len();
-                call_op_indices.push(op_idx);
-                for &result_cid in results {
-                    let canon = egraph.unionfind.find_immutable(result_cid);
-                    if let Some(&vreg) = class_to_vreg.get(&canon) {
-                        vreg_to_result_of_call.insert(vreg, call_k);
-                    }
-                }
-                for &arg_cid in args {
-                    let canon = egraph.unionfind.find_immutable(arg_cid);
-                    if let Some(&vreg) = class_to_vreg.get(&canon) {
-                        // Only record the latest call that needs this vreg as arg,
-                        // in case the same value is passed to multiple calls.
-                        let entry = vreg_to_arg_of_call.entry(vreg).or_insert(call_k);
-                        *entry = (*entry).max(call_k);
-                    }
-                }
-            }
+        // Build barrier maps and group pure ops relative to effectful ops.
+        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
+            build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
+        let num_barriers = non_term_ops.len();
+
+        // Partition scheduled pure insts into groups relative to barriers.
+        let vreg_group = assign_barrier_groups(
+            rewritten,
+            &vreg_to_result_of_barrier,
+            &vreg_to_arg_of_barrier,
+        );
+        let mut groups: Vec<Vec<&ScheduledInst>> = vec![Vec::new(); num_barriers + 1];
+        for inst in rewritten.iter() {
+            let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
+            groups[g].push(inst);
         }
-
-        // Partition scheduled insts into groups relative to calls:
+        // Emit pure ops interleaved with effectful ops.
         //
-        //   group[k]   = pure insts that are arguments to call k (emit just before call k)
-        //   group[k+1] = pure insts that use results of call k (emit just after call k)
-        //   group[0]   = all other pure insts (emit before all calls)
-        //
-        // Groups are 0..=num_calls. Group 0 is "before all calls / no dependency".
-        // Group k (1..=num_calls) is "after call k-1 but before call k" (or after the last call).
-        //
-        // For argument insts: an inst that directly computes a call K argument is placed in group[K].
-        // This ensures it's emitted right before call K, not before an earlier call clobbers the arg reg.
-        //
-        // For result-dependent insts: an inst that uses CallResult of call K goes in group[K+1].
-        //
-        // Transitive propagation: if inst A depends on inst B (via operand), A's group >= B's group.
-        let num_calls = call_op_indices.len();
-        // groups has num_calls+1 slots: 0..=num_calls.
-        let mut groups: Vec<Vec<&ScheduledInst>> = vec![Vec::new(); num_calls + 1];
-        if num_calls == 0 {
-            // No calls: all pure insts go to group[0].
-            for inst in rewritten.iter() {
-                groups[0].push(inst);
-            }
-        } else {
-            // Assign group for each instruction.
-            //
-            // Rules:
-            //   1. If inst.dst is an arg to call K → min group K
-            //   2. If inst uses a CallResult from call K → min group K+1
-            //   3. Transitive forward: if operand's def is in group G → min group G
-            //   4. Transitive backward: if inst is in group G and its dep is in group < G →
-            //      the dep must also be in group G (so it's recomputed after the same call)
-            //
-            // Rules 1-3 are computed in a forward pass. Rule 4 requires propagation.
-            // We iterate until no more changes occur (fixpoint).
-
-            // Forward pass: compute initial groups.
-            let mut vreg_group: HashMap<VReg, usize> = HashMap::new();
-            for inst in rewritten.iter() {
-                let mut min_group: usize = 0;
-                for &operand_vreg in &inst.operands {
-                    if let Some(&call_k) = vreg_to_result_of_call.get(&operand_vreg) {
-                        min_group = min_group.max(call_k + 1);
-                    }
-                    if let Some(&og) = vreg_group.get(&operand_vreg) {
-                        min_group = min_group.max(og);
-                    }
-                }
-                if min_group == 0 {
-                    if let Some(&arg_call_k) = vreg_to_arg_of_call.get(&inst.dst) {
-                        min_group = arg_call_k;
-                    }
-                }
-                vreg_group.insert(inst.dst, min_group);
-            }
-
-            // Backward propagation: if inst W is in group G (G > 0) and its dep inst D is
-            // in group < G, then D must also be in group G (so D is recomputed after the
-            // same call as W's group). This ensures that dependencies of "late" insts are
-            // not left in caller-saved registers that would be clobbered.
-            //
-            // We propagate backward: for each inst in decreasing group order, pull all
-            // its pure-op dependencies up to the same group. Iterate until fixpoint.
-            let mut changed = true;
-            while changed {
-                changed = false;
-                for inst in rewritten.iter() {
-                    let current_group = *vreg_group.get(&inst.dst).unwrap_or(&0);
-                    if current_group == 0 {
-                        continue; // Already in lowest group; no backward pull.
-                    }
-                    for &operand_vreg in &inst.operands {
-                        if vreg_to_result_of_call.contains_key(&operand_vreg) {
-                            // This operand IS a call result; skip backward propagation.
-                            continue;
-                        }
-                        if let Some(dep_group) = vreg_group.get_mut(&operand_vreg) {
-                            if *dep_group < current_group {
-                                *dep_group = current_group;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Assign groups to actual group vectors.
-            for inst in rewritten.iter() {
-                let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
-                groups[g].push(inst);
-            }
-        }
-
-        // Emit pure ops and calls in interleaved order.
-        //
-        // Emission order for each call K (0-based):
-        //   1. group[K] pure ops (arguments to call K and insts between call K-1 and K)
-        //   2. call K (effectful)
-        //   3. (group[K+1] is emitted as step 1 of the next iteration)
-        //
-        // group[0] is emitted as the "before first call" group.
-        // group[num_calls] (insts after the last call) is emitted after the last call.
+        // For each barrier K: emit group[K] pure ops, then barrier K.
+        // After all barriers: emit group[num_barriers] (trailing pure ops).
         let mut all_insts: Vec<MachInst> = Vec::new();
 
         let lower_group = |group: &[&ScheduledInst],
@@ -755,13 +803,10 @@ pub fn compile(
             )
         };
 
-        // When there are no calls, emit all pure ops (group[0]) before any
-        // loads/stores, so that registers used as address indices are
-        // materialized before the instructions that read them.
-        let mut call_k = 0usize;
-        if num_calls == 0 {
+        for (barrier_k, op) in non_term_ops.iter().enumerate() {
+            // Emit pure ops for group[barrier_k] before this barrier.
             let pre_insts = lower_group(
-                &groups[0],
+                &groups[barrier_k],
                 &regalloc_result,
                 func,
                 &param_vreg_set,
@@ -769,40 +814,23 @@ pub fn compile(
                 &vreg_types,
             )?;
             all_insts.extend(pre_insts);
+            // Emit the barrier (load/store/call).
+            let extra = lower_effectful_op(
+                op,
+                &block_class_to_vreg,
+                &regalloc_result,
+                &extraction,
+                func,
+                &egraph.unionfind,
+            )?;
+            all_insts.extend(extra);
         }
-
-        for (op_idx, op) in non_term_ops.iter().enumerate() {
-            if call_op_indices.get(call_k) == Some(&op_idx) {
-                // Emit group[call_k]: pure ops that must come right before call k.
-                // (For call_k=0, this is group[0] = pre-call ops and arg setups.)
-                let pre_insts = lower_group(
-                    &groups[call_k],
-                    &regalloc_result,
-                    func,
-                    &param_vreg_set,
-                    &frame_layout,
-                    &vreg_types,
-                )?;
-                all_insts.extend(pre_insts);
-                // Emit call k.
-                let extra =
-                    lower_effectful_op(op, &class_to_vreg, &regalloc_result, &extraction, func)?;
-                all_insts.extend(extra);
-                call_k += 1;
-            } else {
-                // Non-call effectful op (load/store): emit inline.
-                // Pure ops are already emitted before this loop (no-call case)
-                // or interleaved with calls (call case).
-                let extra =
-                    lower_effectful_op(op, &class_to_vreg, &regalloc_result, &extraction, func)?;
-                all_insts.extend(extra);
-            }
-        }
-        // Emit the last group (pure ops that depend on the last call's results).
-        // In the no-call case, group[0] was already emitted above, so this is a no-op.
-        if num_calls > 0 {
+        // Emit trailing pure ops (group[num_barriers]).
+        // When num_barriers == 0 this is group[0] containing all pure ops.
+        // When num_barriers > 0 this is the group after the last barrier.
+        {
             let post_insts = lower_group(
-                &groups[call_k],
+                &groups[num_barriers],
                 &regalloc_result,
                 func,
                 &param_vreg_set,

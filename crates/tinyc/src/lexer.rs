@@ -48,6 +48,8 @@ pub enum Token {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     Comma,
     Semi,
     Eof,
@@ -142,6 +144,16 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 pos += 1;
                 col += 1;
                 Token::RBrace
+            }
+            '[' => {
+                pos += 1;
+                col += 1;
+                Token::LBracket
+            }
+            ']' => {
+                pos += 1;
+                col += 1;
+                Token::RBracket
             }
             ',' => {
                 pos += 1;

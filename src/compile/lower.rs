@@ -827,6 +827,12 @@ fn lower_op(
 
         // Spill pseudo-ops are handled separately in lower_block_pure_ops,
         // not through lower_inst. They should never reach here.
+        // StackAddr is lowered to an LEA from the frame pointer; handled by
+        // the frame layout pass, not lower_inst.
+        Op::StackAddr(_) => {
+            unreachable!("StackAddr is lowered during frame layout, not lower_inst")
+        }
+
         Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
             unreachable!("spill pseudo-ops are handled before lower_inst")
         }
@@ -866,6 +872,20 @@ pub(super) fn lower_block_pure_ops(
         }
         // Skip CallResult VRegs: their values are captured after CallDirect in lower_effectful_op.
         if matches!(inst.op, Op::CallResult(_, _)) {
+            continue;
+        }
+
+        // StackAddr: compute the address of a user stack slot as LEA dst, [spill_base + offset].
+        // User stack slots are placed after regalloc spill slots in the frame.
+        if let Op::StackAddr(slot_idx) = inst.op {
+            if let Some(dst) = get_reg(inst.dst) {
+                let slot = regalloc.spill_slots as i32 + slot_idx as i32;
+                result.push(MachInst::Lea {
+                    size: OpSize::S64,
+                    dst: Operand::Reg(dst),
+                    addr: spill_addr(frame_layout, slot),
+                });
+            }
             continue;
         }
 

@@ -60,59 +60,67 @@ impl Parser {
 
     /// Parse a type specifier, advancing past all consumed tokens.
     fn parse_type(&mut self) -> Result<CType, TinyErr> {
-        match self.peek().clone() {
+        let base = match self.peek().clone() {
             Token::Void => {
                 self.advance();
-                Ok(CType::Void)
+                CType::Void
             }
             Token::Char => {
                 self.advance();
-                Ok(CType::Char)
+                CType::Char
             }
             Token::Short => {
                 self.advance();
-                Ok(CType::Short)
+                CType::Short
             }
             Token::Int => {
                 self.advance();
-                Ok(CType::Int)
+                CType::Int
             }
             Token::Long => {
                 self.advance();
-                Ok(CType::Long)
+                CType::Long
             }
             Token::Unsigned => {
                 self.advance();
                 match self.peek() {
                     Token::Char => {
                         self.advance();
-                        Ok(CType::UChar)
+                        CType::UChar
                     }
                     Token::Short => {
                         self.advance();
-                        Ok(CType::UShort)
+                        CType::UShort
                     }
                     Token::Int => {
                         self.advance();
-                        Ok(CType::UInt)
+                        CType::UInt
                     }
                     Token::Long => {
                         self.advance();
-                        Ok(CType::ULong)
+                        CType::ULong
                     }
                     // Bare `unsigned` == `unsigned int` per C standard.
-                    _ => Ok(CType::UInt),
+                    _ => CType::UInt,
                 }
             }
             other => {
                 let span = self.span().clone();
-                Err(TinyErr {
+                return Err(TinyErr {
                     line: span.line,
                     col: span.col,
                     msg: format!("expected type, got {other:?}"),
-                })
+                });
             }
+        };
+
+        // Consume trailing `*` tokens to build pointer types.
+        let mut ty = base;
+        while self.at(Token::Star) {
+            self.advance();
+            ty = CType::Ptr(Box::new(ty));
         }
+        Ok(ty)
     }
 
     fn parse_function(&mut self) -> Result<FnDef, TinyErr> {
@@ -232,21 +240,48 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::While { cond, body })
             }
-            Token::Ident(name) => {
-                // Could be assignment or expression statement.
-                // Look ahead: if next token is Assign, it's an assignment.
-                if self.pos + 1 < self.tokens.len()
-                    && self.tokens[self.pos + 1].token == Token::Assign
-                {
-                    self.advance(); // consume ident
-                    self.advance(); // consume '='
-                    let expr = self.parse_expr()?;
+            Token::Star => {
+                // Could be `*expr = value;` (deref assign) or `*expr;` (expr stmt).
+                let expr = self.parse_expr()?;
+                if self.at(Token::Assign) {
+                    self.advance();
+                    let value = self.parse_expr()?;
                     self.expect(Token::Semi)?;
-                    Ok(Stmt::Assign { name, expr })
+                    Ok(Stmt::DerefAssign {
+                        addr_expr: expr,
+                        value,
+                    })
                 } else {
-                    let e = self.parse_expr()?;
                     self.expect(Token::Semi)?;
-                    Ok(Stmt::ExprStmt(e))
+                    Ok(Stmt::ExprStmt(expr))
+                }
+            }
+            Token::Ident(_) => {
+                // Parse LHS expression, then decide: assign, index assign, or expr stmt.
+                let lhs = self.parse_expr()?;
+                if self.at(Token::Assign) {
+                    self.advance();
+                    let value = self.parse_expr()?;
+                    self.expect(Token::Semi)?;
+                    match lhs {
+                        Expr::Var(name) => Ok(Stmt::Assign { name, expr: value }),
+                        Expr::Index { base, index } => Ok(Stmt::IndexAssign {
+                            base: *base,
+                            index: *index,
+                            value,
+                        }),
+                        _ => {
+                            let span = self.span().clone();
+                            Err(TinyErr {
+                                line: span.line,
+                                col: span.col,
+                                msg: "invalid assignment target".to_string(),
+                            })
+                        }
+                    }
+                } else {
+                    self.expect(Token::Semi)?;
+                    Ok(Stmt::ExprStmt(lhs))
                 }
             }
             _ => {
@@ -291,38 +326,59 @@ impl Parser {
     fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr, TinyErr> {
         let mut lhs = self.parse_prefix()?;
 
-        while let Some((l_bp, r_bp)) = Self::infix_bp(self.peek()) {
-            if l_bp <= min_bp {
-                break;
+        loop {
+            // Postfix `[index]` binds at bp 25, tighter than any binary op.
+            if self.at(Token::LBracket) {
+                if 25 <= min_bp {
+                    break;
+                }
+                self.advance();
+                let index = self.parse_expr()?;
+                self.expect(Token::RBracket)?;
+                lhs = Expr::Index {
+                    base: Box::new(lhs),
+                    index: Box::new(index),
+                };
+                continue;
             }
-            let op_tok = self.advance().token.clone();
-            let rhs = self.parse_expr_bp(r_bp)?;
-            let op = match op_tok {
-                Token::Plus => BinOp::Add,
-                Token::Minus => BinOp::Sub,
-                Token::Star => BinOp::Mul,
-                Token::Slash => BinOp::Div,
-                Token::Percent => BinOp::Mod,
-                Token::Eq => BinOp::Eq,
-                Token::Ne => BinOp::Ne,
-                Token::Lt => BinOp::Lt,
-                Token::Gt => BinOp::Gt,
-                Token::Le => BinOp::Le,
-                Token::Ge => BinOp::Ge,
-                Token::And => BinOp::And,
-                Token::Or => BinOp::Or,
-                Token::Amp => BinOp::BitAnd,
-                Token::Pipe => BinOp::BitOr,
-                Token::Caret => BinOp::BitXor,
-                Token::Shl => BinOp::Shl,
-                Token::Shr => BinOp::Shr,
-                _ => unreachable!(),
-            };
-            lhs = Expr::BinOp {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+
+            // Infix binary operators.
+            if let Some((l_bp, r_bp)) = Self::infix_bp(self.peek()) {
+                if l_bp <= min_bp {
+                    break;
+                }
+                let op_tok = self.advance().token.clone();
+                let rhs = self.parse_expr_bp(r_bp)?;
+                let op = match op_tok {
+                    Token::Plus => BinOp::Add,
+                    Token::Minus => BinOp::Sub,
+                    Token::Star => BinOp::Mul,
+                    Token::Slash => BinOp::Div,
+                    Token::Percent => BinOp::Mod,
+                    Token::Eq => BinOp::Eq,
+                    Token::Ne => BinOp::Ne,
+                    Token::Lt => BinOp::Lt,
+                    Token::Gt => BinOp::Gt,
+                    Token::Le => BinOp::Le,
+                    Token::Ge => BinOp::Ge,
+                    Token::And => BinOp::And,
+                    Token::Or => BinOp::Or,
+                    Token::Amp => BinOp::BitAnd,
+                    Token::Pipe => BinOp::BitOr,
+                    Token::Caret => BinOp::BitXor,
+                    Token::Shl => BinOp::Shl,
+                    Token::Shr => BinOp::Shr,
+                    _ => unreachable!(),
+                };
+                lhs = Expr::BinOp {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                };
+                continue;
+            }
+
+            break;
         }
 
         Ok(lhs)
@@ -351,6 +407,22 @@ impl Parser {
                 let expr = self.parse_expr_bp(21)?;
                 Ok(Expr::UnaryOp {
                     op: UnaryOp::BitNot,
+                    expr: Box::new(expr),
+                })
+            }
+            Token::Star => {
+                self.advance();
+                let expr = self.parse_expr_bp(21)?;
+                Ok(Expr::UnaryOp {
+                    op: UnaryOp::Deref,
+                    expr: Box::new(expr),
+                })
+            }
+            Token::Amp => {
+                self.advance();
+                let expr = self.parse_expr_bp(21)?;
+                Ok(Expr::UnaryOp {
+                    op: UnaryOp::AddrOf,
                     expr: Box::new(expr),
                 })
             }

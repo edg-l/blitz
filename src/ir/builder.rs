@@ -5,7 +5,7 @@ use smallvec::smallvec;
 use crate::egraph::{EGraph, ENode};
 use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffectfulOp};
-use crate::ir::function::{BasicBlock, Function};
+use crate::ir::function::{BasicBlock, Function, StackSlot, StackSlotData};
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 
@@ -131,6 +131,9 @@ pub struct FunctionBuilder {
     /// Entry block parameter values (function arguments).
     entry_params: Vec<Value>,
 
+    // ── Stack slots ──────────────────────────────────────────────────────────
+    stack_slots: Vec<StackSlotData>,
+
     // ── SSA variable API state (Braun et al.) ────────────────────────────────
     next_var: u32,
     var_types: Vec<Type>,
@@ -185,6 +188,7 @@ impl FunctionBuilder {
             current_block: Some(0),
             next_block_id: 1,
             entry_params,
+            stack_slots: Vec::new(),
             next_var: 0,
             var_types: Vec::new(),
             var_defs: HashMap::new(),
@@ -410,6 +414,23 @@ impl FunctionBuilder {
             children: smallvec![flags.0, t.0, f.0],
         };
         self.add_node(node)
+    }
+
+    // ── Stack slot API ────────────────────────────────────────────────────────
+
+    /// Allocate a stack slot with the given size and alignment (in bytes).
+    pub fn create_stack_slot(&mut self, size: u32, align: u32) -> StackSlot {
+        let idx = self.stack_slots.len() as u32;
+        self.stack_slots.push(StackSlotData { size, align });
+        StackSlot(idx)
+    }
+
+    /// Return the address of a stack slot as an I64 value.
+    pub fn stack_addr(&mut self, slot: StackSlot) -> Value {
+        self.add_node(ENode {
+            op: Op::StackAddr(slot.0),
+            children: smallvec![],
+        })
     }
 
     // ── Effectful op builders ─────────────────────────────────────────────────
@@ -923,6 +944,7 @@ impl FunctionBuilder {
             blocks: basic_blocks,
             param_class_ids,
             egraph: Some(self.egraph),
+            stack_slots: self.stack_slots,
         };
 
         Ok(func)

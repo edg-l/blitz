@@ -3,6 +3,19 @@ use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::op::ClassId;
 use crate::ir::types::Type;
 
+// ── Stack slots ──────────────────────────────────────────────────────────────
+
+/// Describes a stack slot (size and alignment in bytes).
+#[derive(Debug, Clone, Copy)]
+pub struct StackSlotData {
+    pub size: u32,
+    pub align: u32,
+}
+
+/// Handle to a stack slot allocated in a function's frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StackSlot(pub u32);
+
 /// A basic block in the CFG skeleton.
 ///
 /// The block must end with exactly one terminator (`Branch`, `Jump`, or `Ret`).
@@ -78,6 +91,8 @@ pub struct Function {
     /// The e-graph containing all pure operations for this function.
     /// Populated by `FunctionBuilder::finalize()` and consumed by `compile()`.
     pub egraph: Option<EGraph>,
+    /// Stack slots allocated for this function's frame.
+    pub stack_slots: Vec<StackSlotData>,
 }
 
 impl std::fmt::Debug for Function {
@@ -89,6 +104,7 @@ impl std::fmt::Debug for Function {
             .field("blocks", &self.blocks)
             .field("param_class_ids", &self.param_class_ids)
             .field("egraph", &self.egraph.as_ref().map(|_| "<EGraph>"))
+            .field("stack_slots", &self.stack_slots)
             .finish()
     }
 }
@@ -103,6 +119,7 @@ impl Function {
             blocks: Vec::new(),
             param_class_ids: Vec::new(),
             egraph: None,
+            stack_slots: Vec::new(),
         }
     }
 

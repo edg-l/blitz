@@ -1,12 +1,98 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use blitz::ir::builder::{FunctionBuilder, Value, Variable};
 use blitz::ir::condcode::CondCode;
-use blitz::ir::function::Function;
+use blitz::ir::function::{Function, StackSlot};
 use blitz::ir::types::Type;
 
 use crate::ast::{BinOp, CType, Expr, FnDef, Program, Stmt, UnaryOp};
 use crate::error::TinyErr;
+
+/// Recursively walk all expressions and statements to find variables whose
+/// address is taken via `&var_name`.
+fn find_addressed_vars(stmts: &[Stmt]) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for stmt in stmts {
+        walk_stmt(stmt, &mut set);
+    }
+    set
+}
+
+fn walk_expr(expr: &Expr, set: &mut HashSet<String>) {
+    match expr {
+        Expr::UnaryOp {
+            op: UnaryOp::AddrOf,
+            expr: inner,
+        } => {
+            if let Expr::Var(name) = inner.as_ref() {
+                set.insert(name.clone());
+            }
+            walk_expr(inner, set);
+        }
+        Expr::IntLit(_) => {}
+        Expr::Var(_) => {}
+        Expr::BinOp { lhs, rhs, .. } => {
+            walk_expr(lhs, set);
+            walk_expr(rhs, set);
+        }
+        Expr::UnaryOp { expr: inner, .. } => {
+            walk_expr(inner, set);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                walk_expr(arg, set);
+            }
+        }
+        Expr::Cast { expr: inner, .. } => {
+            walk_expr(inner, set);
+        }
+        Expr::Sizeof(_) => {}
+        Expr::Index { base, index } => {
+            walk_expr(base, set);
+            walk_expr(index, set);
+        }
+    }
+}
+
+fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Return(Some(expr)) => walk_expr(expr, set),
+        Stmt::Return(None) => {}
+        Stmt::ExprStmt(expr) => walk_expr(expr, set),
+        Stmt::VarDecl { init, .. } => walk_expr(init, set),
+        Stmt::Assign { expr, .. } => walk_expr(expr, set),
+        Stmt::DerefAssign { addr_expr, value } => {
+            walk_expr(addr_expr, set);
+            walk_expr(value, set);
+        }
+        Stmt::IndexAssign { base, index, value } => {
+            walk_expr(base, set);
+            walk_expr(index, set);
+            walk_expr(value, set);
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            walk_expr(cond, set);
+            for s in then_body {
+                walk_stmt(s, set);
+            }
+            if let Some(else_stmts) = else_body {
+                for s in else_stmts {
+                    walk_stmt(s, set);
+                }
+            }
+        }
+        Stmt::While { cond, body } => {
+            walk_expr(cond, set);
+            for s in body {
+                walk_stmt(s, set);
+            }
+        }
+    }
+}
 
 pub struct Codegen {
     pub functions: Vec<Function>,
@@ -17,8 +103,8 @@ impl Codegen {
         // Pre-scan all function signatures before codegen.
         let mut fn_signatures: HashMap<String, (CType, Vec<CType>)> = HashMap::new();
         for func in &program.functions {
-            let param_types: Vec<CType> = func.params.iter().map(|(ty, _)| *ty).collect();
-            fn_signatures.insert(func.name.clone(), (func.return_type, param_types));
+            let param_types: Vec<CType> = func.params.iter().map(|(ty, _)| ty.clone()).collect();
+            fn_signatures.insert(func.name.clone(), (func.return_type.clone(), param_types));
         }
 
         let mut functions = Vec::new();
@@ -33,6 +119,8 @@ struct FnCtx<'b> {
     builder: &'b mut FunctionBuilder,
     locals: HashMap<String, Variable>,
     local_types: HashMap<String, CType>,
+    stack_slots: HashMap<String, (StackSlot, CType)>,
+    addressed_vars: HashSet<String>,
     fn_return_type: CType,
     fn_signatures: &'b HashMap<String, (CType, Vec<CType>)>,
 }
@@ -42,13 +130,26 @@ impl<'b> FnCtx<'b> {
         builder: &'b mut FunctionBuilder,
         fn_return_type: CType,
         fn_signatures: &'b HashMap<String, (CType, Vec<CType>)>,
+        addressed_vars: HashSet<String>,
     ) -> Self {
         FnCtx {
             builder,
             locals: HashMap::new(),
             local_types: HashMap::new(),
+            stack_slots: HashMap::new(),
+            addressed_vars,
             fn_return_type,
             fn_signatures,
+        }
+    }
+
+    /// Look up the C type for a local variable, checking both stack-allocated
+    /// and SSA variables.
+    fn local_type(&self, name: &str) -> CType {
+        if let Some((_, ty)) = self.stack_slots.get(name) {
+            ty.clone()
+        } else {
+            self.local_types[name].clone()
         }
     }
 
@@ -57,8 +158,28 @@ impl<'b> FnCtx<'b> {
     }
 
     /// Sign-extend, zero-extend, or truncate `val` from `from` to `to`.
-    fn emit_convert(&mut self, val: Value, from: CType, to: CType) -> Value {
+    fn emit_convert(&mut self, val: Value, from: &CType, to: &CType) -> Value {
         if from == to {
+            return val;
+        }
+        // Pointer-to-pointer: identity (both I64).
+        if from.is_pointer() && to.is_pointer() {
+            return val;
+        }
+        // Integer-to-pointer: zero-extend to I64 (e.g. NULL assignment).
+        if to.is_pointer() && from.is_integer() {
+            let from_w = from.bit_width();
+            if from_w < 64 {
+                return self.builder.zext(val, Type::I64);
+            }
+            return val;
+        }
+        // Pointer-to-integer: truncate or reinterpret as needed.
+        if from.is_pointer() && to.is_integer() {
+            let to_w = to.bit_width();
+            if to_w < 64 {
+                return self.builder.trunc(val, to.to_ir_type().unwrap());
+            }
             return val;
         }
         let from_w = from.bit_width();
@@ -79,13 +200,13 @@ impl<'b> FnCtx<'b> {
     }
 
     /// Apply integer promotion (Char/Short/UChar/UShort -> Int).
-    fn emit_promote(&mut self, val: Value, ty: CType) -> (Value, CType) {
+    fn emit_promote(&mut self, val: Value, ty: &CType) -> (Value, CType) {
         let promoted = ty.promoted();
-        if promoted != ty {
-            let val = self.emit_convert(val, ty, promoted);
+        if promoted != *ty {
+            let val = self.emit_convert(val, ty, &promoted);
             (val, promoted)
         } else {
-            (val, ty)
+            (val, promoted)
         }
     }
 
@@ -93,15 +214,15 @@ impl<'b> FnCtx<'b> {
     fn emit_usual_conversion(
         &mut self,
         lv: Value,
-        lt: CType,
+        lt: &CType,
         rv: Value,
-        rt: CType,
+        rt: &CType,
     ) -> (Value, Value, CType) {
         let (lv, lt) = self.emit_promote(lv, lt);
         let (rv, rt) = self.emit_promote(rv, rt);
-        let common = CType::usual_arithmetic_conversion(lt, rt);
-        let lv = self.emit_convert(lv, lt, common);
-        let rv = self.emit_convert(rv, rt, common);
+        let common = CType::usual_arithmetic_conversion(&lt, &rt);
+        let lv = self.emit_convert(lv, &lt, &common);
+        let rv = self.emit_convert(rv, &rt, &common);
         (lv, rv, common)
     }
 
@@ -113,8 +234,54 @@ impl<'b> FnCtx<'b> {
         self.builder.select(flags, one, zero)
     }
 
+    /// Emit pointer + integer arithmetic: scale the integer by pointee size, add.
+    fn emit_ptr_add(
+        &mut self,
+        ptr: Value,
+        ptr_ty: &CType,
+        idx: Value,
+        idx_ty: &CType,
+    ) -> Result<(Value, CType), TinyErr> {
+        if *ptr_ty.pointee() == CType::Void {
+            return Err(TinyErr {
+                line: 0,
+                col: 0,
+                msg: "pointer arithmetic on void* is not allowed".into(),
+            });
+        }
+        let elem_size = ptr_ty.pointee_size() as i64;
+        let idx = self.emit_convert(idx, idx_ty, &CType::Long);
+        let scale = self.builder.iconst(elem_size, Type::I64);
+        let offset = self.builder.mul(idx, scale);
+        let result = self.builder.add(ptr, offset);
+        Ok((result, ptr_ty.clone()))
+    }
+
+    /// Emit pointer - integer arithmetic: scale the integer by pointee size, subtract.
+    fn emit_ptr_sub(
+        &mut self,
+        ptr: Value,
+        ptr_ty: &CType,
+        idx: Value,
+        idx_ty: &CType,
+    ) -> Result<(Value, CType), TinyErr> {
+        if *ptr_ty.pointee() == CType::Void {
+            return Err(TinyErr {
+                line: 0,
+                col: 0,
+                msg: "pointer arithmetic on void* is not allowed".into(),
+            });
+        }
+        let elem_size = ptr_ty.pointee_size() as i64;
+        let idx = self.emit_convert(idx, idx_ty, &CType::Long);
+        let scale = self.builder.iconst(elem_size, Type::I64);
+        let offset = self.builder.mul(idx, scale);
+        let result = self.builder.sub(ptr, offset);
+        Ok((result, ptr_ty.clone()))
+    }
+
     /// Convert a value to Flags using a typed zero constant.
-    fn val_to_flags(&mut self, val: Value, ty: CType) -> Value {
+    fn val_to_flags(&mut self, val: Value, ty: &CType) -> Value {
         let ir_ty = ty.to_ir_type().unwrap();
         let zero = self.builder.iconst(0, ir_ty);
         self.builder.icmp(CondCode::Ne, val, zero)
@@ -136,7 +303,7 @@ impl<'b> FnCtx<'b> {
                 if cc.is_some() {
                     let (l, lt) = self.compile_expr(lhs)?;
                     let (r, rt) = self.compile_expr(rhs)?;
-                    let (l, r, common) = self.emit_usual_conversion(l, lt, r, rt);
+                    let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
                     // Pick signed/unsigned condition code.
                     let cc = match op {
                         BinOp::Eq => CondCode::Eq,
@@ -174,7 +341,7 @@ impl<'b> FnCtx<'b> {
                     Ok(self.builder.icmp(cc, l, r))
                 } else {
                     let (val, ty) = self.compile_expr(expr)?;
-                    Ok(self.val_to_flags(val, ty))
+                    Ok(self.val_to_flags(val, &ty))
                 }
             }
             Expr::UnaryOp {
@@ -182,13 +349,13 @@ impl<'b> FnCtx<'b> {
                 expr: inner,
             } => {
                 let (val, ty) = self.compile_expr(inner)?;
-                let (val, ty) = self.emit_promote(val, ty);
+                let (val, ty) = self.emit_promote(val, &ty);
                 let zero = self.builder.iconst(0, ty.to_ir_type().unwrap());
                 Ok(self.builder.icmp(CondCode::Eq, val, zero))
             }
             _ => {
                 let (val, ty) = self.compile_expr(expr)?;
-                Ok(self.val_to_flags(val, ty))
+                Ok(self.val_to_flags(val, &ty))
             }
         }
     }
@@ -206,33 +373,75 @@ impl<'b> FnCtx<'b> {
                 }
             }
             Expr::Var(name) => {
-                let var = self.locals.get(name).copied().ok_or_else(|| TinyErr {
-                    line: 0,
-                    col: 0,
-                    msg: format!("undefined variable '{name}'"),
-                })?;
-                let ty = self.local_types[name];
-                let val = self.builder.use_var(var);
-                Ok((val, ty))
+                if let Some((slot, ty)) = self.stack_slots.get(name) {
+                    let slot = *slot;
+                    let ty = ty.clone();
+                    let ir_ty = ty.to_ir_type().unwrap();
+                    let addr = self.builder.stack_addr(slot);
+                    let val = self.builder.load(addr, ir_ty);
+                    Ok((val, ty))
+                } else {
+                    let var = self.locals.get(name).copied().ok_or_else(|| TinyErr {
+                        line: 0,
+                        col: 0,
+                        msg: format!("undefined variable '{name}'"),
+                    })?;
+                    let ty = self.local_types[name].clone();
+                    let val = self.builder.use_var(var);
+                    Ok((val, ty))
+                }
+            }
+            Expr::UnaryOp {
+                op: UnaryOp::AddrOf,
+                expr: inner,
+            } => {
+                // &var_name: look up the stack slot for the variable
+                if let Expr::Var(name) = inner.as_ref() {
+                    let (slot, var_ty) = self.stack_slots.get(name).ok_or_else(|| TinyErr {
+                        line: 0,
+                        col: 0,
+                        msg: format!("address-of variable '{name}' not in stack slots"),
+                    })?;
+                    let slot = *slot;
+                    let var_ty = var_ty.clone();
+                    let addr = self.builder.stack_addr(slot);
+                    Ok((addr, CType::Ptr(Box::new(var_ty))))
+                } else {
+                    Err(TinyErr {
+                        line: 0,
+                        col: 0,
+                        msg: "address-of applied to non-variable expression".into(),
+                    })
+                }
             }
             Expr::UnaryOp { op, expr } => {
                 let (val, ty) = self.compile_expr(expr)?;
                 match op {
                     UnaryOp::Neg => {
-                        let (val, ty) = self.emit_promote(val, ty);
+                        let (val, ty) = self.emit_promote(val, &ty);
                         Ok((self.builder.neg(val), ty))
                     }
                     UnaryOp::Not => {
                         // !x == (x == 0) -> I32 result
-                        let (val, ty) = self.emit_promote(val, ty);
+                        let (val, ty) = self.emit_promote(val, &ty);
                         let zero = self.builder.iconst(0, ty.to_ir_type().unwrap());
                         Ok((self.emit_icmp_val(CondCode::Eq, val, zero), CType::Int))
                     }
                     UnaryOp::BitNot => {
                         // ~x == x ^ -1
-                        let (val, ty) = self.emit_promote(val, ty);
+                        let (val, ty) = self.emit_promote(val, &ty);
                         let all_ones = self.builder.iconst(-1, ty.to_ir_type().unwrap());
                         Ok((self.builder.xor(val, all_ones), ty))
+                    }
+                    UnaryOp::Deref => {
+                        // *expr: inner must be a pointer type
+                        let pointee = ty.pointee().clone();
+                        let ir_ty = pointee.to_ir_type().unwrap();
+                        let loaded = self.builder.load(val, ir_ty);
+                        Ok((loaded, pointee))
+                    }
+                    UnaryOp::AddrOf => {
+                        unreachable!("AddrOf handled by earlier match arm")
                     }
                 }
             }
@@ -240,12 +449,12 @@ impl<'b> FnCtx<'b> {
                 match op {
                     BinOp::And => {
                         let (l, lt) = self.compile_expr(lhs)?;
-                        let (l, lt) = self.emit_promote(l, lt);
+                        let (l, lt) = self.emit_promote(l, &lt);
                         let lzero = self.builder.iconst(0, lt.to_ir_type().unwrap());
                         let lbool = self.emit_icmp_val(CondCode::Ne, l, lzero);
 
                         let (r, rt) = self.compile_expr(rhs)?;
-                        let (r, rt) = self.emit_promote(r, rt);
+                        let (r, rt) = self.emit_promote(r, &rt);
                         let rzero = self.builder.iconst(0, rt.to_ir_type().unwrap());
                         let rbool = self.emit_icmp_val(CondCode::Ne, r, rzero);
 
@@ -253,12 +462,12 @@ impl<'b> FnCtx<'b> {
                     }
                     BinOp::Or => {
                         let (l, lt) = self.compile_expr(lhs)?;
-                        let (l, lt) = self.emit_promote(l, lt);
+                        let (l, lt) = self.emit_promote(l, &lt);
                         let lzero = self.builder.iconst(0, lt.to_ir_type().unwrap());
                         let lbool = self.emit_icmp_val(CondCode::Ne, l, lzero);
 
                         let (r, rt) = self.compile_expr(rhs)?;
-                        let (r, rt) = self.emit_promote(r, rt);
+                        let (r, rt) = self.emit_promote(r, &rt);
                         let rzero = self.builder.iconst(0, rt.to_ir_type().unwrap());
                         let rbool = self.emit_icmp_val(CondCode::Ne, r, rzero);
 
@@ -267,20 +476,20 @@ impl<'b> FnCtx<'b> {
                     // Shift operators: promote independently, result type is promoted left type.
                     BinOp::Shl => {
                         let (l, lt) = self.compile_expr(lhs)?;
-                        let (l, lt) = self.emit_promote(l, lt);
+                        let (l, lt) = self.emit_promote(l, &lt);
                         let (r, _rt) = self.compile_expr(rhs)?;
-                        let (r, _rt) = self.emit_promote(r, _rt);
+                        let (r, _rt) = self.emit_promote(r, &_rt);
                         // Shift amount must match the left operand's type for the IR.
-                        let r = self.emit_convert(r, _rt, lt);
+                        let r = self.emit_convert(r, &_rt, &lt);
                         Ok((self.builder.shl(l, r), lt))
                     }
                     BinOp::Shr => {
                         let (l, lt) = self.compile_expr(lhs)?;
-                        let (l, lt) = self.emit_promote(l, lt);
+                        let (l, lt) = self.emit_promote(l, &lt);
                         let (r, _rt) = self.compile_expr(rhs)?;
-                        let (r, _rt) = self.emit_promote(r, _rt);
+                        let (r, _rt) = self.emit_promote(r, &_rt);
                         // Shift amount must match the left operand's type for the IR.
-                        let r = self.emit_convert(r, _rt, lt);
+                        let r = self.emit_convert(r, &_rt, &lt);
                         // sar for signed, shr for unsigned.
                         if lt.is_signed() {
                             Ok((self.builder.sar(l, r), lt))
@@ -288,13 +497,36 @@ impl<'b> FnCtx<'b> {
                             Ok((self.builder.shr(l, r), lt))
                         }
                     }
+                    // Pointer + integer or integer + pointer arithmetic.
+                    BinOp::Add => {
+                        let (l, lt) = self.compile_expr(lhs)?;
+                        let (r, rt) = self.compile_expr(rhs)?;
+                        if lt.is_pointer() && rt.is_integer() {
+                            self.emit_ptr_add(l, &lt, r, &rt)
+                        } else if lt.is_integer() && rt.is_pointer() {
+                            // Commutative: int + ptr => ptr + int.
+                            self.emit_ptr_add(r, &rt, l, &lt)
+                        } else {
+                            let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
+                            Ok((self.builder.add(l, r), common))
+                        }
+                    }
+                    // Pointer - integer arithmetic.
+                    BinOp::Sub => {
+                        let (l, lt) = self.compile_expr(lhs)?;
+                        let (r, rt) = self.compile_expr(rhs)?;
+                        if lt.is_pointer() && rt.is_integer() {
+                            self.emit_ptr_sub(l, &lt, r, &rt)
+                        } else {
+                            let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
+                            Ok((self.builder.sub(l, r), common))
+                        }
+                    }
                     _ => {
                         let (l, lt) = self.compile_expr(lhs)?;
                         let (r, rt) = self.compile_expr(rhs)?;
-                        let (l, r, common) = self.emit_usual_conversion(l, lt, r, rt);
+                        let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
                         match op {
-                            BinOp::Add => Ok((self.builder.add(l, r), common)),
-                            BinOp::Sub => Ok((self.builder.sub(l, r), common)),
                             BinOp::Mul => Ok((self.builder.mul(l, r), common)),
                             BinOp::Div => {
                                 if common.is_unsigned() {
@@ -347,7 +579,12 @@ impl<'b> FnCtx<'b> {
                             BinOp::BitAnd => Ok((self.builder.and(l, r), common)),
                             BinOp::BitOr => Ok((self.builder.or(l, r), common)),
                             BinOp::BitXor => Ok((self.builder.xor(l, r), common)),
-                            BinOp::And | BinOp::Or | BinOp::Shl | BinOp::Shr => unreachable!(),
+                            BinOp::Add
+                            | BinOp::Sub
+                            | BinOp::And
+                            | BinOp::Or
+                            | BinOp::Shl
+                            | BinOp::Shr => unreachable!(),
                         }
                     }
                 }
@@ -356,7 +593,7 @@ impl<'b> FnCtx<'b> {
                 let (ret_type, param_types) = self
                     .fn_signatures
                     .get(name.as_str())
-                    .map(|(r, p)| (*r, p.clone()))
+                    .map(|(r, p)| (r.clone(), p.clone()))
                     .ok_or_else(|| TinyErr {
                         line: 0,
                         col: 0,
@@ -367,8 +604,8 @@ impl<'b> FnCtx<'b> {
                 let mut arg_vals: Vec<Value> = Vec::new();
                 for (i, arg_expr) in args.iter().enumerate() {
                     let (arg_val, arg_ty) = self.compile_expr(arg_expr)?;
-                    let param_ty = param_types[i];
-                    let converted = self.emit_convert(arg_val, arg_ty, param_ty);
+                    let param_ty = &param_types[i];
+                    let converted = self.emit_convert(arg_val, &arg_ty, param_ty);
                     arg_vals.push(converted);
                 }
 
@@ -386,13 +623,34 @@ impl<'b> FnCtx<'b> {
             }
             Expr::Cast { ty, expr } => {
                 let (val, from_ty) = self.compile_expr(expr)?;
-                let converted = self.emit_convert(val, from_ty, *ty);
-                Ok((converted, *ty))
+                let converted = self.emit_convert(val, &from_ty, ty);
+                Ok((converted, ty.clone()))
             }
             Expr::Sizeof(ty) => {
                 let size = ty.bit_width() as i64 / 8;
                 let val = self.builder.iconst(size, Type::I64);
                 Ok((val, CType::ULong))
+            }
+            Expr::Index { base, index } => {
+                let (base_val, base_ty) = self.compile_expr(base)?;
+                let pointee = base_ty.pointee().clone();
+                if pointee == CType::Void {
+                    return Err(TinyErr {
+                        line: 0,
+                        col: 0,
+                        msg: "pointer arithmetic on void* is not allowed".into(),
+                    });
+                }
+                let elem_size = base_ty.pointee_size() as i64;
+                let (idx_val, idx_ty) = self.compile_expr(index)?;
+                // Widen index to I64 for address arithmetic
+                let idx_val = self.emit_convert(idx_val, &idx_ty, &CType::Long);
+                let scale = self.builder.iconst(elem_size, Type::I64);
+                let offset = self.builder.mul(idx_val, scale);
+                let addr = self.builder.add(base_val, offset);
+                let ir_ty = pointee.to_ir_type().unwrap();
+                let loaded = self.builder.load(addr, ir_ty);
+                Ok((loaded, pointee))
             }
         }
     }
@@ -415,14 +673,28 @@ fn compile_fn(
 
     let mut builder = FunctionBuilder::new(&fn_def.name, &param_ir_types, &ret_ir_types);
 
+    let addressed_vars = find_addressed_vars(&fn_def.body);
     let param_vals = builder.params().to_vec();
-    let mut ctx = FnCtx::new(&mut builder, fn_def.return_type, fn_sigs);
+    let mut ctx = FnCtx::new(
+        &mut builder,
+        fn_def.return_type.clone(),
+        fn_sigs,
+        addressed_vars,
+    );
 
     for ((ty, name), val) in fn_def.params.iter().zip(param_vals.iter()) {
-        let var = ctx.builder.declare_var(ty.to_ir_type().unwrap());
-        ctx.builder.def_var(var, *val);
-        ctx.locals.insert(name.clone(), var);
-        ctx.local_types.insert(name.clone(), *ty);
+        if ctx.addressed_vars.contains(name) {
+            let size = ty.bit_width() / 8;
+            let slot = ctx.builder.create_stack_slot(size, 8);
+            let addr = ctx.builder.stack_addr(slot);
+            ctx.builder.store(addr, *val);
+            ctx.stack_slots.insert(name.clone(), (slot, ty.clone()));
+        } else {
+            let var = ctx.builder.declare_var(ty.to_ir_type().unwrap());
+            ctx.builder.def_var(var, *val);
+            ctx.locals.insert(name.clone(), var);
+            ctx.local_types.insert(name.clone(), ty.clone());
+        }
     }
 
     compile_stmts(&mut ctx, &fn_def.body)?;
@@ -460,7 +732,8 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         Stmt::Return(opt_expr) => match opt_expr {
             Some(expr) => {
                 let (val, ty) = ctx.compile_expr(expr)?;
-                let converted = ctx.emit_convert(val, ty, ctx.fn_return_type);
+                let ret_ty = ctx.fn_return_type.clone();
+                let converted = ctx.emit_convert(val, &ty, &ret_ty);
                 ctx.builder.ret(Some(converted));
             }
             None => {
@@ -472,22 +745,33 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         }
         Stmt::VarDecl { ty, name, init } => {
             let (val, init_ty) = ctx.compile_expr(init)?;
-            let converted = ctx.emit_convert(val, init_ty, *ty);
-            let ir_ty = ty.to_ir_type().unwrap();
-            let var = ctx.builder.declare_var(ir_ty);
-            ctx.builder.def_var(var, converted);
-            ctx.locals.insert(name.clone(), var);
-            ctx.local_types.insert(name.clone(), *ty);
+            let converted = ctx.emit_convert(val, &init_ty, ty);
+            if ctx.addressed_vars.contains(name) {
+                let size = ty.bit_width() / 8;
+                let slot = ctx.builder.create_stack_slot(size, 8);
+                let addr = ctx.builder.stack_addr(slot);
+                ctx.builder.store(addr, converted);
+                ctx.stack_slots.insert(name.clone(), (slot, ty.clone()));
+            } else {
+                let ir_ty = ty.to_ir_type().unwrap();
+                let var = ctx.builder.declare_var(ir_ty);
+                ctx.builder.def_var(var, converted);
+                ctx.locals.insert(name.clone(), var);
+                ctx.local_types.insert(name.clone(), ty.clone());
+            }
         }
         Stmt::Assign { name, expr } => {
-            let local_ty = *ctx
-                .local_types
-                .get(name)
-                .expect("undefined variable in assign");
+            let local_ty = ctx.local_type(name);
             let (val, expr_ty) = ctx.compile_expr(expr)?;
-            let converted = ctx.emit_convert(val, expr_ty, local_ty);
-            let var = *ctx.locals.get(name).expect("undefined variable in assign");
-            ctx.builder.def_var(var, converted);
+            let converted = ctx.emit_convert(val, &expr_ty, &local_ty);
+            if let Some((slot, _)) = ctx.stack_slots.get(name) {
+                let slot = *slot;
+                let addr = ctx.builder.stack_addr(slot);
+                ctx.builder.store(addr, converted);
+            } else {
+                let var = *ctx.locals.get(name).expect("undefined variable in assign");
+                ctx.builder.def_var(var, converted);
+            }
         }
         Stmt::If {
             cond,
@@ -498,6 +782,42 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         }
         Stmt::While { cond, body } => {
             compile_while(ctx, cond, body)?;
+        }
+        Stmt::DerefAssign { addr_expr, value } => {
+            // The parser stores the full `*expr` as addr_expr (including the Deref).
+            // We need the pointer address, so unwrap the outer Deref.
+            let ptr_expr = match addr_expr {
+                Expr::UnaryOp {
+                    op: UnaryOp::Deref,
+                    expr: inner,
+                } => inner.as_ref(),
+                other => other,
+            };
+            let (addr_val, addr_ty) = ctx.compile_expr(ptr_expr)?;
+            let pointee = addr_ty.pointee().clone();
+            let (val, val_ty) = ctx.compile_expr(value)?;
+            let converted = ctx.emit_convert(val, &val_ty, &pointee);
+            ctx.builder.store(addr_val, converted);
+        }
+        Stmt::IndexAssign { base, index, value } => {
+            let (base_val, base_ty) = ctx.compile_expr(base)?;
+            let pointee = base_ty.pointee().clone();
+            if pointee == CType::Void {
+                return Err(TinyErr {
+                    line: 0,
+                    col: 0,
+                    msg: "pointer arithmetic on void* is not allowed".into(),
+                });
+            }
+            let elem_size = base_ty.pointee_size() as i64;
+            let (idx_val, idx_ty) = ctx.compile_expr(index)?;
+            let idx_val = ctx.emit_convert(idx_val, &idx_ty, &CType::Long);
+            let scale = ctx.builder.iconst(elem_size, Type::I64);
+            let offset = ctx.builder.mul(idx_val, scale);
+            let addr = ctx.builder.add(base_val, offset);
+            let (val, val_ty) = ctx.compile_expr(value)?;
+            let converted = ctx.emit_convert(val, &val_ty, &pointee);
+            ctx.builder.store(addr, converted);
         }
     }
     Ok(())

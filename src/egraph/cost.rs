@@ -51,6 +51,9 @@ impl CostModel {
             // ── Function parameters: free (value lives in an ABI register on entry) ──
             Op::Param(..) => 0.0,
 
+            // ── Stack slot address: free (LEA emitted during lowering) ───────────
+            Op::StackAddr(..) => 0.0,
+
             // ── Block parameters: free (value comes from predecessor block) ──────────
             Op::BlockParam(..) => 0.0,
 

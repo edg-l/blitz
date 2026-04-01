@@ -31,6 +31,7 @@ pub fn compute_global_liveness(
     block_schedules: &[Vec<ScheduledInst>],
     successors: &[Vec<usize>],
     phi_uses: &[HashSet<VReg>],
+    effectful_uses: &[HashSet<VReg>],
 ) -> GlobalLiveness {
     let n = block_schedules.len();
     assert_eq!(successors.len(), n);
@@ -60,6 +61,17 @@ pub fn compute_global_liveness(
         for &v in &phi_uses[b] {
             if !def.contains(&v) {
                 uses.insert(v);
+            }
+        }
+
+        // effectful_uses[b] are VRegs referenced by Load/Store effectful ops
+        // (addresses and values). These are not in the scheduled instruction
+        // list but must be live for correct cross-block spill/reload insertion.
+        if b < effectful_uses.len() {
+            for &v in &effectful_uses[b] {
+                if !def.contains(&v) {
+                    uses.insert(v);
+                }
             }
         }
 
@@ -287,7 +299,12 @@ mod tests {
         let successors = vec![vec![1usize], vec![2], vec![]];
         let phi_uses = empty_phi_uses(3);
 
-        let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
+        let gl = compute_global_liveness(
+            &schedules,
+            &successors,
+            &phi_uses,
+            &vec![HashSet::new(); schedules.len()],
+        );
 
         // v0 defined in block 0, used in block 2.
         assert!(gl.live_out[0].contains(&VReg(0)), "v0 live_out of block 0");
@@ -320,7 +337,12 @@ mod tests {
         let successors = vec![vec![1, 2], vec![3], vec![3], vec![]];
         let phi_uses = empty_phi_uses(4);
 
-        let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
+        let gl = compute_global_liveness(
+            &schedules,
+            &successors,
+            &phi_uses,
+            &vec![HashSet::new(); schedules.len()],
+        );
 
         assert!(gl.live_out[0].contains(&VReg(0)));
         assert!(gl.live_in[1].contains(&VReg(0)));
@@ -345,7 +367,12 @@ mod tests {
         let phi_uses = empty_phi_uses(2);
 
         // Should not infinite-loop and should converge.
-        let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
+        let gl = compute_global_liveness(
+            &schedules,
+            &successors,
+            &phi_uses,
+            &vec![HashSet::new(); schedules.len()],
+        );
 
         // v0 is defined in block 0 and used in block 1.
         assert!(gl.live_out[0].contains(&VReg(0)));
@@ -365,7 +392,12 @@ mod tests {
         let successors = vec![vec![1], vec![]];
         let phi_uses = empty_phi_uses(2);
 
-        let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
+        let gl = compute_global_liveness(
+            &schedules,
+            &successors,
+            &phi_uses,
+            &vec![HashSet::new(); schedules.len()],
+        );
 
         // v0 and v1 are local to block 0 -- should not be live across any boundary.
         assert!(!gl.live_out[0].contains(&VReg(0)));
@@ -389,7 +421,12 @@ mod tests {
         let mut phi_uses = empty_phi_uses(2);
         phi_uses[0].insert(VReg(0));
 
-        let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
+        let gl = compute_global_liveness(
+            &schedules,
+            &successors,
+            &phi_uses,
+            &vec![HashSet::new(); schedules.len()],
+        );
 
         // v0 is defined in block 0 but also used in phi_uses[0], so it stays local.
         // It should NOT be live_out[0] unless a successor needs it.

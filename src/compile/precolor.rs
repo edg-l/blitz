@@ -199,12 +199,12 @@ pub(super) fn collect_call_points_for_block(
         block.ops.len() - 1
     };
 
-    // Collect all calls (in order) along with their result ClassIds.
-    let calls: Vec<&Vec<ClassId>> = block.ops[..non_term_count]
+    // Collect all calls (in order) along with their args and result ClassIds.
+    let calls: Vec<(&Vec<ClassId>, &Vec<ClassId>)> = block.ops[..non_term_count]
         .iter()
         .filter_map(|op| {
-            if let EffectfulOp::Call { results, .. } = op {
-                Some(results)
+            if let EffectfulOp::Call { args, results, .. } = op {
+                Some((args, results))
             } else {
                 None
             }
@@ -215,32 +215,44 @@ pub(super) fn collect_call_points_for_block(
         return vec![];
     }
 
-    if calls.len() == 1 {
-        // Single call: use the sentinel (entire block is the clobber region).
-        return vec![block_sched.len()];
-    }
-
-    // For blocks with multiple calls, find the schedule index of each call's
-    // CallResult node. The call point for call K is the index of its CallResult
-    // in block_sched. The liveness analysis at that index captures VRegs that
-    // are live "just before" the CallResult is defined, which represents VRegs
-    // that are live immediately after call K completes (i.e., they need to
-    // survive the call's clobber).
-    //
-    // For each call, we look up the first result's VReg and find its position
-    // in block_sched. If not found, fall back to the sentinel.
+    // For each call, find the schedule position that represents the call point.
+    // For non-void calls: use the CallResult node's position in block_sched.
+    // The liveness at that index captures VRegs live across the call.
+    // For void calls: use the position after the last argument in block_sched,
+    // since the call happens after all arguments are computed.
     let mut call_points: Vec<usize> = Vec::with_capacity(calls.len());
-    for result_cids in &calls {
+    for (arg_cids, result_cids) in &calls {
         let mut cp = block_sched.len(); // sentinel fallback
+
+        // Try to find via CallResult first (non-void calls).
         if let Some(&first_result_cid) = result_cids.first() {
             let canon = egraph.unionfind.find_immutable(first_result_cid);
             if let Some(&result_vreg) = class_to_vreg.get(&canon) {
-                // Find the schedule index of this CallResult node.
                 if let Some(pos) = block_sched.iter().position(|inst| inst.dst == result_vreg) {
                     cp = pos;
                 }
             }
         }
+
+        // For void calls (no results or result not found), find the position
+        // after the last argument. VRegs live at this point must survive the call.
+        if cp == block_sched.len() && !arg_cids.is_empty() {
+            let mut max_arg_pos: Option<usize> = None;
+            for &arg_cid in arg_cids.iter() {
+                let canon = egraph.unionfind.find_immutable(arg_cid);
+                if let Some(&arg_vreg) = class_to_vreg.get(&canon) {
+                    if let Some(pos) = block_sched.iter().position(|inst| inst.dst == arg_vreg) {
+                        max_arg_pos = Some(max_arg_pos.map_or(pos, |m: usize| m.max(pos)));
+                    }
+                }
+            }
+            if let Some(pos) = max_arg_pos {
+                // Use pos + 1: VRegs live after the last arg is defined but before
+                // the call completes need to survive the clobber.
+                cp = (pos + 1).min(block_sched.len());
+            }
+        }
+
         call_points.push(cp);
     }
     call_points

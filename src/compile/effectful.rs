@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::egraph::extract::{ExtractionResult, VReg};
+use crate::egraph::unionfind::UnionFind;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
@@ -23,6 +24,7 @@ fn build_mem_addr(
     extraction: &ExtractionResult,
     class_to_vreg: &HashMap<ClassId, VReg>,
     regalloc: &RegAllocResult,
+    conflict_reg: Option<Reg>,
 ) -> Addr {
     if let Some(ext) = extraction.choices.get(&addr_cid) {
         if let Op::Addr { scale, disp } = &ext.op {
@@ -39,6 +41,19 @@ fn build_mem_addr(
                 .and_then(|&c| class_to_vreg.get(&c))
                 .and_then(|v| regalloc.vreg_to_reg.get(v).copied());
             if let Some(base) = base_reg {
+                // If the folded base or index register conflicts with an
+                // operand that is read simultaneously (e.g. the Store value),
+                // fall back to the pre-computed addr_reg to avoid clobbering.
+                if let Some(cr) = conflict_reg {
+                    if base == cr || index_reg == Some(cr) {
+                        return Addr {
+                            base: Some(addr_reg),
+                            index: None,
+                            scale: 1,
+                            disp: 0,
+                        };
+                    }
+                }
                 return Addr {
                     base: Some(base),
                     index: index_reg,
@@ -63,17 +78,19 @@ pub(super) fn lower_effectful_op(
     regalloc: &RegAllocResult,
     extraction: &ExtractionResult,
     func: &Function,
+    uf: &UnionFind,
 ) -> Result<Vec<MachInst>, CompileError> {
     let get_reg = |cid: ClassId| -> Option<Reg> {
+        let canon = uf.find_immutable(cid);
         class_to_vreg
-            .get(&cid)
+            .get(&canon)
             .and_then(|v| regalloc.vreg_to_reg.get(v).copied())
     };
 
     match op {
         EffectfulOp::Load { addr, result, ty } => {
             let load_size = OpSize::from_type(ty);
-            let canon_addr = *addr;
+            let canon_addr = uf.find_immutable(*addr);
             let addr_reg = get_reg(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
                 message: "Load: no register for addr".into(),
@@ -83,8 +100,9 @@ pub(super) fn lower_effectful_op(
                     inst: None,
                 }),
             })?;
+            let canon_result = uf.find_immutable(*result);
             let result_reg = class_to_vreg
-                .get(result)
+                .get(&canon_result)
                 .and_then(|v| regalloc.vreg_to_reg.get(v).copied())
                 .ok_or_else(|| CompileError {
                     phase: "lowering".into(),
@@ -95,7 +113,14 @@ pub(super) fn lower_effectful_op(
                         inst: None,
                     }),
                 })?;
-            let addr = build_mem_addr(canon_addr, addr_reg, extraction, class_to_vreg, regalloc);
+            let addr = build_mem_addr(
+                canon_addr,
+                addr_reg,
+                extraction,
+                class_to_vreg,
+                regalloc,
+                None,
+            );
             // S8/S16 loads must use zero-extending loads (MovzxBRM/MovzxWRM) to
             // avoid partial register writes that leave upper bits unchanged.
             let inst = match load_size {
@@ -116,7 +141,7 @@ pub(super) fn lower_effectful_op(
             Ok(vec![inst])
         }
         EffectfulOp::Store { addr, val, ty } => {
-            let canon_addr = *addr;
+            let canon_addr = uf.find_immutable(*addr);
             let addr_reg = get_reg(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
                 message: "Store: no register for addr".into(),
@@ -136,7 +161,14 @@ pub(super) fn lower_effectful_op(
                 }),
             })?;
             let store_size = OpSize::from_type(ty);
-            let addr = build_mem_addr(canon_addr, addr_reg, extraction, class_to_vreg, regalloc);
+            let addr = build_mem_addr(
+                canon_addr,
+                addr_reg,
+                extraction,
+                class_to_vreg,
+                regalloc,
+                Some(val_reg),
+            );
             Ok(vec![MachInst::MovMR {
                 size: store_size,
                 addr,
