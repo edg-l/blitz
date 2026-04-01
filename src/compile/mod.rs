@@ -13,7 +13,7 @@
 //! 10. Encoding
 //! 11. ELF emission
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::egraph::cost::{CostModel, OptGoal};
 use crate::egraph::extract::{VReg, VRegInst, build_vreg_types, extract, vreg_insts_for_block};
@@ -235,7 +235,7 @@ pub fn compile(
     // Map (BlockId, param_idx) -> fresh VReg for block params whose canonical
     // VReg was emitted by a prior block. This prevents the e-graph from merging
     // outer and inner loop header params into the same register.
-    let mut block_param_vreg_overrides: HashMap<(BlockId, u32), VReg> = HashMap::new();
+    let mut block_param_vreg_overrides: BTreeMap<(BlockId, u32), VReg> = BTreeMap::new();
 
     // Build per-block VRegInst lists in RPO order, stored by block index.
     let mut block_vreg_insts: Vec<Vec<VRegInst>> = vec![Vec::new(); func.blocks.len()];
@@ -392,7 +392,13 @@ pub fn compile(
     let param_vregs = assign_param_vregs_from_map(func, &class_to_vreg, &egraph);
 
     // Build phi copy pairs from block parameter passing for coalescing.
-    let copy_pairs = compute_copy_pairs(func, &class_to_vreg, &egraph, &block_param_map);
+    let copy_pairs = compute_copy_pairs(
+        func,
+        &class_to_vreg,
+        &egraph,
+        &block_param_map,
+        &block_param_vreg_overrides,
+    );
 
     // Compute loop depths from the CFG for spill selection.
     let loop_depths = compute_loop_depths(func, &block_schedules);

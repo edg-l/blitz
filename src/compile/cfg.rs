@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::egraph::EGraph;
 use crate::egraph::extract::VReg;
@@ -241,12 +241,22 @@ pub(super) fn compute_copy_pairs(
     class_to_vreg: &HashMap<ClassId, VReg>,
     egraph: &EGraph,
     block_param_map: &HashMap<(BlockId, u32), ClassId>,
+    param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
 ) -> Vec<(VReg, VReg)> {
     let mut pairs: Vec<(VReg, VReg)> = Vec::new();
 
     let get_vreg = |cid: ClassId| -> Option<VReg> {
         let canon = egraph.unionfind.find_immutable(cid);
         class_to_vreg.get(&canon).copied()
+    };
+
+    // Look up the destination VReg for a block param, preferring the
+    // per-block override (fresh VReg) over the global class_to_vreg.
+    let get_param_vreg = |target: BlockId, idx: u32, param_cid: ClassId| -> Option<VReg> {
+        param_vreg_overrides
+            .get(&(target, idx))
+            .copied()
+            .or_else(|| get_vreg(param_cid))
     };
 
     for block in &func.blocks {
@@ -259,9 +269,10 @@ pub(super) fn compute_copy_pairs(
                     // Handle true branch.
                     for (idx, &arg_cid) in true_args.iter().enumerate() {
                         if let Some(&param_cid) = block_param_map.get(&(*bb_true, idx as u32)) {
-                            if let (Some(arg_v), Some(param_v)) =
-                                (get_vreg(arg_cid), get_vreg(param_cid))
-                            {
+                            if let (Some(arg_v), Some(param_v)) = (
+                                get_vreg(arg_cid),
+                                get_param_vreg(*bb_true, idx as u32, param_cid),
+                            ) {
                                 pairs.push((arg_v, param_v));
                             }
                         }
@@ -276,9 +287,10 @@ pub(super) fn compute_copy_pairs(
                         for (idx, &arg_cid) in false_args.iter().enumerate() {
                             if let Some(&param_cid) = block_param_map.get(&(*bb_false, idx as u32))
                             {
-                                if let (Some(arg_v), Some(param_v)) =
-                                    (get_vreg(arg_cid), get_vreg(param_cid))
-                                {
+                                if let (Some(arg_v), Some(param_v)) = (
+                                    get_vreg(arg_cid),
+                                    get_param_vreg(*bb_false, idx as u32, param_cid),
+                                ) {
                                     pairs.push((arg_v, param_v));
                                 }
                             }
@@ -290,7 +302,10 @@ pub(super) fn compute_copy_pairs(
             };
             for (idx, &arg_cid) in args.iter().enumerate() {
                 if let Some(&param_cid) = block_param_map.get(&(target, idx as u32)) {
-                    if let (Some(arg_v), Some(param_v)) = (get_vreg(arg_cid), get_vreg(param_cid)) {
+                    if let (Some(arg_v), Some(param_v)) = (
+                        get_vreg(arg_cid),
+                        get_param_vreg(target, idx as u32, param_cid),
+                    ) {
                         pairs.push((arg_v, param_v));
                     }
                 }

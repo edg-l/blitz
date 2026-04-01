@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::egraph::EGraph;
 use crate::egraph::extract::VReg;
@@ -132,7 +132,7 @@ pub(super) fn lower_terminator(
     class_to_vreg: &HashMap<ClassId, VReg>,
     ret_class_to_vreg: &HashMap<ClassId, VReg>,
     block_param_map: &HashMap<(BlockId, u32), ClassId>,
-    param_vreg_overrides: &HashMap<(BlockId, u32), VReg>,
+    param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
     next_label: &mut LabelId,
@@ -318,7 +318,7 @@ fn build_phi_copies(
     class_to_vreg: &HashMap<ClassId, VReg>,
     block_class_to_vreg: &HashMap<ClassId, VReg>,
     block_param_map: &HashMap<(BlockId, u32), ClassId>,
-    param_vreg_overrides: &HashMap<(BlockId, u32), VReg>,
+    param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
 ) -> Result<Vec<(Reg, Reg, OpSize)>, CompileError> {
