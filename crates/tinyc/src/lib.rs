@@ -3,6 +3,7 @@ pub mod ast;
 pub mod codegen;
 pub mod error;
 pub mod lexer;
+pub mod link;
 pub mod parser;
 
 pub use error::TinyErr;

@@ -1,8 +1,8 @@
 // Usage: tinyc <input.c> [-o <output>]
-// Compiles a .c file to a native executable via Blitz backend + cc linker.
+// Compiles a .c file to a native executable via Blitz backend + ld/cc linker.
 
 use std::io::Write;
-use std::process::{Command, exit};
+use std::process::exit;
 
 fn main() {
     blitz::trace::init_tracing();
@@ -57,22 +57,13 @@ fn main() {
         });
     }
 
-    // Link with cc (no runtime helpers needed — division uses native IDIV)
-    let status = Command::new("cc")
-        .arg(&tmp_obj)
-        .arg("-o")
-        .arg(&output_path)
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!("tinyc: cannot run cc: {}", e);
-            let _ = std::fs::remove_file(&tmp_obj);
-            exit(1);
-        });
-
-    let _ = std::fs::remove_file(&tmp_obj);
-
-    if !status.success() {
-        eprintln!("tinyc: linker failed");
+    // Link object file into executable (tries ld directly, falls back to cc)
+    let output = std::path::Path::new(&output_path);
+    if let Err(e) = tinyc::link::link(&tmp_obj, output) {
+        let _ = std::fs::remove_file(&tmp_obj);
+        eprintln!("tinyc: {}", e);
         exit(1);
     }
+
+    let _ = std::fs::remove_file(&tmp_obj);
 }

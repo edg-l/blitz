@@ -28,11 +28,6 @@ fn compile_and_disasm(src: &str) -> String {
 }
 
 fn compile_and_run(src: &str) -> Option<i32> {
-    // Check that cc is available
-    if Command::new("cc").arg("--version").output().is_err() {
-        return None;
-    }
-
     let obj_bytes = compile_source(src).expect("compile_source failed");
 
     // Use a unique suffix per invocation to avoid conflicts in parallel tests.
@@ -53,17 +48,8 @@ fn compile_and_run(src: &str) -> Option<i32> {
         f.write_all(&obj_bytes).expect("write obj bytes");
     }
 
-    // Link with cc (no runtime helpers needed — division uses native IDIV)
-    let link_status = Command::new("cc")
-        .arg(&obj_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .status()
-        .expect("cc link failed");
-
-    if !link_status.success() {
-        panic!("linker returned non-zero status");
-    }
+    // Link (tries ld directly, falls back to cc)
+    super::link::link(&obj_path, &bin_path).expect("linking failed");
 
     // Run the binary and capture exit code
     let status = Command::new(&bin_path).status().expect("run binary failed");
