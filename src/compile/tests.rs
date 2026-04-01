@@ -3043,6 +3043,53 @@ int main(void) {
     }
 }
 
+#[test]
+fn e2e_many_stores_register_pressure() {
+    // Regression: many Store effectful ops in one block kept all operand
+    // VRegs alive until end of block, exhausting registers. Deadline-based
+    // liveness lets operands die at their barrier position.
+    let mut builder = FunctionBuilder::new("blitz_many_stores", &[], &[Type::I64]);
+
+    // Allocate a stack slot for 8 bytes
+    let slot = builder.create_stack_slot(32, 8);
+    let base = builder.stack_addr(slot);
+
+    // Write 4 different values at 4 offsets
+    for i in 0..4i64 {
+        let off = builder.iconst(i * 8, Type::I64);
+        let addr = builder.add(base, off);
+        let val = builder.iconst((i + 1) * 10, Type::I64);
+        builder.store(addr, val);
+    }
+
+    // Read back and sum
+    let mut acc = builder.iconst(0, Type::I64);
+    for i in 0..4i64 {
+        let off = builder.iconst(i * 8, Type::I64);
+        let addr = builder.add(base, off);
+        let loaded = builder.load(addr, Type::I64);
+        acc = builder.add(acc, loaded);
+    }
+
+    builder.ret(Some(acc));
+    let func = builder.finalize().expect("many_stores finalize");
+    let opts = CompileOptions::default();
+    let obj = compile(func, &opts, None).expect("compile many_stores");
+
+    let c_main = r#"
+#include <stdint.h>
+int64_t blitz_many_stores(void);
+int main(void) {
+    // 10 + 20 + 30 + 40 = 100
+    if (blitz_many_stores() != 100) return 1;
+    return 0;
+}
+"#;
+    if let Some(code) = link_and_run_obj("blitz_e2e_many_stores", &obj, c_main) {
+        assert_eq!(code, 0, "many_stores returned wrong exit code {code}");
+    }
+}
+
 // ── insert_early_barrier_spills unit tests ──────────────────────────────────
 
 use crate::schedule::scheduler::ScheduledInst;
