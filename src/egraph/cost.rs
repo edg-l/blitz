@@ -245,6 +245,8 @@ impl CostModel {
             Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
                 unreachable!("spill pseudo-ops are not part of the e-graph")
             }
+
+            Op::EffectfulUse => unreachable!("EffectfulUse is not part of the e-graph"),
         }
     }
 }

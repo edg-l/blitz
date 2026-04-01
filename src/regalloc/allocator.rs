@@ -50,7 +50,6 @@ pub fn allocate(
     loop_depths: &std::collections::HashMap<VReg, u32>, // loop-depth info for spill selection
     call_points: &[usize],       // instruction indices after which a call occurs
     uses_frame_pointer: bool,
-    deadlines: &HashMap<VReg, usize>, // per-VReg deadline positions for effectful operands
 ) -> Result<RegAllocResult, String> {
     let mut insts: Vec<ScheduledInst> = insts.to_vec();
     let mut block_live_out: HashSet<VReg> = block_live_out.clone();
@@ -76,7 +75,7 @@ pub fn allocate(
 
     for round in 0..=MAX_SPILL_ROUNDS {
         // Step 1: Compute liveness.
-        let liveness = compute_liveness(&insts, &block_live_out, deadlines);
+        let liveness = compute_liveness(&insts, &block_live_out);
 
         // Step 2: Build VReg class map (all GPR for now; XMM support in 10.13a).
         let vreg_classes = build_vreg_classes(&insts, &liveness);
@@ -115,7 +114,7 @@ pub fn allocate(
 
         // Step 5: MCS ordering + greedy coloring.
         // Recompute liveness/graph on coalesced insts for accuracy.
-        let liveness2 = compute_liveness(&insts_coalesced, &block_live_out, deadlines);
+        let liveness2 = compute_liveness(&insts_coalesced, &block_live_out);
         let vreg_classes2 = build_vreg_classes(&insts_coalesced, &liveness2);
         let graph2 = build_interference(&liveness2, &insts_coalesced, &vreg_classes2);
         let (graph2, phantom_precolors) = add_call_clobber_interferences(
@@ -435,7 +434,6 @@ mod tests {
             &std::collections::HashMap::new(),
             &[],
             false,
-            &HashMap::new(),
         )
         .expect("allocation should succeed");
 
@@ -471,7 +469,6 @@ mod tests {
             &std::collections::HashMap::new(),
             &[],
             false,
-            &HashMap::new(),
         )
         .expect("allocation should succeed");
 
@@ -509,7 +506,6 @@ mod tests {
             &std::collections::HashMap::new(),
             &[],
             false,
-            &HashMap::new(),
         )
         .expect("allocation should succeed");
 
@@ -552,7 +548,6 @@ mod tests {
             &std::collections::HashMap::new(),
             &[],
             false,
-            &HashMap::new(),
         );
         // Either it succeeds (some spilling reduced pressure) or it errors.
         // With 16 simultaneous live regs and only constants (rematerializable),
@@ -598,7 +593,6 @@ mod tests {
             &std::collections::HashMap::new(),
             &[],
             false,
-            &HashMap::new(),
         )
         .expect("allocation with copy pairs should succeed");
 
@@ -636,7 +630,6 @@ mod tests {
             &std::collections::HashMap::new(),
             &[],
             false,
-            &HashMap::new(),
         )
         .expect("allocation with shift pre-coloring should succeed");
 

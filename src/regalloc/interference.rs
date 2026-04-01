@@ -171,7 +171,7 @@ mod tests {
         // v2 = add(v0, v1)  (inst 2) -- v0 and v1 live simultaneously
         let insts = vec![iconst_inst(0), iconst_inst(1), add_inst(2, 0, 1)];
         let live_out = HashSet::new();
-        let liveness = compute_liveness(&insts, &live_out, &HashMap::new());
+        let liveness = compute_liveness(&insts, &live_out);
         let classes = default_classes(&insts);
         let graph = build_interference(&liveness, &insts, &classes);
 
@@ -204,7 +204,7 @@ mod tests {
             },
         ];
         let live_out = HashSet::new();
-        let liveness = compute_liveness(&insts, &live_out, &HashMap::new());
+        let liveness = compute_liveness(&insts, &live_out);
         let classes = default_classes(&insts);
         let graph = build_interference(&liveness, &insts, &classes);
 
@@ -225,7 +225,7 @@ mod tests {
             add_inst(2, 0, 1),
         ];
         let live_out = HashSet::new();
-        let liveness = compute_liveness(&insts, &live_out, &HashMap::new());
+        let liveness = compute_liveness(&insts, &live_out);
         let mut classes = HashMap::new();
         classes.insert(VReg(0), RegClass::GPR);
         classes.insert(VReg(1), RegClass::XMM);

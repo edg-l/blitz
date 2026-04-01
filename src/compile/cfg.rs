@@ -231,67 +231,6 @@ pub(super) fn collect_phi_source_vregs(
     }
 }
 
-/// Collect VRegs for non-terminator effectful op operands (Store, Load, Ret)
-/// across all blocks of a function.
-///
-/// These values are consumed by effectful ops emitted after the pure scheduled
-/// instructions, so they must be in `live_out` to prevent the register allocator
-/// from reusing their registers before the effectful ops execute.
-pub(super) fn collect_effectful_operand_vregs(
-    func: &Function,
-    egraph: &EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-    result: &mut HashSet<VReg>,
-) {
-    for block in &func.blocks {
-        collect_block_effectful_operand_vregs(block, egraph, class_to_vreg, result);
-    }
-}
-
-/// Collect VRegs for non-terminator effectful op operands in a single block.
-pub(super) fn collect_block_effectful_operand_vregs(
-    block: &BasicBlock,
-    egraph: &EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-    result: &mut HashSet<VReg>,
-) {
-    for op in &block.ops {
-        let cids: Vec<ClassId> = match op {
-            EffectfulOp::Store { addr, val, .. } => vec![*addr, *val],
-            EffectfulOp::Load { addr, .. } => vec![*addr],
-            EffectfulOp::Ret { val } => val.iter().copied().collect(),
-            _ => continue,
-        };
-        for cid in cids {
-            let canon = egraph.unionfind.find_immutable(cid);
-            if let Some(&vreg) = class_to_vreg.get(&canon) {
-                result.insert(vreg);
-            }
-        }
-    }
-}
-
-/// Compute per-block effectful VReg uses for global liveness.
-///
-/// Returns a Vec indexed by block index, where each entry is the set of VRegs
-/// referenced by non-terminator effectful ops (Load addr, Store addr/val, Ret val)
-/// in that block. These VRegs are not part of the scheduled instruction list but
-/// must be included in global liveness to ensure correct cross-block spill/reload.
-pub(super) fn compute_effectful_uses_per_block(
-    func: &Function,
-    egraph: &EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-) -> Vec<HashSet<VReg>> {
-    func.blocks
-        .iter()
-        .map(|block| {
-            let mut uses = HashSet::new();
-            collect_block_effectful_operand_vregs(block, egraph, class_to_vreg, &mut uses);
-            uses
-        })
-        .collect()
-}
-
 /// Build phi copy pairs from block parameter passing for coalescing.
 ///
 /// For each Jump/Branch that passes args to a target block with params,

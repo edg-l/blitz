@@ -34,14 +34,13 @@ use crate::x86::reg::Reg;
 
 mod barrier;
 use barrier::{
-    assign_barrier_groups, build_barrier_maps, compute_effectful_deadlines,
-    insert_early_barrier_spills,
+    assign_barrier_groups, build_barrier_maps, insert_early_barrier_spills,
+    insert_effectful_use_markers,
 };
 mod cfg;
 use cfg::{
-    build_block_param_class_map, collect_block_effectful_operand_vregs, collect_block_roots,
-    collect_effectful_operand_vregs, collect_externals, collect_phi_source_vregs, collect_roots,
-    compute_copy_pairs, compute_effectful_uses_per_block, compute_loop_depths, compute_rpo,
+    build_block_param_class_map, collect_block_roots, collect_externals, collect_phi_source_vregs,
+    collect_roots, compute_copy_pairs, compute_loop_depths, compute_rpo,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -355,11 +354,44 @@ pub fn compile(
     // Single-block fast path skips global liveness.
     let (regalloc_result, block_rewritten, block_rename_maps) = if func.blocks.len() == 1 {
         // --- Single-block fast path ---
-        let all_scheduled: Vec<ScheduledInst> = block_schedules.iter().flatten().cloned().collect();
+        let mut all_scheduled: Vec<ScheduledInst> =
+            block_schedules.iter().flatten().cloned().collect();
+
+        // Insert EffectfulUse markers right before regalloc so it sees
+        // effectful op operand liveness at the correct barrier positions.
+        {
+            let block = &func.blocks[0];
+            let non_term_count = if block.ops.is_empty() {
+                0
+            } else {
+                block.ops.len() - 1
+            };
+            if non_term_count > 0 {
+                let non_term_ops = &block.ops[..non_term_count];
+                let (result_map, arg_map) =
+                    build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
+                let mut vreg_group = assign_barrier_groups(&all_scheduled, &result_map, &arg_map);
+                insert_effectful_use_markers(
+                    &mut all_scheduled,
+                    non_term_ops,
+                    &egraph,
+                    &class_to_vreg,
+                    &mut vreg_group,
+                    &mut next_vreg,
+                );
+            }
+        }
 
         let mut live_out: HashSet<VReg> = HashSet::new();
         collect_phi_source_vregs(func, &egraph, &class_to_vreg, &mut live_out);
-        collect_effectful_operand_vregs(func, &egraph, &class_to_vreg, &mut live_out);
+        // Add Ret operands to live_out. Ret is the terminator (no EffectfulUse
+        // marker) so its operands must survive until end of block.
+        if let Some(EffectfulOp::Ret { val: Some(cid) }) = func.blocks[0].ops.last() {
+            let canon = egraph.unionfind.find_immutable(*cid);
+            if let Some(&vreg) = class_to_vreg.get(&canon) {
+                live_out.insert(vreg);
+            }
+        }
         for &(vreg, _reg) in &param_vregs {
             live_out.insert(vreg);
         }
@@ -382,31 +414,6 @@ pub fn compile(
         let mut combined_points = call_points;
         combined_points.extend_from_slice(&div_points);
 
-        // Compute per-VReg deadlines for effectful operands to reduce register pressure.
-        let block = &func.blocks[0];
-        let non_term_count = if block.ops.is_empty() {
-            0
-        } else {
-            block.ops.len() - 1
-        };
-        let deadlines = if non_term_count > 0 {
-            let non_term_ops = &block.ops[..non_term_count];
-            let terminator = block.ops.last().expect("block must have terminator");
-            let (dl, covered) = compute_effectful_deadlines(
-                &all_scheduled,
-                non_term_ops,
-                terminator,
-                &egraph,
-                &class_to_vreg,
-            );
-            for v in &covered {
-                live_out.remove(v);
-            }
-            dl
-        } else {
-            HashMap::new()
-        };
-
         let result = allocate(
             &all_scheduled,
             &all_param_vregs,
@@ -415,7 +422,6 @@ pub fn compile(
             &loop_depths,
             &combined_points,
             opts.force_frame_pointer,
-            &deadlines,
         )
         .map_err(|e| CompileError {
             phase: "regalloc".into(),
@@ -426,15 +432,6 @@ pub fn compile(
                 inst: None,
             }),
         })?;
-
-        if std::env::var("BLITZ_DEBUG_DEADLINES").is_ok() {
-            eprintln!("=== REGALLOC RESULT ===");
-            let mut sorted: Vec<_> = result.vreg_to_reg.iter().collect();
-            sorted.sort_by_key(|(v, _)| v.0);
-            for (v, r) in &sorted {
-                eprintln!("  VReg({}) -> {:?}", v.0, r);
-            }
-        }
 
         let rewritten = vec![rewrite_vregs(&all_scheduled, &result.vreg_to_reg)];
         let rename_maps: Vec<HashMap<VReg, VReg>> = vec![HashMap::new()];
@@ -450,15 +447,11 @@ pub fn compile(
             &class_to_vreg,
         );
 
-        // Step 1b: Compute per-block effectful VReg uses (Load/Store operands).
-        let effectful_uses = compute_effectful_uses_per_block(func, &egraph, &class_to_vreg);
-
         // Step 2: Compute global liveness.
         let global_liveness = crate::regalloc::global_liveness::compute_global_liveness(
             &block_schedules,
             &cfg_succs,
             &phi_uses,
-            &effectful_uses,
         );
 
         // Step 3: Determine block params per block (excluded from reload insertion).
@@ -522,11 +515,6 @@ pub fn compile(
             let block = &func.blocks[block_idx];
 
             // Step 8a: Insert cross-block spill/reload code.
-            let block_effectful_uses = if block_idx < effectful_uses.len() {
-                &effectful_uses[block_idx]
-            } else {
-                &HashSet::new()
-            };
             let (split_schedule, rename) = crate::regalloc::split::rewrite_block_for_splitting(
                 &block_schedules[block_idx],
                 block_idx,
@@ -537,7 +525,6 @@ pub fn compile(
                 &mut shared_next_vreg,
                 &block_param_vregs_per_block[block_idx],
                 &vreg_classes,
-                block_effectful_uses,
             );
 
             // Step 8a-reorder: Move all BlockParam instructions to the front of
@@ -556,7 +543,12 @@ pub fn compile(
 
             // Step 8a-spill: Insert early spill/reload for distant barrier results.
             // Rebuild barrier maps with post-rename VRegs, then insert pairs.
-            let mut split_schedule = split_schedule;
+            // Strip EffectfulUse markers first — they confuse assign_barrier_groups
+            // (their dst VRegs aren't in barrier maps). Re-insert after.
+            let mut split_schedule: Vec<_> = split_schedule
+                .into_iter()
+                .filter(|inst| !matches!(inst.op, Op::EffectfulUse))
+                .collect();
             {
                 let non_term_count = if block.ops.is_empty() {
                     0
@@ -585,6 +577,15 @@ pub fn compile(
                         &mut shared_next_vreg,
                         &mut spill_slot_counter,
                     );
+                    // Re-insert EffectfulUse markers with post-rename VRegs.
+                    insert_effectful_use_markers(
+                        &mut split_schedule,
+                        non_term_ops,
+                        &egraph,
+                        &bcv,
+                        &mut vreg_group,
+                        &mut shared_next_vreg,
+                    );
                 }
             }
 
@@ -594,60 +595,21 @@ pub fn compile(
             //   - block param VRegs for this block: forces them into the interference
             //     graph so they are not coalesced away, ensuring build_phi_copies can
             //     find their physical registers in merged_vreg_to_reg.
+            //   - effectful op operands are NOT in live_out: they're handled by
+            //     EffectfulUse markers in the instruction stream.
+            //   - Ret operands ARE in live_out (terminator, no marker).
             let mut block_live_out: HashSet<VReg> = phi_uses[block_idx]
                 .iter()
                 .chain(block_param_vregs_per_block[block_idx].iter())
                 .copied()
                 .collect();
-            // Collect effectful op operands (Load addr, Store addr/val) and apply
-            // the split rename map so the per-block regalloc sees the renamed VRegs.
-            // Then compute per-VReg deadlines to reduce register pressure.
-            let block_deadlines: HashMap<VReg, usize>;
-            {
-                let mut raw_effectful_live: HashSet<VReg> = HashSet::new();
-                collect_block_effectful_operand_vregs(
-                    &func.blocks[block_idx],
-                    &egraph,
-                    &class_to_vreg,
-                    &mut raw_effectful_live,
-                );
-                for v in &raw_effectful_live {
-                    let renamed = rename.get(v).copied().unwrap_or(*v);
+            if let Some(EffectfulOp::Ret { val: Some(cid) }) = block.ops.last() {
+                let canon = egraph.unionfind.find_immutable(*cid);
+                if let Some(&vreg) = class_to_vreg.get(&canon) {
+                    let renamed = rename.get(&vreg).copied().unwrap_or(vreg);
                     block_live_out.insert(renamed);
                 }
-
-                // Compute deadlines using post-rename class_to_vreg.
-                let non_term_count = if block.ops.is_empty() {
-                    0
-                } else {
-                    block.ops.len() - 1
-                };
-                if non_term_count > 0 {
-                    let non_term_ops = &block.ops[..non_term_count];
-                    let bcv: HashMap<ClassId, VReg> = class_to_vreg
-                        .iter()
-                        .map(|(&cid, &vreg)| {
-                            let renamed = rename.get(&vreg).copied().unwrap_or(vreg);
-                            (cid, renamed)
-                        })
-                        .collect();
-                    let terminator = block.ops.last().expect("block must have terminator");
-                    let (dl, covered) = compute_effectful_deadlines(
-                        &split_schedule,
-                        non_term_ops,
-                        terminator,
-                        &egraph,
-                        &bcv,
-                    );
-                    for v in &covered {
-                        block_live_out.remove(v);
-                    }
-                    block_deadlines = dl;
-                } else {
-                    block_deadlines = HashMap::new();
-                }
             }
-
             // Step 8c: Filter pre-colorings to VRegs in this block's schedule.
             let split_vreg_set: HashSet<VReg> = split_schedule
                 .iter()
@@ -696,7 +658,6 @@ pub fn compile(
                 &block_loop_depths,
                 &block_combined_points,
                 opts.force_frame_pointer,
-                &block_deadlines,
             )
             .map_err(|e| CompileError {
                 phase: "regalloc".into(),
@@ -786,7 +747,14 @@ pub fn compile(
 
     for (rpo_pos, &block_idx) in rpo_order.iter().enumerate() {
         let block = &func.blocks[block_idx];
-        let rewritten = &block_rewritten[block_idx];
+        // Strip EffectfulUse markers before Phase 7 grouping: their dummy dst VRegs
+        // are not in barrier maps and would be misrouted to group 0.
+        let rewritten: Vec<ScheduledInst> = block_rewritten[block_idx]
+            .iter()
+            .filter(|inst| !matches!(inst.op, Op::EffectfulUse))
+            .cloned()
+            .collect();
+        let rewritten = &rewritten;
 
         // The block that follows this one in emission order (for fallthrough).
         let next_block_id: Option<BlockId> = rpo_order

@@ -116,20 +116,16 @@ pub fn rewrite_block_for_splitting(
     next_vreg: &mut u32,
     block_params: &HashSet<VReg>,
     vreg_classes: &HashMap<VReg, RegClass>,
-    effectful_uses: &HashSet<VReg>,
 ) -> (Vec<ScheduledInst>, HashMap<VReg, VReg>) {
     let live_in = &global_liveness.live_in[block_idx];
     let live_out = &global_liveness.live_out[block_idx];
     let defs_in_block = &block_defs[block_idx];
 
     // Determine which VRegs are used or defined in this block (for pass-through detection).
-    // Include effectful op operands (Load addr, Store addr/val) which are not in the
-    // scheduled instruction list but still consume VRegs.
-    let mut used_in_block: HashSet<VReg> = schedule
+    let used_in_block: HashSet<VReg> = schedule
         .iter()
         .flat_map(|inst| inst.operands.iter().copied())
         .collect();
-    used_in_block.extend(effectful_uses);
 
     // Build a rename map: original VReg -> fresh VReg (for reloads/remats at block entry).
     let mut rename: HashMap<VReg, VReg> = HashMap::new();
@@ -362,12 +358,7 @@ mod tests {
         let phi_uses = empty_params(2);
         let params = empty_params(2);
 
-        let gl = compute_global_liveness(
-            &schedules,
-            &successors,
-            &phi_uses,
-            &vec![HashSet::new(); schedules.len()],
-        );
+        let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
         let block_defs = compute_block_defs(&schedules);
         let spill_map = assign_cross_block_slots(&gl, &schedules, &params);
         let def_insts = make_def_insts(&schedules);
@@ -390,7 +381,6 @@ mod tests {
             &mut next_vreg,
             &params[0],
             &vreg_classes,
-            &HashSet::new(),
         );
         let stores: Vec<_> = block0_rewritten
             .iter()
@@ -410,7 +400,6 @@ mod tests {
             &mut next_vreg,
             &params[1],
             &vreg_classes,
-            &HashSet::new(),
         );
         let loads: Vec<_> = block1_rewritten
             .iter()
@@ -440,12 +429,7 @@ mod tests {
         let phi_uses = empty_params(2);
         let params = empty_params(2);
 
-        let gl = compute_global_liveness(
-            &schedules,
-            &successors,
-            &phi_uses,
-            &vec![HashSet::new(); schedules.len()],
-        );
+        let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
         let block_defs = compute_block_defs(&schedules);
         let spill_map = assign_cross_block_slots(&gl, &schedules, &params);
         let def_insts = make_def_insts(&schedules);
@@ -468,7 +452,6 @@ mod tests {
             &mut next_vreg,
             &params[0],
             &vreg_classes,
-            &HashSet::new(),
         );
         assert!(
             !block0_rewritten.iter().any(|i| is_spill_store(i)),
@@ -486,7 +469,6 @@ mod tests {
             &mut next_vreg,
             &params[1],
             &vreg_classes,
-            &HashSet::new(),
         );
         assert!(
             !block1_rewritten.iter().any(|i| is_spill_load(i)),
@@ -522,12 +504,7 @@ mod tests {
         let phi_uses = empty_params(3);
         let params = empty_params(3);
 
-        let gl = compute_global_liveness(
-            &schedules,
-            &successors,
-            &phi_uses,
-            &vec![HashSet::new(); schedules.len()],
-        );
+        let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
         let block_defs = compute_block_defs(&schedules);
         let spill_map = assign_cross_block_slots(&gl, &schedules, &params);
         let def_insts = make_def_insts(&schedules);
@@ -550,7 +527,6 @@ mod tests {
             &mut next_vreg,
             &params[1],
             &vreg_classes,
-            &HashSet::new(),
         );
         // No SpillLoad in block 1 for v0 (pass-through optimization).
         assert!(
@@ -589,12 +565,7 @@ mod tests {
 
         // We need v5 to be in live_in[1]. Simulate: add v5 to live_in manually
         // by making block 1 use v5 (it's in operands).
-        let gl = compute_global_liveness(
-            &schedules,
-            &successors,
-            &phi_uses_with_v5,
-            &vec![HashSet::new(); schedules.len()],
-        );
+        let gl = compute_global_liveness(&schedules, &successors, &phi_uses_with_v5);
 
         // v5 used in block 1 but not defined anywhere in schedules -> upward-exposed.
         assert!(
@@ -625,7 +596,6 @@ mod tests {
             &mut next_vreg,
             &params[1],
             &vreg_classes,
-            &HashSet::new(),
         );
 
         // No SpillLoad for v5 (it's a block param).

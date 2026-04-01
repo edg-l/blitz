@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::egraph::egraph::EGraph;
 use crate::egraph::extract::VReg;
@@ -240,162 +240,99 @@ pub(super) fn insert_early_barrier_spills(
     }
 }
 
-/// Compute per-VReg deadline positions for effectful op operands.
-///
-/// Instead of keeping all effectful operand VRegs alive until the end of the block,
-/// each VReg gets a deadline: the instruction index at which it must be alive for
-/// its barrier group's effectful op to execute. This reduces artificial register
-/// pressure in blocks with many effectful ops.
-///
-/// Returns `(deadlines, covered_vregs)` where:
-/// - `deadlines` maps each effectful operand VReg to its deadline instruction index
-/// - `covered_vregs` is the set of VRegs that have deadlines (to remove from block_live_out)
-pub(super) fn compute_effectful_deadlines(
-    schedule: &[ScheduledInst],
+/// Insert `Op::EffectfulUse` pseudo-instructions into the schedule at barrier
+/// boundaries so the register allocator sees correct liveness for effectful-op
+/// operands without separate deadline/live_out workarounds.
+pub(super) fn insert_effectful_use_markers(
+    schedule: &mut Vec<ScheduledInst>,
     non_term_ops: &[EffectfulOp],
-    terminator: &EffectfulOp,
     egraph: &EGraph,
     class_to_vreg: &HashMap<ClassId, VReg>,
-) -> (HashMap<VReg, usize>, HashSet<VReg>) {
-    if non_term_ops.is_empty() || schedule.is_empty() {
-        return (HashMap::new(), HashSet::new());
-    }
-
-    // Collect VRegs used by the terminator (Ret). These must remain in
-    // block_live_out even if they also appear as operands of non-terminator ops.
-    let mut terminator_vregs: HashSet<VReg> = HashSet::new();
-    {
-        let term_cids: Vec<ClassId> = match terminator {
-            EffectfulOp::Ret { val } => val.iter().copied().collect(),
-            _ => vec![],
-        };
-        for cid in term_cids {
-            let canon = egraph.unionfind.find_immutable(cid);
-            if let Some(&vreg) = class_to_vreg.get(&canon) {
-                terminator_vregs.insert(vreg);
-            }
-        }
-    }
-
-    // Build barrier maps and assign barrier groups.
-    let (vreg_to_result, vreg_to_arg) = build_barrier_maps(non_term_ops, egraph, class_to_vreg);
-    let vreg_group = assign_barrier_groups(schedule, &vreg_to_result, &vreg_to_arg);
-
-    // Compute the barrier group of each instruction in the schedule.
-    let inst_groups: Vec<usize> = schedule
+    vreg_group: &mut HashMap<VReg, usize>,
+    next_vreg: &mut u32,
+) {
+    // Build Addr-child lookup: for each VReg that defines an Addr node,
+    // record its operand children.
+    let addr_children: HashMap<VReg, Vec<VReg>> = schedule
         .iter()
-        .map(|inst| *vreg_group.get(&inst.dst).unwrap_or(&0))
+        .filter(|inst| matches!(inst.op, Op::Addr { .. }))
+        .map(|inst| {
+            let children: Vec<VReg> = inst
+                .operands
+                .iter()
+                .copied()
+                .filter(|v| v.0 != u32::MAX)
+                .collect();
+            (inst.dst, children)
+        })
         .collect();
 
-    // Find the first instruction index of each group.
-    let mut group_start: HashMap<usize, usize> = HashMap::new();
-    for (i, &g) in inst_groups.iter().enumerate() {
-        group_start.entry(g).or_insert(i);
-    }
+    // Build all markers first, then push them.
+    let mut markers: Vec<(usize, ScheduledInst)> = Vec::new();
 
-    // Build sorted list of group starts for finding the next existing group.
-    // When a barrier K has no instructions in group K+1, we use the first
-    // instruction of the next group that DOES exist as the deadline.
-    let mut sorted_group_starts: Vec<(usize, usize)> =
-        group_start.iter().map(|(&g, &pos)| (g, pos)).collect();
-    sorted_group_starts.sort_by_key(|(g, _)| *g);
-
-    // Find the deadline position for barrier K: the first instruction of the
-    // next existing group after K. Returns None if no such group exists.
-    let find_deadline = |barrier_k: usize| -> Option<usize> {
-        let next_group = barrier_k + 1;
-        // Find the first group >= next_group that has instructions.
-        sorted_group_starts
-            .iter()
-            .find(|(g, _)| *g >= next_group)
-            .map(|(_, pos)| *pos)
-    };
-
-    // Build a map from VReg to its defining instruction, so we can find
-    // transitive register dependencies through Addr nodes. The effectful
-    // emission code (build_mem_addr) reads the Addr node's base/index
-    // children's registers directly, not the Addr VReg's register.
-    let def_inst: HashMap<VReg, &ScheduledInst> =
-        schedule.iter().map(|inst| (inst.dst, inst)).collect();
-
-    // Resolve a ClassId to (direct_vreg, addr_children).
-    // The direct VReg is in block_live_out (from collect_block_effectful_operand_vregs).
-    // Addr children are NOT in block_live_out but are read by build_mem_addr during emission.
-    let resolve_cid = |cid: ClassId| -> (Option<VReg>, Vec<VReg>) {
-        let canon = egraph.unionfind.find_immutable(cid);
-        let Some(&vreg) = class_to_vreg.get(&canon) else {
-            return (None, vec![]);
-        };
-        let mut children = vec![];
-        if let Some(inst) = def_inst.get(&vreg) {
-            if matches!(inst.op, Op::Addr { .. }) {
-                children.extend_from_slice(&inst.operands);
-            }
-        }
-        (Some(vreg), children)
-    };
-
-    // Collect (direct_vregs, addr_child_vregs) for an effectful op.
-    let collect_op_vregs = |op: &EffectfulOp| -> (Vec<VReg>, Vec<VReg>) {
+    for (barrier_k, op) in non_term_ops.iter().enumerate() {
+        // Collect ClassId operands for this barrier.
         let cids: Vec<ClassId> = match op {
             EffectfulOp::Store { addr, val, .. } => vec![*addr, *val],
             EffectfulOp::Load { addr, .. } => vec![*addr],
             EffectfulOp::Call { args, .. } => args.clone(),
-            _ => return (vec![], vec![]),
+            _ => continue,
         };
-        let mut direct = vec![];
-        let mut children = vec![];
+
+        // Resolve ClassIds to VRegs, and add Addr children.
+        let mut vregs: Vec<VReg> = Vec::new();
         for cid in cids {
-            let (d, c) = resolve_cid(cid);
-            if let Some(v) = d {
-                direct.push(v);
-            }
-            children.extend(c);
-        }
-        (direct, children)
-    };
-
-    // First pass: collect VRegs that are used by barriers without a deadline
-    // (last barrier or barriers with no next-group instructions). These VRegs
-    // must stay in block_live_out even if earlier barriers also use them.
-    let mut must_stay_in_live_out: HashSet<VReg> = HashSet::new();
-    for (barrier_k, op) in non_term_ops.iter().enumerate() {
-        if find_deadline(barrier_k).is_none() {
-            let (direct, children) = collect_op_vregs(op);
-            for vreg in direct.into_iter().chain(children) {
-                must_stay_in_live_out.insert(vreg);
+            let canon = egraph.unionfind.find_immutable(cid);
+            let Some(&vreg) = class_to_vreg.get(&canon) else {
+                continue;
+            };
+            vregs.push(vreg);
+            // If this VReg defines an Addr node, also add its children (base/index).
+            if let Some(children) = addr_children.get(&vreg) {
+                vregs.extend_from_slice(children);
             }
         }
-    }
 
-    // Second pass: assign deadlines. Direct VRegs go into `covered` (to be
-    // removed from block_live_out). Addr-child VRegs only get deadlines
-    // (they were never in block_live_out, just need liveness via deadline).
-    let mut deadlines: HashMap<VReg, usize> = HashMap::new();
-    let mut covered: HashSet<VReg> = HashSet::new();
+        // Deduplicate.
+        vregs.sort_by_key(|v| v.0);
+        vregs.dedup();
 
-    for (barrier_k, op) in non_term_ops.iter().enumerate() {
-        let Some(deadline_pos) = find_deadline(barrier_k) else {
+        if vregs.is_empty() {
             continue;
+        }
+
+        // Allocate a fresh dst VReg for the marker.
+        let dst = VReg(*next_vreg);
+        *next_vreg += 1;
+
+        let marker = ScheduledInst {
+            op: Op::EffectfulUse,
+            dst,
+            operands: vregs,
         };
 
-        let (direct, children) = collect_op_vregs(op);
-        for vreg in direct {
-            if terminator_vregs.contains(&vreg) || must_stay_in_live_out.contains(&vreg) {
-                continue;
-            }
-            let entry = deadlines.entry(vreg).or_insert(0);
-            *entry = (*entry).max(deadline_pos);
-            covered.insert(vreg);
-        }
-        for vreg in children {
-            if terminator_vregs.contains(&vreg) || must_stay_in_live_out.contains(&vreg) {
-                continue;
-            }
-            let entry = deadlines.entry(vreg).or_insert(0);
-            *entry = (*entry).max(deadline_pos);
-        }
+        markers.push((barrier_k, marker));
     }
 
-    (deadlines, covered)
+    // Insert markers at the correct positions in the already-sorted schedule.
+    // Each marker goes at the END of its barrier group's instructions (right
+    // before the next group starts). This keeps operands alive through the
+    // barrier execution gap without disrupting existing instruction order.
+    //
+    // Process markers in reverse barrier order so insertion indices stay valid.
+    markers.reverse();
+    for (barrier_k, marker) in markers {
+        // Find the insertion point: after the last instruction in group barrier_k.
+        // The schedule is already sorted by group from Phase 4b.
+        let insert_pos = schedule
+            .iter()
+            .rposition(|inst| {
+                let g = vreg_group.get(&inst.dst).copied().unwrap_or(0);
+                g <= barrier_k
+            })
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        vreg_group.insert(marker.dst, barrier_k);
+        schedule.insert(insert_pos, marker);
+    }
 }

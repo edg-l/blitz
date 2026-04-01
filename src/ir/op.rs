@@ -218,6 +218,11 @@ pub enum Op {
     XmmSpillStore(i64),
     /// XMM spill load: dst is the reload VReg, i64 is the slot index.
     XmmSpillLoad(i64),
+
+    /// Pseudo-instruction that makes effectful-op operands visible to regalloc.
+    /// Inserted at barrier boundaries so the register allocator sees correct liveness
+    /// without separate deadline/live_out workarounds. Skipped during lowering.
+    EffectfulUse,
 }
 
 impl Op {
@@ -632,6 +637,8 @@ impl Op {
             Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
                 unreachable!("spill pseudo-ops have no result_type")
             }
+
+            Op::EffectfulUse => Type::I64,
         }
     }
 }

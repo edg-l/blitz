@@ -836,6 +836,8 @@ fn lower_op(
         Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
             unreachable!("spill pseudo-ops are handled before lower_inst")
         }
+
+        Op::EffectfulUse => unreachable!("skipped by lower_block_pure_ops"),
     }
 }
 
@@ -872,6 +874,10 @@ pub(super) fn lower_block_pure_ops(
         }
         // Skip CallResult VRegs: their values are captured after CallDirect in lower_effectful_op.
         if matches!(inst.op, Op::CallResult(_, _)) {
+            continue;
+        }
+        // Skip EffectfulUse markers: they exist only for regalloc liveness.
+        if matches!(inst.op, Op::EffectfulUse) {
             continue;
         }
 
