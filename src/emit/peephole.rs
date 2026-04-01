@@ -177,6 +177,29 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
                 continue;
             }
 
+            // 8. Store-load forwarding: mov [addr], rX; mov rY, [addr] -> mov [addr], rX; mov rY, rX.
+            // Same size, same address. Avoids the redundant memory round-trip.
+            MachInst::MovMR { size, addr, src }
+                if i + 1 < insts.len()
+                    && matches!(
+                        &insts[i + 1],
+                        MachInst::MovRM { size: s2, dst: _, addr: a2 }
+                        if s2 == size && a2 == addr
+                    ) =>
+            {
+                result.push(insts[i].clone());
+                // Replace the load with a reg-reg move.
+                if let MachInst::MovRM { size: s2, dst, .. } = &insts[i + 1] {
+                    result.push(MachInst::MovRR {
+                        size: *s2,
+                        dst: dst.clone(),
+                        src: src.clone(),
+                    });
+                }
+                i += 2;
+                continue;
+            }
+
             _ => {
                 result.push(insts[i].clone());
                 i += 1;
@@ -561,5 +584,82 @@ mod tests {
         let out = peephole(insts);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], MachInst::AddRI { imm: -1, .. }));
+    }
+
+    #[test]
+    fn store_load_forwarding_same_addr() {
+        use crate::x86::addr::Addr;
+        let addr = Addr::new(Some(Reg::RSP), None, 1, 0);
+        let insts = vec![
+            MachInst::MovMR {
+                size: OpSize::S64,
+                addr: addr.clone(),
+                src: reg(Reg::RAX),
+            },
+            MachInst::MovRM {
+                size: OpSize::S64,
+                dst: reg(Reg::RCX),
+                addr: addr.clone(),
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 2);
+        // Store kept as-is.
+        assert!(matches!(out[0], MachInst::MovMR { .. }));
+        // Load replaced with reg-reg mov.
+        assert_eq!(
+            out[1],
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RCX),
+                src: reg(Reg::RAX),
+            }
+        );
+    }
+
+    #[test]
+    fn store_load_different_addr_not_forwarded() {
+        use crate::x86::addr::Addr;
+        let addr1 = Addr::new(Some(Reg::RSP), None, 1, 0);
+        let addr2 = Addr::new(Some(Reg::RSP), None, 1, 8);
+        let insts = vec![
+            MachInst::MovMR {
+                size: OpSize::S64,
+                addr: addr1,
+                src: reg(Reg::RAX),
+            },
+            MachInst::MovRM {
+                size: OpSize::S64,
+                dst: reg(Reg::RCX),
+                addr: addr2,
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 2);
+        // Both kept as-is (different addresses).
+        assert!(matches!(out[0], MachInst::MovMR { .. }));
+        assert!(matches!(out[1], MachInst::MovRM { .. }));
+    }
+
+    #[test]
+    fn store_load_different_size_not_forwarded() {
+        use crate::x86::addr::Addr;
+        let addr = Addr::new(Some(Reg::RSP), None, 1, 0);
+        let insts = vec![
+            MachInst::MovMR {
+                size: OpSize::S64,
+                addr: addr.clone(),
+                src: reg(Reg::RAX),
+            },
+            MachInst::MovRM {
+                size: OpSize::S32,
+                dst: reg(Reg::RCX),
+                addr: addr.clone(),
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], MachInst::MovMR { .. }));
+        assert!(matches!(out[1], MachInst::MovRM { .. }));
     }
 }
