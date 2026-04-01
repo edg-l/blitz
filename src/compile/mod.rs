@@ -120,12 +120,58 @@ fn assign_barrier_groups(
         }
         vreg_group.insert(inst.dst, min_group);
     }
-    // Note: backward propagation (pulling deps closer to consumers) is
-    // intentionally omitted. It interacts poorly with effectful ops whose
-    // operands are not in the scheduled instruction list -- the cap logic
-    // only covers direct barrier operands, not transitive dependencies
-    // through spill/reload chains. The forward pass is sufficient for
-    // correctness; register pressure is managed by the allocator.
+    // Backward propagation: pull definitions closer to their consumers to
+    // reduce register pressure. A value in group 0 consumed only in group 3
+    // can move to group 3, keeping its register live for less time.
+    //
+    // Build consumers map: for each VReg, which scheduled instructions use it.
+    let mut consumers: HashMap<VReg, Vec<VReg>> = HashMap::new();
+    for inst in sched {
+        for &op in &inst.operands {
+            consumers.entry(op).or_default().push(inst.dst);
+        }
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for inst in sched.iter().rev() {
+            let v = inst.dst;
+
+            // Skip barrier results (LoadResult, CallResult): they are anchored
+            // to the group right after their producing barrier. Moving them later
+            // would let the regalloc reuse their register before consumers read it.
+            if vreg_to_result_of_barrier.contains_key(&v) {
+                continue;
+            }
+
+            let current = *vreg_group.get(&v).unwrap_or(&0);
+
+            // Compute latest valid group: minimum of all consumers' groups.
+            let max_from_consumers = consumers
+                .get(&v)
+                .map(|cs| cs.iter().filter_map(|c| vreg_group.get(c)).min().copied())
+                .flatten();
+
+            // If no scheduled consumers, this VReg is only used by barriers
+            // or terminators -- keep it at the forward-pass group.
+            let Some(latest) = max_from_consumers else {
+                continue;
+            };
+
+            // Cap: never move past a barrier that consumes this VReg.
+            let cap = vreg_to_arg_of_barrier
+                .get(&v)
+                .copied()
+                .unwrap_or(usize::MAX);
+            let target = latest.min(cap);
+
+            // Only increase (move later); never decrease below forward-pass minimum.
+            if target > current {
+                vreg_group.insert(v, target);
+                changed = true;
+            }
+        }
+    }
     vreg_group
 }
 
@@ -788,9 +834,10 @@ pub fn compile(
         };
         let non_term_ops = &block.ops[..non_term_count];
 
-        // Build barrier maps and group pure ops relative to effectful ops.
+        // Build barrier maps using block_class_to_vreg (with cross-block renames
+        // applied) so barrier operand caps match the renamed VRegs in the schedule.
         let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
-            build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
+            build_barrier_maps(non_term_ops, &egraph, &block_class_to_vreg);
         let num_barriers = non_term_ops.len();
 
         // Partition scheduled pure insts into groups relative to barriers.
