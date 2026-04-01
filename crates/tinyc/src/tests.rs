@@ -3,6 +3,30 @@ use std::process::Command;
 
 use super::*;
 
+/// Compile TinyC source and return disassembly of all functions.
+#[allow(dead_code)]
+fn compile_and_disasm(src: &str) -> String {
+    let obj = compile_to_object(src).expect("compile failed");
+    let mut out = String::new();
+    for func_info in &obj.functions {
+        let code = &obj.code[func_info.offset..func_info.offset + func_info.size];
+        if let Some(disasm) = blitz::test_utils::objdump_disasm(code) {
+            out.push_str(&format!(
+                "=== {} ({} bytes) ===\n",
+                func_info.name, func_info.size
+            ));
+            out.push_str(&disasm);
+            out.push('\n');
+        } else {
+            out.push_str(&format!(
+                "=== {} ({} bytes) === (objdump unavailable)\n",
+                func_info.name, func_info.size
+            ));
+        }
+    }
+    out
+}
+
 fn compile_and_run(src: &str) -> Option<i32> {
     // Check that cc is available
     if Command::new("cc").arg("--version").output().is_err() {

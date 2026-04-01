@@ -5,6 +5,7 @@ use std::io::Write;
 use std::process::{Command, exit};
 
 fn main() {
+    blitz::trace::init_tracing();
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {

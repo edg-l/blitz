@@ -149,6 +149,8 @@ pub fn compile(
     opts: &CompileOptions,
     mut sink: Option<&mut dyn DiagnosticSink>,
 ) -> Result<ObjectFile, CompileError> {
+    crate::trace::init_tracing();
+
     // Compute user stack space in 8-byte units. Each slot may be larger than
     // 8 bytes (e.g. string literal buffers), so sum actual sizes rounded up.
     let user_stack_slots: u32 = func.stack_slots.iter().map(|s| (s.size + 7) / 8).sum();
@@ -326,6 +328,15 @@ pub fn compile(
         let reordered: Vec<ScheduledInst> =
             indexed.into_iter().map(|(_, inst)| inst.clone()).collect();
         block_schedules[block_idx] = reordered;
+
+        if crate::trace::is_enabled("sched") && crate::trace::fn_matches(&func.name) {
+            tracing::debug!(
+                target: "blitz::sched",
+                "[{}] block {block_idx} after barrier sort:\n{}",
+                func.name,
+                crate::trace::format_schedule(&block_schedules[block_idx], Some(&vreg_group)),
+            );
+        }
     }
 
     // Phase 5: Register allocation -- per-block with cross-block live range splitting.
@@ -379,6 +390,15 @@ pub fn compile(
                     &mut vreg_group,
                     &mut next_vreg,
                 );
+
+                if crate::trace::is_enabled("sched") && crate::trace::fn_matches(&func.name) {
+                    tracing::debug!(
+                        target: "blitz::sched",
+                        "[{}] single-block after markers:\n{}",
+                        func.name,
+                        crate::trace::format_schedule(&all_scheduled, Some(&vreg_group)),
+                    );
+                }
             }
         }
 
@@ -422,6 +442,7 @@ pub fn compile(
             &loop_depths,
             &combined_points,
             opts.force_frame_pointer,
+            &func.name,
         )
         .map_err(|e| CompileError {
             phase: "regalloc".into(),
@@ -586,6 +607,15 @@ pub fn compile(
                         &mut vreg_group,
                         &mut shared_next_vreg,
                     );
+
+                    if crate::trace::is_enabled("sched") && crate::trace::fn_matches(&func.name) {
+                        tracing::debug!(
+                            target: "blitz::sched",
+                            "[{}] block {block_idx} after markers:\n{}",
+                            func.name,
+                            crate::trace::format_schedule(&split_schedule, Some(&vreg_group)),
+                        );
+                    }
                 }
             }
 
@@ -658,6 +688,7 @@ pub fn compile(
                 &block_loop_depths,
                 &block_combined_points,
                 opts.force_frame_pointer,
+                &func.name,
             )
             .map_err(|e| CompileError {
                 phase: "regalloc".into(),
@@ -970,6 +1001,23 @@ pub fn compile(
 
     if let Some(s) = sink.as_mut() {
         s.phase_stats("encoding", &format!("bytes={func_size}"));
+    }
+
+    if crate::trace::is_enabled("asm") && crate::trace::fn_matches(&func.name) {
+        let code_bytes = &encoder.buf[func_start..];
+        if let Some(disasm) = crate::test_utils::objdump_disasm(code_bytes) {
+            tracing::debug!(
+                target: "blitz::asm",
+                "[{}] disassembly ({func_size} bytes):\n{disasm}",
+                func.name,
+            );
+        } else {
+            tracing::debug!(
+                target: "blitz::asm",
+                "[{}] disassembly unavailable (objdump not found), {func_size} bytes",
+                func.name,
+            );
+        }
     }
 
     // Collect externals (symbols referenced by call instructions).

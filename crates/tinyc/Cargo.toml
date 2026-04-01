@@ -9,3 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 blitz = { path = "../.." }
+tracing = "0.1"
