@@ -29,22 +29,22 @@ pub fn phi_copies(copies: &[(Reg, Reg, OpSize)], temp: Reg) -> Vec<MachInst> {
     // breaking inherit the correct OpSize from the original copy.
     let size_map: std::collections::HashMap<(Reg, Reg), OpSize> =
         filtered.iter().map(|&(s, d, sz)| ((s, d), sz)).collect();
-    // Build per-register size lookup for cycle-breaking temp moves. In a
-    // well-formed program each register in a parallel copy set should have a
-    // consistent OpSize. Verify this in debug builds to catch mismatches.
+    // Build per-register size lookup for cycle-breaking temp moves.
+    // A register may appear in copies with different sizes (e.g., as dst
+    // of an I64 copy and src of an I32 copy). Keep the widest size so
+    // cycle-breaking temp moves preserve all bits.
     let mut reg_size: std::collections::HashMap<Reg, OpSize> =
         std::collections::HashMap::with_capacity(filtered.len() * 2);
     for &(s, d, sz) in &filtered {
         for reg in [s, d] {
-            if let Some(&existing) = reg_size.get(&reg) {
-                debug_assert_eq!(
-                    existing, sz,
-                    "phi_copies: register {reg:?} appears with conflicting OpSize values \
-                     ({existing:?} vs {sz:?})"
-                );
-            } else {
-                reg_size.insert(reg, sz);
-            }
+            reg_size
+                .entry(reg)
+                .and_modify(|existing| {
+                    if sz.byte_width() > existing.byte_width() {
+                        *existing = sz;
+                    }
+                })
+                .or_insert(sz);
         }
     }
 

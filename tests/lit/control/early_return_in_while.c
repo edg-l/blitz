@@ -1,18 +1,22 @@
 // EXIT: 0
 // Early return from inside a while loop.
-int find_ge(int *arr, int len, int target) {
+int find_first_nonzero(int *arr, int len) {
     int i = 0;
     while (i < len) {
-        if (*(arr + i) >= target) { return i; }
+        if (*(arr + i) != 0) { return i; }
         i = i + 1;
     }
     return 0 - 1;
 }
 int main() {
-    int a = 10;
-    int b = 20;
-    int c = 30;
-    int d = 40;
-    if (find_ge(&a, 4, 25) != 2) { return 1; }
+    int arr = 0;
+    int *p = &arr;
+    // Store values: [0, 0, 42, 0] via pointer offsets
+    *(p + 0) = 0;
+    *(p + 1) = 0;
+    *(p + 2) = 42;
+    *(p + 3) = 0;
+    if (find_first_nonzero(p, 4) != 2) { return 1; }
+    if (find_first_nonzero(p, 1) != 0 - 1) { return 2; }
     return 0;
 }
