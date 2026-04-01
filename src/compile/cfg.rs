@@ -93,6 +93,107 @@ pub(super) fn compute_rpo(func: &Function) -> Vec<usize> {
     post_order
 }
 
+/// Compute the immediate dominator for each block using the Cooper-Harvey-Kennedy
+/// algorithm on RPO order.
+pub(super) fn compute_idom(func: &Function, rpo: &[usize]) -> Vec<Option<usize>> {
+    let n = func.blocks.len();
+    if n == 0 {
+        return vec![];
+    }
+
+    let id_to_idx: HashMap<BlockId, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, block) in func.blocks.iter().enumerate() {
+        if let Some(term) = block.ops.last() {
+            let succs: Vec<usize> = match term {
+                EffectfulOp::Jump { target, .. } => {
+                    id_to_idx.get(target).copied().into_iter().collect()
+                }
+                EffectfulOp::Branch {
+                    bb_true, bb_false, ..
+                } => {
+                    let mut v = Vec::new();
+                    if let Some(&idx) = id_to_idx.get(bb_true) {
+                        v.push(idx);
+                    }
+                    if let Some(&idx) = id_to_idx.get(bb_false) {
+                        v.push(idx);
+                    }
+                    v
+                }
+                _ => vec![],
+            };
+            for s in succs {
+                preds[s].push(i);
+            }
+        }
+    }
+
+    let mut rpo_idx = vec![0usize; n];
+    for (pos, &block) in rpo.iter().enumerate() {
+        rpo_idx[block] = pos;
+    }
+
+    let mut idom: Vec<Option<usize>> = vec![None; n];
+    let entry = rpo[0];
+    idom[entry] = Some(entry);
+
+    let intersect = |mut a: usize, mut b: usize, idom: &[Option<usize>]| -> usize {
+        while a != b {
+            while rpo_idx[a] > rpo_idx[b] {
+                a = idom[a].unwrap();
+            }
+            while rpo_idx[b] > rpo_idx[a] {
+                b = idom[b].unwrap();
+            }
+        }
+        a
+    };
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in &rpo[1..] {
+            let mut new_idom: Option<usize> = None;
+            for &p in &preds[b] {
+                if idom[p].is_some() {
+                    new_idom = Some(match new_idom {
+                        None => p,
+                        Some(cur) => intersect(cur, p, &idom),
+                    });
+                }
+            }
+            if new_idom != idom[b] {
+                idom[b] = new_idom;
+                changed = true;
+            }
+        }
+    }
+
+    idom[entry] = None;
+    idom
+}
+
+/// Check if block `a` dominates block `b` using the idom tree.
+pub(super) fn dominates(a: usize, b: usize, idom: &[Option<usize>]) -> bool {
+    if a == b {
+        return true;
+    }
+    let mut cur = b;
+    while let Some(parent) = idom[cur] {
+        if parent == a {
+            return true;
+        }
+        cur = parent;
+    }
+    false
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Collect all ClassIds that are roots for extraction (used by effectful ops).

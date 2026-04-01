@@ -118,6 +118,74 @@ pub fn greedy_color(
     }
 }
 
+/// Interval-based coloring for single-block SSA.
+///
+/// Processes instructions left-to-right, assigning each dst the smallest color
+/// not used by any currently-alive VReg. Guaranteed optimal for interval graphs
+/// (chromatic number = max clique = max simultaneous liveness + 1).
+///
+/// Falls back gracefully when the graph is not a perfect interval graph.
+pub fn interval_color(
+    insts: &[crate::schedule::scheduler::ScheduledInst],
+    liveness: &super::liveness::LivenessInfo,
+    pre_coloring: &HashMap<usize, u32>,
+    num_vregs: usize,
+) -> ColoringResult {
+    let mut colors: Vec<Option<u32>> = vec![None; num_vregs];
+
+    // Apply pre-colorings first.
+    for (&vreg, &color) in pre_coloring {
+        if vreg < num_vregs {
+            colors[vreg] = Some(color);
+        }
+    }
+
+    // Process instructions in order. At each instruction, the dst needs a color
+    // that doesn't conflict with any VReg in live_at[i] (alive before this inst).
+    for (i, inst) in insts.iter().enumerate() {
+        let dst = inst.dst.0 as usize;
+        if dst >= num_vregs || colors[dst].is_some() {
+            continue;
+        }
+        // Forbidden: colors of VRegs alive before this instruction.
+        let mut forbidden = std::collections::HashSet::new();
+        if i < liveness.live_at.len() {
+            for v in &liveness.live_at[i] {
+                let idx = v.0 as usize;
+                if idx < num_vregs {
+                    if let Some(c) = colors[idx] {
+                        forbidden.insert(c);
+                    }
+                }
+            }
+        }
+        let mut color = 0u32;
+        while forbidden.contains(&color) {
+            color += 1;
+        }
+        colors[dst] = Some(color);
+    }
+
+    // Any uncolored VRegs (not in instruction list, or in live_out only).
+    for c in colors.iter_mut().take(num_vregs) {
+        if c.is_none() {
+            *c = Some(0);
+        }
+    }
+
+    let chromatic_number = colors
+        .iter()
+        .filter_map(|&c| c)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
+
+    ColoringResult {
+        colors,
+        chromatic_number,
+    }
+}
+
 // ── Physical register mapping (10.8) ─────────────────────────────────────────
 
 /// Map color numbers to physical registers.

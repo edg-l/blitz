@@ -426,30 +426,54 @@ impl<'b> FnCtx<'b> {
             Expr::BinOp { op, lhs, rhs } => {
                 match op {
                     BinOp::And => {
+                        // Short-circuit: if left is false, result is 0.
                         let (l, lt) = self.compile_expr(lhs)?;
                         let (l, lt) = self.emit_promote(l, &lt);
                         let lzero = self.builder.iconst(0, lt.to_ir_type().unwrap());
-                        let lbool = self.emit_icmp_val(CondCode::Ne, l, lzero);
+                        let lcond = self.builder.icmp(CondCode::Ne, l, lzero);
 
+                        let bb_rhs = self.builder.create_block();
+                        let (bb_merge, merge_params) =
+                            self.builder.create_block_with_params(&[Type::I32]);
+                        let merge_val = merge_params[0];
+
+                        let zero_i32 = self.builder.iconst(0, Type::I32);
+                        self.builder.branch(lcond, bb_rhs, bb_merge, &[], &[zero_i32]);
+
+                        self.builder.set_block(bb_rhs);
                         let (r, rt) = self.compile_expr(rhs)?;
                         let (r, rt) = self.emit_promote(r, &rt);
                         let rzero = self.builder.iconst(0, rt.to_ir_type().unwrap());
                         let rbool = self.emit_icmp_val(CondCode::Ne, r, rzero);
+                        self.builder.jump(bb_merge, &[rbool]);
 
-                        Ok((self.builder.and(lbool, rbool), CType::Int))
+                        self.builder.set_block(bb_merge);
+                        Ok((merge_val, CType::Int))
                     }
                     BinOp::Or => {
+                        // Short-circuit: if left is true, result is 1.
                         let (l, lt) = self.compile_expr(lhs)?;
                         let (l, lt) = self.emit_promote(l, &lt);
                         let lzero = self.builder.iconst(0, lt.to_ir_type().unwrap());
-                        let lbool = self.emit_icmp_val(CondCode::Ne, l, lzero);
+                        let lcond = self.builder.icmp(CondCode::Ne, l, lzero);
 
+                        let bb_rhs = self.builder.create_block();
+                        let (bb_merge, merge_params) =
+                            self.builder.create_block_with_params(&[Type::I32]);
+                        let merge_val = merge_params[0];
+
+                        let one_i32 = self.builder.iconst(1, Type::I32);
+                        self.builder.branch(lcond, bb_merge, bb_rhs, &[one_i32], &[]);
+
+                        self.builder.set_block(bb_rhs);
                         let (r, rt) = self.compile_expr(rhs)?;
                         let (r, rt) = self.emit_promote(r, &rt);
                         let rzero = self.builder.iconst(0, rt.to_ir_type().unwrap());
                         let rbool = self.emit_icmp_val(CondCode::Ne, r, rzero);
+                        self.builder.jump(bb_merge, &[rbool]);
 
-                        Ok((self.builder.or(lbool, rbool), CType::Int))
+                        self.builder.set_block(bb_merge);
+                        Ok((merge_val, CType::Int))
                     }
                     // Shift operators: promote independently, result type is promoted left type.
                     BinOp::Shl => {

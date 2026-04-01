@@ -40,7 +40,7 @@ use barrier::{
 mod cfg;
 use cfg::{
     build_block_param_class_map, collect_block_roots, collect_externals, collect_phi_source_vregs,
-    collect_roots, compute_copy_pairs, compute_loop_depths, compute_rpo,
+    collect_roots, compute_copy_pairs, compute_idom, compute_loop_depths, compute_rpo, dominates,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -237,9 +237,25 @@ pub fn compile(
     // outer and inner loop header params into the same register.
     let mut block_param_vreg_overrides: BTreeMap<(BlockId, u32), VReg> = BTreeMap::new();
 
+    let idom = compute_idom(func, &rpo_order);
+    let mut class_emitted_in: HashMap<ClassId, usize> = HashMap::new();
+
     // Build per-block VRegInst lists in RPO order, stored by block index.
     let mut block_vreg_insts: Vec<Vec<VRegInst>> = vec![Vec::new(); func.blocks.len()];
     for &block_idx in &rpo_order {
+        // Remove classes emitted in non-dominating blocks so they get fresh VRegs.
+        let non_dom_classes: Vec<ClassId> = class_emitted_in
+            .iter()
+            .filter(|(_, emitter)| !dominates(**emitter, block_idx, &idom))
+            .map(|(cid, _)| *cid)
+            .collect();
+        let mut removed: Vec<(ClassId, VReg)> = Vec::new();
+        for cid in non_dom_classes {
+            if let Some(vreg) = class_to_vreg.remove(&cid) {
+                removed.push((cid, vreg));
+            }
+        }
+
         let block = &func.blocks[block_idx];
         let roots = collect_block_roots(block, &egraph);
         // Also include the block param ClassIds as roots for this block so
@@ -253,6 +269,7 @@ pub fn compile(
         }
         all_roots.sort_by_key(|c| c.0);
         all_roots.dedup();
+        let pre_emission: HashSet<ClassId> = class_to_vreg.keys().copied().collect();
         let mut insts =
             vreg_insts_for_block(&extraction, &all_roots, &mut class_to_vreg, &mut next_vreg);
 
@@ -304,6 +321,18 @@ pub fn compile(
         }
 
         block_vreg_insts[block_idx] = insts;
+
+        // Track newly emitted classes for dominator filtering.
+        for cid in class_to_vreg.keys().copied().collect::<Vec<_>>() {
+            if !pre_emission.contains(&cid) && !class_emitted_in.contains_key(&cid) {
+                class_emitted_in.insert(cid, block_idx);
+            }
+        }
+
+        // Restore removed classes so subsequent blocks can see them.
+        for (cid, vreg) in removed {
+            class_to_vreg.insert(cid, vreg);
+        }
     }
 
     // Build VReg -> Type map from the egraph's per-class type info.
@@ -366,8 +395,12 @@ pub fn compile(
         let mut indexed: Vec<(usize, &ScheduledInst)> = sched.iter().enumerate().collect();
         indexed.sort_by_key(|(orig_idx, inst)| {
             let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
-            let is_barrier_result = !matches!(inst.op, Op::LoadResult(_, _) | Op::CallResult(_, _));
-            (g, is_barrier_result, *orig_idx)
+            let param_order: u8 = match inst.op {
+                Op::Param(_, _) => 0,
+                Op::LoadResult(_, _) | Op::CallResult(_, _) => 1,
+                _ => 2,
+            };
+            (g, param_order, *orig_idx)
         });
         let reordered: Vec<ScheduledInst> =
             indexed.into_iter().map(|(_, inst)| inst.clone()).collect();
@@ -381,6 +414,12 @@ pub fn compile(
                 crate::trace::format_schedule(&block_schedules[block_idx], Some(&vreg_group)),
             );
         }
+    }
+
+    // Hoist Param ops to the front of the entry block's schedule.
+    if !block_schedules.is_empty() {
+        let sched = &mut block_schedules[0];
+        sched.sort_by_key(|inst| if matches!(inst.op, Op::Param(_, _)) { 0u8 } else { 1 });
     }
 
     // Phase 5: Register allocation -- per-block with cross-block live range splitting.
@@ -1388,8 +1427,12 @@ pub fn compile_to_ir_string(
         let mut indexed: Vec<(usize, &ScheduledInst)> = sched.iter().enumerate().collect();
         indexed.sort_by_key(|(orig_idx, inst)| {
             let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
-            let is_barrier_result = !matches!(inst.op, Op::LoadResult(_, _) | Op::CallResult(_, _));
-            (g, is_barrier_result, *orig_idx)
+            let param_order: u8 = match inst.op {
+                Op::Param(_, _) => 0,
+                Op::LoadResult(_, _) | Op::CallResult(_, _) => 1,
+                _ => 2,
+            };
+            (g, param_order, *orig_idx)
         });
         let reordered: Vec<ScheduledInst> =
             indexed.into_iter().map(|(_, inst)| inst.clone()).collect();

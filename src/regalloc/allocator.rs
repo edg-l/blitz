@@ -8,7 +8,8 @@ use crate::x86::reg::{Reg, RegClass};
 
 use super::coalesce::coalesce;
 use super::coloring::{
-    allocatable_gpr_order, available_gpr_colors, greedy_color, map_colors_to_regs, mcs_ordering,
+    allocatable_gpr_order, available_gpr_colors, greedy_color, interval_color, map_colors_to_regs,
+    mcs_ordering,
 };
 use super::interference::build_interference;
 use super::liveness::compute_liveness;
@@ -141,11 +142,35 @@ pub fn allocate(
         pre_coloring_colors2.extend(phantom_precolors);
 
         let ordering = mcs_ordering(&graph2);
-        let coloring = greedy_color(&graph2, &ordering, &pre_coloring_colors2);
+        let mut coloring = greedy_color(&graph2, &ordering, &pre_coloring_colors2);
 
         // Step 6: Check if we need to spill.
-        let gpr_colors_needed = coloring.chromatic_number;
         let avail = available_gpr_colors(uses_frame_pointer);
+
+        // MCS+greedy can overestimate on graphs where spill code breaks
+        // chordality. Fall back to interval coloring (optimal for single-block
+        // SSA) when the greedy result exceeds the theoretical optimum.
+        let max_live2 = liveness2.live_at.iter().map(|s| s.len()).max().unwrap_or(0) as u32 + 1;
+        if coloring.chromatic_number > avail && coloring.chromatic_number > max_live2 {
+            let ic = interval_color(
+                &insts_coalesced,
+                &liveness2,
+                &pre_coloring_colors2,
+                graph2.num_vregs,
+            );
+            if ic.chromatic_number < coloring.chromatic_number {
+                coloring = ic;
+            }
+        }
+
+        let gpr_colors_needed = coloring.chromatic_number;
+
+        if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+            tracing::debug!(
+                target: "blitz::regalloc",
+                "[{func_name}] round {round}: chromatic={gpr_colors_needed}, avail={avail}, max_live={max_live2}, graph_vregs={}", graph2.num_vregs,
+            );
+        }
 
         if gpr_colors_needed <= avail {
             // Success: map colors to physical registers.

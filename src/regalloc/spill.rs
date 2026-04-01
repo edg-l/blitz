@@ -115,7 +115,7 @@ pub fn select_spill(
             let degree = graph.adj[idx].len() as u64;
             let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
             let tiebreaker = (degree * range_len) / penalty;
-            (next / penalty, tiebreaker)
+            (next / penalty, tiebreaker, idx)
         }) {
             return Some(best);
         }
@@ -131,19 +131,22 @@ pub fn select_spill(
             let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
             let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
             let penalty = 10u64.saturating_pow(depth).max(1);
-            (degree * range_len) / penalty
+            ((degree * range_len) / penalty, idx)
         })
 }
 
 fn find_pressure_point(liveness: &LivenessInfo, available_regs: u32) -> Option<usize> {
+    // Find the point with maximum register pressure.
+    let mut best: Option<(usize, usize)> = None; // (pressure, index)
     for (i, live_set) in liveness.live_at.iter().enumerate() {
-        // live_at[i] excludes the destination of instruction i, but the dst
-        // also needs a register. True pressure = live_at[i].len() + 1.
-        if live_set.len() >= available_regs as usize {
-            return Some(i);
+        let pressure = live_set.len();
+        if pressure >= available_regs as usize {
+            if best.map_or(true, |(bp, _)| pressure > bp) {
+                best = Some((pressure, i));
+            }
         }
     }
-    None
+    best.map(|(_, i)| i)
 }
 
 fn compute_next_use(insts: &[ScheduledInst], from: usize) -> HashMap<usize, usize> {

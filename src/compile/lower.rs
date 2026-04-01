@@ -9,7 +9,7 @@ use crate::regalloc::spill::{
     is_spill_load, is_spill_store, is_xmm_spill_load, is_xmm_spill_store, spill_slot_of,
 };
 use crate::schedule::scheduler::ScheduledInst;
-use crate::x86::abi::FrameLayout;
+use crate::x86::abi::{ArgLoc, FrameLayout, assign_args};
 use crate::x86::addr::Addr;
 use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
@@ -860,6 +860,41 @@ pub(super) fn lower_block_pure_ops(
         .collect();
 
     for inst in insts {
+        // Handle stack-passed function parameters (7th+ args in SysV ABI).
+        if let Op::Param(param_idx, ty) = &inst.op {
+            if !param_vreg_set.contains(&inst.dst) {
+                let arg_locs = assign_args(&func.param_types);
+                if let Some(ArgLoc::Stack { offset }) = arg_locs.get(*param_idx as usize) {
+                    if let Some(dst_reg) = get_reg(inst.dst) {
+                        let size = OpSize::from_type(ty);
+                        let addr = if frame_layout.uses_frame_pointer {
+                            Addr {
+                                base: Some(Reg::RBP),
+                                index: None,
+                                scale: 1,
+                                disp: 16 + offset,
+                            }
+                        } else {
+                            let n_callee = frame_layout.callee_saved.len() as i32;
+                            let disp = n_callee * 8 + frame_layout.frame_size as i32 + 8 + offset;
+                            Addr {
+                                base: Some(Reg::RSP),
+                                index: None,
+                                scale: 1,
+                                disp,
+                            }
+                        };
+                        result.push(MachInst::MovRM {
+                            size,
+                            dst: Operand::Reg(dst_reg),
+                            addr,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+
         // Skip function param VRegs (pre-colored to ABI arg regs).
         if param_vreg_set.contains(&inst.dst) {
             continue;
