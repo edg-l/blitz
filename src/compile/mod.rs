@@ -232,6 +232,11 @@ pub fn compile(
     // Compute RPO block ordering (indices into func.blocks).
     let rpo_order = compute_rpo(func);
 
+    // Map (BlockId, param_idx) -> fresh VReg for block params whose canonical
+    // VReg was emitted by a prior block. This prevents the e-graph from merging
+    // outer and inner loop header params into the same register.
+    let mut block_param_vreg_overrides: HashMap<(BlockId, u32), VReg> = HashMap::new();
+
     // Build per-block VRegInst lists in RPO order, stored by block index.
     let mut block_vreg_insts: Vec<Vec<VRegInst>> = vec![Vec::new(); func.blocks.len()];
     for &block_idx in &rpo_order {
@@ -267,6 +272,32 @@ pub fn compile(
                             block.param_types[pidx as usize].clone(),
                         );
                         inst.operands.clear();
+                    } else {
+                        // The VReg was emitted by a prior block. Allocate a
+                        // fresh VReg local to this block to avoid the e-graph
+                        // merging outer/inner loop header params.
+                        let fresh_vreg = VReg(next_vreg);
+                        next_vreg += 1;
+                        // Rewrite all operand references to the old vreg in
+                        // this block's insts to use the fresh VReg.
+                        for inst in insts.iter_mut() {
+                            for operand in inst.operands.iter_mut() {
+                                if *operand == Some(vreg) {
+                                    *operand = Some(fresh_vreg);
+                                }
+                            }
+                        }
+                        // Add a BlockParam instruction for the fresh VReg.
+                        insts.push(VRegInst {
+                            dst: fresh_vreg,
+                            op: Op::BlockParam(
+                                block_id,
+                                pidx,
+                                block.param_types[pidx as usize].clone(),
+                            ),
+                            operands: vec![],
+                        });
+                        block_param_vreg_overrides.insert((block_id, pidx), fresh_vreg);
                     }
                 }
             }
@@ -276,7 +307,14 @@ pub fn compile(
     }
 
     // Build VReg -> Type map from the egraph's per-class type info.
-    let vreg_types = build_vreg_types(&class_to_vreg, &egraph);
+    let mut vreg_types = build_vreg_types(&class_to_vreg, &egraph);
+
+    // Insert types for fresh block param VRegs allocated above.
+    for (&(bid, pidx), &fresh_vreg) in &block_param_vreg_overrides {
+        let block = func.blocks.iter().find(|b| b.id == bid).unwrap();
+        let ty = block.param_types[pidx as usize].clone();
+        vreg_types.insert(fresh_vreg, ty);
+    }
 
     // Phase 4: Schedule per block (indexed by block index, same as block_vreg_insts).
     let mut block_schedules: Vec<Vec<ScheduledInst>> = vec![Vec::new(); func.blocks.len()];
@@ -468,11 +506,66 @@ pub fn compile(
 
         // Step 1: Compute CFG successors and phi uses per block.
         let cfg_succs = crate::regalloc::global_liveness::cfg_successors(func);
-        let phi_uses = crate::regalloc::global_liveness::compute_phi_uses(
+        let mut phi_uses = crate::regalloc::global_liveness::compute_phi_uses(
             func,
             &egraph.unionfind,
             &class_to_vreg,
         );
+
+        // Post-process phi_uses: when a back-edge terminator arg's e-class
+        // matches a target block param that has an override, replace the
+        // global VReg with the override VReg so cross-block liveness keeps
+        // it alive. Only apply on back edges (source RPO position >= target)
+        // because forward edges should use the original VReg.
+        let rpo_pos: HashMap<BlockId, usize> = rpo_order
+            .iter()
+            .enumerate()
+            .map(|(pos, &idx)| (func.blocks[idx].id, pos))
+            .collect();
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            if let Some(term) = block.ops.last() {
+                let src_pos = rpo_pos.get(&block.id).copied().unwrap_or(0);
+                let mut process_args = |target: BlockId, args: &[ClassId]| {
+                    let tgt_pos = rpo_pos.get(&target).copied().unwrap_or(0);
+                    if src_pos < tgt_pos {
+                        return; // Forward edge: use the original VReg.
+                    }
+                    for (pidx, &arg_cid) in args.iter().enumerate() {
+                        if let Some(&fresh_vreg) =
+                            block_param_vreg_overrides.get(&(target, pidx as u32))
+                        {
+                            if let Some(&param_cid) = block_param_map.get(&(target, pidx as u32)) {
+                                let canon_arg = egraph.unionfind.find_immutable(arg_cid);
+                                let canon_param = egraph.unionfind.find_immutable(param_cid);
+                                if canon_arg == canon_param {
+                                    // Replace the global VReg with the override.
+                                    if let Some(&old_vreg) = class_to_vreg.get(&canon_arg) {
+                                        phi_uses[block_idx].remove(&old_vreg);
+                                    }
+                                    phi_uses[block_idx].insert(fresh_vreg);
+                                }
+                            }
+                        }
+                    }
+                };
+                match term {
+                    EffectfulOp::Jump { target, args } => {
+                        process_args(*target, args);
+                    }
+                    EffectfulOp::Branch {
+                        bb_true,
+                        bb_false,
+                        true_args,
+                        false_args,
+                        ..
+                    } => {
+                        process_args(*bb_true, true_args);
+                        process_args(*bb_false, false_args);
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         // Step 2: Compute global liveness.
         let global_liveness = crate::regalloc::global_liveness::compute_global_liveness(
@@ -482,12 +575,18 @@ pub fn compile(
         );
 
         // Step 3: Determine block params per block (excluded from reload insertion).
-        let block_param_vregs_per_block =
+        let mut block_param_vregs_per_block =
             crate::regalloc::global_liveness::collect_block_param_vregs_per_block(
                 func,
                 &egraph,
                 &class_to_vreg,
             );
+
+        // Include fresh block param VRegs in the per-block sets.
+        for (&(bid, _pidx), &fresh_vreg) in &block_param_vreg_overrides {
+            let block_idx = func.blocks.iter().position(|b| b.id == bid).unwrap();
+            block_param_vregs_per_block[block_idx].insert(fresh_vreg);
+        }
 
         // Step 4: Assign cross-block spill slots.
         let spill_map = crate::regalloc::split::assign_cross_block_slots(
@@ -597,6 +696,41 @@ pub fn compile(
                         }
                     }
                 }
+                // Step 8a-phi: Ensure phi source VRegs (terminator args) are in the
+                // schedule. The pass-through optimization in cross-block splitting
+                // skips VRegs that are live-in/live-out but not used in the
+                // schedule. Phi source VRegs need to be in registers for phi copy
+                // emission, so insert remat/reload if missing.
+                for &phi_vreg in &phi_uses[block_idx] {
+                    let vreg = phi_vreg;
+                    let in_schedule = schedule.iter().any(|i| i.dst == vreg)
+                        || rename
+                            .get(&vreg)
+                            .map_or(false, |&v| schedule.iter().any(|i| i.dst == v));
+                    if !in_schedule {
+                        if let Some(def) = def_insts.get(&vreg) {
+                            if crate::regalloc::spill::is_rematerializable(def) {
+                                let new_vreg = VReg(shared_next_vreg);
+                                shared_next_vreg += 1;
+                                schedule.push(ScheduledInst {
+                                    op: def.op.clone(),
+                                    dst: new_vreg,
+                                    operands: def.operands.clone(),
+                                });
+                                rename.insert(vreg, new_vreg);
+                            } else if let Some(&slot) = spill_map.vreg_to_slot.get(&vreg) {
+                                let new_vreg = VReg(shared_next_vreg);
+                                shared_next_vreg += 1;
+                                schedule.push(ScheduledInst {
+                                    op: Op::SpillLoad(slot as i64),
+                                    dst: new_vreg,
+                                    operands: vec![],
+                                });
+                                rename.insert(vreg, new_vreg);
+                            }
+                        }
+                    }
+                }
                 (schedule, rename)
             };
 
@@ -682,8 +816,8 @@ pub fn compile(
             //   - Ret operands ARE in live_out (terminator, no marker).
             let mut block_live_out: HashSet<VReg> = phi_uses[block_idx]
                 .iter()
-                .chain(block_param_vregs_per_block[block_idx].iter())
-                .copied()
+                .map(|v| rename.get(v).copied().unwrap_or(*v))
+                .chain(block_param_vregs_per_block[block_idx].iter().copied())
                 .collect();
             if let Some(EffectfulOp::Ret { val: Some(cid) }) = block.ops.last() {
                 let canon = egraph.unionfind.find_immutable(*cid);
@@ -849,7 +983,7 @@ pub fn compile(
         // must use the renamed VReg to get the correct physical register.
         let block_class_to_vreg: HashMap<ClassId, VReg> = {
             let renames = &block_rename_maps[block_idx];
-            if renames.is_empty() {
+            let mut map: HashMap<ClassId, VReg> = if renames.is_empty() {
                 class_to_vreg.clone()
             } else {
                 class_to_vreg
@@ -859,7 +993,24 @@ pub fn compile(
                         (cid, renamed)
                     })
                     .collect()
+            };
+            // Apply override VRegs: if an override's fresh VReg was renamed
+            // (reloaded) in this block, or this IS the block that defines it,
+            // update the class_to_vreg mapping so phi copy source lookups
+            // find the correct register.
+            for (&(bid, pidx), &fresh_vreg) in &block_param_vreg_overrides {
+                if let Some(&param_cid) = block_param_map.get(&(bid, pidx)) {
+                    let canon = egraph.unionfind.find_immutable(param_cid);
+                    if bid == block.id {
+                        // This block defines the override VReg.
+                        map.insert(canon, fresh_vreg);
+                    } else if let Some(&renamed) = renames.get(&fresh_vreg) {
+                        // The override was reloaded into this block.
+                        map.insert(canon, renamed);
+                    }
+                }
             }
+            map
         };
 
         // Handle non-terminator effectful ops (loads, stores, calls).
@@ -956,6 +1107,7 @@ pub fn compile(
             &class_to_vreg,
             &block_class_to_vreg,
             &block_param_map,
+            &block_param_vreg_overrides,
             &regalloc_result,
             func,
             &mut next_label,
@@ -1171,6 +1323,26 @@ pub fn compile_to_ir_string(
                             block.param_types[pidx as usize].clone(),
                         );
                         inst.operands.clear();
+                    } else {
+                        // VReg emitted by a prior block -- allocate a fresh one.
+                        let fresh_vreg = VReg(next_vreg);
+                        next_vreg += 1;
+                        for inst in insts.iter_mut() {
+                            for operand in inst.operands.iter_mut() {
+                                if *operand == Some(vreg) {
+                                    *operand = Some(fresh_vreg);
+                                }
+                            }
+                        }
+                        insts.push(crate::egraph::extract::VRegInst {
+                            dst: fresh_vreg,
+                            op: Op::BlockParam(
+                                block_id,
+                                pidx,
+                                block.param_types[pidx as usize].clone(),
+                            ),
+                            operands: vec![],
+                        });
                     }
                 }
             }

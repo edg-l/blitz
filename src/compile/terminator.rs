@@ -132,6 +132,7 @@ pub(super) fn lower_terminator(
     class_to_vreg: &HashMap<ClassId, VReg>,
     ret_class_to_vreg: &HashMap<ClassId, VReg>,
     block_param_map: &HashMap<(BlockId, u32), ClassId>,
+    param_vreg_overrides: &HashMap<(BlockId, u32), VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
     next_label: &mut LabelId,
@@ -173,7 +174,9 @@ pub(super) fn lower_terminator(
                 args,
                 egraph,
                 class_to_vreg,
+                ret_class_to_vreg,
                 block_param_map,
+                param_vreg_overrides,
                 regalloc,
                 func,
             )?;
@@ -217,7 +220,9 @@ pub(super) fn lower_terminator(
                 true_args,
                 egraph,
                 class_to_vreg,
+                ret_class_to_vreg,
                 block_param_map,
+                param_vreg_overrides,
                 regalloc,
                 func,
             )?;
@@ -226,7 +231,9 @@ pub(super) fn lower_terminator(
                 false_args,
                 egraph,
                 class_to_vreg,
+                ret_class_to_vreg,
                 block_param_map,
+                param_vreg_overrides,
                 regalloc,
                 func,
             )?;
@@ -309,7 +316,9 @@ fn build_phi_copies(
     args: &[ClassId],
     egraph: &EGraph,
     class_to_vreg: &HashMap<ClassId, VReg>,
+    block_class_to_vreg: &HashMap<ClassId, VReg>,
     block_param_map: &HashMap<(BlockId, u32), ClassId>,
+    param_vreg_overrides: &HashMap<(BlockId, u32), VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
 ) -> Result<Vec<(Reg, Reg, OpSize)>, CompileError> {
@@ -344,7 +353,7 @@ fn build_phi_copies(
             })?;
 
         let canon_arg = egraph.unionfind.find_immutable(arg_cid);
-        let arg_vreg = class_to_vreg
+        let arg_vreg = block_class_to_vreg
             .get(&canon_arg)
             .copied()
             .ok_or_else(|| CompileError {
@@ -362,9 +371,10 @@ fn build_phi_copies(
                 location: None,
             })?;
 
-        let param_vreg = class_to_vreg
-            .get(&param_cid)
+        let param_vreg = param_vreg_overrides
+            .get(&(target, param_idx as u32))
             .copied()
+            .or_else(|| class_to_vreg.get(&param_cid).copied())
             .ok_or_else(|| CompileError {
                 phase: "phi-elim".into(),
                 message: format!("param class {:?} not in class_to_vreg", param_cid),
