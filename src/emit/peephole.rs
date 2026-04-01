@@ -1,8 +1,12 @@
 use crate::x86::inst::{MachInst, OpSize};
 
-/// Returns true if `inst` is a conditional or unconditional jump instruction.
-fn is_jcc(inst: &MachInst) -> bool {
-    matches!(inst, MachInst::Jcc { .. } | MachInst::Jmp { .. })
+/// Returns true if `inst` is a flag-consuming instruction (conditional jump,
+/// unconditional jump, or setcc).
+fn is_flag_consumer(inst: &MachInst) -> bool {
+    matches!(
+        inst,
+        MachInst::Jcc { .. } | MachInst::Jmp { .. } | MachInst::Setcc { .. }
+    )
 }
 
 /// Returns true if `inst` writes (defines) the flags register.
@@ -62,17 +66,39 @@ pub fn flags_dead_after(insts: &[MachInst], idx: usize) -> bool {
 /// Apply peephole optimizations to a sequence of `MachInst`s.
 ///
 /// Optimizations applied (in order of pattern matching):
+/// 0. Redundant round-trip mov: `mov rA, rB; mov rB, rA` -> `mov rA, rB` (S64 only).
 /// 1. Delete `mov rX, rX` (redundant self-move).
 /// 2. `mov rX, 0` -> `xor rX, rX` (zero idiom, shorter encoding).
-/// 3. `cmp rX, 0` followed by Jcc -> `test rX, rX` followed by Jcc.
+/// 3. `cmp rX, 0` followed by Jcc/Setcc -> `test rX, rX` followed by Jcc/Setcc.
 /// 4. `add rX, 1` -> `inc rX` when flags are dead after the add.
 /// 5. `sub rX, 1` -> `dec rX` when flags are dead after the sub.
+/// 6. `add rX, -1` -> `dec rX` when flags are dead.
+/// 7. `sub rX, -1` -> `inc rX` when flags are dead.
 pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
     let mut result = Vec::with_capacity(insts.len());
     let mut i = 0;
 
     while i < insts.len() {
         match &insts[i] {
+            // 0. Redundant round-trip mov elimination: mov rA, rB; mov rB, rA -> mov rA, rB.
+            // Only for S64 (S32 zero-extends upper 32 bits).
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: dst_a,
+                src: src_b,
+            } if dst_a != src_b
+                && i + 1 < insts.len()
+                && matches!(
+                    &insts[i + 1],
+                    MachInst::MovRR { size: OpSize::S64, dst, src }
+                    if dst == src_b && src == dst_a
+                ) =>
+            {
+                result.push(insts[i].clone());
+                i += 2;
+                continue;
+            }
+
             // 1. Delete mov rX, rX -- but only for S64.
             // A S32 `mov eax, eax` zero-extends the upper 32 bits and is NOT a no-op.
             // S8/S16 partial-register writes also have observable effects.
@@ -99,7 +125,7 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
 
             // 3. cmp rX, 0 followed by Jcc  ->  test rX, rX followed by Jcc.
             MachInst::CmpRI { size, dst, imm: 0 }
-                if i + 1 < insts.len() && is_jcc(&insts[i + 1]) =>
+                if i + 1 < insts.len() && is_flag_consumer(&insts[i + 1]) =>
             {
                 result.push(MachInst::TestRR {
                     size: *size,
@@ -124,6 +150,26 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
             // 5. sub rX, 1  ->  dec rX  (when flags are dead).
             MachInst::SubRI { size, dst, imm: 1 } if flags_dead_after(&insts, i) => {
                 result.push(MachInst::Dec {
+                    size: *size,
+                    dst: dst.clone(),
+                });
+                i += 1;
+                continue;
+            }
+
+            // 6. add rX, -1  ->  dec rX  (when flags are dead).
+            MachInst::AddRI { size, dst, imm: -1 } if flags_dead_after(&insts, i) => {
+                result.push(MachInst::Dec {
+                    size: *size,
+                    dst: dst.clone(),
+                });
+                i += 1;
+                continue;
+            }
+
+            // 7. sub rX, -1  ->  inc rX  (when flags are dead).
+            MachInst::SubRI { size, dst, imm: -1 } if flags_dead_after(&insts, i) => {
+                result.push(MachInst::Inc {
                     size: *size,
                     dst: dst.clone(),
                 });
@@ -360,5 +406,160 @@ mod tests {
             },
         ];
         assert!(!flags_dead_after(&insts, 0));
+    }
+
+    #[test]
+    fn roundtrip_mov_s64_eliminated() {
+        let insts = vec![
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RCX),
+                src: reg(Reg::RAX),
+            },
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RCX),
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 1, "round-trip mov should be collapsed to one");
+        assert_eq!(
+            out[0],
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RCX),
+                src: reg(Reg::RAX),
+            }
+        );
+    }
+
+    #[test]
+    fn roundtrip_mov_s32_not_eliminated() {
+        let insts = vec![
+            MachInst::MovRR {
+                size: OpSize::S32,
+                dst: reg(Reg::RCX),
+                src: reg(Reg::RAX),
+            },
+            MachInst::MovRR {
+                size: OpSize::S32,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RCX),
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 2, "S32 round-trip mov must not be eliminated");
+    }
+
+    #[test]
+    fn roundtrip_mov_not_adjacent_not_eliminated() {
+        let insts = vec![
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RCX),
+                src: reg(Reg::RAX),
+            },
+            MachInst::Ret,
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RCX),
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 3, "non-adjacent round-trip mov must be kept");
+    }
+
+    #[test]
+    fn cmp_zero_before_setcc_becomes_test() {
+        let insts = vec![
+            MachInst::CmpRI {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                imm: 0,
+            },
+            MachInst::Setcc {
+                cc: CondCode::Eq,
+                dst: reg(Reg::RAX),
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0],
+            MachInst::TestRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RAX),
+            }
+        );
+        assert!(matches!(
+            out[1],
+            MachInst::Setcc {
+                cc: CondCode::Eq,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn add_neg1_becomes_dec_when_flags_dead() {
+        let insts = vec![
+            MachInst::AddRI {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                imm: -1,
+            },
+            MachInst::Ret,
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0],
+            MachInst::Dec {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+            }
+        );
+    }
+
+    #[test]
+    fn sub_neg1_becomes_inc_when_flags_dead() {
+        let insts = vec![
+            MachInst::SubRI {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                imm: -1,
+            },
+            MachInst::Ret,
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0],
+            MachInst::Inc {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+            }
+        );
+    }
+
+    #[test]
+    fn add_neg1_kept_when_flags_live() {
+        let insts = vec![
+            MachInst::AddRI {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                imm: -1,
+            },
+            MachInst::Jcc {
+                cc: CondCode::Eq,
+                target: 0,
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], MachInst::AddRI { imm: -1, .. }));
     }
 }

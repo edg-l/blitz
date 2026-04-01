@@ -45,55 +45,93 @@ pub fn spill_slot_of(inst: &ScheduledInst) -> u32 {
 
 // ── Spill selection (10.9) ────────────────────────────────────────────────────
 
-/// Select a VReg to spill using a farthest-next-use heuristic with loop-depth penalty.
+/// Compute the live range length (definition to last use) for each VReg.
 ///
-/// Among all VRegs that are live (present in the interference graph) and not
-/// rematerializable, picks the one whose next use is farthest from the point
-/// where register pressure exceeds `available_regs`. VRegs defined inside a
-/// loop (higher `loop_depths`) are penalized so they are less likely to be
-/// spilled.
+/// For each VReg index, scans instructions to find the defining position
+/// (where `inst.dst == VReg(idx)`) and the last use position (last appearance
+/// in any `inst.operands`). Range length = last_use - def_pos (or 1 if not found).
+pub fn compute_live_range_length(insts: &[ScheduledInst]) -> HashMap<usize, usize> {
+    let mut def_pos: HashMap<usize, usize> = HashMap::new();
+    let mut last_use: HashMap<usize, usize> = HashMap::new();
+
+    for (i, inst) in insts.iter().enumerate() {
+        let dst_idx = inst.dst.0 as usize;
+        def_pos.entry(dst_idx).or_insert(i);
+
+        for &op in &inst.operands {
+            let op_idx = op.0 as usize;
+            last_use.insert(op_idx, i);
+        }
+    }
+
+    let mut range_lengths = HashMap::new();
+    let all_vregs: HashSet<usize> = def_pos.keys().chain(last_use.keys()).copied().collect();
+    for idx in all_vregs {
+        let dp = def_pos.get(&idx).copied().unwrap_or(0);
+        let lu = last_use.get(&idx).copied().unwrap_or(dp);
+        let len = if lu >= dp { lu - dp } else { 1 };
+        range_lengths.insert(idx, len.max(1));
+    }
+
+    range_lengths
+}
+
+/// Select a VReg to spill using a composite heuristic:
+///   Primary: farthest next-use (Belady's algorithm)
+///   Tiebreaker: degree * range_length (higher = more pressure relief)
+///   Loop penalty divides the whole score.
 ///
-/// Returns `None` if no spill candidate is found (shouldn't happen if the
-/// chromatic number truly exceeds available_regs).
+/// VRegs in `excluded` (pre-colored/phantom) are never selected.
+///
+/// Returns `None` if no spill candidate is found.
 pub fn select_spill(
     graph: &InterferenceGraph,
     liveness: &LivenessInfo,
     insts: &[ScheduledInst],
     available_regs: u32,
     loop_depths: &HashMap<VReg, u32>,
+    excluded: &HashSet<usize>,
 ) -> Option<usize> {
+    let range_lengths = compute_live_range_length(insts);
+
     // Find the instruction index where we first exceed register pressure.
     if let Some(pressure_point) = find_pressure_point(liveness, available_regs) {
         let next_use = compute_next_use(insts, pressure_point);
         let live_at_pressure = &liveness.live_at[pressure_point];
 
-        // Consider all VRegs live at the pressure point (including remat).
+        // Consider all VRegs live at the pressure point, excluding pre-colored/phantom.
         let candidates: Vec<usize> = live_at_pressure
             .iter()
             .map(|v| v.0 as usize)
             .filter(|&idx| idx < graph.num_vregs)
+            .filter(|idx| !excluded.contains(idx))
             .collect();
 
-        // Pick the candidate with the farthest next use, penalized by loop depth.
+        // Pick the candidate with the best composite score.
         if let Some(best) = candidates.into_iter().max_by_key(|&idx| {
-            let next = next_use.get(&idx).copied().unwrap_or(usize::MAX);
+            let next = next_use.get(&idx).copied().unwrap_or(usize::MAX) as u64;
             let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
-            let penalty = 10u64.saturating_pow(depth);
-            (next as u64).saturating_div(penalty)
+            let penalty = 10u64.saturating_pow(depth).max(1);
+            let degree = graph.adj[idx].len() as u64;
+            let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
+            let tiebreaker = (degree * range_len) / penalty;
+            (next / penalty, tiebreaker)
         }) {
             return Some(best);
         }
     }
 
     // Fallback: coloring overestimates but no point exceeds available_regs.
-    // Pick the VReg with the highest interference degree.
+    // Pick the VReg with the highest degree*range_length, penalized by loop depth.
     (0..graph.num_vregs)
         .filter(|&idx| !graph.adj[idx].is_empty())
+        .filter(|idx| !excluded.contains(idx))
         .max_by_key(|&idx| {
-            let degree = graph.adj[idx].len();
+            let degree = graph.adj[idx].len() as u64;
+            let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
             let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
-            let penalty = 10usize.saturating_pow(depth);
-            degree / penalty.max(1)
+            let penalty = 10u64.saturating_pow(depth).max(1);
+            (degree * range_len) / penalty
         })
 }
 
@@ -419,7 +457,8 @@ mod tests {
         // select_spill with 1 available register: must pick one of the two.
         // Due to loop penalty, VReg 1 (depth=2) should NOT be spilled.
         // VReg 0 (depth=0) should be chosen.
-        let candidate = select_spill(&graph, &liveness, &insts, 1, &loop_depths);
+        let excluded = HashSet::new();
+        let candidate = select_spill(&graph, &liveness, &insts, 1, &loop_depths, &excluded);
         assert_eq!(
             candidate,
             Some(0),
@@ -520,5 +559,138 @@ mod tests {
             !insts.iter().any(|i| is_spill_load(i)),
             "XMM VReg spill must NOT produce GPR SPILL_LOAD_TYPE marker"
         );
+    }
+
+    // Two candidates with same next-use but different degree*range. The one with
+    // higher degree*range_length should be selected (more pressure relief).
+    #[test]
+    fn spill_prefers_high_degree_long_range() {
+        use super::super::interference::InterferenceGraph;
+        use super::super::liveness::LivenessInfo;
+        use crate::x86::reg::RegClass;
+
+        // v0: defined at 0, used at 4 (range=4). Degree=1.
+        // v1: defined at 0, used at 4 (range=4). Degree=3.
+        // Both live at pressure point (inst 0), both next-use at inst 4.
+        // v1 has higher degree*range (3*4=12 vs 1*4=4), so v1 should be picked.
+        let insts = vec![
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(0),
+                operands: vec![],
+            },
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(1),
+                operands: vec![],
+            },
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(2),
+                operands: vec![],
+            },
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(3),
+                operands: vec![],
+            },
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(4),
+                operands: vec![VReg(0), VReg(1)],
+            },
+        ];
+
+        // Both v0 and v1 live at every instruction from 0 onward.
+        let live_at: Vec<HashSet<VReg>> = vec![
+            [VReg(0), VReg(1)].iter().copied().collect(), // pressure point (size 2 >= avail 1)
+            [VReg(0), VReg(1)].iter().copied().collect(),
+            [VReg(0), VReg(1)].iter().copied().collect(),
+            [VReg(0), VReg(1)].iter().copied().collect(),
+            [VReg(0), VReg(1)].iter().copied().collect(),
+        ];
+        let liveness = LivenessInfo {
+            live_at,
+            live_in: HashSet::new(),
+            live_out: HashSet::new(),
+        };
+
+        // v0: degree 1 (interferes with v1 only)
+        // v1: degree 3 (interferes with v0, v2, v3)
+        let mut adj = vec![HashSet::new(); 5];
+        adj[0].insert(1);
+        adj[1].insert(0);
+        adj[1].insert(2);
+        adj[1].insert(3);
+        adj[2].insert(1);
+        adj[3].insert(1);
+        let graph = InterferenceGraph {
+            num_vregs: 5,
+            adj,
+            reg_class: vec![RegClass::GPR; 5],
+        };
+
+        let loop_depths = HashMap::new();
+        let excluded = HashSet::new();
+        let candidate = select_spill(&graph, &liveness, &insts, 1, &loop_depths, &excluded);
+        // Both have same next-use (4) and same range (4), so tiebreaker is degree*range.
+        // v1: degree=3, range=4 -> 12. v0: degree=1, range=4 -> 4. v1 wins.
+        assert_eq!(candidate, Some(1), "should spill v1 (higher degree*range)");
+    }
+
+    // Best candidate by score is in excluded set, verify next-best is chosen.
+    #[test]
+    fn spill_excludes_precolored() {
+        use super::super::interference::InterferenceGraph;
+        use super::super::liveness::LivenessInfo;
+        use crate::x86::reg::RegClass;
+
+        let insts = vec![
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(0),
+                operands: vec![],
+            },
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(1),
+                operands: vec![],
+            },
+            ScheduledInst {
+                op: Op::Proj0,
+                dst: VReg(2),
+                operands: vec![VReg(0), VReg(1)],
+            },
+        ];
+
+        let live_at: Vec<HashSet<VReg>> = vec![
+            [VReg(0), VReg(1)].iter().copied().collect(),
+            [VReg(0), VReg(1)].iter().copied().collect(),
+            [VReg(0), VReg(1)].iter().copied().collect(),
+        ];
+        let liveness = LivenessInfo {
+            live_at,
+            live_in: HashSet::new(),
+            live_out: HashSet::new(),
+        };
+
+        // v0 has higher degree (better spill target), but is excluded.
+        let mut adj = vec![HashSet::new(); 3];
+        adj[0].insert(1);
+        adj[0].insert(2);
+        adj[1].insert(0);
+        adj[2].insert(0);
+        let graph = InterferenceGraph {
+            num_vregs: 3,
+            adj,
+            reg_class: vec![RegClass::GPR; 3],
+        };
+
+        let loop_depths = HashMap::new();
+        let mut excluded = HashSet::new();
+        excluded.insert(0usize); // exclude v0
+
+        let candidate = select_spill(&graph, &liveness, &insts, 1, &loop_depths, &excluded);
+        assert_eq!(candidate, Some(1), "should spill v1 since v0 is excluded");
     }
 }

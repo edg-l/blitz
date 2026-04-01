@@ -208,9 +208,17 @@ pub fn allocate(
         let overshoot = gpr_colors_needed.saturating_sub(avail) as usize;
         let spill_count = overshoot.max(1).min(4); // spill 1-4 per round
 
+        let excluded: HashSet<usize> = pre_coloring_colors2.keys().copied().collect();
         let mut spilled = HashSet::new();
         for _ in 0..spill_count {
-            let candidate = select_spill(&graph2, &liveness2, &insts_coalesced, avail, loop_depths);
+            let candidate = select_spill(
+                &graph2,
+                &liveness2,
+                &insts_coalesced,
+                avail,
+                loop_depths,
+                &excluded,
+            );
             let Some(idx) = candidate else { break };
             if spilled.contains(&idx) {
                 break; // same candidate selected twice, no progress
