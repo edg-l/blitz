@@ -72,7 +72,7 @@ pub fn allocate(
         param_vreg_to_reg.insert(vreg, reg);
     }
 
-    const MAX_SPILL_ROUNDS: usize = 3;
+    const MAX_SPILL_ROUNDS: usize = 10;
 
     for round in 0..=MAX_SPILL_ROUNDS {
         // Step 1: Compute liveness.
@@ -185,26 +185,34 @@ pub fn allocate(
             ));
         }
 
-        // Select a VReg to spill.
-        let spill_candidate =
-            select_spill(&graph2, &liveness2, &insts_coalesced, avail, loop_depths);
+        // Select VRegs to spill. When the gap between chromatic number and
+        // available registers is large, spill multiple VRegs per round to
+        // converge faster.
+        let overshoot = gpr_colors_needed.saturating_sub(avail) as usize;
+        let spill_count = overshoot.max(1).min(4); // spill 1-4 per round
 
-        let Some(spill_idx) = spill_candidate else {
+        let mut spilled = HashSet::new();
+        for _ in 0..spill_count {
+            let candidate = select_spill(&graph2, &liveness2, &insts_coalesced, avail, loop_depths);
+            let Some(idx) = candidate else { break };
+            if spilled.contains(&idx) {
+                break; // same candidate selected twice, no progress
+            }
+            spilled.insert(idx);
+        }
+
+        if spilled.is_empty() {
             return Err(format!(
                 "register allocation: could not find spill candidate in round {round}"
             ));
-        };
+        }
 
-        // Insert spill code.
-        let mut spilled = HashSet::new();
-        spilled.insert(spill_idx);
-
-        // If the spilled VReg is rematerializable, remove it from block_live_out.
-        // Its definition will be dropped and remat copies replace each use.
-        // Keeping it in block_live_out would create phantom liveness.
-        if let Some(def) = insts.iter().find(|i| i.dst.0 as usize == spill_idx) {
-            if super::spill::is_rematerializable(def) {
-                block_live_out.remove(&VReg(spill_idx as u32));
+        // If spilled VRegs are rematerializable, remove from block_live_out.
+        for &idx in &spilled {
+            if let Some(def) = insts.iter().find(|i| i.dst.0 as usize == idx) {
+                if super::spill::is_rematerializable(def) {
+                    block_live_out.remove(&VReg(idx as u32));
+                }
             }
         }
 

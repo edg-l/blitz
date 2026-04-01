@@ -3045,48 +3045,77 @@ int main(void) {
 
 #[test]
 fn e2e_many_stores_register_pressure() {
-    // Regression: many Store effectful ops in one block kept all operand
-    // VRegs alive until end of block, exhausting registers. Deadline-based
-    // liveness lets operands die at their barrier position.
-    let mut builder = FunctionBuilder::new("blitz_many_stores", &[], &[Type::I64]);
+    // Stress test: 6 stores + 6 loads in a single block across 2 stack slots
+    // with mixed I64/I32 types. Without deadline-based liveness this would
+    // exhaust registers (all operand VRegs alive until end of block). With
+    // deadlines, operands die at their barrier position.
+    //
+    // 12 barriers total, ~40 scheduled VRegs, 2 long-lived StackAddr bases.
+    let mut builder = FunctionBuilder::new("blitz_stress_stores", &[], &[Type::I64]);
 
-    // Allocate a stack slot for 8 bytes
-    let slot = builder.create_stack_slot(32, 8);
-    let base = builder.stack_addr(slot);
+    let slot_a = builder.create_stack_slot(48, 8);
+    let slot_b = builder.create_stack_slot(48, 8);
+    let base_a = builder.stack_addr(slot_a);
+    let base_b = builder.stack_addr(slot_b);
 
-    // Write 4 different values at 4 offsets
-    for i in 0..4i64 {
+    // Phase 1: Store 6 I64 values to slot A: [10, 20, 30, 40, 50, 60]
+    for i in 0..6i64 {
         let off = builder.iconst(i * 8, Type::I64);
-        let addr = builder.add(base, off);
+        let addr = builder.add(base_a, off);
         let val = builder.iconst((i + 1) * 10, Type::I64);
         builder.store(addr, val);
     }
 
-    // Read back and sum
-    let mut acc = builder.iconst(0, Type::I64);
-    for i in 0..4i64 {
+    // Phase 2: Load from slot A, add constant, store I32 to slot B
+    // B[i] = (I32)(A[i] + 5)
+    for i in 0..6i64 {
         let off = builder.iconst(i * 8, Type::I64);
-        let addr = builder.add(base, off);
+        let addr = builder.add(base_a, off);
+        let loaded = builder.load(addr, Type::I64);
+        let five = builder.iconst(5, Type::I64);
+        let added = builder.add(loaded, five);
+        let truncated = builder.trunc(added, Type::I32);
+
+        let boff = builder.iconst(i * 8, Type::I64);
+        let baddr = builder.add(base_b, boff);
+        builder.store(baddr, truncated);
+    }
+
+    // Phase 3: Reload from both slots and sum.
+    // result = sum(A[i]) + sum(B[i] as I64)
+    let mut acc = builder.iconst(0, Type::I64);
+    for i in 0..6i64 {
+        let off = builder.iconst(i * 8, Type::I64);
+        let addr = builder.add(base_a, off);
         let loaded = builder.load(addr, Type::I64);
         acc = builder.add(acc, loaded);
     }
+    for i in 0..6i64 {
+        let boff = builder.iconst(i * 8, Type::I64);
+        let baddr = builder.add(base_b, boff);
+        let loaded = builder.load(baddr, Type::I32);
+        let widened = builder.sext(loaded, Type::I64);
+        acc = builder.add(acc, widened);
+    }
 
     builder.ret(Some(acc));
-    let func = builder.finalize().expect("many_stores finalize");
+    let func = builder.finalize().expect("stress_stores finalize");
     let opts = CompileOptions::default();
-    let obj = compile(func, &opts, None).expect("compile many_stores");
+    let obj = compile(func, &opts, None).expect("compile stress_stores");
 
+    // A = [10,20,30,40,50,60], B = [15,25,35,45,55,65] (I32)
+    // sum(A) = 210, sum(B) = 240
+    // Total = 450
     let c_main = r#"
 #include <stdint.h>
-int64_t blitz_many_stores(void);
+int64_t blitz_stress_stores(void);
 int main(void) {
-    // 10 + 20 + 30 + 40 = 100
-    if (blitz_many_stores() != 100) return 1;
+    if (blitz_stress_stores() != 450) return 1;
     return 0;
 }
 "#;
-    if let Some(code) = link_and_run_obj("blitz_e2e_many_stores", &obj, c_main) {
-        assert_eq!(code, 0, "many_stores returned wrong exit code {code}");
+    if let Some(code) = link_and_run_obj("blitz_e2e_stress_stores", &obj, c_main) {
+        assert_eq!(code, 0, "stress_stores returned wrong exit code {code}");
     }
 }
 
