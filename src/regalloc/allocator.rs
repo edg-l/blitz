@@ -159,7 +159,17 @@ pub fn allocate(
                 graph2.num_vregs,
             );
             if ic.chromatic_number < coloring.chromatic_number {
-                coloring = ic;
+                // Validate: coalescing can create multiply-defined VRegs,
+                // breaking the SSA invariant that interval_color relies on.
+                // Check that no interference edge has both endpoints with
+                // the same color before accepting.
+                let valid = (0..graph2.num_vregs).all(|v| {
+                    let vc = ic.colors[v];
+                    graph2.adj[v].iter().all(|&u| ic.colors[u] != vc)
+                });
+                if valid {
+                    coloring = ic;
+                }
             }
         }
 

@@ -1,0 +1,46 @@
+# Known Bugs
+
+## 1. Flaky e2e_many_stores_register_pressure (spill codegen correctness)
+
+**Status:** Open
+**Severity:** Correctness (wrong results ~14% of runs)
+**Test:** `cargo test e2e_many_stores_register_pressure`
+
+HashMap non-determinism in e-graph extraction produces different schedules across
+runs (98-100 VRegs, max_live 16-19). When spilling is needed, the greedy coloring
+succeeds (chromatic=15=avail) but the spill/reload or rematerialization code
+produces wrong values. The function returns the wrong result even though register
+allocation reports success.
+
+The interval_color unsoundness after coalescing was fixed (validation against
+interference graph), but this separate spill codegen bug remains. The spill
+insertion path (src/regalloc/spill.rs insert_spills) or the remat logic may
+corrupt values when certain VReg orderings are chosen.
+
+To reproduce: run the test in a loop until failure (~14% rate):
+  for i in $(seq 1 50); do cargo test e2e_many_stores_register_pressure 2>&1 | tail -1; done
+
+Root cause: unknown -- likely in spill code insertion or rematerialization.
+The non-determinism originates from HashMap iteration in e-graph DFS traversal
+affecting VReg numbering and schedule order.
+
+
+## 2. Phi OpSize mismatch on early return from while loop
+
+**Status:** Open
+**Severity:** Compilation failure (assertion panic)
+**Test:** `tests/lit/control/early_return_in_while.c`
+
+Assertion: "phi_copies: register RDX appears with conflicting OpSize values
+(S64 vs S32)" in src/emit/phi_elim.rs:40.
+
+Triggered when a function takes pointer args (I64) and returns I32 from inside
+a while loop body. The phi copy elimination sees the same physical register
+used with both S64 (pointer) and S32 (int return value) OpSize, and asserts.
+
+To reproduce:
+  ./target/debug/tinyc tests/lit/control/early_return_in_while.c -o /tmp/test
+
+Root cause: phi_elim.rs assumes each register has a single OpSize across all
+phi copies, but mixed-width block parameters and return values can assign
+different sizes to the same register.
