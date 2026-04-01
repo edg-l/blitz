@@ -1,0 +1,102 @@
+#!/bin/sh
+# Run all lit tests. Requires tinyc and blitztest on PATH or in target/debug/.
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+TINYC="${TINYC:-$ROOT/target/debug/tinyc}"
+BLITZTEST="${BLITZTEST:-$ROOT/target/debug/blitztest}"
+
+if [ ! -x "$TINYC" ]; then
+    echo "error: tinyc not found at $TINYC (run 'cargo build -p tinyc' first)" >&2
+    exit 1
+fi
+if [ ! -x "$BLITZTEST" ]; then
+    echo "error: blitztest not found at $BLITZTEST (run 'cargo build -p blitztest' first)" >&2
+    exit 1
+fi
+
+passed=0
+failed=0
+total=0
+
+run_check_test() {
+    local file="$1"
+    local mode="$2"
+    local name
+    name="$(echo "$file" | sed "s|^$SCRIPT_DIR/||")"
+    total=$((total + 1))
+
+    if "$TINYC" "$file" "$mode" 2>&1 | "$BLITZTEST" "$file" 2>/dev/null; then
+        passed=$((passed + 1))
+        printf "."
+    else
+        failed=$((failed + 1))
+        printf "\nFAIL: %s\n" "$name"
+    fi
+}
+
+run_exit_test() {
+    local file="$1"
+    local expected="$2"
+    local name
+    name="$(echo "$file" | sed "s|^$SCRIPT_DIR/||")"
+    total=$((total + 1))
+
+    local tmpfile
+    tmpfile="$(mktemp /tmp/blitztest_XXXXXX)"
+
+    if "$TINYC" "$file" -o "$tmpfile" 2>/dev/null; then
+        local actual=0
+        "$tmpfile" 2>/dev/null && actual=0 || actual=$?
+        rm -f "$tmpfile"
+        if [ "$actual" -eq "$expected" ]; then
+            passed=$((passed + 1))
+            printf "."
+        else
+            failed=$((failed + 1))
+            printf "\nFAIL: %s (expected exit %d, got %d)\n" "$name" "$expected" "$actual"
+        fi
+    else
+        rm -f "$tmpfile"
+        failed=$((failed + 1))
+        printf "\nFAIL: %s (compilation failed)\n" "$name"
+    fi
+}
+
+# Find and run all .c test files
+for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
+    # Parse directives from the file
+    has_check=false
+    has_exit=false
+    exit_code=0
+    mode=""
+
+    while IFS= read -r line; do
+        case "$line" in
+            *"// CHECK:"*|*"// CHECK-"*)
+                has_check=true
+                ;;
+            *"// EXIT:"*)
+                has_exit=true
+                exit_code="$(echo "$line" | sed 's/.*\/\/ EXIT: *//')"
+                ;;
+            *"// RUN:"*"--emit-ir"*)
+                mode="--emit-ir"
+                ;;
+            *"// RUN:"*"--emit-asm"*)
+                mode="--emit-asm"
+                ;;
+        esac
+    done < "$file"
+
+    if [ "$has_check" = true ] && [ -n "$mode" ]; then
+        run_check_test "$file" "$mode"
+    elif [ "$has_exit" = true ]; then
+        run_exit_test "$file" "$exit_code"
+    fi
+done
+
+printf "\n\n%d tests: %d passed, %d failed\n" "$total" "$passed" "$failed"
+[ "$failed" -eq 0 ]
