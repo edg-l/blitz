@@ -49,8 +49,13 @@ run_exit_test() {
 
     if "$TINYC" "$file" -o "$tmpfile" 2>/dev/null; then
         local actual=0
-        "$tmpfile" 2>/dev/null && actual=0 || actual=$?
+        timeout 10 "$tmpfile" 2>/dev/null && actual=0 || actual=$?
         rm -f "$tmpfile"
+        if [ "$actual" -eq 124 ]; then
+            failed=$((failed + 1))
+            printf "\nFAIL: %s (timeout)\n" "$name"
+            return
+        fi
         if [ "$actual" -eq "$expected" ]; then
             passed=$((passed + 1))
             printf "."

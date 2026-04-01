@@ -130,15 +130,15 @@ pub(super) fn lower_terminator(
     next_block_id: Option<BlockId>,
     egraph: &EGraph,
     class_to_vreg: &HashMap<ClassId, VReg>,
+    ret_class_to_vreg: &HashMap<ClassId, VReg>,
     block_param_map: &HashMap<(BlockId, u32), ClassId>,
     regalloc: &RegAllocResult,
     func: &Function,
     next_label: &mut LabelId,
 ) -> Result<Vec<BlockItem>, CompileError> {
-    let get_reg = |cid: ClassId| -> Option<Reg> {
+    let get_reg = |cid: ClassId, ctv: &HashMap<ClassId, VReg>| -> Option<Reg> {
         let canon = egraph.unionfind.find_immutable(cid);
-        class_to_vreg
-            .get(&canon)
+        ctv.get(&canon)
             .and_then(|v| regalloc.vreg_to_reg.get(v).copied())
     };
 
@@ -146,7 +146,7 @@ pub(super) fn lower_terminator(
         EffectfulOp::Ret { val } => {
             let mut items = Vec::new();
             if let Some(&ret_cid) = val.as_ref() {
-                if let Some(ret_reg) = get_reg(ret_cid) {
+                if let Some(ret_reg) = get_reg(ret_cid, ret_class_to_vreg) {
                     if ret_reg != GPR_RETURN_REG {
                         // Use the function's return type for the MOV size.
                         let ret_size = func

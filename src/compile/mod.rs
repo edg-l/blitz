@@ -554,6 +554,52 @@ pub fn compile(
                 &vreg_classes,
             );
 
+            // Step 8a-ret: If this block ends with Ret, ensure the return value
+            // is available in this block's schedule. The global liveness doesn't
+            // include Ret operands (adding them breaks while loop liveness), so
+            // rewrite_block_for_splitting won't insert a reload/remat for them.
+            // Handle it here: if the ret value is from another block and not
+            // already in the schedule, insert a remat (for Iconst/StackAddr) or
+            // spill-load.
+            let (split_schedule, rename) = {
+                let mut schedule = split_schedule;
+                let mut rename = rename;
+                if let Some(EffectfulOp::Ret { val: Some(cid) }) = block.ops.last() {
+                    let canon = egraph.unionfind.find_immutable(*cid);
+                    if let Some(&vreg) = class_to_vreg.get(&canon) {
+                        let in_schedule = schedule.iter().any(|i| i.dst == vreg)
+                            || rename
+                                .values()
+                                .any(|&v| schedule.iter().any(|i| i.dst == v));
+                        if !in_schedule {
+                            // Value not in this block's schedule -- need remat or reload.
+                            if let Some(def) = def_insts.get(&vreg) {
+                                if crate::regalloc::spill::is_rematerializable(def) {
+                                    let new_vreg = VReg(shared_next_vreg);
+                                    shared_next_vreg += 1;
+                                    schedule.push(ScheduledInst {
+                                        op: def.op.clone(),
+                                        dst: new_vreg,
+                                        operands: def.operands.clone(),
+                                    });
+                                    rename.insert(vreg, new_vreg);
+                                } else if let Some(&slot) = spill_map.vreg_to_slot.get(&vreg) {
+                                    let new_vreg = VReg(shared_next_vreg);
+                                    shared_next_vreg += 1;
+                                    schedule.push(ScheduledInst {
+                                        op: Op::SpillLoad(slot as i64),
+                                        dst: new_vreg,
+                                        operands: vec![],
+                                    });
+                                    rename.insert(vreg, new_vreg);
+                                }
+                            }
+                        }
+                    }
+                }
+                (schedule, rename)
+            };
+
             // Step 8a-reorder: Move all BlockParam instructions to the front of
             // split_schedule. Block params receive their values from predecessor
             // phi copies before the block begins execution. Placing them at
@@ -908,6 +954,7 @@ pub fn compile(
             next_block_id,
             &egraph,
             &class_to_vreg,
+            &block_class_to_vreg,
             &block_param_map,
             &regalloc_result,
             func,
