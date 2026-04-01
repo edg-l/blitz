@@ -24,6 +24,10 @@ pub struct RegAllocResult {
     pub spill_slots: u32,
     /// Callee-saved registers that were actually assigned (must be preserved).
     pub callee_saved_used: Vec<Reg>,
+    /// Final instruction list with spill/reload code inserted and coalescing
+    /// aliases applied. Callers must use this instead of their original
+    /// instruction list, since `vreg_to_reg` was computed for this version.
+    pub insts: Vec<ScheduledInst>,
 }
 
 /// Allocate physical registers for a single basic block's scheduled instruction list.
@@ -224,6 +228,7 @@ pub fn allocate(
                 vreg_to_reg,
                 spill_slots,
                 callee_saved_used,
+                insts: insts_coalesced,
             });
         }
 

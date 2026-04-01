@@ -549,7 +549,7 @@ pub fn compile(
             }),
         })?;
 
-        let rewritten = vec![rewrite_vregs(&all_scheduled, &result.vreg_to_reg)];
+        let rewritten = vec![rewrite_vregs(&result.insts, &result.vreg_to_reg)];
         let rename_maps: Vec<HashMap<VReg, VReg>> = vec![HashMap::new()];
         (result, rewritten, rename_maps)
     } else {
@@ -998,13 +998,9 @@ pub fn compile(
                 }
             }
 
-            // Rewrite split_schedule with physical registers.
-            // The split_schedule contains cross-block spill/reload instructions
-            // with absolute slot numbers (0..cross_block_slots). Any intra-block
-            // spill instructions inserted by allocate() internally use a separate
-            // local copy and are not reflected here; their slot count is tracked
-            // for frame layout purposes.
-            let rewritten_insts = rewrite_vregs(&split_schedule, &block_result.vreg_to_reg);
+            // Rewrite with physical registers. Use the allocator's final
+            // instruction list which includes intra-block spill/reload code.
+            let rewritten_insts = rewrite_vregs(&block_result.insts, &block_result.vreg_to_reg);
             spill_slot_counter += block_result.spill_slots;
             block_rewritten_storage[block_idx] = rewritten_insts;
             block_rename_maps[block_idx] = rename;
@@ -1017,6 +1013,7 @@ pub fn compile(
             vreg_to_reg: merged_vreg_to_reg,
             spill_slots: spill_slot_counter,
             callee_saved_used: merged_callee_saved,
+            insts: vec![], // per-block insts already consumed above
         };
 
         (merged_result, block_rewritten_storage, block_rename_maps)
