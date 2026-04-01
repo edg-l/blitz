@@ -458,11 +458,28 @@ impl Op {
             }
 
             // ── x86 LEA variants (I64, I64 → I64) ───────────────────────────
-            Op::X86Lea2 | Op::X86Lea3 { .. } | Op::X86Lea4 { .. } => {
+            Op::X86Lea2 | Op::X86Lea3 { .. } => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
-                assert_eq!(child_types[0], Type::I64, "{self:?} requires I64 base");
-                assert_eq!(child_types[1], Type::I64, "{self:?} requires I64 index");
-                Type::I64
+                assert!(
+                    matches!(child_types[0], Type::I32 | Type::I64),
+                    "{self:?} requires I32 or I64 base, got {:?}",
+                    child_types[0]
+                );
+                assert_eq!(
+                    child_types[0], child_types[1],
+                    "{self:?} base and index must have same type"
+                );
+                child_types[0].clone()
+            }
+            Op::X86Lea4 { .. } => {
+                assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
+                assert!(
+                    matches!(child_types[0], Type::I32 | Type::I64),
+                    "{self:?} requires I32 or I64 base, got {:?}",
+                    child_types[0]
+                );
+                // child_types[1] may be NONE (no index register), skip type check
+                child_types[0].clone()
             }
 
             // ── X86Idiv / X86Div (2 integer children → Pair(I64, I64)) ────────

@@ -152,10 +152,10 @@ fn apply_lea_rules(egraph: &mut EGraph) -> bool {
             Op::Add if snap.children.len() == 2 => {
                 let a = snap.children[0];
                 let b = snap.children[1];
-                // Only apply LEA to I64 operands
+                // Apply LEA to I32 and I64 operands (no byte/word form)
                 let a_ty = egraph.class(egraph.unionfind.find_immutable(a)).ty.clone();
                 let b_ty = egraph.class(egraph.unionfind.find_immutable(b)).ty.clone();
-                if a_ty == Type::I64 && b_ty == Type::I64 {
+                if matches!(a_ty, Type::I32 | Type::I64) && a_ty == b_ty {
                     let lea2 = egraph.add(ENode {
                         op: Op::X86Lea2,
                         children: smallvec![a, b],
@@ -181,7 +181,7 @@ fn apply_lea_rules(egraph: &mut EGraph) -> bool {
                                     .class(egraph.unionfind.find_immutable(idx))
                                     .ty
                                     .clone();
-                                if a_ty == Type::I64 && idx_ty == Type::I64 {
+                                if matches!(a_ty, Type::I32 | Type::I64) && a_ty == idx_ty {
                                     let lea3 = egraph.add(ENode {
                                         op: Op::X86Lea3 { scale },
                                         children: smallvec![a, idx],
@@ -199,7 +199,10 @@ fn apply_lea_rules(egraph: &mut EGraph) -> bool {
 
                 // Add(a, Iconst(d)) -> X86Lea4(a, NONE, 1, d)
                 if let Some((d, _)) = find_iconst(egraph, b) {
-                    if d >= i32::MIN as i64 && d <= i32::MAX as i64 && a_ty == Type::I64 {
+                    if d >= i32::MIN as i64
+                        && d <= i32::MAX as i64
+                        && matches!(a_ty, Type::I32 | Type::I64)
+                    {
                         let lea4 = egraph.add(ENode {
                             op: Op::X86Lea4 {
                                 scale: 1,
@@ -233,7 +236,7 @@ fn apply_lea_rules(egraph: &mut EGraph) -> bool {
                     .class(egraph.unionfind.find_immutable(base))
                     .ty
                     .clone();
-                if base_ty != Type::I64 {
+                if !matches!(base_ty, Type::I32 | Type::I64) {
                     continue;
                 }
                 if let Some(val) = val_opt {
@@ -337,7 +340,7 @@ fn apply_three_component_lea(egraph: &mut EGraph) -> bool {
                     .class(egraph.unionfind.find_immutable(idx))
                     .ty
                     .clone();
-                if base_ty != Type::I64 || idx_ty != Type::I64 {
+                if !matches!(base_ty, Type::I32 | Type::I64) || base_ty != idx_ty {
                     continue;
                 }
                 let lea4 = egraph.add(ENode {

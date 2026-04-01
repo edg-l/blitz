@@ -445,7 +445,7 @@ fn lower_op(
                 .and_then(|r| *r)
                 .ok_or_else(|| "X86Lea2: no register for index".to_string())?;
             Ok(vec![MachInst::Lea {
-                size: OpSize::S64,
+                size,
                 dst: Operand::Reg(dst),
                 addr: Addr {
                     base: Some(base),
@@ -467,7 +467,7 @@ fn lower_op(
                 .and_then(|r| *r)
                 .ok_or_else(|| "X86Lea3: no register for index".to_string())?;
             Ok(vec![MachInst::Lea {
-                size: OpSize::S64,
+                size,
                 dst: Operand::Reg(dst),
                 addr: Addr {
                     base: Some(base),
@@ -486,7 +486,7 @@ fn lower_op(
                 .ok_or_else(|| "X86Lea4: no register for base".to_string())?;
             let idx_reg = operand_regs.get(1).and_then(|r| *r);
             Ok(vec![MachInst::Lea {
-                size: OpSize::S64,
+                size,
                 dst: Operand::Reg(dst),
                 addr: Addr {
                     base: Some(base),
@@ -507,7 +507,7 @@ fn lower_op(
                 .ok_or_else(|| "Addr: no register for base".to_string())?;
             let idx_reg = operand_regs.get(1).and_then(|r| *r);
             Ok(vec![MachInst::Lea {
-                size: OpSize::S64,
+                size,
                 dst: Operand::Reg(dst),
                 addr: Addr {
                     base: Some(base),
