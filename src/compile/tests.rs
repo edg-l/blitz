@@ -3042,3 +3042,250 @@ int main(void) {
         assert_eq!(code, 0, "i32_sum20 returned wrong exit code {code}");
     }
 }
+
+// ── insert_early_barrier_spills unit tests ──────────────────────────────────
+
+use crate::schedule::scheduler::ScheduledInst;
+
+fn make_inst(dst: u32, op: Op, operands: &[u32]) -> ScheduledInst {
+    ScheduledInst {
+        dst: VReg(dst),
+        op,
+        operands: operands.iter().map(|&v| VReg(v)).collect(),
+    }
+}
+
+#[test]
+fn early_spill_distant_barrier_result() {
+    // LoadResult at barrier 0, consumer at group 3 (distance = 2).
+    // Should insert SpillStore in group 1, SpillLoad in group 3.
+    let mut schedule = vec![
+        make_inst(0, Op::LoadResult(0, Type::I32), &[]), // barrier 0 result
+        make_inst(1, Op::Iconst(10, Type::I32), &[]),    // filler
+        make_inst(2, Op::Iconst(20, Type::I32), &[]),    // filler
+        make_inst(3, Op::X86Add, &[0, 2]),               // consumer of LoadResult
+        make_inst(4, Op::Proj0, &[3]),
+    ];
+    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = HashMap::new();
+    let mut vreg_group = HashMap::from([
+        (VReg(0), 1usize), // barrier 0 result -> group 1
+        (VReg(1), 1),
+        (VReg(2), 2),
+        (VReg(3), 3), // consumer in group 3
+        (VReg(4), 3),
+    ]);
+    let vreg_types = HashMap::from([
+        (VReg(0), Type::I32),
+        (VReg(1), Type::I32),
+        (VReg(2), Type::I32),
+        (VReg(3), Type::I32),
+        (VReg(4), Type::I32),
+    ]);
+    let mut next_vreg = 10u32;
+    let mut spill_counter = 0u32;
+
+    insert_early_barrier_spills(
+        &mut schedule,
+        &vreg_to_result,
+        &vreg_to_arg,
+        &mut vreg_group,
+        &vreg_types,
+        &mut next_vreg,
+        &mut spill_counter,
+    );
+
+    // Should have allocated one spill slot.
+    assert_eq!(spill_counter, 1, "one spill slot allocated");
+
+    // Should have inserted SpillStore and SpillLoad.
+    let spill_stores: Vec<_> = schedule
+        .iter()
+        .filter(|i| matches!(i.op, Op::SpillStore(_)))
+        .collect();
+    let spill_loads: Vec<_> = schedule
+        .iter()
+        .filter(|i| matches!(i.op, Op::SpillLoad(_)))
+        .collect();
+    assert_eq!(spill_stores.len(), 1, "one SpillStore inserted");
+    assert_eq!(spill_loads.len(), 1, "one SpillLoad inserted");
+
+    // SpillStore should reference the original LoadResult VReg as operand.
+    assert_eq!(spill_stores[0].operands, vec![VReg(0)]);
+
+    // SpillStore should be in group 1 (def_group).
+    assert_eq!(vreg_group[&spill_stores[0].dst], 1);
+
+    // SpillLoad should be in group 3 (consumer_group).
+    let reload_vreg = spill_loads[0].dst;
+    assert_eq!(vreg_group[&reload_vreg], 3);
+
+    // Consumer's operand should be rewritten to the reload VReg.
+    let consumer = schedule
+        .iter()
+        .find(|i| matches!(i.op, Op::X86Add))
+        .unwrap();
+    assert!(
+        consumer.operands.contains(&reload_vreg),
+        "consumer should reference reload VReg"
+    );
+    assert!(
+        !consumer.operands.contains(&VReg(0)),
+        "consumer should NOT reference original LoadResult VReg"
+    );
+}
+
+#[test]
+fn early_spill_skips_close_consumer() {
+    // LoadResult at barrier 0, consumer at group 2 (distance = 1).
+    // Should NOT insert any spills.
+    let mut schedule = vec![
+        make_inst(0, Op::LoadResult(0, Type::I32), &[]),
+        make_inst(1, Op::X86Add, &[0, 0]),
+    ];
+    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = HashMap::new();
+    let mut vreg_group = HashMap::from([
+        (VReg(0), 1usize),
+        (VReg(1), 2), // only 1 group away
+    ]);
+    let vreg_types = HashMap::from([(VReg(0), Type::I32), (VReg(1), Type::I32)]);
+    let mut next_vreg = 10u32;
+    let mut spill_counter = 0u32;
+
+    insert_early_barrier_spills(
+        &mut schedule,
+        &vreg_to_result,
+        &vreg_to_arg,
+        &mut vreg_group,
+        &vreg_types,
+        &mut next_vreg,
+        &mut spill_counter,
+    );
+
+    assert_eq!(spill_counter, 0, "no spill slots allocated");
+    assert_eq!(schedule.len(), 2, "no instructions inserted");
+}
+
+#[test]
+fn early_spill_skips_effectful_consumer() {
+    // LoadResult at barrier 0, consumer at group 3 (distance = 2),
+    // BUT the LoadResult is also consumed by a later effectful op
+    // (vreg_to_arg_of_barrier has it). Should NOT spill.
+    let mut schedule = vec![
+        make_inst(0, Op::LoadResult(0, Type::I32), &[]),
+        make_inst(1, Op::Iconst(10, Type::I32), &[]),
+        make_inst(2, Op::X86Add, &[0, 1]),
+    ];
+    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    // VReg(0) is also consumed by barrier 2 (a Store).
+    let vreg_to_arg = HashMap::from([(VReg(0), 2usize)]);
+    let mut vreg_group = HashMap::from([(VReg(0), 1usize), (VReg(1), 1), (VReg(2), 3)]);
+    let vreg_types = HashMap::from([
+        (VReg(0), Type::I32),
+        (VReg(1), Type::I32),
+        (VReg(2), Type::I32),
+    ]);
+    let mut next_vreg = 10u32;
+    let mut spill_counter = 0u32;
+
+    insert_early_barrier_spills(
+        &mut schedule,
+        &vreg_to_result,
+        &vreg_to_arg,
+        &mut vreg_group,
+        &vreg_types,
+        &mut next_vreg,
+        &mut spill_counter,
+    );
+
+    assert_eq!(spill_counter, 0, "no spill for effectful-consumed result");
+}
+
+#[test]
+fn early_spill_skips_no_consumers() {
+    // LoadResult at barrier 0 with no scheduled consumers at all.
+    let mut schedule = vec![make_inst(0, Op::LoadResult(0, Type::I32), &[])];
+    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = HashMap::new();
+    let mut vreg_group = HashMap::from([(VReg(0), 1usize)]);
+    let vreg_types = HashMap::from([(VReg(0), Type::I32)]);
+    let mut next_vreg = 10u32;
+    let mut spill_counter = 0u32;
+
+    insert_early_barrier_spills(
+        &mut schedule,
+        &vreg_to_result,
+        &vreg_to_arg,
+        &mut vreg_group,
+        &vreg_types,
+        &mut next_vreg,
+        &mut spill_counter,
+    );
+
+    assert_eq!(spill_counter, 0, "no spill for dead result");
+}
+
+#[test]
+fn early_spill_multiple_consumers_uses_earliest() {
+    // LoadResult at barrier 0, consumers at groups 4 and 5.
+    // Should spill with reload at group 4 (earliest consumer).
+    // Both consumers should be rewritten.
+    let mut schedule = vec![
+        make_inst(0, Op::LoadResult(0, Type::I32), &[]),
+        make_inst(1, Op::Iconst(1, Type::I32), &[]),
+        make_inst(2, Op::Iconst(2, Type::I32), &[]),
+        make_inst(3, Op::X86Add, &[0, 1]), // consumer 1 in group 4
+        make_inst(4, Op::X86Sub, &[0, 2]), // consumer 2 in group 5
+    ];
+    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = HashMap::new();
+    let mut vreg_group = HashMap::from([
+        (VReg(0), 1usize),
+        (VReg(1), 2),
+        (VReg(2), 3),
+        (VReg(3), 4),
+        (VReg(4), 5),
+    ]);
+    let vreg_types = HashMap::from([
+        (VReg(0), Type::I32),
+        (VReg(1), Type::I32),
+        (VReg(2), Type::I32),
+        (VReg(3), Type::I32),
+        (VReg(4), Type::I32),
+    ]);
+    let mut next_vreg = 10u32;
+    let mut spill_counter = 0u32;
+
+    insert_early_barrier_spills(
+        &mut schedule,
+        &vreg_to_result,
+        &vreg_to_arg,
+        &mut vreg_group,
+        &vreg_types,
+        &mut next_vreg,
+        &mut spill_counter,
+    );
+
+    assert_eq!(spill_counter, 1);
+
+    let spill_loads: Vec<_> = schedule
+        .iter()
+        .filter(|i| matches!(i.op, Op::SpillLoad(_)))
+        .collect();
+    let reload_vreg = spill_loads[0].dst;
+    // Reload should be at group 4 (earliest consumer).
+    assert_eq!(vreg_group[&reload_vreg], 4);
+
+    // Both consumers should use the reload VReg.
+    let add = schedule
+        .iter()
+        .find(|i| matches!(i.op, Op::X86Add))
+        .unwrap();
+    let sub = schedule
+        .iter()
+        .find(|i| matches!(i.op, Op::X86Sub))
+        .unwrap();
+    assert!(add.operands.contains(&reload_vreg));
+    assert!(sub.operands.contains(&reload_vreg));
+}
