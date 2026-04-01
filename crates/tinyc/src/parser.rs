@@ -2,6 +2,11 @@ use crate::ast::{BinOp, CType, Expr, ExternDecl, FnDef, Program, Stmt, UnaryOp};
 use crate::error::TinyErr;
 use crate::lexer::{Span, SpannedToken, Token};
 
+enum FnOrForward {
+    Fn(FnDef),
+    Forward(ExternDecl),
+}
+
 pub struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
@@ -16,7 +21,10 @@ impl Parser {
             if p.at(Token::Extern) {
                 extern_decls.push(p.parse_extern_decl()?);
             } else {
-                functions.push(p.parse_function()?);
+                match p.parse_function_or_forward_decl()? {
+                    FnOrForward::Fn(f) => functions.push(f),
+                    FnOrForward::Forward(d) => extern_decls.push(d),
+                }
             }
         }
         Ok(Program {
@@ -169,8 +177,9 @@ impl Parser {
         })
     }
 
-    fn parse_function(&mut self) -> Result<FnDef, TinyErr> {
-        // <type> name(<type> p1, <type> p2, ...) { body }
+    fn parse_function_or_forward_decl(&mut self) -> Result<FnOrForward, TinyErr> {
+        // <type> name(<params>) { body }   -- function definition
+        // <type> name(<params>) ;          -- forward declaration
         let return_type = self.parse_type()?;
 
         let name_tok = self.advance().clone();
@@ -208,13 +217,24 @@ impl Parser {
         }
         self.expect(Token::RParen)?;
 
+        // Forward declaration: semicolon instead of body
+        if self.at(Token::Semi) {
+            self.advance();
+            let param_types = params.into_iter().map(|(ty, _)| ty).collect();
+            return Ok(FnOrForward::Forward(ExternDecl {
+                name,
+                return_type,
+                params: param_types,
+            }));
+        }
+
         let body = self.parse_block()?;
-        Ok(FnDef {
+        Ok(FnOrForward::Fn(FnDef {
             name,
             return_type,
             params,
             body,
-        })
+        }))
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, TinyErr> {

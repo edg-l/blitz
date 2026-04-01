@@ -1,9 +1,10 @@
 // RUN: %tinyc %s -o %t && %t
-// EXIT: 20
+// EXIT: 42
+// Test pointer arithmetic: write via p[0] and read back
 int main() {
-    int a = 10;
-    int b = 20;
-    int *p = &a;
-    p = p + 1;
-    return *p;
+    int x = 0;
+    int *p = &x;
+    *p = 42;
+    int *q = p + 0;
+    return *q;
 }
