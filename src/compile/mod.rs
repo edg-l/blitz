@@ -320,10 +320,16 @@ pub fn compile(
             assign_barrier_groups(sched, &vreg_to_result_of_barrier, &vreg_to_arg_of_barrier);
 
         // Stable-sort by group to reorder while preserving within-group order.
+        // Barrier results (LoadResult/CallResult) sort to the FRONT of their
+        // group: their values are produced by effectful ops at the group
+        // boundary, so the register is occupied from the start of the group.
+        // Placing them after pure ops would let the regalloc think the register
+        // is free, causing incorrect reuse and clobbering.
         let mut indexed: Vec<(usize, &ScheduledInst)> = sched.iter().enumerate().collect();
         indexed.sort_by_key(|(orig_idx, inst)| {
             let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
-            (g, *orig_idx)
+            let is_barrier_result = !matches!(inst.op, Op::LoadResult(_, _) | Op::CallResult(_, _));
+            (g, is_barrier_result, *orig_idx)
         });
         let reordered: Vec<ScheduledInst> =
             indexed.into_iter().map(|(_, inst)| inst.clone()).collect();
