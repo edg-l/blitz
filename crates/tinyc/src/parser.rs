@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, CType, Expr, FnDef, Program, Stmt, UnaryOp};
+use crate::ast::{BinOp, CType, Expr, ExternDecl, FnDef, Program, Stmt, UnaryOp};
 use crate::error::TinyErr;
 use crate::lexer::{Span, SpannedToken, Token};
 
@@ -11,10 +11,18 @@ impl Parser {
     pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program, TinyErr> {
         let mut p = Parser { tokens, pos: 0 };
         let mut functions = Vec::new();
+        let mut extern_decls = Vec::new();
         while !p.at(Token::Eof) {
-            functions.push(p.parse_function()?);
+            if p.at(Token::Extern) {
+                extern_decls.push(p.parse_extern_decl()?);
+            } else {
+                functions.push(p.parse_function()?);
+            }
         }
-        Ok(Program { functions })
+        Ok(Program {
+            functions,
+            extern_decls,
+        })
     }
 
     fn peek(&self) -> &Token {
@@ -121,6 +129,44 @@ impl Parser {
             ty = CType::Ptr(Box::new(ty));
         }
         Ok(ty)
+    }
+
+    fn parse_extern_decl(&mut self) -> Result<ExternDecl, TinyErr> {
+        self.expect(Token::Extern)?;
+        let return_type = self.parse_type()?;
+        let name_tok = self.advance().clone();
+        let name = match &name_tok.token {
+            Token::Ident(s) => s.clone(),
+            other => {
+                return Err(TinyErr {
+                    line: name_tok.span.line,
+                    col: name_tok.span.col,
+                    msg: format!("expected function name, got {other:?}"),
+                });
+            }
+        };
+        self.expect(Token::LParen)?;
+        let mut params = Vec::new();
+        while !self.at(Token::RParen) {
+            let param_type = self.parse_type()?;
+            // Optional parameter name — discard if present
+            if let Token::Ident(_) = self.peek() {
+                self.advance();
+            }
+            params.push(param_type);
+            if self.at(Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        self.expect(Token::Semi)?;
+        Ok(ExternDecl {
+            name,
+            return_type,
+            params,
+        })
     }
 
     fn parse_function(&mut self) -> Result<FnDef, TinyErr> {
@@ -442,6 +488,10 @@ impl Parser {
             Token::IntLit(v) => {
                 self.advance();
                 Ok(Expr::IntLit(v))
+            }
+            Token::StringLit(bytes) => {
+                self.advance();
+                Ok(Expr::StringLit(bytes))
             }
             Token::Ident(name) => {
                 self.advance();

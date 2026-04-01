@@ -15,8 +15,10 @@ pub enum Token {
     While,
     Return,
     Sizeof,
+    Extern,
     // Literals and names
     IntLit(i64),
+    StringLit(Vec<u8>),
     Ident(String),
     // Arithmetic operators
     Plus,
@@ -282,8 +284,65 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     "while" => Token::While,
                     "return" => Token::Return,
                     "sizeof" => Token::Sizeof,
+                    "extern" => Token::Extern,
                     _ => Token::Ident(s),
                 }
+            }
+            '"' => {
+                pos += 1;
+                col += 1;
+                let mut bytes = Vec::new();
+                loop {
+                    if pos >= chars.len() {
+                        return Err(TinyErr {
+                            line,
+                            col: span.col,
+                            msg: "unterminated string literal".into(),
+                        });
+                    }
+                    let c = chars[pos];
+                    if c == '"' {
+                        pos += 1;
+                        col += 1;
+                        break;
+                    }
+                    if c == '\\' {
+                        pos += 1;
+                        col += 1;
+                        if pos >= chars.len() {
+                            return Err(TinyErr {
+                                line,
+                                col: span.col,
+                                msg: "unterminated string literal".into(),
+                            });
+                        }
+                        let esc = chars[pos];
+                        let byte = match esc {
+                            'n' => 0x0A,
+                            '0' => 0x00,
+                            '\\' => 0x5C,
+                            '"' => 0x22,
+                            't' => 0x09,
+                            other => {
+                                return Err(TinyErr {
+                                    line,
+                                    col,
+                                    msg: format!("unknown escape sequence '\\{other}'"),
+                                });
+                            }
+                        };
+                        bytes.push(byte);
+                        pos += 1;
+                        col += 1;
+                    } else {
+                        let mut buf = [0u8; 4];
+                        let encoded = c.encode_utf8(&mut buf);
+                        bytes.extend_from_slice(encoded.as_bytes());
+                        pos += 1;
+                        col += 1;
+                    }
+                }
+                Token::StringLit(bytes)
             }
             other => {
                 return Err(TinyErr {

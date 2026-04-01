@@ -63,50 +63,45 @@ pub fn select_spill(
     loop_depths: &HashMap<VReg, u32>,
 ) -> Option<usize> {
     // Find the instruction index where we first exceed register pressure.
-    let pressure_point = find_pressure_point(liveness, available_regs)?;
+    if let Some(pressure_point) = find_pressure_point(liveness, available_regs) {
+        let next_use = compute_next_use(insts, pressure_point);
+        let live_at_pressure = &liveness.live_at[pressure_point];
 
-    // Build a next-use map: VReg index -> next instruction index where it's used.
-    let next_use = compute_next_use(insts, pressure_point);
-
-    // Gather candidates: VRegs live at the pressure point.
-    let live_at_pressure = &liveness.live_at[pressure_point];
-
-    // Prefer to spill VRegs with farthest next use.
-    // Exclude rematerializable VRegs (Iconst definitions) if possible.
-    let iconst_defs: HashSet<usize> = iconst_defined_vregs(insts);
-
-    // First try non-rematerializable candidates.
-    let non_remat: Vec<usize> = live_at_pressure
-        .iter()
-        .map(|v| v.0 as usize)
-        .filter(|&idx| idx < graph.num_vregs && !iconst_defs.contains(&idx))
-        .collect();
-
-    let candidates = if non_remat.is_empty() {
-        // Fall back to all candidates including rematerializable ones.
-        live_at_pressure
+        // Consider all VRegs live at the pressure point (including remat).
+        let candidates: Vec<usize> = live_at_pressure
             .iter()
             .map(|v| v.0 as usize)
             .filter(|&idx| idx < graph.num_vregs)
-            .collect::<Vec<_>>()
-    } else {
-        non_remat
-    };
+            .collect();
 
-    // Pick the candidate with the farthest next use, penalized by loop depth.
-    // A VReg at loop depth d has its effective next-use distance divided by 10^d,
-    // making loop-body VRegs much less attractive as spill candidates.
-    candidates.into_iter().max_by_key(|&idx| {
-        let next = next_use.get(&idx).copied().unwrap_or(usize::MAX);
-        let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
-        let penalty = 10u64.saturating_pow(depth);
-        (next as u64).saturating_div(penalty)
-    })
+        // Pick the candidate with the farthest next use, penalized by loop depth.
+        if let Some(best) = candidates.into_iter().max_by_key(|&idx| {
+            let next = next_use.get(&idx).copied().unwrap_or(usize::MAX);
+            let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
+            let penalty = 10u64.saturating_pow(depth);
+            (next as u64).saturating_div(penalty)
+        }) {
+            return Some(best);
+        }
+    }
+
+    // Fallback: coloring overestimates but no point exceeds available_regs.
+    // Pick the VReg with the highest interference degree.
+    (0..graph.num_vregs)
+        .filter(|&idx| !graph.adj[idx].is_empty())
+        .max_by_key(|&idx| {
+            let degree = graph.adj[idx].len();
+            let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
+            let penalty = 10usize.saturating_pow(depth);
+            degree / penalty.max(1)
+        })
 }
 
 fn find_pressure_point(liveness: &LivenessInfo, available_regs: u32) -> Option<usize> {
     for (i, live_set) in liveness.live_at.iter().enumerate() {
-        if live_set.len() > available_regs as usize {
+        // live_at[i] excludes the destination of instruction i, but the dst
+        // also needs a register. True pressure = live_at[i].len() + 1.
+        if live_set.len() >= available_regs as usize {
             return Some(i);
         }
     }
@@ -124,20 +119,13 @@ fn compute_next_use(insts: &[ScheduledInst], from: usize) -> HashMap<usize, usiz
     next_use
 }
 
-fn iconst_defined_vregs(insts: &[ScheduledInst]) -> HashSet<usize> {
-    insts
-        .iter()
-        .filter(|inst| matches!(&inst.op, Op::Iconst(_, _)))
-        .map(|inst| inst.dst.0 as usize)
-        .collect()
-}
-
 // ── Rematerialization check ────────────────────────────────────────────────────
 
 /// Returns true if the VReg defined by `inst` can be rematerialized
 /// (i.e., cheaply recomputed instead of spilled to memory).
+/// Both Iconst and StackAddr have no dependencies and produce constants.
 pub fn is_rematerializable(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::Iconst(_, _))
+    matches!(&inst.op, Op::Iconst(_, _) | Op::StackAddr(_))
 }
 
 // ── Spill code insertion (10.10) ──────────────────────────────────────────────
@@ -262,7 +250,18 @@ pub fn insert_spills(
         let dst_idx = inst.dst.0 as usize;
         let is_spill_def = spilled.contains(&dst_idx);
 
-        new_insts.push(inst);
+        // For rematerializable spilled VRegs, drop the original definition
+        // entirely — uses are replaced by fresh remat copies above. Keeping
+        // the dead def would preserve its live range via block_live_out.
+        if is_spill_def
+            && def_ops
+                .get(&dst_idx)
+                .map_or(false, |d| is_rematerializable(d))
+        {
+            // Skip the original definition.
+        } else {
+            new_insts.push(inst);
+        }
 
         // After the def of a spilled VReg, insert a SpillStore (if not remat).
         if is_spill_def && let Some(&slot) = vreg_to_slot.get(&dst_idx) {

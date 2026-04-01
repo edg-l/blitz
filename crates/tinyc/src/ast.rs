@@ -135,8 +135,15 @@ impl CType {
     }
 }
 
+pub struct ExternDecl {
+    pub name: String,
+    pub return_type: CType,
+    pub params: Vec<CType>,
+}
+
 pub struct Program {
     pub functions: Vec<FnDef>,
+    pub extern_decls: Vec<ExternDecl>,
 }
 
 pub struct FnDef {
@@ -180,6 +187,7 @@ pub enum Stmt {
 
 pub enum Expr {
     IntLit(i64),
+    StringLit(Vec<u8>),
     Var(String),
     BinOp {
         op: BinOp,

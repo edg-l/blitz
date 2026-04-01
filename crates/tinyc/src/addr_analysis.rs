@@ -24,6 +24,7 @@ fn walk_expr(expr: &Expr, set: &mut HashSet<String>) {
             walk_expr(inner, set);
         }
         Expr::IntLit(_) => {}
+        Expr::StringLit(_) => {}
         Expr::Var(_) => {}
         Expr::BinOp { lhs, rhs, .. } => {
             walk_expr(lhs, set);

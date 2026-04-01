@@ -52,6 +52,7 @@ pub fn allocate(
     uses_frame_pointer: bool,
 ) -> Result<RegAllocResult, String> {
     let mut insts: Vec<ScheduledInst> = insts.to_vec();
+    let mut block_live_out: HashSet<VReg> = block_live_out.clone();
     let mut spill_slots = 0u32;
 
     // Determine the starting next_vreg from the max VReg index in the input.
@@ -74,7 +75,7 @@ pub fn allocate(
 
     for round in 0..=MAX_SPILL_ROUNDS {
         // Step 1: Compute liveness.
-        let liveness = compute_liveness(&insts, block_live_out);
+        let liveness = compute_liveness(&insts, &block_live_out);
 
         // Step 2: Build VReg class map (all GPR for now; XMM support in 10.13a).
         let vreg_classes = build_vreg_classes(&insts, &liveness);
@@ -113,7 +114,7 @@ pub fn allocate(
 
         // Step 5: MCS ordering + greedy coloring.
         // Recompute liveness/graph on coalesced insts for accuracy.
-        let liveness2 = compute_liveness(&insts_coalesced, block_live_out);
+        let liveness2 = compute_liveness(&insts_coalesced, &block_live_out);
         let vreg_classes2 = build_vreg_classes(&insts_coalesced, &liveness2);
         let graph2 = build_interference(&liveness2, &insts_coalesced, &vreg_classes2);
         let (graph2, phantom_precolors) = add_call_clobber_interferences(
@@ -196,6 +197,16 @@ pub fn allocate(
         // Insert spill code.
         let mut spilled = HashSet::new();
         spilled.insert(spill_idx);
+
+        // If the spilled VReg is rematerializable, remove it from block_live_out.
+        // Its definition will be dropped and remat copies replace each use.
+        // Keeping it in block_live_out would create phantom liveness.
+        if let Some(def) = insts.iter().find(|i| i.dst.0 as usize == spill_idx) {
+            if super::spill::is_rematerializable(def) {
+                block_live_out.remove(&VReg(spill_idx as u32));
+            }
+        }
+
         insert_spills(
             &mut insts,
             &spilled,

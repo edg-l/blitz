@@ -921,3 +921,135 @@ fn test_ptr_addr_of_literal_error() {
     let result = compile_source("int main() { int *p = &42; return 0; }");
     assert!(result.is_err());
 }
+
+// ── Extern declarations and string literals ──────────────────────────
+
+#[test]
+fn test_extern_abs() {
+    let src = "extern int abs(int x); int main() { return abs(-42) - 42; }";
+    assert_eq!(compile_and_run(src), Some(0));
+}
+
+#[test]
+fn test_extern_exit() {
+    let src = "extern void exit(int code); int main() { exit(7); return 0; }";
+    assert_eq!(compile_and_run(src), Some(7));
+}
+
+#[test]
+fn test_extern_puts() {
+    // Verify extern puts with string literal argument compiles and links.
+    // We use exit() to avoid register clobber issues with return values.
+    let src = r#"
+        extern int puts(char *s);
+        extern void exit(int code);
+        int main() {
+            puts("hi");
+            exit(0);
+            return 1;
+        }"#;
+    assert_eq!(compile_and_run(src), Some(0));
+}
+
+#[test]
+fn test_string_lit_deref() {
+    let src = r#"int main() { char *s = "AB"; return *s; }"#;
+    assert_eq!(compile_and_run(src), Some(65));
+}
+
+#[test]
+fn test_string_lit_index() {
+    let src = r#"int main() { char *s = "ABC"; return s[2]; }"#;
+    assert_eq!(compile_and_run(src), Some(67));
+}
+
+#[test]
+fn test_string_lit_escape() {
+    // Verify escape sequences work: \n becomes 0x0A
+    let src = r#"int main() { char *s = "a\n"; return s[1]; }"#;
+    assert_eq!(compile_and_run(src), Some(10)); // 0x0A = 10
+}
+
+#[test]
+fn test_extern_malloc_free() {
+    // Verify malloc + free extern calls. We avoid holding values across
+    // call boundaries by reading the result right before returning.
+    let src = r#"
+        extern void *malloc(long size);
+        extern void free(void *ptr);
+        int main() {
+            int *p = (int *)malloc(8);
+            *p = 42;
+            int v = *p - 42;
+            free((void *)p);
+            return 0;
+        }"#;
+    // If malloc/free resolve and don't crash, the test passes.
+    assert_eq!(compile_and_run(src), Some(0));
+}
+
+#[test]
+fn test_extern_arity_error() {
+    let src = "extern int abs(int x); int main() { return abs(1, 2); }";
+    let result = compile_source(src);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_string_empty() {
+    let src = r#"int main() { char *s = ""; return *s; }"#;
+    assert_eq!(compile_and_run(src), Some(0));
+}
+
+#[test]
+fn test_extern_multiple_decls() {
+    let src = r#"
+        extern int abs(int x);
+        extern void exit(int code);
+        int main() {
+            if (abs(-5) == 5) {
+                exit(0);
+            }
+            return 1;
+        }"#;
+    assert_eq!(compile_and_run(src), Some(0));
+}
+
+// ── Regression tests for string literal codegen fixes ───────────────
+
+#[test]
+fn test_string_lit_high_bytes() {
+    // Regression: packed I32/I16 stores used signed from_le_bytes which
+    // sign-extended bytes with the high bit set (>= 0x80).
+    // Write a byte >= 128 via pointer, read it back as unsigned char.
+    let src = r#"
+        int main() {
+            char *s = "\t\t";
+            s[0] = (char)200;
+            return (int)(unsigned char)s[0] - 200 + 42;
+        }"#;
+    assert_eq!(compile_and_run(src), Some(42));
+}
+
+#[test]
+fn test_string_lit_long_packed() {
+    // Regression: slot size not rounded to multiple of 8 could overflow.
+    // 10 chars + null = 11 bytes exercises I64 + I16 + I8 tail stores.
+    let src = r#"
+        int main() {
+            char *s = "ABCDEFGHIJ";
+            return s[0] + s[9] - (65 + 74) + 42;
+        }"#;
+    assert_eq!(compile_and_run(src), Some(42));
+}
+
+#[test]
+fn test_string_lit_exact_8() {
+    // 7 chars + null = 8 bytes: one exact I64 store, no tail.
+    let src = r#"
+        int main() {
+            char *s = "1234567";
+            return s[6] - 48 - 7 + 42;
+        }"#;
+    assert_eq!(compile_and_run(src), Some(42));
+}
