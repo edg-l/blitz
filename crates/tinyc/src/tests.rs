@@ -1070,3 +1070,21 @@ fn test_string_lit_exact_8() {
         }"#;
     assert_eq!(compile_and_run(src), Some(42));
 }
+
+#[test]
+fn test_high_register_pressure() {
+    // Regression: 3 pointer writes + 3 reads in one block previously exhausted
+    // registers. Deadline-based liveness + frame layout fix resolved this.
+    let src = r#"
+        int main() {
+            char *s = "\t\t\t\t\t";
+            s[0] = (char)200;
+            s[1] = (char)128;
+            s[2] = (char)255;
+            int sum = (int)(unsigned char)s[0]
+                    + (int)(unsigned char)s[1]
+                    + (int)(unsigned char)s[2];
+            return sum - (200 + 128 + 255) + 42;
+        }"#;
+    assert_eq!(compile_and_run(src), Some(42));
+}
