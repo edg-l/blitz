@@ -33,7 +33,10 @@ use crate::x86::inst::{LabelId, MachInst};
 use crate::x86::reg::Reg;
 
 mod barrier;
-use barrier::{assign_barrier_groups, build_barrier_maps, insert_early_barrier_spills};
+use barrier::{
+    assign_barrier_groups, build_barrier_maps, compute_effectful_deadlines,
+    insert_early_barrier_spills,
+};
 mod cfg;
 use cfg::{
     build_block_param_class_map, collect_block_effectful_operand_vregs, collect_block_roots,
@@ -147,7 +150,9 @@ pub fn compile(
     opts: &CompileOptions,
     mut sink: Option<&mut dyn DiagnosticSink>,
 ) -> Result<ObjectFile, CompileError> {
-    let user_stack_slots = func.stack_slots.len() as u32;
+    // Compute user stack space in 8-byte units. Each slot may be larger than
+    // 8 bytes (e.g. string literal buffers), so sum actual sizes rounded up.
+    let user_stack_slots: u32 = func.stack_slots.iter().map(|s| (s.size + 7) / 8).sum();
     let mut egraph = func
         .egraph
         .take()
@@ -377,6 +382,31 @@ pub fn compile(
         let mut combined_points = call_points;
         combined_points.extend_from_slice(&div_points);
 
+        // Compute per-VReg deadlines for effectful operands to reduce register pressure.
+        let block = &func.blocks[0];
+        let non_term_count = if block.ops.is_empty() {
+            0
+        } else {
+            block.ops.len() - 1
+        };
+        let deadlines = if non_term_count > 0 {
+            let non_term_ops = &block.ops[..non_term_count];
+            let terminator = block.ops.last().expect("block must have terminator");
+            let (dl, covered) = compute_effectful_deadlines(
+                &all_scheduled,
+                non_term_ops,
+                terminator,
+                &egraph,
+                &class_to_vreg,
+            );
+            for v in &covered {
+                live_out.remove(v);
+            }
+            dl
+        } else {
+            HashMap::new()
+        };
+
         let result = allocate(
             &all_scheduled,
             &all_param_vregs,
@@ -385,6 +415,7 @@ pub fn compile(
             &loop_depths,
             &combined_points,
             opts.force_frame_pointer,
+            &deadlines,
         )
         .map_err(|e| CompileError {
             phase: "regalloc".into(),
@@ -395,6 +426,15 @@ pub fn compile(
                 inst: None,
             }),
         })?;
+
+        if std::env::var("BLITZ_DEBUG_DEADLINES").is_ok() {
+            eprintln!("=== REGALLOC RESULT ===");
+            let mut sorted: Vec<_> = result.vreg_to_reg.iter().collect();
+            sorted.sort_by_key(|(v, _)| v.0);
+            for (v, r) in &sorted {
+                eprintln!("  VReg({}) -> {:?}", v.0, r);
+            }
+        }
 
         let rewritten = vec![rewrite_vregs(&all_scheduled, &result.vreg_to_reg)];
         let rename_maps: Vec<HashMap<VReg, VReg>> = vec![HashMap::new()];
@@ -561,6 +601,8 @@ pub fn compile(
                 .collect();
             // Collect effectful op operands (Load addr, Store addr/val) and apply
             // the split rename map so the per-block regalloc sees the renamed VRegs.
+            // Then compute per-VReg deadlines to reduce register pressure.
+            let block_deadlines: HashMap<VReg, usize>;
             {
                 let mut raw_effectful_live: HashSet<VReg> = HashSet::new();
                 collect_block_effectful_operand_vregs(
@@ -569,9 +611,40 @@ pub fn compile(
                     &class_to_vreg,
                     &mut raw_effectful_live,
                 );
-                for v in raw_effectful_live {
-                    let renamed = rename.get(&v).copied().unwrap_or(v);
+                for v in &raw_effectful_live {
+                    let renamed = rename.get(v).copied().unwrap_or(*v);
                     block_live_out.insert(renamed);
+                }
+
+                // Compute deadlines using post-rename class_to_vreg.
+                let non_term_count = if block.ops.is_empty() {
+                    0
+                } else {
+                    block.ops.len() - 1
+                };
+                if non_term_count > 0 {
+                    let non_term_ops = &block.ops[..non_term_count];
+                    let bcv: HashMap<ClassId, VReg> = class_to_vreg
+                        .iter()
+                        .map(|(&cid, &vreg)| {
+                            let renamed = rename.get(&vreg).copied().unwrap_or(vreg);
+                            (cid, renamed)
+                        })
+                        .collect();
+                    let terminator = block.ops.last().expect("block must have terminator");
+                    let (dl, covered) = compute_effectful_deadlines(
+                        &split_schedule,
+                        non_term_ops,
+                        terminator,
+                        &egraph,
+                        &bcv,
+                    );
+                    for v in &covered {
+                        block_live_out.remove(v);
+                    }
+                    block_deadlines = dl;
+                } else {
+                    block_deadlines = HashMap::new();
                 }
             }
 
@@ -623,6 +696,7 @@ pub fn compile(
                 &block_loop_depths,
                 &block_combined_points,
                 opts.force_frame_pointer,
+                &block_deadlines,
             )
             .map_err(|e| CompileError {
                 phase: "regalloc".into(),

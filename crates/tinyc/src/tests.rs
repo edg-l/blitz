@@ -1021,12 +1021,29 @@ fn test_extern_multiple_decls() {
 fn test_string_lit_high_bytes() {
     // Regression: packed I32/I16 stores used signed from_le_bytes which
     // sign-extended bytes with the high bit set (>= 0x80).
-    // Write a byte >= 128 via pointer, read it back as unsigned char.
     let src = r#"
         int main() {
             char *s = "\t\t";
             s[0] = (char)200;
             return (int)(unsigned char)s[0] - 200 + 42;
+        }"#;
+    assert_eq!(compile_and_run(src), Some(42));
+}
+
+#[test]
+fn test_string_lit_many_stores() {
+    // Regression: many stores in one block exhausted registers when all
+    // effectful operand VRegs were kept alive until end of block.
+    // Deadline-based liveness fixes this by letting VRegs die at their
+    // barrier position.
+    let src = r#"
+        int main() {
+            char *s = "\t\t\t";
+            s[0] = (char)65;
+            s[1] = (char)66;
+            int a = (int)(unsigned char)s[0];
+            int b = (int)(unsigned char)s[1];
+            return a + b - (65 + 66) + 42;
         }"#;
     assert_eq!(compile_and_run(src), Some(42));
 }

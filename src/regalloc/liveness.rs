@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::egraph::extract::VReg;
 use crate::schedule::scheduler::ScheduledInst;
@@ -25,12 +25,31 @@ pub struct LivenessInfo {
 ///     Remove dst from live (if this inst defines it)
 ///     Add all operands to live
 ///   live_in = live after processing all instructions
-pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &HashSet<VReg>) -> LivenessInfo {
+pub fn compute_liveness(
+    insts: &[ScheduledInst],
+    block_live_out: &HashSet<VReg>,
+    deadlines: &HashMap<VReg, usize>,
+) -> LivenessInfo {
     let n = insts.len();
     let mut live_at: Vec<HashSet<VReg>> = vec![HashSet::new(); n];
     let mut live: HashSet<VReg> = block_live_out.clone();
 
+    // Pre-compute per-position deadline VRegs so we can insert them during the
+    // backward pass without scanning the map each iteration.
+    let mut deadline_at: Vec<Vec<VReg>> = vec![vec![]; n];
+    for (&vreg, &pos) in deadlines {
+        if pos < n {
+            deadline_at[pos].push(vreg);
+        }
+        // If pos >= n, the VReg should already be in block_live_out.
+    }
+
     for i in (0..n).rev() {
+        // VRegs with deadline at position i enter live here.
+        for &v in &deadline_at[i] {
+            live.insert(v);
+        }
+
         let inst = &insts[i];
 
         // Remove the definition: if this VReg is defined here, it's not live
@@ -105,7 +124,7 @@ mod tests {
             use_inst(3, 2),    // v3 = use(v2)
         ];
         let live_out: HashSet<VReg> = HashSet::new();
-        let info = compute_liveness(&insts, &live_out);
+        let info = compute_liveness(&insts, &live_out, &HashMap::new());
 
         // Before inst 2 (add): v0 and v1 must be live.
         assert!(info.live_at[2].contains(&VReg(0)), "v0 live before inst 2");
@@ -140,7 +159,7 @@ mod tests {
         let mut live_out: HashSet<VReg> = HashSet::new();
         live_out.insert(VReg(0)); // v0 is used in a successor block
 
-        let info = compute_liveness(&insts, &live_out);
+        let info = compute_liveness(&insts, &live_out, &HashMap::new());
 
         // v0 should be in live_out.
         assert!(info.live_out.contains(&VReg(0)));
@@ -166,7 +185,7 @@ mod tests {
         let insts = vec![use_inst(6, 5)];
         let live_out: HashSet<VReg> = HashSet::new();
 
-        let info = compute_liveness(&insts, &live_out);
+        let info = compute_liveness(&insts, &live_out, &HashMap::new());
 
         // v5 is used in inst 0, so it must be live_in.
         assert!(

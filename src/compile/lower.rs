@@ -879,7 +879,15 @@ pub(super) fn lower_block_pure_ops(
         // User stack slots are placed after regalloc spill slots in the frame.
         if let Op::StackAddr(slot_idx) = inst.op {
             if let Some(dst) = get_reg(inst.dst) {
-                let slot = regalloc.spill_slots as i32 + slot_idx as i32;
+                // Compute the 8-byte-unit offset for this stack slot by summing
+                // the sizes of all preceding user slots.
+                let slot_unit_offset: u32 = func
+                    .stack_slots
+                    .iter()
+                    .take(slot_idx as usize)
+                    .map(|s| (s.size + 7) / 8)
+                    .sum();
+                let slot = regalloc.spill_slots as i32 + slot_unit_offset as i32;
                 result.push(MachInst::Lea {
                     size: OpSize::S64,
                     dst: Operand::Reg(dst),
