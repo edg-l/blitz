@@ -6,6 +6,9 @@ pub enum CheckKind {
     CheckNext,
     CheckNot,
     CheckLabel,
+    CheckCount { n: usize },
+    CheckDag,
+    CheckSame,
 }
 
 #[derive(Debug)]
@@ -102,6 +105,47 @@ pub fn parse_directives(source: &str) -> Result<Vec<Directive>, String> {
                 regex,
                 line_no,
             }));
+        } else if let Some(rest) = comment.strip_prefix("CHECK-DAG:") {
+            let raw = rest.trim().to_string();
+            let regex = build_pattern_regex(&raw)?;
+            directives.push(Directive::Check(CheckPattern {
+                kind: CheckKind::CheckDag,
+                raw,
+                regex,
+                line_no,
+            }));
+        } else if let Some(rest) = comment.strip_prefix("CHECK-SAME:") {
+            let raw = rest.trim().to_string();
+            let regex = build_pattern_regex(&raw)?;
+            directives.push(Directive::Check(CheckPattern {
+                kind: CheckKind::CheckSame,
+                raw,
+                regex,
+                line_no,
+            }));
+        } else if let Some(count_rest) = comment.strip_prefix("CHECK-COUNT-") {
+            // Expect `<number>: <pattern>`
+            match count_rest.find(':') {
+                Some(colon_pos) => {
+                    let n_str = &count_rest[..colon_pos];
+                    let n: usize = n_str.trim().parse().map_err(|e| {
+                        format!("line {line_no}: invalid CHECK-COUNT number '{n_str}': {e}")
+                    })?;
+                    let raw = count_rest[colon_pos + 1..].trim().to_string();
+                    let regex = build_pattern_regex(&raw)?;
+                    directives.push(Directive::Check(CheckPattern {
+                        kind: CheckKind::CheckCount { n },
+                        raw,
+                        regex,
+                        line_no,
+                    }));
+                }
+                None => {
+                    return Err(format!(
+                        "line {line_no}: malformed CHECK-COUNT directive, expected CHECK-COUNT-N: pattern"
+                    ));
+                }
+            }
         } else if let Some(rest) = comment.strip_prefix("CHECK:") {
             let raw = rest.trim().to_string();
             let regex = build_pattern_regex(&raw)?;
@@ -135,11 +179,14 @@ mod tests {
 // CHECK-NEXT: world
 // CHECK-NOT: error
 // CHECK-LABEL: function main
+// CHECK-COUNT-3: foo
+// CHECK-DAG: bar
+// CHECK-SAME: baz
 // EXIT: 42
 int main() { return 42; }
 "#;
         let directives = parse_directives(source).unwrap();
-        assert_eq!(directives.len(), 6);
+        assert_eq!(directives.len(), 9);
 
         assert!(
             matches!(&directives[0], Directive::Run { cmd, .. } if cmd == "%tinyc %s -o %t && %t")
@@ -156,7 +203,16 @@ int main() { return 42; }
         assert!(
             matches!(&directives[4], Directive::Check(p) if p.kind == CheckKind::CheckLabel && p.raw == "function main")
         );
-        assert!(matches!(&directives[5], Directive::Exit { code: 42, .. }));
+        assert!(
+            matches!(&directives[5], Directive::Check(p) if p.kind == CheckKind::CheckCount { n: 3 } && p.raw == "foo")
+        );
+        assert!(
+            matches!(&directives[6], Directive::Check(p) if p.kind == CheckKind::CheckDag && p.raw == "bar")
+        );
+        assert!(
+            matches!(&directives[7], Directive::Check(p) if p.kind == CheckKind::CheckSame && p.raw == "baz")
+        );
+        assert!(matches!(&directives[8], Directive::Exit { code: 42, .. }));
     }
 
     #[test]

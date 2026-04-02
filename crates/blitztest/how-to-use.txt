@@ -1,0 +1,254 @@
+blitztest - FileCheck-style pattern matching for Blitz compiler tests
+=====================================================================
+
+blitztest reads CHECK directives from a test source file and verifies
+them against piped output (typically --emit-asm or --emit-ir from tinyc).
+
+Usage:
+  tinyc test.c --emit-asm 2>&1 | blitztest test.c
+
+The test runner (tests/lit/run_tests.sh) handles this automatically
+based on RUN/EXIT/CHECK directives in the source file.
+
+
+Test file structure
+-------------------
+
+A lit test is a .c file under tests/lit/ with directives in // comments:
+
+  // RUN: %tinyc %s --emit-asm 2>&1    <-- how to produce output
+  // RUN: %tinyc %s -o %t && %t        <-- compile+run for EXIT check
+  // EXIT: 0                            <-- expected exit code
+  // CHECK: call                        <-- pattern to find in output
+  // CHECK-NOT: unreachable             <-- pattern that must NOT appear
+
+  int main() { return 0; }
+
+%tinyc, %s, %t are substituted by the test runner:
+  %tinyc -> path to tinyc binary
+  %s     -> path to this source file
+  %t     -> temporary output binary
+
+A test can have CHECK directives only, EXIT only, or both.
+When both are present, the CHECK directives run against the RUN that
+produces output (--emit-asm or --emit-ir), and EXIT runs against the
+compiled binary.
+
+
+Directives reference
+--------------------
+
+CHECK: <pattern>
+
+  Find the next line (after the previous match) containing <pattern>.
+  Searches forward from the current position.
+
+  // CHECK: mov eax
+  // CHECK: ret
+
+  These match in order: "mov eax" must appear before "ret".
+  Lines between matches are ignored.
+
+
+CHECK-NEXT: <pattern>
+
+  The very next line after the previous match must contain <pattern>.
+  Fails if there are any intervening lines.
+
+  // CHECK: push rbx
+  // CHECK-NEXT: push r12
+
+  Verifies these two instructions are adjacent.
+
+
+CHECK-NOT: <pattern>
+
+  The pattern must NOT appear between the current position and the
+  next CHECK/CHECK-LABEL match point. Useful for verifying dead code
+  elimination, inlining, etc.
+
+  // CHECK: function main
+  // CHECK-NOT: function helper
+  // CHECK: ret
+
+  Verifies "function helper" does not appear between "function main"
+  and "ret".
+
+
+CHECK-LABEL: <pattern>
+
+  Like CHECK, but semantically marks a section boundary. Use it to
+  scope subsequent checks to a specific function or block.
+
+  The asm output has "# funcname" headers for each function:
+
+  // CHECK-LABEL: # main
+  // CHECK: call
+  // CHECK: sub
+
+  This ensures "call" and "sub" are found in main's asm, not in
+  some earlier function's output. Without CHECK-LABEL, patterns
+  match across the entire output from all functions.
+
+  IMPORTANT: When testing asm output, always use CHECK-LABEL to
+  scope to the function you care about. The output includes all
+  functions (including noinline helpers), and a pattern like "mov"
+  could match in the wrong function.
+
+
+CHECK-SAME: <pattern>
+
+  The pattern must appear on the SAME line as the previous CHECK match.
+  Does not advance the search position. Useful for verifying multiple
+  properties of a single instruction.
+
+  // CHECK: call
+  // CHECK-SAME: id
+
+  Verifies a "call" instruction that also contains "id" on the
+  same line (i.e., it's calling the function "id").
+
+
+CHECK-COUNT-N: <pattern>
+
+  The pattern must appear exactly N times in the remaining output
+  (from current position to end). Does not advance position.
+
+  // CHECK-LABEL: # main
+  // CHECK-COUNT-8: call
+
+  Verifies that main's asm contains exactly 8 call instructions.
+  Much more concise than writing 8 separate CHECK: call lines.
+
+
+CHECK-DAG: <pattern>
+
+  Consecutive CHECK-DAG directives form a group. All patterns in the
+  group must match, but they can appear in any order in the output.
+  Each pattern matches a unique line (no two patterns share a line).
+  After all patterns match, position advances past the last match.
+
+  // CHECK-DAG: mov r12d
+  // CHECK-DAG: mov ebx
+  // CHECK-DAG: mov r13d
+
+  These three register moves must all appear, but the register
+  allocator may emit them in any order.
+
+
+EXIT: <code>
+
+  Expected exit code when the compiled binary is run. The test runner
+  compiles with -o, runs the binary, and checks the exit code.
+
+  // EXIT: 0     <-- success
+  // EXIT: 42    <-- specific exit code
+
+
+RUN: <command>
+
+  Shell command to produce output for CHECK matching. The test runner
+  looks for --emit-asm or --emit-ir to determine the mode.
+
+  // RUN: %tinyc %s --emit-asm 2>&1    <-- check asm output
+  // RUN: %tinyc %s --emit-ir 2>&1     <-- check IR output
+  // RUN: %tinyc %s -o %t && %t        <-- compile+run for EXIT
+
+
+Pattern syntax
+--------------
+
+Patterns are literal substring matches by default. Special regex
+characters like +, *, (, ) are escaped automatically.
+
+  // CHECK: a+b       matches the literal string "a+b"
+  // CHECK: iconst(42 matches "iconst(42" literally
+
+For regex matching, wrap the regex portion in {{...}}:
+
+  // CHECK: iconst({{[0-9]+}}, I32)
+
+This matches "iconst(" followed by one or more digits, then ", I32)".
+You can mix literal and regex segments:
+
+  // CHECK: mov {{e[a-d]x}}, 0x{{[0-9a-f]+}}
+
+Matches: mov eax, 0x2a / mov ebx, 0xff / etc.
+
+
+Common patterns
+---------------
+
+1. Verify a function was inlined (gone from IR):
+
+  // RUN: %tinyc %s --emit-ir 2>&1
+  // CHECK: function main
+  // CHECK-NOT: function helper
+
+2. Verify exact number of calls in a function:
+
+  // RUN: %tinyc %s --emit-asm 2>&1
+  // CHECK-LABEL: # main
+  // CHECK-COUNT-3: call
+
+3. Verify call target:
+
+  // CHECK: call
+  // CHECK-SAME: my_func
+
+4. Verify instruction sequence is adjacent:
+
+  // CHECK: push rbx
+  // CHECK-NEXT: push r12
+  // CHECK-NEXT: sub rsp
+
+5. Verify constant folding produced specific values:
+
+  // RUN: %tinyc %s --emit-ir 2>&1
+  // CHECK: iconst(42
+  // CHECK: iconst(100
+
+6. Verify register allocation (order-independent):
+
+  // CHECK-LABEL: # main
+  // CHECK-DAG: push rbx
+  // CHECK-DAG: push r12
+  // CHECK-DAG: push r13
+
+7. Combined CHECK + EXIT (verify both asm structure and correctness):
+
+  // RUN: %tinyc %s --emit-asm 2>&1
+  // RUN: %tinyc %s -o %t && %t
+  // EXIT: 0
+  // CHECK-LABEL: # main
+  // CHECK-COUNT-8: call
+  // CHECK: sub
+
+
+Troubleshooting
+---------------
+
+When a CHECK fails, blitztest shows context around the search position:
+
+  blitztest: test.c: check line 8: CHECK: pattern not found after line 5
+    output near search start:
+      3: mov eax,edi
+      4: ret
+      5: # main  <-- search starts here
+      6: push rbx
+      7: push r12
+
+Common mistakes:
+
+- Not using CHECK-LABEL to scope to the right function. Pattern
+  matches the wrong function's output.
+
+- Using CHECK when CHECK-COUNT-N would be clearer. Writing N
+  separate CHECK: call lines is verbose and fragile.
+
+- Forgetting that --emit-asm output includes ALL functions. Helper
+  functions (noinline stubs) appear first, then main.
+
+- Pattern too specific: "mov eax,0x1" might break if the register
+  allocator picks a different register. Prefer patterns that test
+  the property you care about, not the exact encoding.
