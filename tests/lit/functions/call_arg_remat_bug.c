@@ -8,7 +8,24 @@
 //
 // CHECK-LABEL: # main
 // CHECK-COUNT-8: call
-// CHECK: sub
+// Advance past last call, then verify 8 sub+jne comparison pairs.
+// CHECK: call
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
 
 __attribute__((noinline))
 int id(int x) { return x; }

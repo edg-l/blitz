@@ -6,7 +6,14 @@
 //
 // CHECK-LABEL: # main
 // CHECK-COUNT-3: call
-// CHECK-COUNT-3: sub    e
+// Advance past last call, then verify 3 sub+jne comparison pairs.
+// CHECK: call
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
+// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jne
 
 __attribute__((noinline))
 void set(int *p, int v) { *p = v; }
