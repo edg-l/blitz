@@ -1,6 +1,7 @@
 pub mod compile;
 pub mod egraph;
 pub mod emit;
+pub mod inline;
 pub mod ir;
 pub mod regalloc;
 pub mod schedule;

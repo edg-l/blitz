@@ -1,6 +1,7 @@
 use crate::ir::op::ClassId;
 
 /// Union-find with path compression and union by rank.
+#[derive(Clone)]
 pub struct UnionFind {
     parent: Vec<u32>,
     rank: Vec<u8>,

@@ -35,6 +35,7 @@ pub fn snapshot_all(egraph: &EGraph) -> Vec<NodeSnap> {
     snaps
 }
 
+#[derive(Clone)]
 pub struct EGraph {
     pub(crate) unionfind: UnionFind,
     /// Arena: ClassId(i) indexes directly into classes[i].

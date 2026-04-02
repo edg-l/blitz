@@ -70,6 +70,12 @@ pub struct CompileOptions {
     /// general-purpose register. Set to `true` for debuggability or when a frame pointer is
     /// required (e.g. kernel code).
     pub force_frame_pointer: bool,
+    /// Enable function inlining before optimization.
+    pub enable_inlining: bool,
+    /// Maximum inlining depth (transitive inlining limit).
+    pub max_inline_depth: u32,
+    /// Maximum callee e-graph node count to be considered for inlining.
+    pub max_inline_nodes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +96,9 @@ impl Default for CompileOptions {
             enable_nop_alignment: false,
             verbosity: Verbosity::Silent,
             force_frame_pointer: false,
+            enable_inlining: false,
+            max_inline_depth: 3,
+            max_inline_nodes: 50,
         }
     }
 }
@@ -709,7 +718,7 @@ pub fn compile(
             // Handle it here: if the ret value is from another block and not
             // already in the schedule, insert a remat (for Iconst/StackAddr) or
             // spill-load.
-            let (split_schedule, rename) = {
+            let (split_schedule, mut rename) = {
                 let mut schedule = split_schedule;
                 let mut rename = rename;
                 if let Some(EffectfulOp::Ret { val: Some(cid) }) = block.ops.last() {
@@ -867,6 +876,7 @@ pub fn compile(
                                             operands: def.operands.clone(),
                                         });
                                         bcv.insert(canon, new_vreg);
+                                        rename.insert(orig_vreg, new_vreg);
                                     }
                                 }
                             }
@@ -1544,9 +1554,10 @@ pub fn compile_to_ir_string(
 
 /// Compile multiple functions to IR strings.
 pub fn compile_module_to_ir(
-    functions: Vec<Function>,
+    mut functions: Vec<Function>,
     opts: &CompileOptions,
 ) -> Result<String, CompileError> {
+    crate::inline::inline_module(&mut functions, opts);
     let mut results = Vec::new();
     for func in functions {
         results.push(compile_to_ir_string(func, opts)?);
@@ -1560,9 +1571,10 @@ pub fn compile_module_to_ir(
 ///
 /// Each `Function` (with its embedded e-graph) is consumed and compiled independently.
 pub fn compile_module(
-    functions: Vec<Function>,
+    mut functions: Vec<Function>,
     opts: &CompileOptions,
 ) -> Result<ObjectFile, CompileError> {
+    crate::inline::inline_module(&mut functions, opts);
     let mut combined_code: Vec<u8> = Vec::new();
     let mut combined_relocs = Vec::new();
     let mut combined_funcs: Vec<FunctionInfo> = Vec::new();

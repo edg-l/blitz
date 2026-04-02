@@ -3,6 +3,7 @@ use crate::ir::op::ClassId;
 use crate::ir::types::Type;
 
 /// An equivalence class of e-nodes.
+#[derive(Clone)]
 pub struct EClass {
     pub id: ClassId,
     pub nodes: Vec<ENode>,

@@ -8,13 +8,19 @@ pub mod parser;
 
 pub use error::TinyErr;
 
+fn default_opts() -> blitz::compile::CompileOptions {
+    blitz::compile::CompileOptions {
+        enable_inlining: true,
+        ..Default::default()
+    }
+}
+
 /// Compile a TinyC source string to object file bytes.
 pub fn compile_source(src: &str) -> Result<Vec<u8>, TinyErr> {
     let tokens = lexer::tokenize(src)?;
     let program = parser::Parser::parse(tokens)?;
     let cg = codegen::Codegen::generate(&program)?;
-    let opts = blitz::compile::CompileOptions::default();
-    let obj = blitz::compile::compile_module(cg.functions, &opts)?;
+    let obj = blitz::compile::compile_module(cg.functions, &default_opts())?;
     Ok(obj.finalize())
 }
 
@@ -23,8 +29,7 @@ pub fn compile_to_object(src: &str) -> Result<blitz::emit::object::ObjectFile, T
     let tokens = lexer::tokenize(src)?;
     let program = parser::Parser::parse(tokens)?;
     let cg = codegen::Codegen::generate(&program)?;
-    let opts = blitz::compile::CompileOptions::default();
-    let obj = blitz::compile::compile_module(cg.functions, &opts)?;
+    let obj = blitz::compile::compile_module(cg.functions, &default_opts())?;
     Ok(obj)
 }
 
@@ -33,8 +38,7 @@ pub fn compile_to_ir(src: &str) -> Result<String, TinyErr> {
     let tokens = lexer::tokenize(src)?;
     let program = parser::Parser::parse(tokens)?;
     let cg = codegen::Codegen::generate(&program)?;
-    let opts = blitz::compile::CompileOptions::default();
-    let ir = blitz::compile::compile_module_to_ir(cg.functions, &opts)?;
+    let ir = blitz::compile::compile_module_to_ir(cg.functions, &default_opts())?;
     Ok(ir)
 }
 
