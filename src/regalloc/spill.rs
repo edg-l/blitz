@@ -164,7 +164,10 @@ fn compute_next_use(insts: &[ScheduledInst], from: usize) -> BTreeMap<usize, usi
 /// (i.e., cheaply recomputed instead of spilled to memory).
 /// Both Iconst and StackAddr have no dependencies and produce constants.
 pub fn is_rematerializable(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::Iconst(_, _) | Op::StackAddr(_))
+    matches!(
+        &inst.op,
+        Op::Iconst(_, _) | Op::StackAddr(_) | Op::GlobalAddr(_)
+    )
 }
 
 /// Collect the set of VRegs that are call arguments (operands of CallResult or

@@ -54,6 +54,9 @@ impl CostModel {
             // ── Stack slot address: free (LEA emitted during lowering) ───────────
             Op::StackAddr(..) => 0.0,
 
+            // ── Global variable address: free (LEA [RIP+disp32] emitted during lowering) ──
+            Op::GlobalAddr(_) => 0.0,
+
             // ── Block parameters: free (value comes from predecessor block) ──────────
             Op::BlockParam(..) => 0.0,
 

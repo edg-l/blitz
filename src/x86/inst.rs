@@ -399,4 +399,11 @@ pub enum MachInst {
         dst: Operand, // GPR
         src: Operand, // XMM
     },
+
+    // ── RIP-relative LEA ─────────────────────────────────────────────────────
+    /// LEA dst, [RIP + symbol] — load effective address of a global symbol.
+    LeaRipRelative {
+        dst: Operand,
+        symbol: String,
+    },
 }

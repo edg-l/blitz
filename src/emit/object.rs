@@ -5,7 +5,8 @@ use crate::x86::encode::{Reloc, RelocKind};
 use super::elf::{
     ELFCLASS64, ELFDATA2LSB, EM_X86_64, ET_REL, EV_CURRENT, Elf64Ehdr, Elf64Shdr, R_X86_64_32S,
     R_X86_64_64, R_X86_64_PC32, R_X86_64_PLT32, RelocationTable, SHF_ALLOC, SHF_EXECINSTR,
-    SHT_NULL, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, StringTable, SymbolTable,
+    SHF_WRITE, SHT_NOBITS, SHT_NULL, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, StringTable,
+    SymbolTable,
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -16,6 +17,14 @@ pub struct FunctionInfo {
     pub size: usize,
 }
 
+pub struct GlobalInfo {
+    pub name: String,
+    pub size: usize,
+    pub align: usize,
+    /// `None` -> .bss (zero-initialized), `Some(bytes)` -> .data (initialized)
+    pub init: Option<Vec<u8>>,
+}
+
 pub struct ObjectFile {
     /// .text section content
     pub code: Vec<u8>,
@@ -24,16 +33,9 @@ pub struct ObjectFile {
     pub functions: Vec<FunctionInfo>,
     /// Names of external (undefined) symbols referenced
     pub externals: Vec<String>,
+    /// Global variable definitions
+    pub globals: Vec<GlobalInfo>,
 }
-
-// ── Section index constants ───────────────────────────────────────────────────
-
-// Sections: null(0), .text(1), .rela.text(2), .symtab(3), .strtab(4), .shstrtab(5), .note.GNU-stack(6)
-const SEC_TEXT: u16 = 1;
-const SEC_SYMTAB: u16 = 3;
-const SEC_STRTAB: u16 = 4;
-const SEC_SHSTRTAB: u16 = 5;
-const NUM_SECTIONS: u16 = 7;
 
 // ── Alignment helpers ─────────────────────────────────────────────────────────
 
@@ -46,24 +48,137 @@ fn pad_to(buf: &mut Vec<u8>, align: usize) {
     buf.resize(new_len, 0);
 }
 
+// ── Dynamic section layout ───────────────────────────────────────────────────
+
+/// Computed section indices that adjust based on which optional sections exist.
+struct SectionLayout {
+    sec_text: u16,
+    sec_data: Option<u16>,
+    sec_bss: Option<u16>,
+    #[allow(dead_code)]
+    sec_rela_text: u16,
+    sec_symtab: u16,
+    sec_strtab: u16,
+    sec_shstrtab: u16,
+    // .note.GNU-stack is the last section
+    num_sections: u16,
+}
+
+impl SectionLayout {
+    fn compute(has_data: bool, has_bss: bool) -> Self {
+        // Section order: null(0), .text, [.data], [.bss], .rela.text, .symtab, .strtab, .shstrtab, .note.GNU-stack
+        let mut next: u16 = 1; // 0 is null
+        let sec_text = next;
+        next += 1;
+        let sec_data = if has_data {
+            let idx = next;
+            next += 1;
+            Some(idx)
+        } else {
+            None
+        };
+        let sec_bss = if has_bss {
+            let idx = next;
+            next += 1;
+            Some(idx)
+        } else {
+            None
+        };
+        let sec_rela_text = next;
+        next += 1;
+        let sec_symtab = next;
+        next += 1;
+        let sec_strtab = next;
+        next += 1;
+        let sec_shstrtab = next;
+        next += 1;
+        // .note.GNU-stack
+        next += 1;
+        SectionLayout {
+            sec_text,
+            sec_data,
+            sec_bss,
+            sec_rela_text,
+            sec_symtab,
+            sec_strtab,
+            sec_shstrtab,
+            num_sections: next,
+        }
+    }
+}
+
 // ── ObjectFile impl ───────────────────────────────────────────────────────────
 
 impl ObjectFile {
     /// Assemble all sections into a complete ELF64 relocatable object file.
     pub fn finalize(&self) -> Vec<u8> {
+        // ── Partition globals into .data and .bss ────────────────────────────
+        let data_globals: Vec<&GlobalInfo> =
+            self.globals.iter().filter(|g| g.init.is_some()).collect();
+        let bss_globals: Vec<&GlobalInfo> =
+            self.globals.iter().filter(|g| g.init.is_none()).collect();
+
+        let has_data = !data_globals.is_empty();
+        let has_bss = !bss_globals.is_empty();
+        let layout = SectionLayout::compute(has_data, has_bss);
+
+        // ── Build .data section content ──────────────────────────────────────
+        let mut data_content: Vec<u8> = Vec::new();
+        // Map: global name -> (section index, offset within section)
+        let mut global_section_info: HashMap<String, (u16, u64, u64)> = HashMap::new();
+
+        for g in &data_globals {
+            let align = g.align.max(1);
+            let padded_offset = align_up(data_content.len(), align);
+            data_content.resize(padded_offset, 0);
+            let offset = data_content.len();
+            data_content.extend_from_slice(g.init.as_ref().unwrap());
+            // Pad to size if init bytes are shorter
+            if g.init.as_ref().unwrap().len() < g.size {
+                data_content.resize(offset + g.size, 0);
+            }
+            global_section_info.insert(
+                g.name.clone(),
+                (layout.sec_data.unwrap(), offset as u64, g.size as u64),
+            );
+        }
+
+        // ── Compute .bss virtual size and offsets ────────────────────────────
+        let mut bss_size: usize = 0;
+        for g in &bss_globals {
+            let align = g.align.max(1);
+            bss_size = align_up(bss_size, align);
+            let offset = bss_size;
+            bss_size += g.size;
+            global_section_info.insert(
+                g.name.clone(),
+                (layout.sec_bss.unwrap(), offset as u64, g.size as u64),
+            );
+        }
+
         // ── Build .shstrtab ───────────────────────────────────────────────────
         let mut shstrtab = StringTable::new();
         let name_text = shstrtab.add(".text");
+        let name_data = if has_data {
+            Some(shstrtab.add(".data"))
+        } else {
+            None
+        };
+        let name_bss = if has_bss {
+            Some(shstrtab.add(".bss"))
+        } else {
+            None
+        };
         let name_rela_text = shstrtab.add(".rela.text");
         let name_symtab = shstrtab.add(".symtab");
         let name_strtab = shstrtab.add(".strtab");
         let name_shstrtab = shstrtab.add(".shstrtab");
         let name_note_gnu_stack = shstrtab.add(".note.GNU-stack");
 
-        // ── Build .strtab and collect external symbol names ───────────────────
+        // ── Build .strtab and collect symbol names ───────────────────────────
         let mut strtab = StringTable::new();
 
-        // Map from external symbol name -> strtab offset
+        // External symbol strtab offsets
         let mut ext_strtab: HashMap<String, u32> = HashMap::new();
         for ext in &self.externals {
             let off = strtab.add(ext);
@@ -71,22 +186,37 @@ impl ObjectFile {
         }
         // Function name strtab offsets
         let func_strtab: Vec<u32> = self.functions.iter().map(|f| strtab.add(&f.name)).collect();
+        // Global name strtab offsets
+        let global_strtab: Vec<u32> = self.globals.iter().map(|g| strtab.add(&g.name)).collect();
 
         // ── Build .symtab ─────────────────────────────────────────────────────
         let mut symtab = SymbolTable::new();
-        // One local section symbol for .text
-        symtab.add_section(SEC_TEXT);
+        // Local section symbols
+        symtab.add_section(layout.sec_text);
+        if let Some(sec) = layout.sec_data {
+            symtab.add_section(sec);
+        }
+        if let Some(sec) = layout.sec_bss {
+            symtab.add_section(sec);
+        }
         // Global function symbols
         for (i, func) in self.functions.iter().enumerate() {
             symtab.add_function(
                 func_strtab[i],
-                SEC_TEXT,
+                layout.sec_text,
                 func.offset as u64,
                 func.size as u64,
             );
         }
+        // Global data symbols
+        let mut global_sym_idx: HashMap<String, u32> = HashMap::new();
+        for (i, g) in self.globals.iter().enumerate() {
+            let idx = symtab.len() as u32;
+            let (section, offset, size) = global_section_info[&g.name];
+            symtab.add_object(global_strtab[i], section, offset, size);
+            global_sym_idx.insert(g.name.clone(), idx);
+        }
         // Global external (undefined) symbols
-        // Build a map from name -> symtab index for use in relocations
         let mut ext_sym_idx: HashMap<String, u32> = HashMap::new();
         for ext in &self.externals {
             let idx = symtab.len() as u32;
@@ -95,11 +225,20 @@ impl ObjectFile {
         }
 
         // ── Build .rela.text ──────────────────────────────────────────────────
-        // Section sym for .text has symtab index 1.
+        // Section sym for .text is always index 1 (first section sym added).
         let text_sec_sym: u32 = 1;
         let mut rela = RelocationTable::new();
         for reloc in &self.relocations {
-            let (sym_idx, r_type) = if let Some(&idx) = ext_sym_idx.get(&reloc.symbol) {
+            let (sym_idx, r_type) = if let Some(&idx) = global_sym_idx.get(&reloc.symbol) {
+                // Reference to a global variable
+                let r_type = match reloc.kind {
+                    RelocKind::PLT32 => R_X86_64_PLT32,
+                    RelocKind::PC32 => R_X86_64_PC32,
+                    RelocKind::Abs64 => R_X86_64_64,
+                    RelocKind::Abs32S => R_X86_64_32S,
+                };
+                (idx, r_type)
+            } else if let Some(&idx) = ext_sym_idx.get(&reloc.symbol) {
                 let r_type = match reloc.kind {
                     RelocKind::PLT32 => R_X86_64_PLT32,
                     RelocKind::PC32 => R_X86_64_PC32,
@@ -120,7 +259,7 @@ impl ObjectFile {
             rela.add(reloc.offset as u64, sym_idx, r_type, reloc.addend);
         }
 
-        // ── Compute section sizes ─────────────────────────────────────────────
+        // ── Compute section byte content ─────────────────────────────────────
         let text_bytes = &self.code;
         let rela_bytes = rela.to_bytes();
         let symtab_bytes = symtab.to_bytes();
@@ -128,22 +267,24 @@ impl ObjectFile {
         let shstrtab_bytes = shstrtab.to_bytes();
 
         // ── Lay out the file ──────────────────────────────────────────────────
-        // Layout:
-        //   [0..64)        ELF header
-        //   [64..)         .text  (align 16)
-        //   (..)           .rela.text (align 8, may be empty but we always emit it)
-        //   (..)           .symtab (align 8)
-        //   (..)           .strtab
-        //   (..)           .shstrtab
-        //   (..)           Section headers (align 8)
-
-        // Reserve space for ELF header (64 bytes)
-        let mut buf: Vec<u8> = vec![0; 64];
+        let mut buf: Vec<u8> = vec![0; 64]; // ELF header
 
         // .text
         pad_to(&mut buf, 16);
         let off_text = buf.len();
         buf.extend_from_slice(text_bytes);
+
+        // .data (if any)
+        let off_data = if has_data {
+            pad_to(&mut buf, 8);
+            let off = buf.len();
+            buf.extend_from_slice(&data_content);
+            off
+        } else {
+            0
+        };
+
+        // .bss has no file content (SHT_NOBITS), so no bytes emitted
 
         // .rela.text
         pad_to(&mut buf, 8);
@@ -167,112 +308,162 @@ impl ObjectFile {
         pad_to(&mut buf, 8);
         let shoff = buf.len();
 
-        // null section header
-        let shdr_null = Elf64Shdr {
-            sh_name: 0,
-            sh_type: SHT_NULL,
-            sh_flags: 0,
-            sh_addr: 0,
-            sh_offset: 0,
-            sh_size: 0,
-            sh_link: 0,
-            sh_info: 0,
-            sh_addralign: 0,
-            sh_entsize: 0,
-        };
-        buf.extend_from_slice(&shdr_null.to_bytes());
+        // null section header (index 0)
+        buf.extend_from_slice(
+            &Elf64Shdr {
+                sh_name: 0,
+                sh_type: SHT_NULL,
+                sh_flags: 0,
+                sh_addr: 0,
+                sh_offset: 0,
+                sh_size: 0,
+                sh_link: 0,
+                sh_info: 0,
+                sh_addralign: 0,
+                sh_entsize: 0,
+            }
+            .to_bytes(),
+        );
 
         // .text section header
-        let shdr_text = Elf64Shdr {
-            sh_name: name_text,
-            sh_type: SHT_PROGBITS,
-            sh_flags: SHF_ALLOC | SHF_EXECINSTR,
-            sh_addr: 0,
-            sh_offset: off_text as u64,
-            sh_size: text_bytes.len() as u64,
-            sh_link: 0,
-            sh_info: 0,
-            sh_addralign: 16,
-            sh_entsize: 0,
-        };
-        buf.extend_from_slice(&shdr_text.to_bytes());
+        buf.extend_from_slice(
+            &Elf64Shdr {
+                sh_name: name_text,
+                sh_type: SHT_PROGBITS,
+                sh_flags: SHF_ALLOC | SHF_EXECINSTR,
+                sh_addr: 0,
+                sh_offset: off_text as u64,
+                sh_size: text_bytes.len() as u64,
+                sh_link: 0,
+                sh_info: 0,
+                sh_addralign: 16,
+                sh_entsize: 0,
+            }
+            .to_bytes(),
+        );
+
+        // .data section header (if any)
+        if has_data {
+            buf.extend_from_slice(
+                &Elf64Shdr {
+                    sh_name: name_data.unwrap(),
+                    sh_type: SHT_PROGBITS,
+                    sh_flags: SHF_ALLOC | SHF_WRITE,
+                    sh_addr: 0,
+                    sh_offset: off_data as u64,
+                    sh_size: data_content.len() as u64,
+                    sh_link: 0,
+                    sh_info: 0,
+                    sh_addralign: 8,
+                    sh_entsize: 0,
+                }
+                .to_bytes(),
+            );
+        }
+
+        // .bss section header (if any)
+        if has_bss {
+            buf.extend_from_slice(
+                &Elf64Shdr {
+                    sh_name: name_bss.unwrap(),
+                    sh_type: SHT_NOBITS,
+                    sh_flags: SHF_ALLOC | SHF_WRITE,
+                    sh_addr: 0,
+                    sh_offset: 0, // SHT_NOBITS has no file offset
+                    sh_size: bss_size as u64,
+                    sh_link: 0,
+                    sh_info: 0,
+                    sh_addralign: 8,
+                    sh_entsize: 0,
+                }
+                .to_bytes(),
+            );
+        }
 
         // .rela.text section header
-        // sh_link = index of associated symtab; sh_info = index of section being relocated
-        let shdr_rela = Elf64Shdr {
-            sh_name: name_rela_text,
-            sh_type: SHT_RELA,
-            sh_flags: 0,
-            sh_addr: 0,
-            sh_offset: off_rela as u64,
-            sh_size: rela_bytes.len() as u64,
-            sh_link: SEC_SYMTAB as u32,
-            sh_info: SEC_TEXT as u32,
-            sh_addralign: 8,
-            sh_entsize: 24, // sizeof(Elf64Rela)
-        };
-        buf.extend_from_slice(&shdr_rela.to_bytes());
+        buf.extend_from_slice(
+            &Elf64Shdr {
+                sh_name: name_rela_text,
+                sh_type: SHT_RELA,
+                sh_flags: 0,
+                sh_addr: 0,
+                sh_offset: off_rela as u64,
+                sh_size: rela_bytes.len() as u64,
+                sh_link: layout.sec_symtab as u32,
+                sh_info: layout.sec_text as u32,
+                sh_addralign: 8,
+                sh_entsize: 24,
+            }
+            .to_bytes(),
+        );
 
         // .symtab section header
-        // sh_link = index of associated strtab; sh_info = index of first global symbol
-        let shdr_symtab = Elf64Shdr {
-            sh_name: name_symtab,
-            sh_type: SHT_SYMTAB,
-            sh_flags: 0,
-            sh_addr: 0,
-            sh_offset: off_symtab as u64,
-            sh_size: symtab_bytes.len() as u64,
-            sh_link: SEC_STRTAB as u32,
-            sh_info: symtab.sh_info(),
-            sh_addralign: 8,
-            sh_entsize: 24, // sizeof(Elf64Sym)
-        };
-        buf.extend_from_slice(&shdr_symtab.to_bytes());
+        buf.extend_from_slice(
+            &Elf64Shdr {
+                sh_name: name_symtab,
+                sh_type: SHT_SYMTAB,
+                sh_flags: 0,
+                sh_addr: 0,
+                sh_offset: off_symtab as u64,
+                sh_size: symtab_bytes.len() as u64,
+                sh_link: layout.sec_strtab as u32,
+                sh_info: symtab.sh_info(),
+                sh_addralign: 8,
+                sh_entsize: 24,
+            }
+            .to_bytes(),
+        );
 
         // .strtab section header
-        let shdr_strtab = Elf64Shdr {
-            sh_name: name_strtab,
-            sh_type: SHT_STRTAB,
-            sh_flags: 0,
-            sh_addr: 0,
-            sh_offset: off_strtab as u64,
-            sh_size: strtab_bytes.len() as u64,
-            sh_link: 0,
-            sh_info: 0,
-            sh_addralign: 1,
-            sh_entsize: 0,
-        };
-        buf.extend_from_slice(&shdr_strtab.to_bytes());
+        buf.extend_from_slice(
+            &Elf64Shdr {
+                sh_name: name_strtab,
+                sh_type: SHT_STRTAB,
+                sh_flags: 0,
+                sh_addr: 0,
+                sh_offset: off_strtab as u64,
+                sh_size: strtab_bytes.len() as u64,
+                sh_link: 0,
+                sh_info: 0,
+                sh_addralign: 1,
+                sh_entsize: 0,
+            }
+            .to_bytes(),
+        );
 
         // .shstrtab section header
-        let shdr_shstrtab = Elf64Shdr {
-            sh_name: name_shstrtab,
-            sh_type: SHT_STRTAB,
-            sh_flags: 0,
-            sh_addr: 0,
-            sh_offset: off_shstrtab as u64,
-            sh_size: shstrtab_bytes.len() as u64,
-            sh_link: 0,
-            sh_info: 0,
-            sh_addralign: 1,
-            sh_entsize: 0,
-        };
-        buf.extend_from_slice(&shdr_shstrtab.to_bytes());
+        buf.extend_from_slice(
+            &Elf64Shdr {
+                sh_name: name_shstrtab,
+                sh_type: SHT_STRTAB,
+                sh_flags: 0,
+                sh_addr: 0,
+                sh_offset: off_shstrtab as u64,
+                sh_size: shstrtab_bytes.len() as u64,
+                sh_link: 0,
+                sh_info: 0,
+                sh_addralign: 1,
+                sh_entsize: 0,
+            }
+            .to_bytes(),
+        );
 
-        // .note.GNU-stack section header (empty, flags=0 → non-executable stack)
-        let shdr_note_gnu_stack = Elf64Shdr {
-            sh_name: name_note_gnu_stack,
-            sh_type: SHT_PROGBITS,
-            sh_flags: 0,
-            sh_addr: 0,
-            sh_offset: 0,
-            sh_size: 0,
-            sh_link: 0,
-            sh_info: 0,
-            sh_addralign: 1,
-            sh_entsize: 0,
-        };
-        buf.extend_from_slice(&shdr_note_gnu_stack.to_bytes());
+        // .note.GNU-stack section header (empty, flags=0 -> non-executable stack)
+        buf.extend_from_slice(
+            &Elf64Shdr {
+                sh_name: name_note_gnu_stack,
+                sh_type: SHT_PROGBITS,
+                sh_flags: 0,
+                sh_addr: 0,
+                sh_offset: 0,
+                sh_size: 0,
+                sh_link: 0,
+                sh_info: 0,
+                sh_addralign: 1,
+                sh_entsize: 0,
+            }
+            .to_bytes(),
+        );
 
         // ── Write ELF header ──────────────────────────────────────────────────
         let mut e_ident = [0u8; 16];
@@ -283,7 +474,6 @@ impl ObjectFile {
         e_ident[4] = ELFCLASS64;
         e_ident[5] = ELFDATA2LSB;
         e_ident[6] = EV_CURRENT as u8;
-        // e_ident[7..16] = 0 (OS/ABI = ELFOSABI_NONE, padding)
 
         let ehdr = Elf64Ehdr {
             e_ident,
@@ -297,9 +487,9 @@ impl ObjectFile {
             e_ehsize: 64,
             e_phentsize: 0,
             e_phnum: 0,
-            e_shentsize: 64, // sizeof(Elf64Shdr)
-            e_shnum: NUM_SECTIONS,
-            e_shstrndx: SEC_SHSTRTAB,
+            e_shentsize: 64,
+            e_shnum: layout.num_sections,
+            e_shstrndx: layout.sec_shstrtab,
         };
 
         let ehdr_bytes = ehdr.to_bytes();
@@ -337,6 +527,7 @@ mod tests {
                 size,
             }],
             externals: vec![],
+            globals: vec![],
         }
     }
 
@@ -355,14 +546,14 @@ mod tests {
         let bytes = obj.finalize();
         // e_shnum is at offset 60 (2 bytes LE)
         let e_shnum = u16::from_le_bytes([bytes[60], bytes[61]]);
-        assert_eq!(e_shnum, NUM_SECTIONS, "expected {} sections", NUM_SECTIONS);
+        // No globals, so no .data/.bss: 7 sections (null, .text, .rela.text, .symtab, .strtab, .shstrtab, .note.GNU-stack)
+        assert_eq!(e_shnum, 7, "expected 7 sections for no-globals case");
     }
 
     #[test]
     fn elf_machine_and_type() {
         let obj = simple_add_obj();
         let bytes = obj.finalize();
-        // e_type at offset 16 (2 bytes LE), e_machine at 18
         let e_type = u16::from_le_bytes([bytes[16], bytes[17]]);
         let e_machine = u16::from_le_bytes([bytes[18], bytes[19]]);
         assert_eq!(e_type, ET_REL, "e_type should be ET_REL");
@@ -425,8 +616,6 @@ mod tests {
         if !has_tool("cc") {
             return;
         }
-        // Hand-assembled: mov rax, rdi; add rax, rsi; ret
-        // Implements: int64_t add_two(int64_t a, int64_t b) { return a + b; }
         let code = vec![0x48, 0x89, 0xf8, 0x48, 0x01, 0xf0, 0xc3];
         let size = code.len();
         let obj = ObjectFile {
@@ -438,6 +627,7 @@ mod tests {
                 size,
             }],
             externals: vec![],
+            globals: vec![],
         };
 
         let dir = std::env::temp_dir();
@@ -482,11 +672,7 @@ mod tests {
 
     #[test]
     fn relocation_table_populated() {
-        // Build an object with a relocation to an external symbol
-        let code = vec![
-            // call <placeholder>: e8 00 00 00 00
-            0xe8, 0x00, 0x00, 0x00, 0x00, 0xc3,
-        ];
+        let code = vec![0xe8, 0x00, 0x00, 0x00, 0x00, 0xc3];
         let obj = ObjectFile {
             code,
             relocations: vec![Reloc {
@@ -501,9 +687,9 @@ mod tests {
                 size: 6,
             }],
             externals: vec!["printf".into()],
+            globals: vec![],
         };
         let bytes = obj.finalize();
-        // Just verify it produces valid-looking ELF bytes
         assert_eq!(&bytes[0..4], b"\x7fELF");
 
         if has_tool("readelf") {

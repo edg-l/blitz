@@ -20,6 +20,30 @@ impl Encoder {
         self.emit_addr(d, addr);
     }
 
+    // ── LEA RIP-relative ───────────────────────────────────────────────────
+
+    /// LEA dst, [RIP + disp32] with a PC32 relocation for `symbol`.
+    /// Encoding: REX.W 8D /r (mod=00, rm=5 = RIP-relative).
+    pub fn encode_lea_rip_relative(&mut self, dst: Reg, symbol: &str) {
+        let d = dst.hw_enc();
+        // REX.W prefix (64-bit operand)
+        self.emit_rex(true, d, 0, 0);
+        // Opcode: LEA
+        self.emit_byte(0x8D);
+        // ModRM: mod=00, reg=dst, rm=5 (RIP-relative addressing)
+        self.emit_modrm(0b00, d, 5);
+        // Record relocation offset (where the disp32 placeholder starts)
+        let offset = self.buf.len();
+        // disp32 placeholder
+        self.emit_le32(0);
+        self.relocations.push(Reloc {
+            offset,
+            kind: RelocKind::PC32,
+            symbol: symbol.to_string(),
+            addend: -4,
+        });
+    }
+
     // ── PUSH / POP ────────────────────────────────────────────────────────
 
     pub fn encode_push(&mut self, src: Reg) {

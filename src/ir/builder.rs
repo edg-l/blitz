@@ -415,6 +415,14 @@ impl FunctionBuilder {
         })
     }
 
+    /// Return the address of a global variable as an I64 value.
+    pub fn global_addr(&mut self, name: &str) -> Value {
+        self.add_node(ENode {
+            op: Op::GlobalAddr(name.to_string()),
+            children: smallvec![],
+        })
+    }
+
     // ── Effectful op builders ─────────────────────────────────────────────────
 
     /// Emit a load from `addr` of type `ty`. Returns the loaded value.

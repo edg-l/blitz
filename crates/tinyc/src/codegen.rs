@@ -19,6 +19,7 @@ pub type StructRegistry = HashMap<String, StructLayout>;
 
 pub struct Codegen {
     pub functions: Vec<Function>,
+    pub globals: Vec<blitz::emit::object::GlobalInfo>,
 }
 
 impl Codegen {
@@ -63,10 +64,59 @@ impl Codegen {
         }
 
         let mut functions = Vec::new();
-        for func in &program.functions {
-            functions.push(compile_fn(func, &fn_signatures, &struct_registry)?);
+        let mut globals = Vec::new();
+        let mut global_types: HashMap<String, CType> = HashMap::new();
+
+        // Process global variable declarations.
+        if let Some(ref global_vars) = program.global_vars {
+            for gvar in global_vars {
+                // Check for duplicate global names.
+                if fn_signatures.contains_key(&gvar.name) {
+                    return Err(TinyErr {
+                        line: 0,
+                        col: 0,
+                        msg: format!(
+                            "global variable '{}' conflicts with function name",
+                            gvar.name
+                        ),
+                    });
+                }
+                if global_types.contains_key(&gvar.name) {
+                    return Err(TinyErr {
+                        line: 0,
+                        col: 0,
+                        msg: format!("duplicate global variable '{}'", gvar.name),
+                    });
+                }
+
+                let (size, align) = compute_global_size_align(&gvar.ty, &struct_registry)?;
+                let init = gvar.init.map(|val| {
+                    let mut bytes = vec![0u8; size];
+                    let le = val.to_le_bytes();
+                    let copy_len = size.min(8);
+                    bytes[..copy_len].copy_from_slice(&le[..copy_len]);
+                    bytes
+                });
+
+                globals.push(blitz::emit::object::GlobalInfo {
+                    name: gvar.name.clone(),
+                    size,
+                    align,
+                    init,
+                });
+                global_types.insert(gvar.name.clone(), gvar.ty.clone());
+            }
         }
-        Ok(Codegen { functions })
+
+        for func in &program.functions {
+            functions.push(compile_fn(
+                func,
+                &fn_signatures,
+                &struct_registry,
+                &global_types,
+            )?);
+        }
+        Ok(Codegen { functions, globals })
     }
 }
 
@@ -79,6 +129,7 @@ struct FnCtx<'b> {
     fn_return_type: CType,
     fn_signatures: &'b HashMap<String, (CType, Vec<CType>)>,
     struct_registry: &'b StructRegistry,
+    global_types: &'b HashMap<String, CType>,
 }
 
 impl<'b> FnCtx<'b> {
@@ -88,6 +139,7 @@ impl<'b> FnCtx<'b> {
         fn_signatures: &'b HashMap<String, (CType, Vec<CType>)>,
         addressed_vars: HashSet<String>,
         struct_registry: &'b StructRegistry,
+        global_types: &'b HashMap<String, CType>,
     ) -> Self {
         FnCtx {
             builder,
@@ -98,17 +150,28 @@ impl<'b> FnCtx<'b> {
             fn_return_type,
             fn_signatures,
             struct_registry,
+            global_types,
         }
     }
 
-    /// Look up the C type for a local variable, checking both stack-allocated
-    /// and SSA variables.
+    /// Look up the C type for a variable, checking stack-allocated, SSA, and global variables.
     fn local_type(&self, name: &str) -> CType {
         if let Some((_, ty)) = self.stack_slots.get(name) {
             ty.clone()
+        } else if let Some(ty) = self.local_types.get(name) {
+            ty.clone()
+        } else if let Some(ty) = self.global_types.get(name) {
+            ty.clone()
         } else {
-            self.local_types[name].clone()
+            panic!("local_type: undefined variable '{name}'");
         }
+    }
+
+    /// Returns true if the named variable is a global.
+    fn is_global(&self, name: &str) -> bool {
+        !self.stack_slots.contains_key(name)
+            && !self.locals.contains_key(name)
+            && self.global_types.contains_key(name)
     }
 
     fn is_terminated(&self) -> bool {
@@ -436,33 +499,55 @@ impl<'b> FnCtx<'b> {
                     let ir_ty = ty.to_ir_type().unwrap();
                     let val = self.builder.load(addr, ir_ty);
                     Ok((val, ty))
-                } else {
-                    let var = self.locals.get(name).copied().ok_or_else(|| TinyErr {
-                        line: 0,
-                        col: 0,
-                        msg: format!("undefined variable '{name}'"),
-                    })?;
+                } else if let Some(var) = self.locals.get(name) {
+                    let var = *var;
                     let ty = self.local_types[name].clone();
                     let val = self.builder.use_var(var);
                     Ok((val, ty))
+                } else if let Some(ty) = self.global_types.get(name) {
+                    let ty = ty.clone();
+                    let addr = self.builder.global_addr(name);
+                    if ty.is_array() {
+                        return Ok((addr, ty.decay()));
+                    }
+                    if ty.is_struct() {
+                        return Ok((addr, ty));
+                    }
+                    let ir_ty = ty.to_ir_type().unwrap();
+                    let val = self.builder.load(addr, ir_ty);
+                    Ok((val, ty))
+                } else {
+                    Err(TinyErr {
+                        line: 0,
+                        col: 0,
+                        msg: format!("undefined variable '{name}'"),
+                    })
                 }
             }
             Expr::UnaryOp {
                 op: UnaryOp::AddrOf,
                 expr: inner,
             } => {
-                // &var_name: look up the stack slot for the variable
+                // &var_name: look up the stack slot for the variable, or global
                 if let Expr::Var(name) = inner.as_ref() {
-                    let (slot, var_ty) = self.stack_slots.get(name).ok_or_else(|| TinyErr {
-                        line: 0,
-                        col: 0,
-                        msg: format!("address-of variable '{name}' not in stack slots"),
-                    })?;
-                    let slot = *slot;
-                    let var_ty = var_ty.clone();
-                    let addr = self.builder.stack_addr(slot);
-                    // &arr returns Ptr(Array(elem, count)) -- pointer to the full array
-                    Ok((addr, CType::Ptr(Box::new(var_ty))))
+                    if let Some((slot, var_ty)) = self.stack_slots.get(name) {
+                        let slot = *slot;
+                        let var_ty = var_ty.clone();
+                        let addr = self.builder.stack_addr(slot);
+                        Ok((addr, CType::Ptr(Box::new(var_ty))))
+                    } else if let Some(ty) = self.global_types.get(name) {
+                        let ty = ty.clone();
+                        let addr = self.builder.global_addr(name);
+                        Ok((addr, CType::Ptr(Box::new(ty))))
+                    } else {
+                        Err(TinyErr {
+                            line: 0,
+                            col: 0,
+                            msg: format!(
+                                "address-of variable '{name}' not in stack slots or globals"
+                            ),
+                        })
+                    }
                 } else if let Expr::FieldAccess { expr, field } = inner.as_ref() {
                     // &s.field: compute field address
                     let (struct_addr, struct_ty) = self.compile_expr(expr)?;
@@ -899,6 +984,38 @@ fn array_element_alignment(ty: &CType, registry: &StructRegistry) -> u32 {
     }
 }
 
+/// Compute (size, alignment) for a global variable type.
+fn compute_global_size_align(
+    ty: &CType,
+    registry: &StructRegistry,
+) -> Result<(usize, usize), TinyErr> {
+    match ty {
+        CType::Void => Err(TinyErr {
+            line: 0,
+            col: 0,
+            msg: "cannot declare global of type void".into(),
+        }),
+        CType::Array(_, _) => {
+            let size = array_total_byte_size(ty, registry) as usize;
+            let align = array_element_alignment(ty, registry) as usize;
+            Ok((size, align))
+        }
+        CType::Struct(name) => {
+            let layout = registry.get(name).ok_or_else(|| TinyErr {
+                line: 0,
+                col: 0,
+                msg: format!("unknown struct '{name}'"),
+            })?;
+            Ok((layout.byte_size as usize, layout.alignment as usize))
+        }
+        CType::Ptr(_) => Ok((8, 8)),
+        _ => {
+            let bytes = (ty.bit_width() / 8) as usize;
+            Ok((bytes, bytes))
+        }
+    }
+}
+
 fn field_byte_size(ty: &CType, registry: &StructRegistry) -> u32 {
     match ty {
         CType::Array(elem, count) => *count as u32 * field_byte_size(elem, registry),
@@ -1092,6 +1209,7 @@ fn compile_fn(
     fn_def: &FnDef,
     fn_sigs: &HashMap<String, (CType, Vec<CType>)>,
     struct_registry: &StructRegistry,
+    global_types: &HashMap<String, CType>,
 ) -> Result<Function, TinyErr> {
     let param_ir_types: Vec<Type> = fn_def
         .params
@@ -1121,6 +1239,7 @@ fn compile_fn(
         fn_sigs,
         addressed_vars,
         struct_registry,
+        global_types,
     );
 
     for ((ty, name), val) in fn_def.params.iter().zip(param_vals.iter()) {
@@ -1281,18 +1400,26 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
                     _ => unreachable!(),
                 };
                 let (src_addr, _) = ctx.compile_expr(expr)?;
-                let (slot, _) = ctx.stack_slots.get(name).ok_or_else(|| TinyErr {
-                    line: 0,
-                    col: 0,
-                    msg: format!("struct variable '{name}' not in stack slots"),
-                })?;
-                let slot = *slot;
-                let dst_addr = ctx.builder.stack_addr(slot);
-                emit_struct_copy(ctx, dst_addr, src_addr, &struct_name)?;
+                if ctx.is_global(name) {
+                    let dst_addr = ctx.builder.global_addr(name);
+                    emit_struct_copy(ctx, dst_addr, src_addr, &struct_name)?;
+                } else {
+                    let (slot, _) = ctx.stack_slots.get(name).ok_or_else(|| TinyErr {
+                        line: 0,
+                        col: 0,
+                        msg: format!("struct variable '{name}' not in stack slots"),
+                    })?;
+                    let slot = *slot;
+                    let dst_addr = ctx.builder.stack_addr(slot);
+                    emit_struct_copy(ctx, dst_addr, src_addr, &struct_name)?;
+                }
             } else {
                 let (val, expr_ty) = ctx.compile_expr(expr)?;
                 let converted = ctx.emit_convert(val, &expr_ty, &local_ty);
-                if let Some((slot, _)) = ctx.stack_slots.get(name) {
+                if ctx.is_global(name) {
+                    let addr = ctx.builder.global_addr(name);
+                    ctx.builder.store(addr, converted);
+                } else if let Some((slot, _)) = ctx.stack_slots.get(name) {
                     let slot = *slot;
                     let addr = ctx.builder.stack_addr(slot);
                     ctx.builder.store(addr, converted);

@@ -190,10 +190,17 @@ pub struct ExternDecl {
     pub params: Vec<CType>,
 }
 
+pub struct GlobalVar {
+    pub name: String,
+    pub ty: CType,
+    pub init: Option<i64>,
+}
+
 pub struct Program {
     pub functions: Vec<FnDef>,
     pub extern_decls: Vec<ExternDecl>,
     pub struct_defs: Vec<(String, Vec<(String, CType)>)>,
+    pub global_vars: Option<Vec<GlobalVar>>,
 }
 
 pub struct FnDef {

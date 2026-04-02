@@ -111,6 +111,9 @@ pub fn fmt_op(op: &Op) -> String {
         // Stack address
         Op::StackAddr(slot) => format!("stack_addr({slot})"),
 
+        // Global address
+        Op::GlobalAddr(name) => format!("global_addr(\"{}\")", name),
+
         // x86 conversion ops
         Op::X86Movsx { from, to } => format!("x86_movsx({from:?} -> {to:?})"),
         Op::X86Movzx { from, to } => format!("x86_movzx({from:?} -> {to:?})"),

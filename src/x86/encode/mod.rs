@@ -598,6 +598,9 @@ impl Encoder {
             MachInst::MovqFromXmm { dst, src } => {
                 self.encode_movq_from_xmm(Self::expect_reg(dst), Self::expect_reg(src));
             }
+            MachInst::LeaRipRelative { dst, symbol } => {
+                self.encode_lea_rip_relative(Self::expect_reg(dst), symbol);
+            }
         }
     }
 }

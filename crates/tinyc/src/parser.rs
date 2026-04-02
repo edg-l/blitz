@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, CType, Expr, ExternDecl, FnDef, Program, Stmt, UnaryOp};
+use crate::ast::{BinOp, CType, Expr, ExternDecl, FnDef, GlobalVar, Program, Stmt, UnaryOp};
 use crate::error::TinyErr;
 use crate::lexer::{Span, SpannedToken, Token};
 
@@ -18,6 +18,7 @@ impl Parser {
         let mut functions = Vec::new();
         let mut extern_decls = Vec::new();
         let mut struct_defs = Vec::new();
+        let mut global_vars = Vec::new();
         while !p.at(Token::Eof) {
             if p.at(Token::Extern) {
                 extern_decls.push(p.parse_extern_decl()?);
@@ -28,16 +29,78 @@ impl Parser {
                 struct_defs.push(p.parse_struct_def()?);
             } else {
                 let noinline = p.try_parse_attribute_noinline()?;
-                match p.parse_function_or_forward_decl(noinline)? {
-                    FnOrForward::Fn(f) => functions.push(f),
-                    FnOrForward::Forward(d) => extern_decls.push(d),
+
+                // Save position to disambiguate function vs global variable.
+                let save_pos = p.pos;
+                let ty = p.parse_type()?;
+
+                let name_tok = p.advance().clone();
+                let name = match &name_tok.token {
+                    Token::Ident(s) => s.clone(),
+                    other => {
+                        return Err(TinyErr {
+                            line: name_tok.span.line,
+                            col: name_tok.span.col,
+                            msg: format!("expected identifier, got {other:?}"),
+                        });
+                    }
+                };
+
+                if p.at(Token::LParen) {
+                    // Function definition or forward declaration: restore and re-parse.
+                    p.pos = save_pos;
+                    match p.parse_function_or_forward_decl(noinline)? {
+                        FnOrForward::Fn(f) => functions.push(f),
+                        FnOrForward::Forward(d) => extern_decls.push(d),
+                    }
+                } else {
+                    // Global variable declaration.
+                    if noinline {
+                        return Err(TinyErr {
+                            line: name_tok.span.line,
+                            col: name_tok.span.col,
+                            msg: "__attribute__((noinline)) cannot be applied to a global variable"
+                                .into(),
+                        });
+                    }
+                    // Parse optional array dimensions.
+                    let ty = p.parse_array_dims(ty)?;
+
+                    // Parse optional initializer.
+                    let init = if p.at(Token::Assign) {
+                        p.advance();
+                        let init_tok = p.advance().clone();
+                        match &init_tok.token {
+                            Token::IntLit(n) => Some(*n),
+                            other => {
+                                return Err(TinyErr {
+                                    line: init_tok.span.line,
+                                    col: init_tok.span.col,
+                                    msg: format!(
+                                        "global initializer must be an integer constant, got {other:?}"
+                                    ),
+                                });
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    p.expect(Token::Semi)?;
+                    global_vars.push(GlobalVar { name, ty, init });
                 }
             }
         }
+        let global_vars_opt = if global_vars.is_empty() {
+            None
+        } else {
+            Some(global_vars)
+        };
         Ok(Program {
             functions,
             extern_decls,
             struct_defs,
+            global_vars: global_vars_opt,
         })
     }
 

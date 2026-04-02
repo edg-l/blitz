@@ -172,6 +172,11 @@ pub enum Op {
     /// Lowered to an LEA from the frame pointer.
     StackAddr(u32),
 
+    // ── Global variable address ───────────────────────────────────────────────
+    /// Address of a global variable by name. Zero children, returns I64.
+    /// Lowered to LEA [RIP + symbol].
+    GlobalAddr(String),
+
     // ── Load result placeholder ───────────────────────────────────────────────
     /// Placeholder node representing the result of a Load effectful op.
     /// The `u32` is a unique identifier (block_id * 1000 + load_index) to
@@ -344,6 +349,10 @@ impl Op {
             }
             Op::StackAddr(_) => {
                 assert_eq!(child_types.len(), 0, "StackAddr requires 0 children");
+                Type::I64
+            }
+            Op::GlobalAddr(_) => {
+                assert_eq!(child_types.len(), 0, "GlobalAddr requires 0 children");
                 Type::I64
             }
 

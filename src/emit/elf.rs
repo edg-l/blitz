@@ -27,6 +27,7 @@ pub const STB_GLOBAL: u8 = 1;
 
 // Symbol type
 pub const STT_NOTYPE: u8 = 0;
+pub const STT_OBJECT: u8 = 1;
 pub const STT_FUNC: u8 = 2;
 pub const STT_SECTION: u8 = 3;
 
@@ -240,6 +241,18 @@ impl SymbolTable {
             st_info: (STB_GLOBAL << 4) | STT_FUNC,
             st_other: 0,
             st_shndx: text_section,
+            st_value: offset,
+            st_size: size,
+        };
+        self.symbols.push(sym);
+    }
+
+    pub fn add_object(&mut self, name_idx: u32, section: u16, offset: u64, size: u64) {
+        let sym = Elf64Sym {
+            st_name: name_idx,
+            st_info: (STB_GLOBAL << 4) | STT_OBJECT,
+            st_other: 0,
+            st_shndx: section,
             st_value: offset,
             st_size: size,
         };

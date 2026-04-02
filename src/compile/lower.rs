@@ -825,6 +825,14 @@ fn lower_op(
             }
         }
 
+        Op::GlobalAddr(name) => {
+            let dst = dst_reg.ok_or_else(|| "GlobalAddr: no register for dst".to_string())?;
+            Ok(vec![MachInst::LeaRipRelative {
+                dst: Operand::Reg(dst),
+                symbol: name.clone(),
+            }])
+        }
+
         // Spill pseudo-ops are handled separately in lower_block_pure_ops,
         // not through lower_inst. They should never reach here.
         // StackAddr is lowered to an LEA from the frame pointer; handled by
