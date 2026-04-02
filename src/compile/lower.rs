@@ -837,7 +837,9 @@ fn lower_op(
             unreachable!("spill pseudo-ops are handled before lower_inst")
         }
 
-        Op::EffectfulUse => unreachable!("skipped by lower_block_pure_ops"),
+        Op::StoreBarrier | Op::VoidCallBarrier => {
+            unreachable!("barrier pseudo-ops are skipped by lower_block_pure_ops")
+        }
     }
 }
 
@@ -911,8 +913,8 @@ pub(super) fn lower_block_pure_ops(
         if matches!(inst.op, Op::CallResult(_, _)) {
             continue;
         }
-        // Skip EffectfulUse markers: they exist only for regalloc liveness.
-        if matches!(inst.op, Op::EffectfulUse) {
+        // Skip barrier pseudo-ops: they exist only for regalloc liveness.
+        if matches!(inst.op, Op::StoreBarrier | Op::VoidCallBarrier) {
             continue;
         }
 

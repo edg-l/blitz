@@ -220,10 +220,14 @@ pub enum Op {
     /// XMM spill load: dst is the reload VReg, i64 is the slot index.
     XmmSpillLoad(i64),
 
-    /// Pseudo-instruction that makes effectful-op operands visible to regalloc.
-    /// Inserted at barrier boundaries so the register allocator sees correct liveness
-    /// without separate deadline/live_out workarounds. Skipped during lowering.
-    EffectfulUse,
+    /// Pseudo-instruction for Store barriers. Carries addr/val VRegs as operands
+    /// so regalloc sees correct liveness. Skipped during lowering.
+    StoreBarrier,
+
+    /// Pseudo-instruction for void Call barriers (calls with no return value).
+    /// Carries call-arg VRegs as operands so regalloc sees correct liveness.
+    /// Skipped during lowering.
+    VoidCallBarrier,
 }
 
 impl Op {
@@ -656,7 +660,7 @@ impl Op {
                 unreachable!("spill pseudo-ops have no result_type")
             }
 
-            Op::EffectfulUse => Type::I64,
+            Op::StoreBarrier | Op::VoidCallBarrier => Type::I64,
         }
     }
 }

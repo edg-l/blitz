@@ -123,8 +123,9 @@ pub fn fmt_op(op: &Op) -> String {
         Op::XmmSpillStore(s) => format!("xmm_spill_store({s})"),
         Op::XmmSpillLoad(s) => format!("xmm_spill_load({s})"),
 
-        // EffectfulUse
-        Op::EffectfulUse => "effectful_use".into(),
+        // Barrier pseudo-ops
+        Op::StoreBarrier => "store_barrier".into(),
+        Op::VoidCallBarrier => "void_call_barrier".into(),
     }
 }
 
@@ -261,9 +262,9 @@ pub fn print_function_ir(
 
         // Print groups: pure ops, then barrier
         for (k, group) in block.groups.iter().enumerate() {
-            // Pure ops (skip EffectfulUse)
+            // Pure ops (skip barrier pseudo-ops)
             for inst in &group.pure_ops {
-                if matches!(inst.op, Op::EffectfulUse) {
+                if matches!(inst.op, Op::StoreBarrier | Op::VoidCallBarrier) {
                     continue;
                 }
                 let op_text = fmt_op(&inst.op);

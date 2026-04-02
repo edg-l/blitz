@@ -95,8 +95,8 @@ pub(super) fn assign_barrier_groups(
         }
         // Barrier results (LoadResult, CallResult) are anchored to the group
         // right after their producing barrier. They must NOT be pushed later by
-        // vreg_to_arg (which reflects consuming barriers); EffectfulUse markers
-        // handle keeping them alive until their consumers.
+        // vreg_to_arg (which reflects consuming barriers); their operands
+        // (populated by populate_effectful_operands) keep them alive.
         if let Some(&barrier_k) = vreg_to_result_of_barrier.get(&inst.dst) {
             min_group = min_group.max(barrier_k + 1);
         } else if let Some(&arg_barrier_k) = vreg_to_arg_of_barrier.get(&inst.dst) {
@@ -268,10 +268,17 @@ pub(super) fn insert_early_barrier_spills(
     }
 }
 
-/// Insert `Op::EffectfulUse` pseudo-instructions into the schedule at barrier
-/// boundaries so the register allocator sees correct liveness for effectful-op
-/// operands without separate deadline/live_out workarounds.
-pub(super) fn insert_effectful_use_markers(
+/// Populate effectful-op operands directly onto barrier instructions in the schedule.
+///
+/// For Load: appends addr VReg + Addr children to the existing `LoadResult` instruction.
+/// For Call with results: appends arg VRegs + Addr children to the existing `CallResult`.
+/// For void Call: inserts a `VoidCallBarrier` pseudo-instruction with arg VRegs.
+/// For Store: inserts a `StoreBarrier` pseudo-instruction with addr/val VRegs.
+///
+/// This replaces `insert_effectful_use_markers`: instead of separate EffectfulUse
+/// pseudo-ops, the operands live directly on the barrier instruction itself, so
+/// liveness analysis naturally sees them.
+pub(super) fn populate_effectful_operands(
     schedule: &mut Vec<ScheduledInst>,
     non_term_ops: &[EffectfulOp],
     egraph: &EGraph,
@@ -295,63 +302,102 @@ pub(super) fn insert_effectful_use_markers(
         })
         .collect();
 
-    // Build all markers first, then push them.
+    // Collect markers to insert (for Store and void Call only).
     let mut markers: Vec<(usize, ScheduledInst)> = Vec::new();
 
     for (barrier_k, op) in non_term_ops.iter().enumerate() {
-        // Collect ClassId operands for this barrier.
-        let cids: Vec<ClassId> = match op {
-            EffectfulOp::Store { addr, val, .. } => vec![*addr, *val],
-            EffectfulOp::Load { addr, .. } => vec![*addr],
-            EffectfulOp::Call { args, .. } => args.clone(),
-            _ => continue,
-        };
-
-        // Resolve ClassIds to VRegs, and add Addr children.
-        let mut vregs: Vec<VReg> = Vec::new();
-        for cid in cids {
-            let canon = egraph.unionfind.find_immutable(cid);
-            let Some(&vreg) = class_to_vreg.get(&canon) else {
-                continue;
-            };
-            vregs.push(vreg);
-            // If this VReg defines an Addr node, also add its children (base/index).
-            if let Some(children) = addr_children.get(&vreg) {
-                vregs.extend_from_slice(children);
+        // Resolve ClassIds to VRegs with Addr children, dedup.
+        let resolve_vregs = |cids: &[ClassId]| -> Vec<VReg> {
+            let mut vregs = Vec::new();
+            for &cid in cids {
+                let canon = egraph.unionfind.find_immutable(cid);
+                let Some(&vreg) = class_to_vreg.get(&canon) else {
+                    continue;
+                };
+                vregs.push(vreg);
+                if let Some(children) = addr_children.get(&vreg) {
+                    vregs.extend_from_slice(children);
+                }
             }
-        }
-
-        // Deduplicate.
-        vregs.sort_by_key(|v| v.0);
-        vregs.dedup();
-
-        if vregs.is_empty() {
-            continue;
-        }
-
-        // Allocate a fresh dst VReg for the marker.
-        let dst = VReg(*next_vreg);
-        *next_vreg += 1;
-
-        let marker = ScheduledInst {
-            op: Op::EffectfulUse,
-            dst,
-            operands: vregs,
+            vregs.sort_by_key(|v| v.0);
+            vregs.dedup();
+            vregs
         };
 
-        markers.push((barrier_k, marker));
+        match op {
+            EffectfulOp::Load { addr, result, .. } => {
+                let cids = [*addr];
+                let vregs = resolve_vregs(&cids);
+                if vregs.is_empty() {
+                    continue;
+                }
+                // Find the LoadResult instruction by its result VReg.
+                let result_canon = egraph.unionfind.find_immutable(*result);
+                let Some(&result_vreg) = class_to_vreg.get(&result_canon) else {
+                    continue;
+                };
+                if let Some(inst) = schedule.iter_mut().find(|i| i.dst == result_vreg) {
+                    inst.operands.extend(vregs);
+                    // Dedup after extending (in case of overlap with existing operands).
+                    inst.operands.sort_by_key(|v| v.0);
+                    inst.operands.dedup();
+                }
+            }
+            EffectfulOp::Call { args, results, .. } => {
+                let vregs = resolve_vregs(args);
+                if vregs.is_empty() {
+                    continue;
+                }
+                if let Some(first_result) = results.first() {
+                    // Non-void call: attach to existing CallResult.
+                    let result_canon = egraph.unionfind.find_immutable(*first_result);
+                    let Some(&result_vreg) = class_to_vreg.get(&result_canon) else {
+                        continue;
+                    };
+                    if let Some(inst) = schedule.iter_mut().find(|i| i.dst == result_vreg) {
+                        inst.operands.extend(vregs);
+                        inst.operands.sort_by_key(|v| v.0);
+                        inst.operands.dedup();
+                    }
+                } else {
+                    // Void call: insert VoidCallBarrier.
+                    let dst = VReg(*next_vreg);
+                    *next_vreg += 1;
+                    markers.push((
+                        barrier_k,
+                        ScheduledInst {
+                            op: Op::VoidCallBarrier,
+                            dst,
+                            operands: vregs,
+                        },
+                    ));
+                }
+            }
+            EffectfulOp::Store { addr, val, .. } => {
+                let cids = [*addr, *val];
+                let vregs = resolve_vregs(&cids);
+                if vregs.is_empty() {
+                    continue;
+                }
+                let dst = VReg(*next_vreg);
+                *next_vreg += 1;
+                markers.push((
+                    barrier_k,
+                    ScheduledInst {
+                        op: Op::StoreBarrier,
+                        dst,
+                        operands: vregs,
+                    },
+                ));
+            }
+            _ => continue,
+        }
     }
 
-    // Insert markers at the correct positions in the already-sorted schedule.
-    // Each marker goes at the END of its barrier group's instructions (right
-    // before the next group starts). This keeps operands alive through the
-    // barrier execution gap without disrupting existing instruction order.
-    //
-    // Process markers in reverse barrier order so insertion indices stay valid.
+    // Insert markers (StoreBarrier, VoidCallBarrier) at the correct positions.
+    // Each marker goes at the END of its barrier group (same logic as EffectfulUse).
     markers.reverse();
     for (barrier_k, marker) in markers {
-        // Find the insertion point: after the last instruction in group barrier_k.
-        // The schedule is already sorted by group from Phase 4b.
         let insert_pos = schedule
             .iter()
             .rposition(|inst| {

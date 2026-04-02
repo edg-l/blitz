@@ -166,22 +166,37 @@ pub(super) fn collect_call_points_for_block(
             }
         }
 
-        // For void calls (no results or result not found), find the position
-        // after the last argument. VRegs live at this point must survive the call.
-        if cp == block_sched.len() && !arg_cids.is_empty() {
-            let mut max_arg_pos: Option<usize> = None;
-            for &arg_cid in arg_cids.iter() {
-                let canon = egraph.unionfind.find_immutable(arg_cid);
-                if let Some(&arg_vreg) = class_to_vreg.get(&canon)
-                    && let Some(pos) = block_sched.iter().position(|inst| inst.dst == arg_vreg)
-                {
-                    max_arg_pos = Some(max_arg_pos.map_or(pos, |m: usize| m.max(pos)));
+        // For void calls (no results or result not found), use the
+        // VoidCallBarrier's position if one exists with matching arg VRegs.
+        // Fall back to position after last argument otherwise.
+        if cp == block_sched.len() {
+            // Try VoidCallBarrier first: its operands are the call's arg VRegs.
+            let arg_vregs: Vec<VReg> = arg_cids
+                .iter()
+                .filter_map(|&cid| {
+                    let canon = egraph.unionfind.find_immutable(cid);
+                    class_to_vreg.get(&canon).copied()
+                })
+                .collect();
+            if let Some(pos) = block_sched.iter().position(|inst| {
+                matches!(inst.op, Op::VoidCallBarrier)
+                    && arg_vregs.iter().all(|v| inst.operands.contains(v))
+            }) {
+                cp = pos;
+            } else if !arg_cids.is_empty() {
+                // Fallback: position after the last argument.
+                let mut max_arg_pos: Option<usize> = None;
+                for &arg_cid in arg_cids.iter() {
+                    let canon = egraph.unionfind.find_immutable(arg_cid);
+                    if let Some(&arg_vreg) = class_to_vreg.get(&canon)
+                        && let Some(pos) = block_sched.iter().position(|inst| inst.dst == arg_vreg)
+                    {
+                        max_arg_pos = Some(max_arg_pos.map_or(pos, |m: usize| m.max(pos)));
+                    }
                 }
-            }
-            if let Some(pos) = max_arg_pos {
-                // Use pos + 1: VRegs live after the last arg is defined but before
-                // the call completes need to survive the clobber.
-                cp = (pos + 1).min(block_sched.len());
+                if let Some(pos) = max_arg_pos {
+                    cp = (pos + 1).min(block_sched.len());
+                }
             }
         }
 

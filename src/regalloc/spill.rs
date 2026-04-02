@@ -167,6 +167,23 @@ pub fn is_rematerializable(inst: &ScheduledInst) -> bool {
     matches!(&inst.op, Op::Iconst(_, _) | Op::StackAddr(_))
 }
 
+/// Collect the set of VRegs that are call arguments (operands of CallResult or
+/// VoidCallBarrier instructions). These VRegs must NOT be rematerialized away
+/// from their use position, because the call needs the value in a register at
+/// the call point and rematerialization would shorten the live range past
+/// call clobber points.
+pub fn collect_call_arg_vregs(insts: &[ScheduledInst]) -> BTreeSet<usize> {
+    let mut call_args = BTreeSet::new();
+    for inst in insts {
+        if matches!(inst.op, Op::CallResult(_, _) | Op::VoidCallBarrier) {
+            for &op in &inst.operands {
+                call_args.insert(op.0 as usize);
+            }
+        }
+    }
+    call_args
+}
+
 // ── Spill code insertion (10.10) ──────────────────────────────────────────────
 
 /// Insert spill/reload code for the given set of spilled VReg indices.
@@ -208,12 +225,22 @@ pub fn insert_spills(
         })
         .collect();
 
-    // Assign spill slots to non-rematerializable VRegs.
+    // Collect call-arg VRegs: these must NOT be rematerialized even if
+    // their defining op is Iconst/StackAddr, because the call needs
+    // the value alive at the call point.
+    let call_arg_vregs = collect_call_arg_vregs(insts);
+
+    // Assign spill slots to non-rematerializable VRegs AND call-arg VRegs
+    // (call-arg constants need a spill slot because we can't remat them away).
     let mut vreg_to_slot: BTreeMap<usize, u32> = BTreeMap::new();
     for &idx in spilled {
-        if let Some(def) = def_ops.get(&idx)
-            && !is_rematerializable(def)
-        {
+        let is_call_arg = call_arg_vregs.contains(&idx);
+        let needs_slot = if let Some(def) = def_ops.get(&idx) {
+            !is_rematerializable(def) || is_call_arg
+        } else {
+            false
+        };
+        if needs_slot {
             let slot = *spill_slots;
             *spill_slots += 1;
             vreg_to_slot.insert(idx, slot);
@@ -237,9 +264,12 @@ pub fn insert_spills(
         for &op in &inst.operands {
             let op_idx = op.0 as usize;
             if spilled.contains(&op_idx) {
-                // Replace with a reload VReg.
+                // Replace with a reload VReg. Call-arg VRegs must NOT use
+                // rematerialization: the original def must stay alive at the
+                // call point with proper interference against call clobbers.
                 let reload_vreg = if let Some(def) = def_ops.get(&op_idx)
                     && is_rematerializable(def)
+                    && !call_arg_vregs.contains(&op_idx)
                 {
                     // Rematerialization: re-emit the defining instruction.
                     let new_vreg = VReg(*next_vreg);
@@ -289,10 +319,13 @@ pub fn insert_spills(
         let dst_idx = inst.dst.0 as usize;
         let is_spill_def = spilled.contains(&dst_idx);
 
-        // For rematerializable spilled VRegs, drop the original definition
-        // entirely — uses are replaced by fresh remat copies above. Keeping
-        // the dead def would preserve its live range via block_live_out.
-        if is_spill_def && def_ops.get(&dst_idx).is_some_and(is_rematerializable) {
+        // For rematerializable spilled VRegs (that are NOT call args), drop
+        // the original definition — uses are replaced by fresh remat copies.
+        // Call-arg VRegs keep their def so they remain live at call points.
+        if is_spill_def
+            && def_ops.get(&dst_idx).is_some_and(is_rematerializable)
+            && !call_arg_vregs.contains(&dst_idx)
+        {
             // Skip the original definition.
         } else {
             new_insts.push(inst);

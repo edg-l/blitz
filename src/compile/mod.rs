@@ -35,7 +35,7 @@ use crate::x86::reg::Reg;
 mod barrier;
 use barrier::{
     assign_barrier_groups, build_barrier_maps, insert_early_barrier_spills,
-    insert_effectful_use_markers, mark_branch_cond_barrier,
+    mark_branch_cond_barrier, populate_effectful_operands,
 };
 mod cfg;
 use cfg::{
@@ -505,7 +505,7 @@ pub fn compile(
                     &mut arg_map,
                 );
                 let mut vreg_group = assign_barrier_groups(&all_scheduled, &result_map, &arg_map);
-                insert_effectful_use_markers(
+                populate_effectful_operands(
                     &mut all_scheduled,
                     non_term_ops,
                     &egraph,
@@ -644,30 +644,37 @@ pub fn compile(
             }
         }
 
-        // Include effectful op operands (Load addr, Store addr/val, Call args)
-        // in the per-block use sets for global liveness. These operands are not
-        // in the scheduled instruction list (they're handled by EffectfulUse
-        // markers added later), but they must participate in cross-block liveness
-        // so their values are spilled/reloaded when defined in a different block.
+        // Populate effectful-op operands onto barrier instructions (LoadResult,
+        // CallResult, StoreBarrier, VoidCallBarrier) in each block's schedule
+        // BEFORE global liveness, so compute_global_liveness sees them as regular
+        // instruction operands and includes them in cross-block liveness.
         for (block_idx, block) in func.blocks.iter().enumerate() {
             let non_term_count = if block.ops.is_empty() {
                 0
             } else {
                 block.ops.len() - 1
             };
-            for op in &block.ops[..non_term_count] {
-                let cids: Vec<ClassId> = match op {
-                    EffectfulOp::Store { addr, val, .. } => vec![*addr, *val],
-                    EffectfulOp::Load { addr, .. } => vec![*addr],
-                    EffectfulOp::Call { args, .. } => args.clone(),
-                    _ => continue,
-                };
-                for cid in cids {
-                    let canon = egraph.unionfind.find_immutable(cid);
-                    if let Some(&vreg) = class_to_vreg.get(&canon) {
-                        phi_uses[block_idx].insert(vreg);
-                    }
-                }
+            if non_term_count > 0 {
+                let non_term_ops = &block.ops[..non_term_count];
+                let (result_map, mut arg_map) =
+                    build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
+                mark_branch_cond_barrier(
+                    block.ops.last(),
+                    non_term_count,
+                    &egraph,
+                    &class_to_vreg,
+                    &mut arg_map,
+                );
+                let mut vreg_group =
+                    assign_barrier_groups(&block_schedules[block_idx], &result_map, &arg_map);
+                populate_effectful_operands(
+                    &mut block_schedules[block_idx],
+                    non_term_ops,
+                    &egraph,
+                    &class_to_vreg,
+                    &mut vreg_group,
+                    &mut next_vreg,
+                );
             }
         }
 
@@ -844,11 +851,18 @@ pub fn compile(
 
             // Step 8a-spill: Insert early spill/reload for distant barrier results.
             // Rebuild barrier maps with post-rename VRegs, then insert pairs.
-            // Strip EffectfulUse markers first — they confuse assign_barrier_groups
-            // (their dst VRegs aren't in barrier maps). Re-insert after.
+            // Strip barrier pseudo-ops (StoreBarrier, VoidCallBarrier) and clear
+            // operands from LoadResult/CallResult — they'll be re-populated with
+            // post-rename VRegs after the early spill pass.
             let mut split_schedule: Vec<_> = split_schedule
                 .into_iter()
-                .filter(|inst| !matches!(inst.op, Op::EffectfulUse))
+                .filter(|inst| !matches!(inst.op, Op::StoreBarrier | Op::VoidCallBarrier))
+                .map(|mut inst| {
+                    if matches!(inst.op, Op::LoadResult(_, _) | Op::CallResult(_, _)) {
+                        inst.operands.clear();
+                    }
+                    inst
+                })
                 .collect();
             {
                 let non_term_count = if block.ops.is_empty() {
@@ -905,10 +919,9 @@ pub fn compile(
                     }
 
                     // Step 8a-effectful: Ensure effectful op operands are in
-                    // the schedule. Effectful ops reference e-class operands
-                    // via EffectfulUse markers. If an operand's VReg is not in
-                    // this block's schedule (because global liveness didn't
-                    // detect it as cross-block live), insert a remat instruction.
+                    // the schedule. If an operand's VReg is not in this block's
+                    // schedule (because global liveness didn't detect it as
+                    // cross-block live), insert a remat instruction.
                     {
                         let sched_vregs: BTreeSet<VReg> =
                             split_schedule.iter().map(|i| i.dst).collect();
@@ -947,8 +960,8 @@ pub fn compile(
                         }
                     }
 
-                    // Re-insert EffectfulUse markers with post-rename VRegs.
-                    insert_effectful_use_markers(
+                    // Re-populate effectful-op operands with post-rename VRegs.
+                    populate_effectful_operands(
                         &mut split_schedule,
                         non_term_ops,
                         &egraph,
@@ -974,9 +987,9 @@ pub fn compile(
             //   - block param VRegs for this block: forces them into the interference
             //     graph so they are not coalesced away, ensuring build_phi_copies can
             //     find their physical registers in merged_vreg_to_reg.
-            //   - effectful op operands are NOT in live_out: they're handled by
-            //     EffectfulUse markers in the instruction stream.
-            //   - Ret operands ARE in live_out (terminator, no marker).
+            //   - effectful op operands are NOT in live_out: they're operands on
+            //     barrier instructions (LoadResult/CallResult/StoreBarrier/VoidCallBarrier).
+            //   - Ret operands ARE in live_out (terminator, no barrier instruction).
             let mut block_live_out: BTreeSet<VReg> = phi_uses[block_idx]
                 .iter()
                 .map(|v| rename.get(v).copied().unwrap_or(*v))
@@ -1145,11 +1158,11 @@ pub fn compile(
 
     for (rpo_pos, &block_idx) in rpo_order.iter().enumerate() {
         let block = &func.blocks[block_idx];
-        // Strip EffectfulUse markers before Phase 7 grouping: their dummy dst VRegs
+        // Strip barrier pseudo-ops before Phase 7 grouping: their dummy dst VRegs
         // are not in barrier maps and would be misrouted to group 0.
         let rewritten: Vec<ScheduledInst> = block_rewritten[block_idx]
             .iter()
-            .filter(|inst| !matches!(inst.op, Op::EffectfulUse))
+            .filter(|inst| !matches!(inst.op, Op::StoreBarrier | Op::VoidCallBarrier))
             .cloned()
             .collect();
         let rewritten = &rewritten;

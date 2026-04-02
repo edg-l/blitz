@@ -246,7 +246,9 @@ impl CostModel {
                 unreachable!("spill pseudo-ops are not part of the e-graph")
             }
 
-            Op::EffectfulUse => unreachable!("EffectfulUse is not part of the e-graph"),
+            Op::StoreBarrier | Op::VoidCallBarrier => {
+                unreachable!("barrier pseudo-ops are not part of the e-graph")
+            }
         }
     }
 }

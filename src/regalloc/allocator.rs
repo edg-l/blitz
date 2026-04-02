@@ -272,10 +272,14 @@ pub fn allocate(
             ));
         }
 
-        // If spilled VRegs are rematerializable, remove from block_live_out.
+        // If spilled VRegs are rematerializable AND not call args, remove
+        // from block_live_out. Call-arg VRegs must stay in live_out so their
+        // def is not removed and they remain live at call clobber points.
+        let call_arg_vregs = super::spill::collect_call_arg_vregs(&insts);
         for &idx in &spilled {
             if let Some(def) = insts.iter().find(|i| i.dst.0 as usize == idx)
                 && super::spill::is_rematerializable(def)
+                && !call_arg_vregs.contains(&idx)
             {
                 block_live_out.remove(&VReg(idx as u32));
             }
