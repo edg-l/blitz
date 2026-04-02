@@ -30,17 +30,28 @@ Known bugs:
   mechanism doesn't detect that they collide. In the generated asm:
     mov eax, 0xb    ; 11 (inc(10))
     mov eax, 0x28   ; 40 (dbl(20)) -- overwrites 11!
-  The fix likely requires either: (a) global liveness analysis that marks
-  values from different blocks as interfering when they're both live-in to
-  a common successor, (b) forcing cross-block constants into distinct
-  callee-saved registers via precoloring, or (c) always spilling cross-block
-  values to stack slots and reloading in the consuming block.
-  Reproducer:
-    int inc(int x) { return x + 1; }
-    int dbl(int x) { return x + x; }
-    __attribute__((noinline)) int consume(int x) { return x; }
+  Further investigation revealed this is actually a single-block bug too:
+  8 noinline calls with comparisons after also fails (no inlining needed).
+  The deeper root cause: the allocator's spill/remat pass shortens Iconst
+  live ranges by rematerializing them near their later uses (X86Sub). After
+  remat, the original Iconst's live range only extends to its EffectfulUse
+  marker (call arg), NOT across subsequent call barriers. The call clobber
+  phantom interferences only apply to VRegs live at the call point, so after
+  remat the original Iconst no longer interferes with caller-saved phantoms
+  and gets RAX -- which is then clobbered by later calls before the actual
+  call that uses it executes.
+  Attempted fix (reverted): injecting committed-register precoloring from
+  predecessor blocks caused allocator hangs (EffectfulUse dummies in
+  block_live_out prevented spill convergence).
+  The fix likely requires: (a) making the spill pass aware that call-arg
+  VRegs cannot be rematerialized away from their EffectfulUse position, OR
+  (b) recomputing call points after each spill round so clobber phantoms
+  track the modified schedule, OR (c) extending EffectfulUse to also keep
+  call args in block_live_out so they survive past all call barriers.
+  Simpler reproducer (no inlining, pure single-block):
+    __attribute__((noinline)) int id(int x) { return x; }
     int main() {
-        int a = inc(10); int b = dbl(20); int c = inc(30); int d = dbl(40);
-        int w = consume(a); int x = consume(b); int y = consume(c); int z = consume(d);
-        // w, x, y, z comparisons fail because a and b get same register
+        int a=id(1); int b=id(2); int c=id(3); int d=id(4);
+        int e=id(5); int f=id(6); int g=id(7); int h=id(8);
+        if (a!=1) return 1; if (b!=2) return 2; // ... fails at a!=1
     }
