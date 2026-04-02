@@ -210,7 +210,9 @@ impl<'b> FnCtx<'b> {
                 msg: "pointer arithmetic on void* is not allowed".into(),
             });
         }
-        let elem_size = if ptr_ty.pointee().is_struct() {
+        let elem_size = if ptr_ty.pointee().is_array() {
+            array_total_byte_size(ptr_ty.pointee(), self.struct_registry) as i64
+        } else if ptr_ty.pointee().is_struct() {
             let name = match ptr_ty.pointee() {
                 CType::Struct(s) => s.clone(),
                 _ => unreachable!(),
@@ -246,7 +248,9 @@ impl<'b> FnCtx<'b> {
                 msg: "pointer arithmetic on void* is not allowed".into(),
             });
         }
-        let elem_size = if ptr_ty.pointee().is_struct() {
+        let elem_size = if ptr_ty.pointee().is_array() {
+            array_total_byte_size(ptr_ty.pointee(), self.struct_registry) as i64
+        } else if ptr_ty.pointee().is_struct() {
             let name = match ptr_ty.pointee() {
                 CType::Struct(s) => s.clone(),
                 _ => unreachable!(),
@@ -421,6 +425,10 @@ impl<'b> FnCtx<'b> {
                     let slot = *slot;
                     let ty = ty.clone();
                     let addr = self.builder.stack_addr(slot);
+                    if ty.is_array() {
+                        // Array: decay to pointer
+                        return Ok((addr, ty.decay()));
+                    }
                     if ty.is_struct() {
                         // Struct: return address, do not load
                         return Ok((addr, ty));
@@ -453,6 +461,7 @@ impl<'b> FnCtx<'b> {
                     let slot = *slot;
                     let var_ty = var_ty.clone();
                     let addr = self.builder.stack_addr(slot);
+                    // &arr returns Ptr(Array(elem, count)) -- pointer to the full array
                     Ok((addr, CType::Ptr(Box::new(var_ty))))
                 } else if let Expr::FieldAccess { expr, field } = inner.as_ref() {
                     // &s.field: compute field address
@@ -502,7 +511,10 @@ impl<'b> FnCtx<'b> {
                     UnaryOp::Deref => {
                         // *expr: inner must be a pointer type
                         let pointee = ty.pointee().clone();
-                        if pointee.is_struct() {
+                        if pointee.is_array() {
+                            // Deref pointer-to-array: decay to pointer to element
+                            Ok((val, pointee.decay()))
+                        } else if pointee.is_struct() {
                             // Struct pointer deref: return address, don't load
                             Ok((val, pointee))
                         } else {
@@ -769,7 +781,9 @@ impl<'b> FnCtx<'b> {
                 Ok((converted, ty.clone()))
             }
             Expr::Sizeof(ty) => {
-                let size = if let CType::Struct(name) = ty {
+                let size = if ty.is_array() {
+                    array_total_byte_size(ty, self.struct_registry) as i64
+                } else if let CType::Struct(name) = ty {
                     let layout = self.struct_registry.get(name).ok_or_else(|| TinyErr {
                         line: 0,
                         col: 0,
@@ -792,7 +806,9 @@ impl<'b> FnCtx<'b> {
                         msg: "pointer arithmetic on void* is not allowed".into(),
                     });
                 }
-                let elem_size = if pointee.is_struct() {
+                let elem_size = if pointee.is_array() {
+                    array_total_byte_size(&pointee, self.struct_registry) as i64
+                } else if pointee.is_struct() {
                     let name = match &pointee {
                         CType::Struct(s) => s.clone(),
                         _ => unreachable!(),
@@ -811,7 +827,10 @@ impl<'b> FnCtx<'b> {
                 let scale = self.builder.iconst(elem_size, Type::I64);
                 let offset = self.builder.mul(idx_val, scale);
                 let addr = self.builder.add(base_val, offset);
-                if pointee.is_struct() {
+                if pointee.is_array() {
+                    // Multidimensional: decay one more level, return address
+                    Ok((addr, pointee.decay()))
+                } else if pointee.is_struct() {
                     Ok((addr, pointee))
                 } else {
                     let ir_ty = pointee.to_ir_type().unwrap();
@@ -834,7 +853,10 @@ impl<'b> FnCtx<'b> {
                 let (offset, field_ty) = resolve_field(self.struct_registry, &struct_name, field)?;
                 let offset_val = self.builder.iconst(offset as i64, Type::I64);
                 let field_addr = self.builder.add(struct_addr, offset_val);
-                if field_ty.is_struct() {
+                if field_ty.is_array() {
+                    // Array field: decay to pointer
+                    Ok((field_addr, field_ty.decay()))
+                } else if field_ty.is_struct() {
                     // Nested struct: return address without loading
                     Ok((field_addr, field_ty))
                 } else {
@@ -847,8 +869,39 @@ impl<'b> FnCtx<'b> {
     }
 }
 
+fn array_total_byte_size(ty: &CType, registry: &StructRegistry) -> u32 {
+    match ty {
+        CType::Array(elem, count) => *count as u32 * array_total_byte_size(elem, registry),
+        CType::Struct(name) => {
+            let layout = registry
+                .get(name)
+                .unwrap_or_else(|| panic!("unknown struct '{name}' in array_total_byte_size"));
+            layout.byte_size
+        }
+        CType::Ptr(_) => 8,
+        CType::Void => panic!("array_total_byte_size() called on Void"),
+        _ => ty.bit_width() / 8,
+    }
+}
+
+fn array_element_alignment(ty: &CType, registry: &StructRegistry) -> u32 {
+    match ty {
+        CType::Array(elem, _) => array_element_alignment(elem, registry),
+        CType::Struct(name) => {
+            let layout = registry
+                .get(name)
+                .unwrap_or_else(|| panic!("unknown struct '{name}' in array_element_alignment"));
+            layout.alignment
+        }
+        CType::Ptr(_) => 8,
+        CType::Void => panic!("array_element_alignment() called on Void"),
+        _ => ty.bit_width() / 8,
+    }
+}
+
 fn field_byte_size(ty: &CType, registry: &StructRegistry) -> u32 {
     match ty {
+        CType::Array(elem, count) => *count as u32 * field_byte_size(elem, registry),
         CType::Struct(name) => {
             let layout = registry
                 .get(name)
@@ -862,6 +915,7 @@ fn field_byte_size(ty: &CType, registry: &StructRegistry) -> u32 {
 
 fn field_alignment(ty: &CType, registry: &StructRegistry) -> u32 {
     match ty {
+        CType::Array(elem, _) => field_alignment(elem, registry),
         CType::Struct(name) => {
             let layout = registry
                 .get(name)
@@ -903,9 +957,13 @@ fn build_struct_registry(
                 });
             }
         }
-        // Check for direct self-reference (non-pointer)
+        // Check for direct self-reference (non-pointer), including through arrays
         for (fname, fty) in fields {
-            if *fty == CType::Struct(name.clone()) {
+            let mut inner = fty;
+            while let CType::Array(elem, _) = inner {
+                inner = elem;
+            }
+            if *inner == CType::Struct(name.clone()) {
                 return Err(TinyErr {
                     line: 0,
                     col: 0,
@@ -988,7 +1046,38 @@ fn emit_struct_copy(
         let offset_val = ctx.builder.iconst(*foffset as i64, Type::I64);
         let src_field = ctx.builder.add(src_addr, offset_val);
         let dst_field = ctx.builder.add(dst_addr, offset_val);
-        if let CType::Struct(inner_name) = fty {
+        if fty.is_array() {
+            // Copy array field word-by-word (8-byte chunks + trailing)
+            let total = array_total_byte_size(fty, ctx.struct_registry) as usize;
+            let mut pos = 0;
+            while pos < total {
+                let remaining = total - pos;
+                let (ty, advance) = if remaining >= 8 {
+                    (Type::I64, 8)
+                } else if remaining >= 4 {
+                    (Type::I32, 4)
+                } else if remaining >= 2 {
+                    (Type::I16, 2)
+                } else {
+                    (Type::I8, 1)
+                };
+                let src_elem = if pos > 0 {
+                    let off = ctx.builder.iconst(pos as i64, Type::I64);
+                    ctx.builder.add(src_field, off)
+                } else {
+                    src_field
+                };
+                let dst_elem = if pos > 0 {
+                    let off = ctx.builder.iconst(pos as i64, Type::I64);
+                    ctx.builder.add(dst_field, off)
+                } else {
+                    dst_field
+                };
+                let val = ctx.builder.load(src_elem, ty);
+                ctx.builder.store(dst_elem, val);
+                pos += advance;
+            }
+        } else if let CType::Struct(inner_name) = fty {
             emit_struct_copy(ctx, dst_field, src_field, inner_name)?;
         } else {
             let ir_ty = fty.to_ir_type().unwrap();
@@ -1116,7 +1205,14 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
             ctx.compile_expr(expr)?;
         }
         Stmt::VarDecl { ty, name, init } => {
-            if ty.is_struct() {
+            if ty.is_array() {
+                // Arrays always live on the stack
+                let size = array_total_byte_size(ty, ctx.struct_registry);
+                let alignment = array_element_alignment(ty, ctx.struct_registry);
+                let slot = ctx.builder.create_stack_slot(size, alignment);
+                ctx.stack_slots.insert(name.clone(), (slot, ty.clone()));
+                // No initializer support for arrays (rejected by parser)
+            } else if ty.is_struct() {
                 let struct_name = match ty {
                     CType::Struct(s) => s.clone(),
                     _ => unreachable!(),
@@ -1172,6 +1268,13 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         }
         Stmt::Assign { name, expr } => {
             let local_ty = ctx.local_type(name);
+            if local_ty.is_array() {
+                return Err(TinyErr {
+                    line: 0,
+                    col: 0,
+                    msg: "cannot assign to array variable".into(),
+                });
+            }
             if local_ty.is_struct() {
                 let struct_name = match &local_ty {
                     CType::Struct(s) => s.clone(),
@@ -1221,6 +1324,13 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
             };
             let (addr_val, addr_ty) = ctx.compile_expr(ptr_expr)?;
             let pointee = addr_ty.pointee().clone();
+            if pointee.is_array() {
+                return Err(TinyErr {
+                    line: 0,
+                    col: 0,
+                    msg: "cannot assign to array via deref".into(),
+                });
+            }
             if pointee.is_struct() {
                 let inner_name = match &pointee {
                     CType::Struct(s) => s.clone(),
@@ -1250,6 +1360,13 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
             let (offset, field_ty) = resolve_field(ctx.struct_registry, &struct_name, field)?;
             let offset_val = ctx.builder.iconst(offset as i64, Type::I64);
             let field_addr = ctx.builder.add(struct_addr, offset_val);
+            if field_ty.is_array() {
+                return Err(TinyErr {
+                    line: 0,
+                    col: 0,
+                    msg: "cannot assign directly to array field".into(),
+                });
+            }
             if field_ty.is_struct() {
                 let (src_addr, _) = ctx.compile_expr(value)?;
                 let inner_name = match &field_ty {
@@ -1273,7 +1390,9 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
                     msg: "pointer arithmetic on void* is not allowed".into(),
                 });
             }
-            let elem_size = if pointee.is_struct() {
+            let elem_size = if pointee.is_array() {
+                array_total_byte_size(&pointee, ctx.struct_registry) as i64
+            } else if pointee.is_struct() {
                 let name = match &pointee {
                     CType::Struct(s) => s,
                     _ => unreachable!(),

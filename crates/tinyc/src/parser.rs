@@ -88,6 +88,34 @@ impl Parser {
         )
     }
 
+    /// Parse zero or more `[N]` array dimension suffixes, wrapping `ty` in CType::Array.
+    fn parse_array_dims(&mut self, mut ty: CType) -> Result<CType, TinyErr> {
+        while self.at(Token::LBracket) {
+            self.advance();
+            let dim_tok = self.advance().clone();
+            let dim = match &dim_tok.token {
+                Token::IntLit(n) if *n > 0 => *n as usize,
+                Token::IntLit(n) => {
+                    return Err(TinyErr {
+                        line: dim_tok.span.line,
+                        col: dim_tok.span.col,
+                        msg: format!("array size must be positive, got {n}"),
+                    });
+                }
+                other => {
+                    return Err(TinyErr {
+                        line: dim_tok.span.line,
+                        col: dim_tok.span.col,
+                        msg: format!("expected array size, got {other:?}"),
+                    });
+                }
+            };
+            self.expect(Token::RBracket)?;
+            ty = CType::Array(Box::new(ty), dim);
+        }
+        Ok(ty)
+    }
+
     /// Parse a type specifier, advancing past all consumed tokens.
     fn parse_type(&mut self) -> Result<CType, TinyErr> {
         let base = match self.peek().clone() {
@@ -164,6 +192,8 @@ impl Parser {
             self.advance();
             ty = CType::Ptr(Box::new(ty));
         }
+        // Parse array dimensions in type context (e.g. sizeof(int[10]))
+        let ty = self.parse_array_dims(ty)?;
         Ok(ty)
     }
 
@@ -195,6 +225,8 @@ impl Parser {
                     });
                 }
             };
+            // Parse array dimensions on struct fields
+            let field_ty = self.parse_array_dims(field_ty)?;
             self.expect(Token::Semi)?;
             fields.push((field_name, field_ty));
         }
@@ -220,10 +252,12 @@ impl Parser {
         self.expect(Token::LParen)?;
         let mut params = Vec::new();
         while !self.at(Token::RParen) {
-            let param_type = self.parse_type()?;
-            // Optional parameter name — discard if present
+            let mut param_type = self.parse_type()?;
+            // Optional parameter name -- discard if present
             if let Token::Ident(_) = self.peek() {
                 self.advance();
+                // Parse array dimensions and decay to pointer
+                param_type = self.parse_array_dims(param_type)?.decay();
             }
             params.push(param_type);
             if self.at(Token::Comma) {
@@ -285,10 +319,14 @@ impl Parser {
         self.expect(Token::LParen)?;
         let mut params = Vec::new();
         while !self.at(Token::RParen) {
-            let param_type = self.parse_type()?;
+            let mut param_type = self.parse_type()?;
             let p = self.advance().clone();
             match &p.token {
-                Token::Ident(s) => params.push((param_type, s.clone())),
+                Token::Ident(s) => {
+                    // Parse array dimensions and decay to pointer
+                    param_type = self.parse_array_dims(param_type)?.decay();
+                    params.push((param_type, s.clone()));
+                }
                 other => {
                     return Err(TinyErr {
                         line: p.span.line,
@@ -351,6 +389,16 @@ impl Parser {
                     });
                 }
             };
+            // Parse array dimensions: e.g. `int arr[3][4]`
+            let ty = self.parse_array_dims(ty)?;
+            if ty.is_array() && self.at(Token::Assign) {
+                let span = self.span().clone();
+                return Err(TinyErr {
+                    line: span.line,
+                    col: span.col,
+                    msg: "array initializers are not supported".into(),
+                });
+            }
             if self.at(Token::Semi) {
                 self.advance();
                 return Ok(Stmt::VarDecl {

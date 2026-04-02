@@ -13,6 +13,7 @@ pub enum CType {
     ULong,  // u64
     Ptr(Box<CType>),
     Struct(String),
+    Array(Box<CType>, usize),
 }
 
 impl CType {
@@ -25,6 +26,7 @@ impl CType {
             CType::Long | CType::ULong => Some(Type::I64),
             CType::Ptr(_) => Some(Type::I64),
             CType::Struct(_) => None,
+            CType::Array(_, _) => None,
         }
     }
 
@@ -36,6 +38,7 @@ impl CType {
             CType::Int | CType::UInt => 32,
             CType::Long | CType::ULong | CType::Ptr(_) => 64,
             CType::Struct(_) => panic!("use StructRegistry::byte_size()"),
+            CType::Array(_, _) => panic!("use array_total_byte_size()"),
         }
     }
 
@@ -51,7 +54,10 @@ impl CType {
     }
 
     pub fn is_integer(&self) -> bool {
-        !matches!(self, CType::Void | CType::Ptr(_) | CType::Struct(_))
+        !matches!(
+            self,
+            CType::Void | CType::Ptr(_) | CType::Struct(_) | CType::Array(_, _)
+        )
     }
 
     pub fn is_pointer(&self) -> bool {
@@ -60,6 +66,32 @@ impl CType {
 
     pub fn is_struct(&self) -> bool {
         matches!(self, CType::Struct(_))
+    }
+
+    pub fn is_array(&self) -> bool {
+        matches!(self, CType::Array(_, _))
+    }
+
+    pub fn array_element(&self) -> &CType {
+        match self {
+            CType::Array(elem, _) => elem,
+            _ => panic!("array_element() called on non-array type {:?}", self),
+        }
+    }
+
+    pub fn array_len(&self) -> usize {
+        match self {
+            CType::Array(_, count) => *count,
+            _ => panic!("array_len() called on non-array type {:?}", self),
+        }
+    }
+
+    /// Array-to-pointer decay: Array(elem, _) -> Ptr(elem), non-array unchanged.
+    pub fn decay(&self) -> CType {
+        match self {
+            CType::Array(elem, _) => CType::Ptr(elem.clone()),
+            other => other.clone(),
+        }
     }
 
     pub fn pointee(&self) -> &CType {
@@ -78,6 +110,9 @@ impl CType {
                 if inner.is_struct() {
                     panic!("pointee_size() on struct pointer: use StructRegistry");
                 }
+                if inner.is_array() {
+                    panic!("pointee_size() on array pointer: use array_total_byte_size");
+                }
                 inner.bit_width() / 8
             }
             _ => panic!("pointee_size() called on non-pointer type {:?}", self),
@@ -94,6 +129,7 @@ impl CType {
             CType::Long | CType::ULong => 4,
             CType::Ptr(_) => 5,
             CType::Struct(_) => panic!("rank() called on struct type"),
+            CType::Array(_, _) => panic!("rank() called on array type"),
         }
     }
 
@@ -102,6 +138,7 @@ impl CType {
         match self {
             CType::Char | CType::Short | CType::UChar | CType::UShort => CType::Int,
             CType::Struct(_) => panic!("promoted() called on struct type"),
+            CType::Array(_, _) => panic!("promoted() called on array type"),
             other => other.clone(),
         }
     }
