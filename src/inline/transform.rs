@@ -82,11 +82,12 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
         _ => panic!("inline_call_site: op at [{block_idx}][{op_idx}] is not a Call"),
     };
 
+    // Build remap context BEFORE appending callee stack slots, so that
+    // slot_offset = caller's original slot count (where callee slots will start).
+    let mut remap = RemapContext::new(caller, callee, &call_args);
+
     // Append callee stack slots to caller.
     caller.stack_slots.extend_from_slice(&callee.stack_slots);
-
-    // Build remap context and import e-graph nodes.
-    let mut remap = RemapContext::new(caller, callee, &call_args);
 
     let caller_egraph = caller.egraph.as_mut().expect("caller must have an egraph");
     let callee_egraph = callee.egraph.as_ref().expect("callee must have an egraph");

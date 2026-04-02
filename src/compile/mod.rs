@@ -625,6 +625,33 @@ pub fn compile(
             }
         }
 
+        // Include effectful op operands (Load addr, Store addr/val, Call args)
+        // in the per-block use sets for global liveness. These operands are not
+        // in the scheduled instruction list (they're handled by EffectfulUse
+        // markers added later), but they must participate in cross-block liveness
+        // so their values are spilled/reloaded when defined in a different block.
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            let non_term_count = if block.ops.is_empty() {
+                0
+            } else {
+                block.ops.len() - 1
+            };
+            for op in &block.ops[..non_term_count] {
+                let cids: Vec<ClassId> = match op {
+                    EffectfulOp::Store { addr, val, .. } => vec![*addr, *val],
+                    EffectfulOp::Load { addr, .. } => vec![*addr],
+                    EffectfulOp::Call { args, .. } => args.clone(),
+                    _ => continue,
+                };
+                for cid in cids {
+                    let canon = egraph.unionfind.find_immutable(cid);
+                    if let Some(&vreg) = class_to_vreg.get(&canon) {
+                        phi_uses[block_idx].insert(vreg);
+                    }
+                }
+            }
+        }
+
         // Step 2: Compute global liveness.
         let global_liveness = crate::regalloc::global_liveness::compute_global_liveness(
             &block_schedules,
