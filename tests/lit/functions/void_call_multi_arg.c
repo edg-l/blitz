@@ -1,7 +1,16 @@
+// RUN: %tinyc %s --emit-asm 2>&1
 // RUN: %tinyc %s -o %t && %t
 // EXIT: 0
 // Test void calls with multiple arguments: VoidCallBarrier must keep
 // all arg VRegs live at the call point.
+//
+// Verify: 3 void set() calls emitted, followed by sub comparisons.
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: sub
+// CHECK: sub
+// CHECK: sub
 
 __attribute__((noinline))
 void set(int *p, int v) { *p = v; }

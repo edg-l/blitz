@@ -1,9 +1,21 @@
+// RUN: %tinyc %s --emit-asm 2>&1
 // RUN: %tinyc %s -o %t && %t
 // EXIT: 0
 // Regression test: 8+ sequential calls where results are compared after.
 // The allocator's spill/remat pass must not rematerialize call-arg Iconst
-// VRegs away from their EffectfulUse position, which would shorten the
-// live range past call clobber points and cause misallocation to RAX.
+// VRegs away from their call-arg operand position on CallResult, which
+// would shorten the live range past call clobber points.
+//
+// Verify: 8 calls emitted, args go through edi (ABI), results spilled.
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: sub
 
 __attribute__((noinline))
 int id(int x) { return x; }

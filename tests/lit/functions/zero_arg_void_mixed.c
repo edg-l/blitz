@@ -1,9 +1,29 @@
+// RUN: %tinyc %s --emit-asm 2>&1
 // RUN: %tinyc %s -o %t && %t
 // EXIT: 0
 // Regression test: zero-arg void calls interleaved with non-void calls.
 // Zero-arg void calls emit no VoidCallBarrier (empty operands), so the
 // call point falls back to the arg-scanning heuristic. This must not
 // confuse call-point detection for the non-void calls that do have args.
+//
+// Verify: at least 16 calls (8 nop + 8 id), all id() results compared.
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: call
+// CHECK: sub
 
 __attribute__((noinline))
 void nop() { return; }

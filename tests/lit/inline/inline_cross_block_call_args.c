@@ -1,3 +1,4 @@
+// RUN: %tinyc %s --emit-ir 2>&1
 // RUN: %tinyc %s -o %t && %t
 // EXIT: 0
 // Regression test: inlined constants from different blocks passed as
@@ -5,6 +6,14 @@
 // triple->9) are constfolded into separate early blocks, then flow via
 // block params into a block with multiple calls. The per-block allocator
 // must not assign them colliding registers.
+//
+// Verify inlining happened: inc/dbl/triple should be gone, constants visible.
+// CHECK: function main
+// CHECK-NOT: function inc
+// CHECK-NOT: function dbl
+// CHECK-NOT: function triple
+// CHECK: iconst(11
+// CHECK: iconst(40
 
 __attribute__((noinline))
 int id(int x) { return x; }
