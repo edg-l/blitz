@@ -7,13 +7,13 @@
 // block params into a block with multiple calls. The per-block allocator
 // must not assign them colliding registers.
 //
-// Verify inlining happened: inc/dbl/triple should be gone, constants visible.
-// CHECK: function main
+// CHECK-LABEL: function main
 // CHECK-NOT: function inc
 // CHECK-NOT: function dbl
 // CHECK-NOT: function triple
-// CHECK: iconst(11
-// CHECK: iconst(40
+// CHECK-DAG: iconst(11
+// CHECK-DAG: iconst(40
+// CHECK-DAG: iconst(9
 
 __attribute__((noinline))
 int id(int x) { return x; }

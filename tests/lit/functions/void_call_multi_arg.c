@@ -4,13 +4,9 @@
 // Test void calls with multiple arguments: VoidCallBarrier must keep
 // all arg VRegs live at the call point.
 //
-// Verify: 3 void set() calls emitted, followed by sub comparisons.
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: sub
-// CHECK: sub
-// CHECK: sub
+// CHECK-LABEL: # main
+// CHECK-COUNT-3: call
+// CHECK-COUNT-3: sub    e
 
 __attribute__((noinline))
 void set(int *p, int v) { *p = v; }

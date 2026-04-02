@@ -6,15 +6,8 @@
 // VRegs away from their call-arg operand position on CallResult, which
 // would shorten the live range past call clobber points.
 //
-// Verify: 8 calls emitted, args go through edi (ABI), results spilled.
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
+// CHECK-LABEL: # main
+// CHECK-COUNT-8: call
 // CHECK: sub
 
 __attribute__((noinline))

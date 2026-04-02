@@ -6,23 +6,8 @@
 // call point falls back to the arg-scanning heuristic. This must not
 // confuse call-point detection for the non-void calls that do have args.
 //
-// Verify: at least 16 calls (8 nop + 8 id), all id() results compared.
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
-// CHECK: call
+// CHECK-LABEL: # main
+// CHECK-COUNT-17: call
 // CHECK: sub
 
 __attribute__((noinline))
