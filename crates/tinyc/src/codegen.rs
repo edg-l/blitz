@@ -1080,11 +1080,13 @@ fn compile_fn(
         }
     }
 
-    builder.finalize().map_err(|e| TinyErr {
+    let mut func = builder.finalize().map_err(|e| TinyErr {
         line: 0,
         col: 0,
         msg: e.to_string(),
-    })
+    })?;
+    func.noinline = fn_def.noinline;
+    Ok(func)
 }
 
 fn compile_stmts(ctx: &mut FnCtx, stmts: &[Stmt]) -> Result<(), TinyErr> {

@@ -93,6 +93,8 @@ pub struct Function {
     pub egraph: Option<EGraph>,
     /// Stack slots allocated for this function's frame.
     pub stack_slots: Vec<StackSlotData>,
+    /// If true, the inliner should never inline this function.
+    pub noinline: bool,
 }
 
 impl std::fmt::Debug for Function {
@@ -120,6 +122,7 @@ impl Function {
             param_class_ids: Vec::new(),
             egraph: None,
             stack_slots: Vec::new(),
+            noinline: false,
         }
     }
 

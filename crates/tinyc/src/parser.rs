@@ -27,7 +27,8 @@ impl Parser {
             {
                 struct_defs.push(p.parse_struct_def()?);
             } else {
-                match p.parse_function_or_forward_decl()? {
+                let noinline = p.try_parse_attribute_noinline()?;
+                match p.parse_function_or_forward_decl(noinline)? {
                     FnOrForward::Fn(f) => functions.push(f),
                     FnOrForward::Forward(d) => extern_decls.push(d),
                 }
@@ -240,7 +241,31 @@ impl Parser {
         })
     }
 
-    fn parse_function_or_forward_decl(&mut self) -> Result<FnOrForward, TinyErr> {
+    /// Try to parse `__attribute__((noinline))`. Returns true if found.
+    fn try_parse_attribute_noinline(&mut self) -> Result<bool, TinyErr> {
+        if !matches!(self.peek(), Token::Ident(s) if s == "__attribute__") {
+            return Ok(false);
+        }
+        self.advance(); // __attribute__
+        self.expect(Token::LParen)?;
+        self.expect(Token::LParen)?;
+        let attr_tok = self.advance().clone();
+        match &attr_tok.token {
+            Token::Ident(s) if s == "noinline" => {}
+            other => {
+                return Err(TinyErr {
+                    line: attr_tok.span.line,
+                    col: attr_tok.span.col,
+                    msg: format!("unsupported attribute: {other:?}"),
+                });
+            }
+        }
+        self.expect(Token::RParen)?;
+        self.expect(Token::RParen)?;
+        Ok(true)
+    }
+
+    fn parse_function_or_forward_decl(&mut self, noinline: bool) -> Result<FnOrForward, TinyErr> {
         // <type> name(<params>) { body }   -- function definition
         // <type> name(<params>) ;          -- forward declaration
         let return_type = self.parse_type()?;
@@ -297,6 +322,7 @@ impl Parser {
             return_type,
             params,
             body,
+            noinline,
         }))
     }
 

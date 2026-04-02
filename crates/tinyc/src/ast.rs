@@ -164,6 +164,7 @@ pub struct FnDef {
     pub return_type: CType,
     pub params: Vec<(CType, String)>,
     pub body: Vec<Stmt>,
+    pub noinline: bool,
 }
 
 pub enum Stmt {

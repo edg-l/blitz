@@ -51,6 +51,9 @@ pub fn is_recursive(name: &str, call_graph: &BTreeMap<String, BTreeSet<String>>)
 
 /// Decide whether a callee should be inlined.
 pub fn should_inline(callee: &Function, depth: u32, opts: &CompileOptions) -> bool {
+    if callee.noinline {
+        return false;
+    }
     if depth >= opts.max_inline_depth {
         return false;
     }

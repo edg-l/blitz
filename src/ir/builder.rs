@@ -702,6 +702,7 @@ impl FunctionBuilder {
             param_class_ids,
             egraph: Some(self.egraph),
             stack_slots: self.stack_slots,
+            noinline: false,
         };
 
         Ok(func)

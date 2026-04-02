@@ -91,6 +91,7 @@ fn clone_function(f: &Function) -> Function {
         param_class_ids: f.param_class_ids.clone(),
         egraph: f.egraph.clone(),
         stack_slots: f.stack_slots.clone(),
+        noinline: f.noinline,
     }
 }
 
