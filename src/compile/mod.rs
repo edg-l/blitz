@@ -1281,6 +1281,7 @@ pub fn compile(
                 &extraction,
                 func,
                 &egraph.unionfind,
+                rewritten,
             )?;
             all_insts.extend(extra);
         }

@@ -11,13 +11,17 @@ use crate::x86::addr::Addr;
 use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
+use crate::schedule::scheduler::ScheduledInst;
+
 use super::{CompileError, IrLocation};
 
-/// Build an `Addr` for Load/Store by checking if `addr_cid` extracted to an Addr node.
+/// Build an `Addr` for Load/Store by checking if `addr_cid` extracted to an Addr node
+/// AND the addr VReg is an actual Addr instruction in the current schedule.
 ///
-/// If the extraction result for `addr_cid` is an `Op::Addr { scale, disp }` node,
-/// fuse the addressing mode directly into the memory operand (no separate LEA needed).
-/// Otherwise fall back to `[addr_reg + 0]`.
+/// Addr folding replaces the LEA with a complex addressing mode `[base + index*scale + disp]`,
+/// using the Addr's children registers directly. This is only valid when those children's
+/// registers hold the correct values at the load/store point. If the addr VReg came from a
+/// SpillLoad or cross-block import, the children's registers may be stale.
 fn build_mem_addr(
     addr_cid: ClassId,
     addr_reg: Reg,
@@ -25,8 +29,21 @@ fn build_mem_addr(
     class_to_vreg: &BTreeMap<ClassId, VReg>,
     regalloc: &RegAllocResult,
     conflict_reg: Option<Reg>,
+    schedule: &[ScheduledInst],
 ) -> Addr {
-    if let Some(ext) = extraction.choices.get(&addr_cid)
+    // Only fold if the addr VReg's scheduled instruction is an Addr op.
+    // When it's a SpillLoad, BlockParam, or other non-Addr op, the extraction
+    // may show an Addr node for the class, but the children's registers aren't
+    // guaranteed live at the load/store point.
+    let addr_vreg = class_to_vreg.get(&addr_cid);
+    let is_addr_inst = addr_vreg.is_some_and(|v| {
+        schedule
+            .iter()
+            .any(|inst| inst.dst == *v && matches!(inst.op, Op::Addr { .. }))
+    });
+
+    if is_addr_inst
+        && let Some(ext) = extraction.choices.get(&addr_cid)
         && let Op::Addr { scale, disp } = &ext.op
     {
         // children[0] = base ClassId, children[1] = index ClassId (may be NONE).
@@ -79,6 +96,7 @@ pub(super) fn lower_effectful_op(
     extraction: &ExtractionResult,
     func: &Function,
     uf: &UnionFind,
+    schedule: &[ScheduledInst],
 ) -> Result<Vec<MachInst>, CompileError> {
     let get_reg = |cid: ClassId| -> Option<Reg> {
         let canon = uf.find_immutable(cid);
@@ -120,6 +138,7 @@ pub(super) fn lower_effectful_op(
                 class_to_vreg,
                 regalloc,
                 None,
+                schedule,
             );
             // S8/S16 loads must use zero-extending loads (MovzxBRM/MovzxWRM) to
             // avoid partial register writes that leave upper bits unchanged.
@@ -168,6 +187,7 @@ pub(super) fn lower_effectful_op(
                 class_to_vreg,
                 regalloc,
                 Some(val_reg),
+                schedule,
             );
             Ok(vec![MachInst::MovMR {
                 size: store_size,
