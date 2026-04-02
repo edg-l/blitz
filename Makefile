@@ -6,7 +6,7 @@ build:
 test: test-rust test-lit
 
 test-rust:
-	cargo test --lib
+	cargo test --workspace
 
 test-lit: build
 	./tests/lit/run_tests.sh
