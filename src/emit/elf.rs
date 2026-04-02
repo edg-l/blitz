@@ -173,6 +173,12 @@ pub struct StringTable {
     data: Vec<u8>,
 }
 
+impl Default for StringTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StringTable {
     pub fn new() -> Self {
         // First byte is always null (empty string at offset 0)
@@ -196,6 +202,12 @@ impl StringTable {
 pub struct SymbolTable {
     symbols: Vec<Elf64Sym>,
     pub first_global: u32,
+}
+
+impl Default for SymbolTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SymbolTable {
@@ -254,6 +266,10 @@ impl SymbolTable {
         self.symbols.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.symbols.is_empty()
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(self.symbols.len() * 24);
         for sym in &self.symbols {
@@ -267,6 +283,12 @@ impl SymbolTable {
 
 pub struct RelocationTable {
     pub entries: Vec<Elf64Rela>,
+}
+
+impl Default for RelocationTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RelocationTable {

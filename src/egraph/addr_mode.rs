@@ -44,20 +44,21 @@ fn apply_addr_rules(egraph: &mut EGraph) -> bool {
 
         // Pattern 1: Add(base, Iconst(d)) -> Addr{scale:1, disp:d}(base, NONE)
         //   where d fits i32
-        if let Some((d, _)) = find_iconst(egraph, rhs) {
-            if d >= i32::MIN as i64 && d <= i32::MAX as i64 {
-                let addr = egraph.add(ENode {
-                    op: Op::Addr {
-                        scale: 1,
-                        disp: d as i32,
-                    },
-                    children: smallvec![base, ClassId::NONE],
-                });
-                let canon = egraph.unionfind.find_immutable(class_id);
-                if egraph.unionfind.find_immutable(addr) != canon {
-                    egraph.merge(class_id, addr);
-                    changed = true;
-                }
+        if let Some((d, _)) = find_iconst(egraph, rhs)
+            && d >= i32::MIN as i64
+            && d <= i32::MAX as i64
+        {
+            let addr = egraph.add(ENode {
+                op: Op::Addr {
+                    scale: 1,
+                    disp: d as i32,
+                },
+                children: smallvec![base, ClassId::NONE],
+            });
+            let canon = egraph.unionfind.find_immutable(class_id);
+            if egraph.unionfind.find_immutable(addr) != canon {
+                egraph.merge(class_id, addr);
+                changed = true;
             }
         }
 
@@ -71,18 +72,18 @@ fn apply_addr_rules(egraph: &mut EGraph) -> bool {
                 if rhs_node.op == Op::Shl && rhs_node.children.len() == 2 {
                     let idx = rhs_node.children[0];
                     let shift = rhs_node.children[1];
-                    if let Some((n, _)) = find_iconst(egraph, shift) {
-                        if matches!(n, 1 | 2 | 3) {
-                            let scale = 1u8 << n;
-                            let addr = egraph.add(ENode {
-                                op: Op::Addr { scale, disp: 0 },
-                                children: smallvec![base, idx],
-                            });
-                            let canon = egraph.unionfind.find_immutable(class_id);
-                            if egraph.unionfind.find_immutable(addr) != canon {
-                                egraph.merge(class_id, addr);
-                                changed = true;
-                            }
+                    if let Some((n, _)) = find_iconst(egraph, shift)
+                        && matches!(n, 1..=3)
+                    {
+                        let scale = 1u8 << n;
+                        let addr = egraph.add(ENode {
+                            op: Op::Addr { scale, disp: 0 },
+                            children: smallvec![base, idx],
+                        });
+                        let canon = egraph.unionfind.find_immutable(class_id);
+                        if egraph.unionfind.find_immutable(addr) != canon {
+                            egraph.merge(class_id, addr);
+                            changed = true;
                         }
                     }
                 }
@@ -105,17 +106,18 @@ fn apply_addr_rules(egraph: &mut EGraph) -> bool {
                     } else {
                         (None, mc0)
                     };
-                    if let Some(s) = scale_opt {
-                        if is_valid_scale(s) && s != 1 {
-                            let addr = egraph.add(ENode {
-                                op: Op::Addr { scale: s, disp: 0 },
-                                children: smallvec![base, idx],
-                            });
-                            let canon = egraph.unionfind.find_immutable(class_id);
-                            if egraph.unionfind.find_immutable(addr) != canon {
-                                egraph.merge(class_id, addr);
-                                changed = true;
-                            }
+                    if let Some(s) = scale_opt
+                        && is_valid_scale(s)
+                        && s != 1
+                    {
+                        let addr = egraph.add(ENode {
+                            op: Op::Addr { scale: s, disp: 0 },
+                            children: smallvec![base, idx],
+                        });
+                        let canon = egraph.unionfind.find_immutable(class_id);
+                        if egraph.unionfind.find_immutable(addr) != canon {
+                            egraph.merge(class_id, addr);
+                            changed = true;
                         }
                     }
                 }
@@ -174,23 +176,23 @@ fn apply_lea_rules(egraph: &mut EGraph) -> bool {
                     if rhs_node.op == Op::Shl && rhs_node.children.len() == 2 {
                         let idx = rhs_node.children[0];
                         let shift = rhs_node.children[1];
-                        if let Some((n, _)) = find_iconst(egraph, shift) {
-                            if matches!(n, 1 | 2 | 3) {
-                                let scale = 1u8 << n;
-                                let idx_ty = egraph
-                                    .class(egraph.unionfind.find_immutable(idx))
-                                    .ty
-                                    .clone();
-                                if matches!(a_ty, Type::I32 | Type::I64) && a_ty == idx_ty {
-                                    let lea3 = egraph.add(ENode {
-                                        op: Op::X86Lea3 { scale },
-                                        children: smallvec![a, idx],
-                                    });
-                                    let canon = egraph.unionfind.find_immutable(class_id);
-                                    if egraph.unionfind.find_immutable(lea3) != canon {
-                                        egraph.merge(class_id, lea3);
-                                        changed = true;
-                                    }
+                        if let Some((n, _)) = find_iconst(egraph, shift)
+                            && matches!(n, 1..=3)
+                        {
+                            let scale = 1u8 << n;
+                            let idx_ty = egraph
+                                .class(egraph.unionfind.find_immutable(idx))
+                                .ty
+                                .clone();
+                            if matches!(a_ty, Type::I32 | Type::I64) && a_ty == idx_ty {
+                                let lea3 = egraph.add(ENode {
+                                    op: Op::X86Lea3 { scale },
+                                    children: smallvec![a, idx],
+                                });
+                                let canon = egraph.unionfind.find_immutable(class_id);
+                                if egraph.unionfind.find_immutable(lea3) != canon {
+                                    egraph.merge(class_id, lea3);
+                                    changed = true;
                                 }
                             }
                         }
@@ -198,23 +200,22 @@ fn apply_lea_rules(egraph: &mut EGraph) -> bool {
                 }
 
                 // Add(a, Iconst(d)) -> X86Lea4(a, NONE, 1, d)
-                if let Some((d, _)) = find_iconst(egraph, b) {
-                    if d >= i32::MIN as i64
-                        && d <= i32::MAX as i64
-                        && matches!(a_ty, Type::I32 | Type::I64)
-                    {
-                        let lea4 = egraph.add(ENode {
-                            op: Op::X86Lea4 {
-                                scale: 1,
-                                disp: d as i32,
-                            },
-                            children: smallvec![a, ClassId::NONE],
-                        });
-                        let canon = egraph.unionfind.find_immutable(class_id);
-                        if egraph.unionfind.find_immutable(lea4) != canon {
-                            egraph.merge(class_id, lea4);
-                            changed = true;
-                        }
+                if let Some((d, _)) = find_iconst(egraph, b)
+                    && d >= i32::MIN as i64
+                    && d <= i32::MAX as i64
+                    && matches!(a_ty, Type::I32 | Type::I64)
+                {
+                    let lea4 = egraph.add(ENode {
+                        op: Op::X86Lea4 {
+                            scale: 1,
+                            disp: d as i32,
+                        },
+                        children: smallvec![a, ClassId::NONE],
+                    });
+                    let canon = egraph.unionfind.find_immutable(class_id);
+                    if egraph.unionfind.find_immutable(lea4) != canon {
+                        egraph.merge(class_id, lea4);
+                        changed = true;
                     }
                 }
             }
@@ -328,7 +329,7 @@ fn apply_three_component_lea(egraph: &mut EGraph) -> bool {
                 let Some((n, _)) = find_iconst(egraph, shift) else {
                     continue;
                 };
-                if !matches!(n, 1 | 2 | 3) {
+                if !matches!(n, 1..=3) {
                     continue;
                 }
                 let scale = 1u8 << n;

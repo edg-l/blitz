@@ -137,10 +137,8 @@ impl ObjectFile {
         //   (..)           .shstrtab
         //   (..)           Section headers (align 8)
 
-        let mut buf: Vec<u8> = Vec::new();
-
         // Reserve space for ELF header (64 bytes)
-        buf.resize(64, 0);
+        let mut buf: Vec<u8> = vec![0; 64];
 
         // .text
         pad_to(&mut buf, 16);

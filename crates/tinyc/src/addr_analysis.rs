@@ -18,8 +18,21 @@ fn walk_expr(expr: &Expr, set: &mut HashSet<String>) {
             op: UnaryOp::AddrOf,
             expr: inner,
         } => {
-            if let Expr::Var(name) = inner.as_ref() {
-                set.insert(name.clone());
+            match inner.as_ref() {
+                Expr::Var(name) => {
+                    set.insert(name.clone());
+                }
+                Expr::FieldAccess { expr, .. } => {
+                    // &s.field: mark the root variable as addressed
+                    let mut root = expr.as_ref();
+                    while let Expr::FieldAccess { expr: inner, .. } = root {
+                        root = inner.as_ref();
+                    }
+                    if let Expr::Var(name) = root {
+                        set.insert(name.clone());
+                    }
+                }
+                _ => {}
             }
             walk_expr(inner, set);
         }
@@ -46,6 +59,9 @@ fn walk_expr(expr: &Expr, set: &mut HashSet<String>) {
             walk_expr(base, set);
             walk_expr(index, set);
         }
+        Expr::FieldAccess { expr: inner, .. } => {
+            walk_expr(inner, set);
+        }
     }
 }
 
@@ -54,7 +70,11 @@ fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
         Stmt::Return(Some(expr)) => walk_expr(expr, set),
         Stmt::Return(None) => {}
         Stmt::ExprStmt(expr) => walk_expr(expr, set),
-        Stmt::VarDecl { init, .. } => walk_expr(init, set),
+        Stmt::VarDecl { init, .. } => {
+            if let Some(init) = init {
+                walk_expr(init, set);
+            }
+        }
         Stmt::Assign { expr, .. } => walk_expr(expr, set),
         Stmt::DerefAssign { addr_expr, value } => {
             walk_expr(addr_expr, set);
@@ -63,6 +83,10 @@ fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
         Stmt::IndexAssign { base, index, value } => {
             walk_expr(base, set);
             walk_expr(index, set);
+            walk_expr(value, set);
+        }
+        Stmt::FieldAssign { expr, value, .. } => {
+            walk_expr(expr, set);
             walk_expr(value, set);
         }
         Stmt::If {

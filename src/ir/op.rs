@@ -182,6 +182,7 @@ pub enum Op {
     /// Placeholder node representing a return value of a Call effectful op.
     /// - `u32` index: which return value (0 = first, 1 = second, ...).
     /// - `Type`: the type of this return value.
+    ///
     /// Has no children. Cost is zero (instruction emitted by effectful lowering).
     CallResult(u32, Type),
 

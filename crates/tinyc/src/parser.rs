@@ -17,9 +17,15 @@ impl Parser {
         let mut p = Parser { tokens, pos: 0 };
         let mut functions = Vec::new();
         let mut extern_decls = Vec::new();
+        let mut struct_defs = Vec::new();
         while !p.at(Token::Eof) {
             if p.at(Token::Extern) {
                 extern_decls.push(p.parse_extern_decl()?);
+            } else if p.at(Token::Struct)
+                && p.pos + 2 < p.tokens.len()
+                && p.tokens[p.pos + 2].token == Token::LBrace
+            {
+                struct_defs.push(p.parse_struct_def()?);
             } else {
                 match p.parse_function_or_forward_decl()? {
                     FnOrForward::Fn(f) => functions.push(f),
@@ -30,6 +36,7 @@ impl Parser {
         Ok(Program {
             functions,
             extern_decls,
+            struct_defs,
         })
     }
 
@@ -70,7 +77,13 @@ impl Parser {
     fn peek_is_type(&self) -> bool {
         matches!(
             self.peek(),
-            Token::Void | Token::Char | Token::Short | Token::Int | Token::Long | Token::Unsigned
+            Token::Void
+                | Token::Char
+                | Token::Short
+                | Token::Int
+                | Token::Long
+                | Token::Unsigned
+                | Token::Struct
         )
     }
 
@@ -96,6 +109,20 @@ impl Parser {
             Token::Long => {
                 self.advance();
                 CType::Long
+            }
+            Token::Struct => {
+                self.advance();
+                let name_tok = self.advance().clone();
+                match &name_tok.token {
+                    Token::Ident(s) => CType::Struct(s.clone()),
+                    other => {
+                        return Err(TinyErr {
+                            line: name_tok.span.line,
+                            col: name_tok.span.col,
+                            msg: format!("expected struct name, got {other:?}"),
+                        });
+                    }
+                }
             }
             Token::Unsigned => {
                 self.advance();
@@ -137,6 +164,42 @@ impl Parser {
             ty = CType::Ptr(Box::new(ty));
         }
         Ok(ty)
+    }
+
+    fn parse_struct_def(&mut self) -> Result<(String, Vec<(String, CType)>), TinyErr> {
+        self.expect(Token::Struct)?;
+        let name_tok = self.advance().clone();
+        let name = match &name_tok.token {
+            Token::Ident(s) => s.clone(),
+            other => {
+                return Err(TinyErr {
+                    line: name_tok.span.line,
+                    col: name_tok.span.col,
+                    msg: format!("expected struct name, got {other:?}"),
+                });
+            }
+        };
+        self.expect(Token::LBrace)?;
+        let mut fields = Vec::new();
+        while !self.at(Token::RBrace) {
+            let field_ty = self.parse_type()?;
+            let field_tok = self.advance().clone();
+            let field_name = match &field_tok.token {
+                Token::Ident(s) => s.clone(),
+                other => {
+                    return Err(TinyErr {
+                        line: field_tok.span.line,
+                        col: field_tok.span.col,
+                        msg: format!("expected field name, got {other:?}"),
+                    });
+                }
+            };
+            self.expect(Token::Semi)?;
+            fields.push((field_name, field_ty));
+        }
+        self.expect(Token::RBrace)?;
+        self.expect(Token::Semi)?;
+        Ok((name, fields))
     }
 
     fn parse_extern_decl(&mut self) -> Result<ExternDecl, TinyErr> {
@@ -262,10 +325,22 @@ impl Parser {
                     });
                 }
             };
+            if self.at(Token::Semi) {
+                self.advance();
+                return Ok(Stmt::VarDecl {
+                    ty,
+                    name,
+                    init: None,
+                });
+            }
             self.expect(Token::Assign)?;
             let init = self.parse_expr()?;
             self.expect(Token::Semi)?;
-            return Ok(Stmt::VarDecl { ty, name, init });
+            return Ok(Stmt::VarDecl {
+                ty,
+                name,
+                init: Some(init),
+            });
         }
 
         match self.peek().clone() {
@@ -323,7 +398,7 @@ impl Parser {
                 }
             }
             Token::Ident(_) => {
-                // Parse LHS expression, then decide: assign, index assign, or expr stmt.
+                // Parse LHS expression, then decide: assign, index assign, field assign, or expr stmt.
                 let lhs = self.parse_expr()?;
                 if self.at(Token::Assign) {
                     self.advance();
@@ -334,6 +409,11 @@ impl Parser {
                         Expr::Index { base, index } => Ok(Stmt::IndexAssign {
                             base: *base,
                             index: *index,
+                            value,
+                        }),
+                        Expr::FieldAccess { expr, field } => Ok(Stmt::FieldAssign {
+                            expr: *expr,
+                            field,
                             value,
                         }),
                         _ => {
@@ -393,7 +473,7 @@ impl Parser {
         let mut lhs = self.parse_prefix()?;
 
         loop {
-            // Postfix `[index]` binds at bp 25, tighter than any binary op.
+            // Postfix operators bind at bp 25, tighter than any binary op.
             if self.at(Token::LBracket) {
                 if 25 <= min_bp {
                     break;
@@ -404,6 +484,57 @@ impl Parser {
                 lhs = Expr::Index {
                     base: Box::new(lhs),
                     index: Box::new(index),
+                };
+                continue;
+            }
+
+            // Postfix `.field`
+            if self.at(Token::Dot) {
+                if 25 <= min_bp {
+                    break;
+                }
+                self.advance();
+                let field_tok = self.advance().clone();
+                let field = match &field_tok.token {
+                    Token::Ident(s) => s.clone(),
+                    other => {
+                        return Err(TinyErr {
+                            line: field_tok.span.line,
+                            col: field_tok.span.col,
+                            msg: format!("expected field name after '.', got {other:?}"),
+                        });
+                    }
+                };
+                lhs = Expr::FieldAccess {
+                    expr: Box::new(lhs),
+                    field,
+                };
+                continue;
+            }
+
+            // Postfix `->field` desugars to `(*lhs).field`
+            if self.at(Token::Arrow) {
+                if 25 <= min_bp {
+                    break;
+                }
+                self.advance();
+                let field_tok = self.advance().clone();
+                let field = match &field_tok.token {
+                    Token::Ident(s) => s.clone(),
+                    other => {
+                        return Err(TinyErr {
+                            line: field_tok.span.line,
+                            col: field_tok.span.col,
+                            msg: format!("expected field name after '->', got {other:?}"),
+                        });
+                    }
+                };
+                lhs = Expr::FieldAccess {
+                    expr: Box::new(Expr::UnaryOp {
+                        op: UnaryOp::Deref,
+                        expr: Box::new(lhs),
+                    }),
+                    field,
                 };
                 continue;
             }
@@ -545,6 +676,7 @@ impl Parser {
                             | Token::Int
                             | Token::Long
                             | Token::Unsigned
+                            | Token::Struct
                     );
                 if next_is_type {
                     self.advance(); // consume '('

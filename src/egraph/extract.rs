@@ -361,8 +361,8 @@ pub fn vreg_insts_for_block(
 
     // Assign new VRegs.
     for &class_id in &emit_order {
-        if !class_to_vreg.contains_key(&class_id) {
-            class_to_vreg.insert(class_id, VReg(*next_vreg));
+        if let std::collections::btree_map::Entry::Vacant(e) = class_to_vreg.entry(class_id) {
+            e.insert(VReg(*next_vreg));
             *next_vreg += 1;
         }
     }

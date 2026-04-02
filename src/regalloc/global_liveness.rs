@@ -71,9 +71,7 @@ pub fn compute_global_liveness(
     let mut live_out: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 
     // Initialize live_in = use(B).
-    for b in 0..n {
-        live_in[b] = block_use[b].clone();
-    }
+    live_in[..n].clone_from_slice(&block_use[..n]);
 
     // Iterate until fixed point.
     let mut changed = true;
@@ -221,12 +219,12 @@ pub fn collect_block_param_vregs_per_block(
                 }
                 let class = egraph.class(cid);
                 for node in &class.nodes {
-                    if let Op::BlockParam(bid, pidx2, _) = &node.op {
-                        if *bid == block.id && *pidx2 == pidx {
-                            if let Some(&vreg) = class_to_vreg.get(&cid) {
-                                result[block_idx].insert(vreg);
-                            }
-                        }
+                    if let Op::BlockParam(bid, pidx2, _) = &node.op
+                        && *bid == block.id
+                        && *pidx2 == pidx
+                        && let Some(&vreg) = class_to_vreg.get(&cid)
+                    {
+                        result[block_idx].insert(vreg);
                     }
                 }
             }

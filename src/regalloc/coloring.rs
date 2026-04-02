@@ -152,10 +152,10 @@ pub fn interval_color(
         if i < liveness.live_at.len() {
             for v in &liveness.live_at[i] {
                 let idx = v.0 as usize;
-                if idx < num_vregs {
-                    if let Some(c) = colors[idx] {
-                        forbidden.insert(c);
-                    }
+                if idx < num_vregs
+                    && let Some(c) = colors[idx]
+                {
+                    forbidden.insert(c);
                 }
             }
         }

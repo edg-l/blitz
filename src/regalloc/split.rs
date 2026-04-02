@@ -94,9 +94,11 @@ fn is_rematerializable_inst(inst: &ScheduledInst) -> bool {
 /// For each VReg in live_in(block) that is:
 ///   - NOT a block parameter (phi dest)
 ///   - NOT defined in this block
+///
 ///   This function inserts:
 ///     * If rematerializable: a fresh Iconst instruction defining a new VReg
 ///     * Otherwise: a SpillLoad from the assigned cross-block slot
+///
 ///   And rewrites all uses of the original VReg in this block to use the new one.
 ///
 /// For each VReg in live_out(block) that is defined in this block:

@@ -235,10 +235,10 @@ pub(super) fn collect_call_points_for_block(
         // Try to find via CallResult first (non-void calls).
         if let Some(&first_result_cid) = result_cids.first() {
             let canon = egraph.unionfind.find_immutable(first_result_cid);
-            if let Some(&result_vreg) = class_to_vreg.get(&canon) {
-                if let Some(pos) = block_sched.iter().position(|inst| inst.dst == result_vreg) {
-                    cp = pos;
-                }
+            if let Some(&result_vreg) = class_to_vreg.get(&canon)
+                && let Some(pos) = block_sched.iter().position(|inst| inst.dst == result_vreg)
+            {
+                cp = pos;
             }
         }
 
@@ -248,10 +248,10 @@ pub(super) fn collect_call_points_for_block(
             let mut max_arg_pos: Option<usize> = None;
             for &arg_cid in arg_cids.iter() {
                 let canon = egraph.unionfind.find_immutable(arg_cid);
-                if let Some(&arg_vreg) = class_to_vreg.get(&canon) {
-                    if let Some(pos) = block_sched.iter().position(|inst| inst.dst == arg_vreg) {
-                        max_arg_pos = Some(max_arg_pos.map_or(pos, |m: usize| m.max(pos)));
-                    }
+                if let Some(&arg_vreg) = class_to_vreg.get(&canon)
+                    && let Some(pos) = block_sched.iter().position(|inst| inst.dst == arg_vreg)
+                {
+                    max_arg_pos = Some(max_arg_pos.map_or(pos, |m: usize| m.max(pos)));
                 }
             }
             if let Some(pos) = max_arg_pos {

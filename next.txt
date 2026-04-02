@@ -1,0 +1,18 @@
+Possible Next Directions
+
+Language features (tinyc):
+1. Structs - struct types, field access, sizeof, nested structs
+2. Arrays - stack-allocated arrays, multidimensional
+3. Strings - string literals, char arrays, printf-style formatting
+4. Global variables - .data/.bss sections, relocations
+5. Float support - f32/f64 (backend has SSE2 instructions already, tinyc just needs the frontend)
+
+Backend improvements:
+6. Floating point end-to-end - wire up XMM regalloc + SSE2 encoding (infra exists but untested e2e)
+7. Interprocedural optimizations - inlining, tail calls
+8. Better spill code - split live ranges at loop boundaries, register hints
+9. DWARF debug info - .debug_info, .debug_line for gdb/lldb
+
+Infrastructure:
+10. CI/benchmarks - compile-time benchmarks, runtime correctness suite
+11. More codegen tests - expand the builder-based CHECK tests for edge cases

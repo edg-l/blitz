@@ -1219,3 +1219,145 @@ fn test_load_value_across_call() {
     // loaded = 41, increment(41) = 42
     assert_eq!(compile_and_run(src), Some(42));
 }
+
+// ── Struct support tests ──────────────────────────────────────────────
+
+#[test]
+fn test_struct_field_access() {
+    let src = "
+        struct Point {
+            int x;
+            int y;
+        };
+        int main() {
+            struct Point p;
+            p.x = 10;
+            p.y = 20;
+            return p.x + p.y;
+        }";
+    assert_eq!(compile_and_run(src), Some(30));
+}
+
+#[test]
+fn test_struct_pointer_arrow() {
+    let src = "
+        struct Point {
+            int x;
+            int y;
+        };
+        void set_x(struct Point *p, int v) {
+            p->x = v;
+        }
+        int main() {
+            struct Point p;
+            p.x = 0;
+            p.y = 0;
+            set_x(&p, 42);
+            return p.x;
+        }";
+    assert_eq!(compile_and_run(src), Some(42));
+}
+
+#[test]
+fn test_struct_copy() {
+    let src = "
+        struct Pair {
+            int x;
+            int y;
+        };
+        int main() {
+            struct Pair a;
+            a.x = 1;
+            a.y = 2;
+            struct Pair b;
+            b = a;
+            return b.x + b.y;
+        }";
+    assert_eq!(compile_and_run(src), Some(3));
+}
+
+#[test]
+fn test_struct_sizeof() {
+    // int (4 bytes) + padding (4 bytes) + long (8 bytes) = 16
+    let src = "
+        struct Mixed {
+            int i;
+            long l;
+        };
+        int main() {
+            return (int)sizeof(struct Mixed);
+        }";
+    assert_eq!(compile_and_run(src), Some(16));
+}
+
+#[test]
+fn test_struct_nested() {
+    let src = "
+        struct Inner {
+            int v;
+        };
+        struct Outer {
+            struct Inner i;
+            int w;
+        };
+        int main() {
+            struct Outer o;
+            o.i.v = 7;
+            o.w = 3;
+            return o.i.v + o.w;
+        }";
+    assert_eq!(compile_and_run(src), Some(10));
+}
+
+#[test]
+fn test_struct_by_value_param() {
+    let src = "
+        struct Pair {
+            int x;
+            int y;
+        };
+        int sum(struct Pair p) {
+            return p.x + p.y;
+        }
+        int main() {
+            struct Pair p;
+            p.x = 20;
+            p.y = 22;
+            return sum(p);
+        }";
+    assert_eq!(compile_and_run(src), Some(42));
+}
+
+#[test]
+fn test_struct_recursive_error() {
+    let src = "
+        struct Bad {
+            struct Bad inner;
+        };
+        int main() { return 0; }";
+    let result = compile_source(src);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_struct_undefined_error() {
+    let src = "
+        int main() {
+            struct Nonexistent p;
+            return 0;
+        }";
+    let result = compile_source(src);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_struct_extern_param_error() {
+    let src = "
+        struct Foo {
+            int x;
+        };
+        extern void bad(struct Foo f);
+        int main() { return 0; }";
+    let result = compile_source(src);
+    assert!(result.is_err());
+}

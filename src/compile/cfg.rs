@@ -247,10 +247,10 @@ pub(super) fn collect_externals(func: &Function) -> Vec<String> {
     let mut externals = Vec::new();
     for block in &func.blocks {
         for op in &block.ops {
-            if let EffectfulOp::Call { func: callee, .. } = op {
-                if !externals.contains(callee) {
-                    externals.push(callee.clone());
-                }
+            if let EffectfulOp::Call { func: callee, .. } = op
+                && !externals.contains(callee)
+            {
+                externals.push(callee.clone());
             }
         }
     }
@@ -369,13 +369,13 @@ pub(super) fn compute_copy_pairs(
                 } => {
                     // Handle true branch.
                     for (idx, &arg_cid) in true_args.iter().enumerate() {
-                        if let Some(&param_cid) = block_param_map.get(&(*bb_true, idx as u32)) {
-                            if let (Some(arg_v), Some(param_v)) = (
+                        if let Some(&param_cid) = block_param_map.get(&(*bb_true, idx as u32))
+                            && let (Some(arg_v), Some(param_v)) = (
                                 get_vreg(arg_cid),
                                 get_param_vreg(*bb_true, idx as u32, param_cid),
-                            ) {
-                                pairs.push((arg_v, param_v));
-                            }
+                            )
+                        {
+                            pairs.push((arg_v, param_v));
                         }
                     }
                     // Handle false branch via the destructuring below.
@@ -387,13 +387,12 @@ pub(super) fn compute_copy_pairs(
                     {
                         for (idx, &arg_cid) in false_args.iter().enumerate() {
                             if let Some(&param_cid) = block_param_map.get(&(*bb_false, idx as u32))
-                            {
-                                if let (Some(arg_v), Some(param_v)) = (
+                                && let (Some(arg_v), Some(param_v)) = (
                                     get_vreg(arg_cid),
                                     get_param_vreg(*bb_false, idx as u32, param_cid),
-                                ) {
-                                    pairs.push((arg_v, param_v));
-                                }
+                                )
+                            {
+                                pairs.push((arg_v, param_v));
                             }
                         }
                     }
@@ -402,13 +401,13 @@ pub(super) fn compute_copy_pairs(
                 _ => continue,
             };
             for (idx, &arg_cid) in args.iter().enumerate() {
-                if let Some(&param_cid) = block_param_map.get(&(target, idx as u32)) {
-                    if let (Some(arg_v), Some(param_v)) = (
+                if let Some(&param_cid) = block_param_map.get(&(target, idx as u32))
+                    && let (Some(arg_v), Some(param_v)) = (
                         get_vreg(arg_cid),
                         get_param_vreg(target, idx as u32, param_cid),
-                    ) {
-                        pairs.push((arg_v, param_v));
-                    }
+                    )
+                {
+                    pairs.push((arg_v, param_v));
                 }
             }
         }
@@ -441,12 +440,12 @@ pub(super) fn compute_loop_depths(
             };
             for target in targets {
                 // Find target block index.
-                if let Some(target_idx) = func.blocks.iter().position(|b| b.id == target) {
-                    if target_idx <= src_idx {
-                        // Back-edge: all blocks from target_idx to src_idx are in the loop.
-                        for d in block_depth[target_idx..=src_idx].iter_mut() {
-                            *d += 1;
-                        }
+                if let Some(target_idx) = func.blocks.iter().position(|b| b.id == target)
+                    && target_idx <= src_idx
+                {
+                    // Back-edge: all blocks from target_idx to src_idx are in the loop.
+                    for d in block_depth[target_idx..=src_idx].iter_mut() {
+                        *d += 1;
                     }
                 }
             }

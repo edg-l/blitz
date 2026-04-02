@@ -110,8 +110,7 @@ pub(super) fn assign_barrier_groups(
             // Compute latest valid group: minimum of all consumers' groups.
             let max_from_consumers = consumers
                 .get(&v)
-                .map(|cs| cs.iter().filter_map(|c| vreg_group.get(c)).min().copied())
-                .flatten();
+                .and_then(|cs| cs.iter().filter_map(|c| vreg_group.get(c)).min().copied());
 
             // If no scheduled consumers, this VReg is only used by barriers
             // or terminators -- keep it at the forward-pass group.
@@ -185,10 +184,10 @@ pub(super) fn insert_early_barrier_spills(
         // Only spill if consumer is 2+ groups away.
         if consumer_group >= def_group + 2 {
             // Skip non-GPR types (Flags can't be spilled).
-            if let Some(ty) = vreg_types.get(&v) {
-                if matches!(ty, Type::I8 | Type::I16 | Type::I32 | Type::I64) {
-                    candidates.push((v, def_group, consumer_group));
-                }
+            if let Some(ty) = vreg_types.get(&v)
+                && matches!(ty, Type::I8 | Type::I16 | Type::I32 | Type::I64)
+            {
+                candidates.push((v, def_group, consumer_group));
             }
         }
     }

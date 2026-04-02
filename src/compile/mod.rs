@@ -153,7 +153,7 @@ pub fn compile(
 
     // Compute user stack space in 8-byte units. Each slot may be larger than
     // 8 bytes (e.g. string literal buffers), so sum actual sizes rounded up.
-    let user_stack_slots: u32 = func.stack_slots.iter().map(|s| (s.size + 7) / 8).sum();
+    let user_stack_slots: u32 = func.stack_slots.iter().map(|s| s.size.div_ceil(8)).sum();
     let mut egraph = func
         .egraph
         .take()
@@ -366,8 +366,7 @@ pub fn compile(
     // and pure ops that are inputs to a Call must come before the Call. The
     // scheduler doesn't know about effectful ops, so we reorder the schedule
     // here so the regalloc sees correct liveness.
-    for block_idx in 0..func.blocks.len() {
-        let block = &func.blocks[block_idx];
+    for (block_idx, block) in func.blocks.iter().enumerate() {
         let non_term_count = if block.ops.is_empty() {
             0
         } else {
@@ -584,17 +583,16 @@ pub fn compile(
                     for (pidx, &arg_cid) in args.iter().enumerate() {
                         if let Some(&fresh_vreg) =
                             block_param_vreg_overrides.get(&(target, pidx as u32))
+                            && let Some(&param_cid) = block_param_map.get(&(target, pidx as u32))
                         {
-                            if let Some(&param_cid) = block_param_map.get(&(target, pidx as u32)) {
-                                let canon_arg = egraph.unionfind.find_immutable(arg_cid);
-                                let canon_param = egraph.unionfind.find_immutable(param_cid);
-                                if canon_arg == canon_param {
-                                    // Replace the global VReg with the override.
-                                    if let Some(&old_vreg) = class_to_vreg.get(&canon_arg) {
-                                        phi_uses[block_idx].remove(&old_vreg);
-                                    }
-                                    phi_uses[block_idx].insert(fresh_vreg);
+                            let canon_arg = egraph.unionfind.find_immutable(arg_cid);
+                            let canon_param = egraph.unionfind.find_immutable(param_cid);
+                            if canon_arg == canon_param {
+                                // Replace the global VReg with the override.
+                                if let Some(&old_vreg) = class_to_vreg.get(&canon_arg) {
+                                    phi_uses[block_idx].remove(&old_vreg);
                                 }
+                                phi_uses[block_idx].insert(fresh_vreg);
                             }
                         }
                     }
@@ -757,28 +755,26 @@ pub fn compile(
                     let in_schedule = schedule.iter().any(|i| i.dst == vreg)
                         || rename
                             .get(&vreg)
-                            .map_or(false, |&v| schedule.iter().any(|i| i.dst == v));
-                    if !in_schedule {
-                        if let Some(def) = def_insts.get(&vreg) {
-                            if crate::regalloc::spill::is_rematerializable(def) {
-                                let new_vreg = VReg(shared_next_vreg);
-                                shared_next_vreg += 1;
-                                schedule.push(ScheduledInst {
-                                    op: def.op.clone(),
-                                    dst: new_vreg,
-                                    operands: def.operands.clone(),
-                                });
-                                rename.insert(vreg, new_vreg);
-                            } else if let Some(&slot) = spill_map.vreg_to_slot.get(&vreg) {
-                                let new_vreg = VReg(shared_next_vreg);
-                                shared_next_vreg += 1;
-                                schedule.push(ScheduledInst {
-                                    op: Op::SpillLoad(slot as i64),
-                                    dst: new_vreg,
-                                    operands: vec![],
-                                });
-                                rename.insert(vreg, new_vreg);
-                            }
+                            .is_some_and(|&v| schedule.iter().any(|i| i.dst == v));
+                    if !in_schedule && let Some(def) = def_insts.get(&vreg) {
+                        if crate::regalloc::spill::is_rematerializable(def) {
+                            let new_vreg = VReg(shared_next_vreg);
+                            shared_next_vreg += 1;
+                            schedule.push(ScheduledInst {
+                                op: def.op.clone(),
+                                dst: new_vreg,
+                                operands: def.operands.clone(),
+                            });
+                            rename.insert(vreg, new_vreg);
+                        } else if let Some(&slot) = spill_map.vreg_to_slot.get(&vreg) {
+                            let new_vreg = VReg(shared_next_vreg);
+                            shared_next_vreg += 1;
+                            schedule.push(ScheduledInst {
+                                op: Op::SpillLoad(slot as i64),
+                                dst: new_vreg,
+                                operands: vec![],
+                            });
+                            rename.insert(vreg, new_vreg);
                         }
                     }
                 }
@@ -861,17 +857,16 @@ pub fn compile(
                                         class_to_vreg.get(&canon).copied().unwrap_or(vreg);
                                     if let Some(def) =
                                         def_insts.get(&vreg).or_else(|| def_insts.get(&orig_vreg))
+                                        && crate::regalloc::spill::is_rematerializable(def)
                                     {
-                                        if crate::regalloc::spill::is_rematerializable(def) {
-                                            let new_vreg = VReg(shared_next_vreg);
-                                            shared_next_vreg += 1;
-                                            split_schedule.push(ScheduledInst {
-                                                op: def.op.clone(),
-                                                dst: new_vreg,
-                                                operands: def.operands.clone(),
-                                            });
-                                            bcv.insert(canon, new_vreg);
-                                        }
+                                        let new_vreg = VReg(shared_next_vreg);
+                                        shared_next_vreg += 1;
+                                        split_schedule.push(ScheduledInst {
+                                            op: def.op.clone(),
+                                            dst: new_vreg,
+                                            operands: def.operands.clone(),
+                                        });
+                                        bcv.insert(canon, new_vreg);
                                     }
                                 }
                             }
@@ -1451,8 +1446,7 @@ pub fn compile_to_ir_string(
     }
 
     // Phase 4b: Reorder each block's schedule to respect effectful op barriers.
-    for block_idx in 0..func.blocks.len() {
-        let block = &func.blocks[block_idx];
+    for (block_idx, block) in func.blocks.iter().enumerate() {
         let non_term_count = if block.ops.is_empty() {
             0
         } else {
@@ -1487,8 +1481,7 @@ pub fn compile_to_ir_string(
 
     // Build PrintableBlocks for the printer.
     let mut printable_blocks: Vec<PrintableBlock> = Vec::new();
-    for block_idx in 0..func.blocks.len() {
-        let block = &func.blocks[block_idx];
+    for (block_idx, block) in func.blocks.iter().enumerate() {
         let non_term_count = if block.ops.is_empty() {
             0
         } else {

@@ -227,12 +227,10 @@ impl Encoder {
                     }
                 } else if base_enc & 7 == 5 {
                     // RBP/R13: mod=00 means RIP-relative; force mod=01 even with disp=0.
-                    let mod_ = if !has_disp {
-                        0b01
-                    } else if Self::fits_i8(disp) {
-                        0b01
-                    } else {
+                    let mod_ = if has_disp && !Self::fits_i8(disp) {
                         0b10
+                    } else {
+                        0b01
                     };
                     self.emit_modrm(mod_, reg_field, base_enc);
                     match mod_ {
@@ -266,12 +264,10 @@ impl Encoder {
                 let mod_ = if base_enc & 7 == 5 {
                     // RBP/R13 base with SIB: mod=00 still encodes disp32.
                     // But to encode zero displacement with RBP/R13 base we need mod=01.
-                    if !has_disp {
-                        0b01
-                    } else if Self::fits_i8(disp) {
-                        0b01
-                    } else {
+                    if has_disp && !Self::fits_i8(disp) {
                         0b10
+                    } else {
+                        0b01
                     }
                 } else if !has_disp {
                     0b00
@@ -295,7 +291,7 @@ impl Encoder {
     // ── Immediate-size helpers ─────────────────────────────────────────────
 
     pub(super) fn fits_i8(v: i32) -> bool {
-        v >= -128 && v <= 127
+        (-128..=127).contains(&v)
     }
 
     pub(super) fn fits_i32(v: i64) -> bool {

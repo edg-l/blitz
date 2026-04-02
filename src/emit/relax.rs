@@ -118,7 +118,7 @@ pub fn relax_branches(
                 };
             // rel8 = target - (jump_end)
             let disp: i64 = target_offset as i64 - jump_end_offset as i64;
-            if disp < -128 || disp > 127 {
+            if !(-128..=127).contains(&disp) {
                 // Does not fit in rel8; relax to near.
                 short_jumps.insert(i, false);
                 changed = true;

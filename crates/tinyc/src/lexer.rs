@@ -44,6 +44,10 @@ pub enum Token {
     Shl,
     Shr,
     Tilde,
+    // Struct
+    Struct,
+    Dot,
+    Arrow,
     // Punctuation
     Assign,
     LParen,
@@ -108,9 +112,15 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 Token::Plus
             }
             '-' => {
-                pos += 1;
-                col += 1;
-                Token::Minus
+                if pos + 1 < chars.len() && chars[pos + 1] == '>' {
+                    pos += 2;
+                    col += 2;
+                    Token::Arrow
+                } else {
+                    pos += 1;
+                    col += 1;
+                    Token::Minus
+                }
             }
             '*' => {
                 pos += 1;
@@ -166,6 +176,11 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 pos += 1;
                 col += 1;
                 Token::Semi
+            }
+            '.' => {
+                pos += 1;
+                col += 1;
+                Token::Dot
             }
             '=' => {
                 if pos + 1 < chars.len() && chars[pos + 1] == '=' {
@@ -285,6 +300,7 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     "return" => Token::Return,
                     "sizeof" => Token::Sizeof,
                     "extern" => Token::Extern,
+                    "struct" => Token::Struct,
                     _ => Token::Ident(s),
                 }
             }

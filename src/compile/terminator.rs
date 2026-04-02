@@ -58,10 +58,10 @@ pub(super) fn thread_branches(
                     }
                 })
                 .collect();
-            if real.len() == 1 {
-                if let MachInst::Jmp { target } = real[0] {
-                    redirect.insert(block_id, *target);
-                }
+            if real.len() == 1
+                && let MachInst::Jmp { target } = real[0]
+            {
+                redirect.insert(block_id, *target);
             }
         }
 
@@ -146,22 +146,21 @@ pub(super) fn lower_terminator(
     match op {
         EffectfulOp::Ret { val } => {
             let mut items = Vec::new();
-            if let Some(&ret_cid) = val.as_ref() {
-                if let Some(ret_reg) = get_reg(ret_cid, ret_class_to_vreg) {
-                    if ret_reg != GPR_RETURN_REG {
-                        // Use the function's return type for the MOV size.
-                        let ret_size = func
-                            .return_types
-                            .first()
-                            .map(OpSize::from_type)
-                            .unwrap_or(OpSize::S64);
-                        items.push(BlockItem::Inst(MachInst::MovRR {
-                            size: ret_size,
-                            dst: Operand::Reg(GPR_RETURN_REG),
-                            src: Operand::Reg(ret_reg),
-                        }));
-                    }
-                }
+            if let Some(&ret_cid) = val.as_ref()
+                && let Some(ret_reg) = get_reg(ret_cid, ret_class_to_vreg)
+                && ret_reg != GPR_RETURN_REG
+            {
+                // Use the function's return type for the MOV size.
+                let ret_size = func
+                    .return_types
+                    .first()
+                    .map(OpSize::from_type)
+                    .unwrap_or(OpSize::S64);
+                items.push(BlockItem::Inst(MachInst::MovRR {
+                    size: ret_size,
+                    dst: Operand::Reg(GPR_RETURN_REG),
+                    src: Operand::Reg(ret_reg),
+                }));
             }
             // Ret marker: replaced with emit_epilogue() in the encoding loop.
             items.push(BlockItem::Inst(MachInst::Ret));

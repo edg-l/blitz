@@ -864,32 +864,32 @@ pub(super) fn lower_block_pure_ops(
         if let Op::Param(param_idx, ty) = &inst.op {
             if !param_vreg_set.contains(&inst.dst) {
                 let arg_locs = assign_args(&func.param_types);
-                if let Some(ArgLoc::Stack { offset }) = arg_locs.get(*param_idx as usize) {
-                    if let Some(dst_reg) = get_reg(inst.dst) {
-                        let size = OpSize::from_type(ty);
-                        let addr = if frame_layout.uses_frame_pointer {
-                            Addr {
-                                base: Some(Reg::RBP),
-                                index: None,
-                                scale: 1,
-                                disp: 16 + offset,
-                            }
-                        } else {
-                            let n_callee = frame_layout.callee_saved.len() as i32;
-                            let disp = n_callee * 8 + frame_layout.frame_size as i32 + 8 + offset;
-                            Addr {
-                                base: Some(Reg::RSP),
-                                index: None,
-                                scale: 1,
-                                disp,
-                            }
-                        };
-                        result.push(MachInst::MovRM {
-                            size,
-                            dst: Operand::Reg(dst_reg),
-                            addr,
-                        });
-                    }
+                if let Some(ArgLoc::Stack { offset }) = arg_locs.get(*param_idx as usize)
+                    && let Some(dst_reg) = get_reg(inst.dst)
+                {
+                    let size = OpSize::from_type(ty);
+                    let addr = if frame_layout.uses_frame_pointer {
+                        Addr {
+                            base: Some(Reg::RBP),
+                            index: None,
+                            scale: 1,
+                            disp: 16 + offset,
+                        }
+                    } else {
+                        let n_callee = frame_layout.callee_saved.len() as i32;
+                        let disp = n_callee * 8 + frame_layout.frame_size as i32 + 8 + offset;
+                        Addr {
+                            base: Some(Reg::RSP),
+                            index: None,
+                            scale: 1,
+                            disp,
+                        }
+                    };
+                    result.push(MachInst::MovRM {
+                        size,
+                        dst: Operand::Reg(dst_reg),
+                        addr,
+                    });
                 }
             }
             continue;
@@ -926,7 +926,7 @@ pub(super) fn lower_block_pure_ops(
                     .stack_slots
                     .iter()
                     .take(slot_idx as usize)
-                    .map(|s| (s.size + 7) / 8)
+                    .map(|s| s.size.div_ceil(8))
                     .sum();
                 let slot = regalloc.spill_slots as i32 + slot_unit_offset as i32;
                 result.push(MachInst::Lea {

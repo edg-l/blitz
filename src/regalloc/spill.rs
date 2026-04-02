@@ -140,10 +140,8 @@ fn find_pressure_point(liveness: &LivenessInfo, available_regs: u32) -> Option<u
     let mut best: Option<(usize, usize)> = None; // (pressure, index)
     for (i, live_set) in liveness.live_at.iter().enumerate() {
         let pressure = live_set.len();
-        if pressure >= available_regs as usize {
-            if best.map_or(true, |(bp, _)| pressure > bp) {
-                best = Some((pressure, i));
-            }
+        if pressure >= available_regs as usize && best.is_none_or(|(bp, _)| pressure > bp) {
+            best = Some((pressure, i));
         }
     }
     best.map(|(_, i)| i)
@@ -294,11 +292,7 @@ pub fn insert_spills(
         // For rematerializable spilled VRegs, drop the original definition
         // entirely — uses are replaced by fresh remat copies above. Keeping
         // the dead def would preserve its live range via block_live_out.
-        if is_spill_def
-            && def_ops
-                .get(&dst_idx)
-                .map_or(false, |d| is_rematerializable(d))
-        {
+        if is_spill_def && def_ops.get(&dst_idx).is_some_and(is_rematerializable) {
             // Skip the original definition.
         } else {
             new_insts.push(inst);

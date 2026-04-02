@@ -218,7 +218,7 @@ fn apply_shift_imm_isel(egraph: &mut EGraph) -> bool {
         let Some(val) = find_iconst_in_class(egraph, b) else {
             continue;
         };
-        if val < 0 || val > 63 {
+        if !(0..=63).contains(&val) {
             continue;
         }
         let n = val as u8;

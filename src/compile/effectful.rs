@@ -26,41 +26,41 @@ fn build_mem_addr(
     regalloc: &RegAllocResult,
     conflict_reg: Option<Reg>,
 ) -> Addr {
-    if let Some(ext) = extraction.choices.get(&addr_cid) {
-        if let Op::Addr { scale, disp } = &ext.op {
-            // children[0] = base ClassId, children[1] = index ClassId (may be NONE).
-            let base_reg = ext
-                .children
-                .first()
-                .and_then(|&c| class_to_vreg.get(&c))
-                .and_then(|v| regalloc.vreg_to_reg.get(v).copied());
-            let index_reg = ext
-                .children
-                .get(1)
-                .filter(|&&c| c != ClassId::NONE)
-                .and_then(|&c| class_to_vreg.get(&c))
-                .and_then(|v| regalloc.vreg_to_reg.get(v).copied());
-            if let Some(base) = base_reg {
-                // If the folded base or index register conflicts with an
-                // operand that is read simultaneously (e.g. the Store value),
-                // fall back to the pre-computed addr_reg to avoid clobbering.
-                if let Some(cr) = conflict_reg {
-                    if base == cr || index_reg == Some(cr) {
-                        return Addr {
-                            base: Some(addr_reg),
-                            index: None,
-                            scale: 1,
-                            disp: 0,
-                        };
-                    }
-                }
+    if let Some(ext) = extraction.choices.get(&addr_cid)
+        && let Op::Addr { scale, disp } = &ext.op
+    {
+        // children[0] = base ClassId, children[1] = index ClassId (may be NONE).
+        let base_reg = ext
+            .children
+            .first()
+            .and_then(|&c| class_to_vreg.get(&c))
+            .and_then(|v| regalloc.vreg_to_reg.get(v).copied());
+        let index_reg = ext
+            .children
+            .get(1)
+            .filter(|&&c| c != ClassId::NONE)
+            .and_then(|&c| class_to_vreg.get(&c))
+            .and_then(|v| regalloc.vreg_to_reg.get(v).copied());
+        if let Some(base) = base_reg {
+            // If the folded base or index register conflicts with an
+            // operand that is read simultaneously (e.g. the Store value),
+            // fall back to the pre-computed addr_reg to avoid clobbering.
+            if let Some(cr) = conflict_reg
+                && (base == cr || index_reg == Some(cr))
+            {
                 return Addr {
-                    base: Some(base),
-                    index: index_reg,
-                    scale: *scale,
-                    disp: *disp,
+                    base: Some(addr_reg),
+                    index: None,
+                    scale: 1,
+                    disp: 0,
                 };
             }
+            return Addr {
+                base: Some(base),
+                index: index_reg,
+                scale: *scale,
+                disp: *disp,
+            };
         }
     }
     Addr {
@@ -224,20 +224,19 @@ pub(super) fn lower_effectful_op(
             // Known limitation: caller-saved registers (RAX, RCX, RDX, RSI, RDI, R8-R11)
             // are not modeled as clobbered by the call. VRegs live across the call may
             // be incorrectly assigned to caller-saved registers and corrupted.
-            if let Some(&result_cid) = results.first() {
-                if let Some(result_reg) = get_reg(result_cid) {
-                    if result_reg != GPR_RETURN_REG {
-                        let ret_size = ret_tys
-                            .first()
-                            .map(|ty| OpSize::from_type(ty))
-                            .unwrap_or(OpSize::S64);
-                        insts.push(MachInst::MovRR {
-                            size: ret_size,
-                            dst: Operand::Reg(result_reg),
-                            src: Operand::Reg(GPR_RETURN_REG),
-                        });
-                    }
-                }
+            if let Some(&result_cid) = results.first()
+                && let Some(result_reg) = get_reg(result_cid)
+                && result_reg != GPR_RETURN_REG
+            {
+                let ret_size = ret_tys
+                    .first()
+                    .map(OpSize::from_type)
+                    .unwrap_or(OpSize::S64);
+                insts.push(MachInst::MovRR {
+                    size: ret_size,
+                    dst: Operand::Reg(result_reg),
+                    src: Operand::Reg(GPR_RETURN_REG),
+                });
             }
             Ok(insts)
         }

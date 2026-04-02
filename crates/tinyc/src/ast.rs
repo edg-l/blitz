@@ -12,6 +12,7 @@ pub enum CType {
     UInt,   // u32
     ULong,  // u64
     Ptr(Box<CType>),
+    Struct(String),
 }
 
 impl CType {
@@ -23,6 +24,7 @@ impl CType {
             CType::Int | CType::UInt => Some(Type::I32),
             CType::Long | CType::ULong => Some(Type::I64),
             CType::Ptr(_) => Some(Type::I64),
+            CType::Struct(_) => None,
         }
     }
 
@@ -33,6 +35,7 @@ impl CType {
             CType::Short | CType::UShort => 16,
             CType::Int | CType::UInt => 32,
             CType::Long | CType::ULong | CType::Ptr(_) => 64,
+            CType::Struct(_) => panic!("use StructRegistry::byte_size()"),
         }
     }
 
@@ -48,11 +51,15 @@ impl CType {
     }
 
     pub fn is_integer(&self) -> bool {
-        !matches!(self, CType::Void | CType::Ptr(_))
+        !matches!(self, CType::Void | CType::Ptr(_) | CType::Struct(_))
     }
 
     pub fn is_pointer(&self) -> bool {
         matches!(self, CType::Ptr(_))
+    }
+
+    pub fn is_struct(&self) -> bool {
+        matches!(self, CType::Struct(_))
     }
 
     pub fn pointee(&self) -> &CType {
@@ -67,6 +74,9 @@ impl CType {
             CType::Ptr(inner) => {
                 if *inner.as_ref() == CType::Void {
                     panic!("pointee_size() called on void*");
+                }
+                if inner.is_struct() {
+                    panic!("pointee_size() on struct pointer: use StructRegistry");
                 }
                 inner.bit_width() / 8
             }
@@ -83,6 +93,7 @@ impl CType {
             CType::Int | CType::UInt => 3,
             CType::Long | CType::ULong => 4,
             CType::Ptr(_) => 5,
+            CType::Struct(_) => panic!("rank() called on struct type"),
         }
     }
 
@@ -90,6 +101,7 @@ impl CType {
     pub fn promoted(&self) -> CType {
         match self {
             CType::Char | CType::Short | CType::UChar | CType::UShort => CType::Int,
+            CType::Struct(_) => panic!("promoted() called on struct type"),
             other => other.clone(),
         }
     }
@@ -144,6 +156,7 @@ pub struct ExternDecl {
 pub struct Program {
     pub functions: Vec<FnDef>,
     pub extern_decls: Vec<ExternDecl>,
+    pub struct_defs: Vec<(String, Vec<(String, CType)>)>,
 }
 
 pub struct FnDef {
@@ -167,7 +180,7 @@ pub enum Stmt {
     VarDecl {
         ty: CType,
         name: String,
-        init: Expr,
+        init: Option<Expr>,
     },
     Assign {
         name: String,
@@ -180,6 +193,11 @@ pub enum Stmt {
     IndexAssign {
         base: Expr,
         index: Expr,
+        value: Expr,
+    },
+    FieldAssign {
+        expr: Expr,
+        field: String,
         value: Expr,
     },
     ExprStmt(Expr),
@@ -210,6 +228,10 @@ pub enum Expr {
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
+    },
+    FieldAccess {
+        expr: Box<Expr>,
+        field: String,
     },
 }
 

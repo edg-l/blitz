@@ -54,7 +54,7 @@ impl Reg {
     pub fn needs_rex_ext(self) -> bool {
         let v = self as u8;
         // GPRs 8-15 and XMMs 24-31 (i.e. XMM8-XMM15)
-        (v >= 8 && v <= 15) || (v >= 24 && v <= 31)
+        (8..=15).contains(&v) || (24..=31).contains(&v)
     }
 
     pub fn is_gpr(self) -> bool {

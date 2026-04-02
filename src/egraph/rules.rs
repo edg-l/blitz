@@ -42,10 +42,10 @@ pub fn match_pattern(egraph: &EGraph, pattern: &Pattern, class_id: ClassId) -> V
         Pattern::ConstPred(pred) => {
             let mut results = vec![];
             for node in &class.nodes {
-                if let Op::Iconst(val, _) = &node.op {
-                    if pred(*val) {
-                        results.push(Substitution::new());
-                    }
+                if let Op::Iconst(val, _) = &node.op
+                    && pred(*val)
+                {
+                    results.push(Substitution::new());
                 }
             }
             results

@@ -37,12 +37,12 @@ impl Addr {
 
     /// True if the base register requires a REX extension bit (R8-R15).
     pub fn base_needs_rex(&self) -> bool {
-        self.base.map_or(false, |r| r.needs_rex_ext())
+        self.base.is_some_and(|r| r.needs_rex_ext())
     }
 
     /// True if the index register requires a REX extension bit (R8-R15).
     pub fn index_needs_rex(&self) -> bool {
-        self.index.map_or(false, |r| r.needs_rex_ext())
+        self.index.is_some_and(|r| r.needs_rex_ext())
     }
 }
 

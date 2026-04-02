@@ -246,7 +246,7 @@ pub fn allocate(
         // available registers is large, spill multiple VRegs per round to
         // converge faster.
         let overshoot = gpr_colors_needed.saturating_sub(avail) as usize;
-        let spill_count = overshoot.max(1).min(4); // spill 1-4 per round
+        let spill_count = overshoot.clamp(1, 4); // spill 1-4 per round
 
         let excluded: BTreeSet<usize> = pre_coloring_colors2.keys().copied().collect();
         let mut spilled = BTreeSet::new();
@@ -274,10 +274,10 @@ pub fn allocate(
 
         // If spilled VRegs are rematerializable, remove from block_live_out.
         for &idx in &spilled {
-            if let Some(def) = insts.iter().find(|i| i.dst.0 as usize == idx) {
-                if super::spill::is_rematerializable(def) {
-                    block_live_out.remove(&VReg(idx as u32));
-                }
+            if let Some(def) = insts.iter().find(|i| i.dst.0 as usize == idx)
+                && super::spill::is_rematerializable(def)
+            {
+                block_live_out.remove(&VReg(idx as u32));
             }
         }
 
