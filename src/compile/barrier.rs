@@ -82,6 +82,29 @@ pub(super) fn assign_barrier_groups(
     vreg_to_result_of_barrier: &BTreeMap<VReg, usize>,
     vreg_to_arg_of_barrier: &BTreeMap<VReg, usize>,
 ) -> BTreeMap<VReg, usize> {
+    // Propagate barrier arg constraints to transitive operands.
+    // If v3 must be ready at barrier 0, then v3's operands must also be at
+    // barrier 0 or earlier. Without this, an operand with a later barrier
+    // constraint (e.g. v0 at barrier 4) would pull v3 to group 4 via the
+    // forward pass's max(operand_groups, barrier_constraint).
+    let mut vreg_to_arg = vreg_to_arg_of_barrier.clone();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for inst in sched {
+            if let Some(&barrier_k) = vreg_to_arg.get(&inst.dst) {
+                for &op in &inst.operands {
+                    let entry = vreg_to_arg.entry(op).or_insert(barrier_k);
+                    if barrier_k < *entry {
+                        *entry = barrier_k;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    let vreg_to_arg_of_barrier = &vreg_to_arg;
+
     let mut vreg_group: BTreeMap<VReg, usize> = BTreeMap::new();
     for inst in sched {
         let mut min_group: usize = 0;

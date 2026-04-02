@@ -1,5 +1,4 @@
 // Test that array bracket syntax in parameters decays to pointer.
-// BUG: constant-index array stores + call in same block segfaults (StackAddr scheduling bug)
 // RUN: %tinyc %s -o %t && %t
 // EXIT: 10
 
