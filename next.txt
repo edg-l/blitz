@@ -21,7 +21,21 @@ Known bugs:
 - Cross-block liveness for inlined constants: when many inlined constant values
   from different early blocks need to survive into a block with many calls,
   the per-block regalloc can assign them the same register because it doesn't
-  see cross-block interference. Reproducer:
+  see cross-block interference.
+  Root cause: inlining constfolds inc(10)->11 and dbl(20)->40 into separate
+  early blocks (block13, block15). Both constants flow via block params into
+  block16 which has 6 calls. The per-block allocator for each early block
+  assigns its constant to RAX (no interference within that block). But both
+  RAX values must survive into block16, and the cross-block spill/reload
+  mechanism doesn't detect that they collide. In the generated asm:
+    mov eax, 0xb    ; 11 (inc(10))
+    mov eax, 0x28   ; 40 (dbl(20)) -- overwrites 11!
+  The fix likely requires either: (a) global liveness analysis that marks
+  values from different blocks as interfering when they're both live-in to
+  a common successor, (b) forcing cross-block constants into distinct
+  callee-saved registers via precoloring, or (c) always spilling cross-block
+  values to stack slots and reloading in the consuming block.
+  Reproducer:
     int inc(int x) { return x + 1; }
     int dbl(int x) { return x + x; }
     __attribute__((noinline)) int consume(int x) { return x; }
