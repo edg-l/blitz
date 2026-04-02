@@ -50,82 +50,6 @@ pub(super) fn add_shift_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec
     }
 }
 
-/// Pre-color call argument and call result VRegs to their ABI registers.
-///
-/// For register args (first 6 GPR), pre-color directly.
-/// For stack args, add to `live_out` to force them to interfere with each other.
-/// For call results, pre-color to RAX.
-pub(super) fn add_call_precolors(
-    func: &Function,
-    egraph: &EGraph,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
-    param_vregs: &mut Vec<(VReg, Reg)>,
-    live_out: &mut BTreeSet<VReg>,
-) {
-    for block in &func.blocks {
-        // Count how many calls are in this block (excluding the terminator).
-        let non_term_count = if block.ops.is_empty() {
-            0
-        } else {
-            block.ops.len() - 1
-        };
-        let call_count = block.ops[..non_term_count]
-            .iter()
-            .filter(|op| matches!(op, EffectfulOp::Call { .. }))
-            .count();
-
-        for op in &block.ops {
-            if let EffectfulOp::Call {
-                args,
-                arg_tys,
-                results,
-                ..
-            } = op
-            {
-                let locs = assign_args(arg_tys);
-                for (&cid, loc) in args.iter().zip(locs.iter()) {
-                    let canon = egraph.unionfind.find_immutable(cid);
-                    if let Some(&vreg) = class_to_vreg.get(&canon) {
-                        match loc {
-                            ArgLoc::Reg(reg) => {
-                                // Only pre-color call args when there is exactly one
-                                // call in the block. With multiple calls, a VReg used
-                                // as an argument in one call may be live across another
-                                // call. Pre-coloring it to a caller-saved ABI register
-                                // conflicts with call-clobber phantom interferences,
-                                // causing the allocator to assign incompatible colors.
-                                // The lowering emits explicit MOVs to shuffle registers
-                                // into the correct ABI positions before each call.
-                                if call_count == 1 && !param_vregs.iter().any(|&(v, _)| v == vreg) {
-                                    param_vregs.push((vreg, *reg));
-                                }
-                            }
-                            ArgLoc::Stack { .. } => {
-                                live_out.insert(vreg);
-                            }
-                        }
-                    }
-                }
-                // Only precolor the call result to RAX when there is exactly one call
-                // in this block. With multiple calls, result VRegs from earlier calls
-                // must survive subsequent call clobbers, so we let the allocator freely
-                // assign them to callee-saved registers. The lowering will emit a
-                // `mov allocated_reg, rax` to capture the return value when needed.
-                if call_count == 1
-                    && let Some(&first_result_cid) = results.first()
-                {
-                    let canon = egraph.unionfind.find_immutable(first_result_cid);
-                    if let Some(&vreg) = class_to_vreg.get(&canon)
-                        && !param_vregs.iter().any(|&(v, _)| v == vreg)
-                    {
-                        param_vregs.push((vreg, GPR_RETURN_REG));
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Pre-color division operands and projections to RAX/RDX.
 ///
 /// - For each X86Idiv/X86Div in the schedule: operand 0 (dividend) → RAX.
@@ -264,4 +188,64 @@ pub(super) fn collect_call_points_for_block(
         call_points.push(cp);
     }
     call_points
+}
+
+/// Pre-color call argument and result VRegs for a single block.
+///
+/// Same logic as `add_call_precolors` but scoped to one block, preventing
+/// call-arg precolorings from one block from leaking into another block's
+/// register allocation.
+pub(super) fn add_call_precolors_for_block(
+    block: &crate::ir::function::BasicBlock,
+    egraph: &EGraph,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    param_vregs: &mut Vec<(VReg, Reg)>,
+    live_out: &mut BTreeSet<VReg>,
+) {
+    let non_term_count = if block.ops.is_empty() {
+        0
+    } else {
+        block.ops.len() - 1
+    };
+    let call_count = block.ops[..non_term_count]
+        .iter()
+        .filter(|op| matches!(op, EffectfulOp::Call { .. }))
+        .count();
+
+    for op in &block.ops {
+        if let EffectfulOp::Call {
+            args,
+            arg_tys,
+            results,
+            ..
+        } = op
+        {
+            let locs = assign_args(arg_tys);
+            for (&cid, loc) in args.iter().zip(locs.iter()) {
+                let canon = egraph.unionfind.find_immutable(cid);
+                if let Some(&vreg) = class_to_vreg.get(&canon) {
+                    match loc {
+                        ArgLoc::Reg(reg) => {
+                            if call_count == 1 && !param_vregs.iter().any(|&(v, _)| v == vreg) {
+                                param_vregs.push((vreg, *reg));
+                            }
+                        }
+                        ArgLoc::Stack { .. } => {
+                            live_out.insert(vreg);
+                        }
+                    }
+                }
+            }
+            if call_count == 1
+                && let Some(&first_result_cid) = results.first()
+            {
+                let canon = egraph.unionfind.find_immutable(first_result_cid);
+                if let Some(&vreg) = class_to_vreg.get(&canon)
+                    && !param_vregs.iter().any(|&(v, _)| v == vreg)
+                {
+                    param_vregs.push((vreg, GPR_RETURN_REG));
+                }
+            }
+        }
+    }
 }

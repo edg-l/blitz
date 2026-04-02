@@ -1,18 +1,32 @@
 Possible Next Directions
 
 Language features (tinyc):
-1. Structs - struct types, field access, sizeof, nested structs
-2. Arrays - stack-allocated arrays, multidimensional
-3. Strings - string literals, char arrays, printf-style formatting
-4. Global variables - .data/.bss sections, relocations
-5. Float support - f32/f64 (backend has SSE2 instructions already, tinyc just needs the frontend)
+1. Arrays - stack-allocated arrays, multidimensional
+2. Strings - string literals, char arrays, printf-style formatting
+3. Global variables - .data/.bss sections, relocations
+4. Float support - f32/f64 (backend has SSE2 instructions already, tinyc just needs the frontend)
 
 Backend improvements:
-6. Floating point end-to-end - wire up XMM regalloc + SSE2 encoding (infra exists but untested e2e)
-7. Interprocedural optimizations - inlining, tail calls
-8. Better spill code - split live ranges at loop boundaries, register hints
-9. DWARF debug info - .debug_info, .debug_line for gdb/lldb
+5. Floating point end-to-end - wire up XMM regalloc + SSE2 encoding (infra exists but untested e2e)
+6. Better spill code - split live ranges at loop boundaries, register hints
+7. DWARF debug info - .debug_info, .debug_line for gdb/lldb
+8. Tail call optimization
+9. Extend block param const propagation to multi-predecessor case (all preds pass same constant)
 
 Infrastructure:
 10. CI/benchmarks - compile-time benchmarks, runtime correctness suite
 11. More codegen tests - expand the builder-based CHECK tests for edge cases
+
+Known bugs:
+- Cross-block liveness for inlined constants: when many inlined constant values
+  from different early blocks need to survive into a block with many calls,
+  the per-block regalloc can assign them the same register because it doesn't
+  see cross-block interference. Reproducer:
+    int inc(int x) { return x + 1; }
+    int dbl(int x) { return x + x; }
+    __attribute__((noinline)) int consume(int x) { return x; }
+    int main() {
+        int a = inc(10); int b = dbl(20); int c = inc(30); int d = dbl(40);
+        int w = consume(a); int x = consume(b); int y = consume(c); int z = consume(d);
+        // w, x, y, z comparisons fail because a and b get same register
+    }

@@ -7,6 +7,29 @@ use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 use crate::schedule::scheduler::ScheduledInst;
 
+/// If the block terminator is a Branch, mark its `cond` VReg as consumed after
+/// all non-terminator barriers. This ensures the flags-setting instruction
+/// (e.g. X86Sub) is scheduled in the last barrier group, after all calls that
+/// would clobber EFLAGS.
+pub(super) fn mark_branch_cond_barrier(
+    terminator: Option<&EffectfulOp>,
+    non_term_count: usize,
+    egraph: &EGraph,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    vreg_to_arg: &mut BTreeMap<VReg, usize>,
+) {
+    if let Some(EffectfulOp::Branch { cond, .. }) = terminator {
+        let canon = egraph.unionfind.find_immutable(*cond);
+        if let Some(&vreg) = class_to_vreg.get(&canon) {
+            // Force the cond VReg into the group after all effectful ops.
+            // Use max (not min like mark_arg) because we need this to come
+            // AFTER all calls, overriding any earlier constraint.
+            let entry = vreg_to_arg.entry(vreg).or_insert(non_term_count);
+            *entry = (*entry).max(non_term_count);
+        }
+    }
+}
+
 /// Build barrier maps: which VRegs are produced/consumed by each effectful op.
 pub(super) fn build_barrier_maps(
     non_term_ops: &[EffectfulOp],

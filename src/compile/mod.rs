@@ -35,7 +35,7 @@ use crate::x86::reg::Reg;
 mod barrier;
 use barrier::{
     assign_barrier_groups, build_barrier_maps, insert_early_barrier_spills,
-    insert_effectful_use_markers,
+    insert_effectful_use_markers, mark_branch_cond_barrier,
 };
 mod cfg;
 use cfg::{
@@ -48,8 +48,8 @@ mod lower;
 use lower::lower_block_pure_ops;
 mod precolor;
 use precolor::{
-    add_call_precolors, add_div_precolors, add_shift_precolors, assign_param_vregs_from_map,
-    collect_call_points_for_block, collect_div_clobber_points,
+    add_call_precolors_for_block, add_div_precolors, add_shift_precolors,
+    assign_param_vregs_from_map, collect_call_points_for_block, collect_div_clobber_points,
 };
 mod terminator;
 use terminator::{lower_terminator, thread_branches};
@@ -393,8 +393,15 @@ pub fn compile(
         let non_term_ops = &block.ops[..non_term_count];
 
         // Build barrier maps: which VRegs are produced/consumed by each barrier.
-        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
+        let (vreg_to_result_of_barrier, mut vreg_to_arg_of_barrier) =
             build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
+        mark_branch_cond_barrier(
+            block.ops.last(),
+            non_term_count,
+            &egraph,
+            &class_to_vreg,
+            &mut vreg_to_arg_of_barrier,
+        );
 
         let sched = &block_schedules[block_idx];
         let vreg_group =
@@ -488,8 +495,15 @@ pub fn compile(
             };
             if non_term_count > 0 {
                 let non_term_ops = &block.ops[..non_term_count];
-                let (result_map, arg_map) =
+                let (result_map, mut arg_map) =
                     build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
+                mark_branch_cond_barrier(
+                    block.ops.last(),
+                    non_term_count,
+                    &egraph,
+                    &class_to_vreg,
+                    &mut arg_map,
+                );
                 let mut vreg_group = assign_barrier_groups(&all_scheduled, &result_map, &arg_map);
                 insert_effectful_use_markers(
                     &mut all_scheduled,
@@ -528,14 +542,13 @@ pub fn compile(
         let mut all_param_vregs = param_vregs.clone();
         add_shift_precolors(&all_scheduled, &mut all_param_vregs);
         add_div_precolors(&all_scheduled, &mut all_param_vregs);
-        add_call_precolors(
-            func,
+        add_call_precolors_for_block(
+            &func.blocks[0],
             &egraph,
             &class_to_vreg,
             &mut all_param_vregs,
             &mut live_out,
         );
-
         let call_points =
             collect_call_points_for_block(func, 0, &all_scheduled, &class_to_vreg, &egraph);
         let div_points = collect_div_clobber_points(&all_scheduled);
@@ -709,14 +722,6 @@ pub fn compile(
             add_shift_precolors(&all_scheduled, &mut func_level_param_vregs);
             add_div_precolors(&all_scheduled, &mut func_level_param_vregs);
         }
-        let mut dummy_live_out: BTreeSet<VReg> = BTreeSet::new();
-        add_call_precolors(
-            func,
-            &egraph,
-            &class_to_vreg,
-            &mut func_level_param_vregs,
-            &mut dummy_live_out,
-        );
 
         // Step 8: Per-block allocation loop (RPO order).
         let mut shared_next_vreg = shared_next_vreg_start;
@@ -861,7 +866,14 @@ pub fn compile(
                             (cid, renamed)
                         })
                         .collect();
-                    let (result_map, arg_map) = build_barrier_maps(non_term_ops, &egraph, &bcv);
+                    let (result_map, mut arg_map) = build_barrier_maps(non_term_ops, &egraph, &bcv);
+                    mark_branch_cond_barrier(
+                        block.ops.last(),
+                        non_term_count,
+                        &egraph,
+                        &bcv,
+                        &mut arg_map,
+                    );
                     let mut vreg_group =
                         assign_barrier_groups(&split_schedule, &result_map, &arg_map);
                     insert_early_barrier_spills(
@@ -873,6 +885,25 @@ pub fn compile(
                         &mut shared_next_vreg,
                         &mut spill_slot_counter,
                     );
+
+                    // Re-sort by barrier group after inserting SpillStore/SpillLoad.
+                    // SpillLoad must come before consumers in the same group (like
+                    // LoadResult/CallResult), and SpillStore right after its source.
+                    {
+                        let mut indexed: Vec<(usize, ScheduledInst)> =
+                            split_schedule.drain(..).enumerate().collect();
+                        indexed.sort_by_key(|(orig_idx, inst)| {
+                            let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
+                            let priority: u8 = match inst.op {
+                                Op::Param(_, _) | Op::BlockParam(_, _, _) => 0,
+                                Op::LoadResult(_, _) | Op::CallResult(_, _) | Op::SpillLoad(_) => 1,
+                                _ => 2,
+                            };
+                            (g, priority, *orig_idx)
+                        });
+                        split_schedule.extend(indexed.into_iter().map(|(_, inst)| inst));
+                    }
+
                     // Step 8a-effectful: Ensure effectful op operands are in
                     // the schedule. Effectful ops reference e-class operands
                     // via EffectfulUse markers. If an operand's VReg is not in
@@ -970,6 +1001,21 @@ pub fn compile(
                 .copied()
                 .collect();
 
+            // Step 8c2: Add call precolors specific to THIS block only.
+            // Call-arg precolors must not leak from other blocks where the same
+            // VReg may be used as a call arg in a different ABI position.
+            let mut block_param_vregs = block_param_vregs;
+            {
+                let mut dummy_live_out: BTreeSet<VReg> = BTreeSet::new();
+                add_call_precolors_for_block(
+                    block,
+                    &egraph,
+                    &class_to_vreg,
+                    &mut block_param_vregs,
+                    &mut dummy_live_out,
+                );
+            }
+
             // Step 8d: Filter copy pairs to VRegs in this block.
             let block_copy_pairs: Vec<(VReg, VReg)> = copy_pairs
                 .iter()
@@ -1018,15 +1064,21 @@ pub fn compile(
                 }),
             })?;
 
-            // Merge results: only insert VRegs that actually appear in this
-            // block's split schedule. The allocate() function builds an
-            // interference graph with num_vregs = max_vreg_seen + 1, which
-            // includes "phantom" entries for all VReg indices up to the max.
-            // Those phantom entries get color 0 (RAX) and must not be merged
-            // into merged_vreg_to_reg as they would overwrite correct
-            // assignments from other blocks.
+            // Merge results: include VRegs that appear in either the
+            // pre-allocation schedule OR the post-allocation instruction list.
+            // Pre-alloc is needed because effectful op args reference VRegs
+            // from the original schedule (even if the allocator rematerialized
+            // them internally). Post-alloc is needed for new VRegs created by
+            // spill/remat. The interference graph includes "phantom" entries
+            // for all VReg indices up to the max; those get color 0 (RAX) and
+            // must not be merged as they would overwrite correct assignments.
+            let post_alloc_vregs: BTreeSet<VReg> = block_result
+                .insts
+                .iter()
+                .flat_map(|i| std::iter::once(i.dst).chain(i.operands.iter().copied()))
+                .collect();
             for (v, r) in &block_result.vreg_to_reg {
-                if split_vreg_set.contains(v) {
+                if split_vreg_set.contains(v) || post_alloc_vregs.contains(v) {
                     merged_vreg_to_reg.insert(*v, *r);
                 }
             }
@@ -1152,8 +1204,15 @@ pub fn compile(
 
         // Build barrier maps using block_class_to_vreg (with cross-block renames
         // applied) so barrier operand caps match the renamed VRegs in the schedule.
-        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
+        let (vreg_to_result_of_barrier, mut vreg_to_arg_of_barrier) =
             build_barrier_maps(non_term_ops, &egraph, &block_class_to_vreg);
+        mark_branch_cond_barrier(
+            block.ops.last(),
+            non_term_count,
+            &egraph,
+            &block_class_to_vreg,
+            &mut vreg_to_arg_of_barrier,
+        );
         let num_barriers = non_term_ops.len();
 
         // Partition scheduled pure insts into groups relative to barriers.
@@ -1506,8 +1565,15 @@ pub fn compile_to_ir_string(
         }
         let non_term_ops = &block.ops[..non_term_count];
 
-        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
+        let (vreg_to_result_of_barrier, mut vreg_to_arg_of_barrier) =
             build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
+        mark_branch_cond_barrier(
+            block.ops.last(),
+            non_term_count,
+            &egraph,
+            &class_to_vreg,
+            &mut vreg_to_arg_of_barrier,
+        );
 
         let sched = &block_schedules[block_idx];
         let vreg_group =
@@ -1540,8 +1606,15 @@ pub fn compile_to_ir_string(
         let num_barriers = non_term_ops.len();
 
         // Build barrier groups for this block's schedule.
-        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
+        let (vreg_to_result_of_barrier, mut vreg_to_arg_of_barrier) =
             build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
+        mark_branch_cond_barrier(
+            block.ops.last(),
+            non_term_count,
+            &egraph,
+            &class_to_vreg,
+            &mut vreg_to_arg_of_barrier,
+        );
         let vreg_group = assign_barrier_groups(
             &block_schedules[block_idx],
             &vreg_to_result_of_barrier,

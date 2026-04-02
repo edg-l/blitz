@@ -98,7 +98,8 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
 
     if [ "$has_check" = true ] && [ -n "$mode" ]; then
         run_check_test "$file" "$mode"
-    elif [ "$has_exit" = true ]; then
+    fi
+    if [ "$has_exit" = true ]; then
         run_exit_test "$file" "$exit_code"
     fi
 done

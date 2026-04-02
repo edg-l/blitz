@@ -1,14 +1,22 @@
 // RUN: %tinyc %s -o %t && %t
-// EXIT: 6
-// Inline a function with multiple return paths.
-int pick(int x) {
-    if (x == 1) { return 10; }
-    if (x == 2) { return 20; }
-    return 30;
+// EXIT: 0
+// Inlined function with multiple return paths, result used in comparison.
+
+int clamp(int x, int lo, int hi) {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
 }
+
+__attribute__((noinline))
+int identity(int x) { return x; }
+
 int main() {
-    int a = pick(1);
-    int b = pick(2);
-    int c = pick(99);
-    return (a + b + c) - 54;
+    int a = clamp(identity(50), 0, 100);
+    int b = clamp(identity(0 - 5), 0, 100);
+    int c = clamp(identity(200), 0, 100);
+    if (a != 50) { return 1; }
+    if (b != 0) { return 2; }
+    if (c != 100) { return 3; }
+    return 0;
 }
