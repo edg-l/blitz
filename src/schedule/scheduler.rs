@@ -1,4 +1,4 @@
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::egraph::extract::{VReg, VRegInst};
 use crate::ir::op::Op;
@@ -39,7 +39,7 @@ impl ScheduleDag {
         let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
 
         // Map VReg -> defining node index.
-        let mut def_map: HashMap<VReg, usize> = HashMap::new();
+        let mut def_map: BTreeMap<VReg, usize> = BTreeMap::new();
 
         // First pass: create nodes and record definitions.
         let mut effectful_count = 0usize;
@@ -165,7 +165,7 @@ fn compute_priorities(dag: &ScheduleDag) -> Vec<Priority> {
     // that uses it, treating original order as a proxy for "last use."
     // Since insts are in def-before-use order, the last node in original order
     // that references a VReg is the last in-block user.
-    let mut last_user: HashMap<VReg, usize> = HashMap::new();
+    let mut last_user: BTreeMap<VReg, usize> = BTreeMap::new();
     for node in &dag.nodes {
         for &operand in &node.operands {
             last_user.insert(operand, node.id);
@@ -318,7 +318,7 @@ mod tests {
 
     /// Check that every instruction's operands are defined before it in the schedule.
     fn assert_topo_order(scheduled: &[ScheduledInst]) {
-        let mut defined: std::collections::HashSet<VReg> = std::collections::HashSet::new();
+        let mut defined: std::collections::BTreeSet<VReg> = std::collections::BTreeSet::new();
         for inst in scheduled {
             for &op in &inst.operands {
                 assert!(
@@ -335,14 +335,14 @@ mod tests {
     /// Count peak simultaneously live VRegs in a schedule.
     fn peak_live(scheduled: &[ScheduledInst]) -> usize {
         // Build a def->last_use map.
-        let mut last_use: HashMap<VReg, usize> = HashMap::new();
+        let mut last_use: BTreeMap<VReg, usize> = BTreeMap::new();
         for (i, inst) in scheduled.iter().enumerate() {
             for &op in &inst.operands {
                 last_use.insert(op, i);
             }
         }
 
-        let mut live: std::collections::HashSet<VReg> = std::collections::HashSet::new();
+        let mut live: std::collections::BTreeSet<VReg> = std::collections::BTreeSet::new();
         let mut peak = 0;
         for (i, inst) in scheduled.iter().enumerate() {
             // Kill VRegs whose last use was the previous instruction.

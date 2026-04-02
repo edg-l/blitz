@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::x86::inst::{LabelId, MachInst};
 
@@ -17,7 +17,7 @@ const JCC_NEAR_SIZE: usize = 6;
 /// Compute a `Vec<usize>` of byte offsets, one per instruction (offset of that instruction).
 fn compute_offsets(
     insts: &[MachInst],
-    short_jumps: &HashMap<usize, bool>,
+    short_jumps: &BTreeMap<usize, bool>,
     inst_sizes: &dyn Fn(&MachInst) -> usize,
 ) -> Vec<usize> {
     let mut offsets = Vec::with_capacity(insts.len() + 1);
@@ -70,14 +70,14 @@ fn compute_offsets(
 /// where the second vec has one entry per instruction: `true` = short, `false` = near.
 pub fn relax_branches(
     insts: &[MachInst],
-    label_positions: &HashMap<LabelId, usize>,
+    label_positions: &BTreeMap<LabelId, usize>,
     inst_sizes: &dyn Fn(&MachInst) -> usize,
 ) -> (Vec<MachInst>, Vec<bool>) {
     // Identify which instructions are jumps.
     let n = insts.len();
 
     // Start: all jumps are short.
-    let mut short_jumps: HashMap<usize, bool> = (0..n)
+    let mut short_jumps: BTreeMap<usize, bool> = (0..n)
         .filter(|&i| matches!(insts[i], MachInst::Jmp { .. } | MachInst::Jcc { .. }))
         .map(|i| (i, true))
         .collect();
@@ -180,7 +180,7 @@ mod tests {
         insts.extend(filler(4));
         insts.push(MachInst::Ret); // <- label defined before this
 
-        let mut label_positions = HashMap::new();
+        let mut label_positions = BTreeMap::new();
         label_positions.insert(label, 5); // label at insts[5]
 
         let (_, is_short) = relax_branches(&insts, &label_positions, &size);
@@ -207,7 +207,7 @@ mod tests {
         insts.push(MachInst::Ret); // <- label here
 
         let label_idx = 1 + n_filler; // index of the instruction the label points to
-        let mut label_positions = HashMap::new();
+        let mut label_positions = BTreeMap::new();
         label_positions.insert(label, label_idx);
 
         let (_, is_short) = relax_branches(&insts, &label_positions, &size);
@@ -265,7 +265,7 @@ mod tests {
         let idx_label_a = 1 + n + 1 + n; // = 66
         let idx_label_b = idx_label_a + 1; // = 67
 
-        let mut label_positions = HashMap::new();
+        let mut label_positions = BTreeMap::new();
         label_positions.insert(label_a, idx_label_a);
         label_positions.insert(label_b, idx_label_b);
 

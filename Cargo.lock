@@ -15,6 +15,7 @@ dependencies = [
 name = "blitz"
 version = "0.1.0"
 dependencies = [
+ "blitztest",
  "smallvec",
  "tracing",
  "tracing-subscriber",

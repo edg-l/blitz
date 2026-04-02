@@ -27,14 +27,13 @@ pub fn phi_copies(copies: &[(Reg, Reg, OpSize)], temp: Reg) -> Vec<MachInst> {
     // Build a size lookup: (src, dst) -> OpSize for original pairs, plus a
     // per-register fallback so that temp-register moves introduced by cycle
     // breaking inherit the correct OpSize from the original copy.
-    let size_map: std::collections::HashMap<(Reg, Reg), OpSize> =
+    let size_map: std::collections::BTreeMap<(Reg, Reg), OpSize> =
         filtered.iter().map(|&(s, d, sz)| ((s, d), sz)).collect();
     // Build per-register size lookup for cycle-breaking temp moves.
     // A register may appear in copies with different sizes (e.g., as dst
     // of an I64 copy and src of an I32 copy). Keep the widest size so
     // cycle-breaking temp moves preserve all bits.
-    let mut reg_size: std::collections::HashMap<Reg, OpSize> =
-        std::collections::HashMap::with_capacity(filtered.len() * 2);
+    let mut reg_size: std::collections::BTreeMap<Reg, OpSize> = std::collections::BTreeMap::new();
     for &(s, d, sz) in &filtered {
         for reg in [s, d] {
             reg_size
@@ -107,8 +106,8 @@ mod tests {
         ];
         let insts = phi_copies(&copies, Reg::R11);
         // Simulate execution to verify correctness.
-        use std::collections::HashMap;
-        let mut state: HashMap<Reg, u64> = [(Reg::RAX, 10), (Reg::RCX, 20), (Reg::R11, 0)]
+        use std::collections::BTreeMap;
+        let mut state: BTreeMap<Reg, u64> = [(Reg::RAX, 10), (Reg::RCX, 20), (Reg::R11, 0)]
             .into_iter()
             .collect();
         for inst in &insts {
@@ -135,8 +134,8 @@ mod tests {
             (Reg::RDX, Reg::RAX, OpSize::S64),
         ];
         let insts = phi_copies(&copies, Reg::R11);
-        use std::collections::HashMap;
-        let mut state: HashMap<Reg, u64> =
+        use std::collections::BTreeMap;
+        let mut state: BTreeMap<Reg, u64> =
             [(Reg::RAX, 1), (Reg::RCX, 2), (Reg::RDX, 3), (Reg::R11, 0)]
                 .into_iter()
                 .collect();
@@ -180,9 +179,9 @@ mod tests {
     fn simulate(
         copies: &[(Reg, Reg, OpSize)],
         initial: &[(Reg, u64)],
-    ) -> std::collections::HashMap<Reg, u64> {
+    ) -> std::collections::BTreeMap<Reg, u64> {
         let insts = phi_copies(copies, Reg::R11);
-        let mut state: std::collections::HashMap<Reg, u64> = initial.iter().copied().collect();
+        let mut state: std::collections::BTreeMap<Reg, u64> = initial.iter().copied().collect();
         // Ensure R11 exists as scratch in case cycle-breaking uses it.
         state.entry(Reg::R11).or_insert(0);
         for inst in &insts {

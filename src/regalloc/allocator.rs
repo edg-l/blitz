@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
 use crate::ir::op::Op;
@@ -19,7 +19,7 @@ use super::spill::{insert_spills, select_spill};
 /// Result of register allocation for a single basic block.
 pub struct RegAllocResult {
     /// Maps each VReg to the physical register assigned to it.
-    pub vreg_to_reg: HashMap<VReg, Reg>,
+    pub vreg_to_reg: BTreeMap<VReg, Reg>,
     /// Number of spill slots used (each slot is 8 bytes for GPR, 16 for XMM).
     pub spill_slots: u32,
     /// Callee-saved registers that were actually assigned (must be preserved).
@@ -50,15 +50,15 @@ pub struct RegAllocResult {
 pub fn allocate(
     insts: &[ScheduledInst],
     param_vregs: &[(VReg, Reg)], // pre-colored function params
-    block_live_out: &HashSet<VReg>,
+    block_live_out: &BTreeSet<VReg>,
     copy_pairs: &[(VReg, VReg)], // phi copy pairs for coalescing
-    loop_depths: &std::collections::HashMap<VReg, u32>, // loop-depth info for spill selection
+    loop_depths: &std::collections::BTreeMap<VReg, u32>, // loop-depth info for spill selection
     call_points: &[usize],       // instruction indices after which a call occurs
     uses_frame_pointer: bool,
     func_name: &str,
 ) -> Result<RegAllocResult, String> {
     let mut insts: Vec<ScheduledInst> = insts.to_vec();
-    let mut block_live_out: HashSet<VReg> = block_live_out.clone();
+    let mut block_live_out: BTreeSet<VReg> = block_live_out.clone();
     let mut spill_slots = 0u32;
 
     // Determine the starting next_vreg from the max VReg index in the input.
@@ -72,7 +72,7 @@ pub fn allocate(
     // Build pre-coloring map from function parameters.
     // Map: VReg index -> color (we assign colors 0..N to the ABI arg regs in order).
     // We also keep a VReg -> Reg mapping for pre-colored nodes.
-    let mut param_vreg_to_reg: HashMap<VReg, Reg> = HashMap::new();
+    let mut param_vreg_to_reg: BTreeMap<VReg, Reg> = BTreeMap::new();
     for &(vreg, reg) in param_vregs {
         param_vreg_to_reg.insert(vreg, reg);
     }
@@ -124,7 +124,7 @@ pub fn allocate(
         // Build pre-coloring: VReg index -> color.
         // Assign each pre-colored param a unique color based on a canonical
         // ordering of the ABI registers.
-        let pre_coloring_colors: HashMap<usize, u32> =
+        let pre_coloring_colors: BTreeMap<usize, u32> =
             build_pre_coloring_colors(&insts_coalesced, &param_vreg_to_reg, uses_frame_pointer);
 
         // Step 5: MCS ordering + greedy coloring.
@@ -197,7 +197,7 @@ pub fn allocate(
             );
 
             // Build final VReg -> Reg mapping.
-            let mut vreg_to_reg: HashMap<VReg, Reg> = HashMap::new();
+            let mut vreg_to_reg: BTreeMap<VReg, Reg> = BTreeMap::new();
             for (i, color_opt) in coloring.colors.iter().enumerate() {
                 if let Some(&color) = color_opt.as_ref()
                     && let Some(&reg) = color_to_reg.get(&color)
@@ -207,7 +207,7 @@ pub fn allocate(
             }
 
             // Identify callee-saved registers actually used.
-            let callee_saved_set: HashSet<Reg> = CALLEE_SAVED.iter().copied().collect();
+            let callee_saved_set: BTreeSet<Reg> = CALLEE_SAVED.iter().copied().collect();
             let mut callee_saved_used: Vec<Reg> = vreg_to_reg
                 .values()
                 .filter(|r| callee_saved_set.contains(r))
@@ -248,8 +248,8 @@ pub fn allocate(
         let overshoot = gpr_colors_needed.saturating_sub(avail) as usize;
         let spill_count = overshoot.max(1).min(4); // spill 1-4 per round
 
-        let excluded: HashSet<usize> = pre_coloring_colors2.keys().copied().collect();
-        let mut spilled = HashSet::new();
+        let excluded: BTreeSet<usize> = pre_coloring_colors2.keys().copied().collect();
+        let mut spilled = BTreeSet::new();
         for _ in 0..spill_count {
             let candidate = select_spill(
                 &graph2,
@@ -309,26 +309,26 @@ fn add_call_clobber_interferences(
     call_points: &[usize],
     next_vreg: &mut u32,
     uses_frame_pointer: bool,
-) -> (super::interference::InterferenceGraph, HashMap<usize, u32>) {
+) -> (super::interference::InterferenceGraph, BTreeMap<usize, u32>) {
     if call_points.is_empty() {
-        return (graph, HashMap::new());
+        return (graph, BTreeMap::new());
     }
 
     // Use the same register ordering as map_colors_to_regs so that the color numbers
     // assigned to phantom VRegs correspond to the correct physical registers.
     let ordered_regs = allocatable_gpr_order(uses_frame_pointer);
-    let reg_to_color: HashMap<Reg, u32> = ordered_regs
+    let reg_to_color: BTreeMap<Reg, u32> = ordered_regs
         .iter()
         .enumerate()
         .map(|(i, &r)| (r, i as u32))
         .collect();
 
     let n = liveness.live_at.len();
-    let mut phantom_precolors: HashMap<usize, u32> = HashMap::new();
+    let mut phantom_precolors: BTreeMap<usize, u32> = BTreeMap::new();
 
     for &cp in call_points {
         // The live set at the call boundary: if cp < n use live_at[cp]; otherwise live_out.
-        let live_at_cp: &std::collections::HashSet<VReg> = if cp < n {
+        let live_at_cp: &std::collections::BTreeSet<VReg> = if cp < n {
             &liveness.live_at[cp]
         } else {
             &liveness.live_out
@@ -348,7 +348,7 @@ fn add_call_clobber_interferences(
             // Grow the graph to accommodate the new phantom.
             if phantom_idx >= graph.num_vregs {
                 let new_n = phantom_idx + 1;
-                graph.adj.resize(new_n, std::collections::HashSet::new());
+                graph.adj.resize(new_n, std::collections::BTreeSet::new());
                 graph.reg_class.resize(new_n, RegClass::GPR);
                 graph.num_vregs = new_n;
             }
@@ -389,8 +389,8 @@ fn is_fp_op(op: &Op) -> bool {
 fn build_vreg_classes(
     insts: &[ScheduledInst],
     liveness: &super::liveness::LivenessInfo,
-) -> HashMap<VReg, RegClass> {
-    let mut map = HashMap::new();
+) -> BTreeMap<VReg, RegClass> {
+    let mut map = BTreeMap::new();
     for inst in insts {
         let class = if is_fp_op(&inst.op) {
             RegClass::XMM
@@ -428,17 +428,17 @@ fn build_vreg_classes(
 /// correspond to the same physical registers.
 fn build_pre_coloring_colors(
     insts: &[ScheduledInst],
-    param_vreg_to_reg: &HashMap<VReg, Reg>,
+    param_vreg_to_reg: &BTreeMap<VReg, Reg>,
     uses_frame_pointer: bool,
-) -> HashMap<usize, u32> {
+) -> BTreeMap<usize, u32> {
     let ordered_regs = allocatable_gpr_order(uses_frame_pointer);
-    let reg_to_color: HashMap<Reg, u32> = ordered_regs
+    let reg_to_color: BTreeMap<Reg, u32> = ordered_regs
         .iter()
         .enumerate()
         .map(|(i, &r)| (r, i as u32))
         .collect();
 
-    let mut pre: HashMap<usize, u32> = HashMap::new();
+    let mut pre: BTreeMap<usize, u32> = BTreeMap::new();
     for inst in insts {
         let vreg = inst.dst;
         if let Some(&reg) = param_vreg_to_reg.get(&vreg)
@@ -453,9 +453,9 @@ fn build_pre_coloring_colors(
 /// Build a pre-coloring map from VReg index -> Reg (for map_colors_to_regs).
 fn build_pre_coloring_regs(
     insts: &[ScheduledInst],
-    param_vreg_to_reg: &HashMap<VReg, Reg>,
-) -> HashMap<usize, Reg> {
-    let mut pre: HashMap<usize, Reg> = HashMap::new();
+    param_vreg_to_reg: &BTreeMap<VReg, Reg>,
+) -> BTreeMap<usize, Reg> {
+    let mut pre: BTreeMap<usize, Reg> = BTreeMap::new();
     for inst in insts {
         let vreg = inst.dst;
         if let Some(&reg) = param_vreg_to_reg.get(&vreg) {
@@ -491,13 +491,13 @@ mod tests {
     #[test]
     fn basic_allocation_succeeds() {
         let insts = vec![iconst_inst(0, 1), iconst_inst(1, 2), add_inst(2, 0, 1)];
-        let live_out = HashSet::new();
+        let live_out = BTreeSet::new();
         let result = allocate(
             &insts,
             &[],
             &live_out,
             &[],
-            &std::collections::HashMap::new(),
+            &std::collections::BTreeMap::new(),
             &[],
             false,
             "",
@@ -527,13 +527,13 @@ mod tests {
             add_inst(2, 0, 1),
         ];
         let params = vec![(VReg(0), Reg::RDI)];
-        let live_out = HashSet::new();
+        let live_out = BTreeSet::new();
         let result = allocate(
             &insts,
             &params,
             &live_out,
             &[],
-            &std::collections::HashMap::new(),
+            &std::collections::BTreeMap::new(),
             &[],
             false,
             "",
@@ -565,13 +565,13 @@ mod tests {
                 operands: vec![VReg(2)],
             },
         ];
-        let live_out = HashSet::new();
+        let live_out = BTreeSet::new();
         let result = allocate(
             &insts,
             &[],
             &live_out,
             &[],
-            &std::collections::HashMap::new(),
+            &std::collections::BTreeMap::new(),
             &[],
             false,
             "",
@@ -608,13 +608,13 @@ mod tests {
         // These 16 VRegs are all simultaneously live at inst 16.
         // Chromatic number = 16 > 15 available GPRs.
         // After 3 spill rounds, should error.
-        let live_out = HashSet::new();
+        let live_out = BTreeSet::new();
         let result = allocate(
             &insts,
             &[],
             &live_out,
             &[],
-            &std::collections::HashMap::new(),
+            &std::collections::BTreeMap::new(),
             &[],
             false,
             "",
@@ -652,7 +652,7 @@ mod tests {
                 operands: vec![VReg(2)],
             },
         ];
-        let live_out = HashSet::new();
+        let live_out = BTreeSet::new();
         // Pass a copy pair (v0, v2) — non-interfering, so coalescing may unify them.
         let copy_pairs = vec![(VReg(0), VReg(2))];
         let result = allocate(
@@ -660,7 +660,7 @@ mod tests {
             &[],
             &live_out,
             &copy_pairs,
-            &std::collections::HashMap::new(),
+            &std::collections::BTreeMap::new(),
             &[],
             false,
             "",
@@ -692,13 +692,13 @@ mod tests {
             },
         ];
         let params = vec![(VReg(1), Reg::RCX)]; // pre-color count to RCX
-        let live_out = HashSet::new();
+        let live_out = BTreeSet::new();
         let result = allocate(
             &insts,
             &params,
             &live_out,
             &[],
-            &std::collections::HashMap::new(),
+            &std::collections::BTreeMap::new(),
             &[],
             false,
             "",

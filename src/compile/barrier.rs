@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::egraph::egraph::EGraph;
 use crate::egraph::extract::VReg;
@@ -11,10 +11,10 @@ use crate::schedule::scheduler::ScheduledInst;
 pub(super) fn build_barrier_maps(
     non_term_ops: &[EffectfulOp],
     egraph: &EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-) -> (HashMap<VReg, usize>, HashMap<VReg, usize>) {
-    let mut vreg_to_result: HashMap<VReg, usize> = HashMap::new();
-    let mut vreg_to_arg: HashMap<VReg, usize> = HashMap::new();
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+) -> (BTreeMap<VReg, usize>, BTreeMap<VReg, usize>) {
+    let mut vreg_to_result: BTreeMap<VReg, usize> = BTreeMap::new();
+    let mut vreg_to_arg: BTreeMap<VReg, usize> = BTreeMap::new();
     // Helper: mark a ClassId as consumed by barrier_k (earliest consumer wins).
     let mut mark_arg = |cid: ClassId, barrier_k: usize| {
         let canon = egraph.unionfind.find_immutable(cid);
@@ -56,10 +56,10 @@ pub(super) fn build_barrier_maps(
 /// Assign each scheduled instruction to a barrier group and return the group mapping.
 pub(super) fn assign_barrier_groups(
     sched: &[ScheduledInst],
-    vreg_to_result_of_barrier: &HashMap<VReg, usize>,
-    vreg_to_arg_of_barrier: &HashMap<VReg, usize>,
-) -> HashMap<VReg, usize> {
-    let mut vreg_group: HashMap<VReg, usize> = HashMap::new();
+    vreg_to_result_of_barrier: &BTreeMap<VReg, usize>,
+    vreg_to_arg_of_barrier: &BTreeMap<VReg, usize>,
+) -> BTreeMap<VReg, usize> {
+    let mut vreg_group: BTreeMap<VReg, usize> = BTreeMap::new();
     for inst in sched {
         let mut min_group: usize = 0;
         for &operand_vreg in &inst.operands {
@@ -86,7 +86,7 @@ pub(super) fn assign_barrier_groups(
     // can move to group 3, keeping its register live for less time.
     //
     // Build consumers map: for each VReg, which scheduled instructions use it.
-    let mut consumers: HashMap<VReg, Vec<VReg>> = HashMap::new();
+    let mut consumers: BTreeMap<VReg, Vec<VReg>> = BTreeMap::new();
     for inst in sched {
         for &op in &inst.operands {
             consumers.entry(op).or_default().push(inst.dst);
@@ -147,15 +147,15 @@ pub(super) fn assign_barrier_groups(
 /// that need to update effectful op lookups.
 pub(super) fn insert_early_barrier_spills(
     schedule: &mut Vec<ScheduledInst>,
-    vreg_to_result_of_barrier: &HashMap<VReg, usize>,
-    vreg_to_arg_of_barrier: &HashMap<VReg, usize>,
-    vreg_group: &mut HashMap<VReg, usize>,
-    vreg_types: &HashMap<VReg, Type>,
+    vreg_to_result_of_barrier: &BTreeMap<VReg, usize>,
+    vreg_to_arg_of_barrier: &BTreeMap<VReg, usize>,
+    vreg_group: &mut BTreeMap<VReg, usize>,
+    vreg_types: &BTreeMap<VReg, Type>,
     next_vreg: &mut u32,
     spill_slot_counter: &mut u32,
 ) {
     // Build consumers map: for each VReg, the dst VRegs that use it as an operand.
-    let mut consumers: HashMap<VReg, Vec<VReg>> = HashMap::new();
+    let mut consumers: BTreeMap<VReg, Vec<VReg>> = BTreeMap::new();
     for inst in schedule.iter() {
         for &op in &inst.operands {
             consumers.entry(op).or_default().push(inst.dst);
@@ -253,13 +253,13 @@ pub(super) fn insert_effectful_use_markers(
     schedule: &mut Vec<ScheduledInst>,
     non_term_ops: &[EffectfulOp],
     egraph: &EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-    vreg_group: &mut HashMap<VReg, usize>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    vreg_group: &mut BTreeMap<VReg, usize>,
     next_vreg: &mut u32,
 ) {
     // Build Addr-child lookup: for each VReg that defines an Addr node,
     // record its operand children.
-    let addr_children: HashMap<VReg, Vec<VReg>> = schedule
+    let addr_children: BTreeMap<VReg, Vec<VReg>> = schedule
         .iter()
         .filter(|inst| matches!(inst.op, Op::Addr { .. }))
         .map(|inst| {

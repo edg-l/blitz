@@ -28,3 +28,17 @@ impl Hash for ENode {
         self.children.hash(state);
     }
 }
+
+impl PartialOrd for ENode {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ENode {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.op
+            .cmp(&other.op)
+            .then_with(|| self.children.cmp(&other.children))
+    }
+}

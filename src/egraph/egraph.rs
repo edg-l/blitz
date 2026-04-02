@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use smallvec::SmallVec;
 
@@ -40,7 +40,7 @@ pub struct EGraph {
     /// Arena: ClassId(i) indexes directly into classes[i].
     pub(crate) classes: Vec<EClass>,
     /// Hashcons: canonicalized ENode -> canonical ClassId.
-    pub(crate) memo: HashMap<ENode, ClassId>,
+    pub(crate) memo: BTreeMap<ENode, ClassId>,
     pub(crate) worklist: Vec<ClassId>,
     pub(crate) node_count: usize,
 }
@@ -56,7 +56,7 @@ impl EGraph {
         Self {
             unionfind: UnionFind::new(),
             classes: Vec::new(),
-            memo: HashMap::new(),
+            memo: BTreeMap::new(),
             worklist: Vec::new(),
             node_count: 0,
         }
@@ -187,7 +187,7 @@ impl EGraph {
 
             // Drain the entire memo, re-canonicalize every node, re-insert.
             // Any collision means congruence: merge the two classes and add to worklist.
-            let old_memo: HashMap<ENode, ClassId> = std::mem::take(&mut self.memo);
+            let old_memo: BTreeMap<ENode, ClassId> = std::mem::take(&mut self.memo);
 
             // Also clear all class node lists so we can rebuild them clean
             for class in self.classes.iter_mut() {

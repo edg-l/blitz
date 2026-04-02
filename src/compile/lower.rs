@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
 use crate::ir::function::Function;
@@ -151,7 +151,7 @@ fn lower_op(
     operand_vregs: &[VReg],
     operand_regs: &[Option<Reg>],
     size: OpSize,
-    div_dst_vregs: &HashSet<VReg>,
+    div_dst_vregs: &BTreeSet<VReg>,
 ) -> Result<Vec<MachInst>, String> {
     let _ = dst_vreg; // used for context in errors
     match op {
@@ -845,15 +845,15 @@ pub(super) fn lower_block_pure_ops(
     insts: &[ScheduledInst],
     regalloc: &RegAllocResult,
     func: &Function,
-    param_vreg_set: &HashSet<VReg>,
+    param_vreg_set: &BTreeSet<VReg>,
     frame_layout: &FrameLayout,
-    vreg_types: &HashMap<VReg, Type>,
+    vreg_types: &BTreeMap<VReg, Type>,
 ) -> Result<Vec<MachInst>, CompileError> {
     let mut result: Vec<MachInst> = Vec::new();
     let get_reg = |vreg: VReg| -> Option<Reg> { regalloc.vreg_to_reg.get(&vreg).copied() };
 
     // Build set of VRegs defined by X86Idiv/X86Div for Proj1 lowering.
-    let div_dst_vregs: HashSet<VReg> = insts
+    let div_dst_vregs: BTreeSet<VReg> = insts
         .iter()
         .filter(|i| matches!(i.op, Op::X86Idiv | Op::X86Div))
         .map(|i| i.dst)

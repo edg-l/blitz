@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::x86::inst::{LabelId, MachInst};
 
@@ -21,7 +21,7 @@ use crate::x86::inst::{LabelId, MachInst};
 pub fn align_loop_headers(
     insts: &mut Vec<MachInst>,
     label_defs: &[(usize, LabelId)],
-    loop_headers: &HashSet<LabelId>,
+    loop_headers: &BTreeSet<LabelId>,
     inst_sizes: &dyn Fn(&MachInst) -> usize,
 ) {
     if loop_headers.is_empty() {
@@ -78,7 +78,7 @@ mod tests {
         ];
         let label_id: LabelId = 0;
         let label_defs = [(4, label_id)];
-        let mut headers = HashSet::new();
+        let mut headers = BTreeSet::new();
         headers.insert(label_id);
 
         align_loop_headers(&mut insts, &label_defs, &headers, &size);
@@ -104,7 +104,7 @@ mod tests {
         ];
         let label_id: LabelId = 1;
         let label_defs = [(6, label_id)];
-        let mut headers = HashSet::new();
+        let mut headers = BTreeSet::new();
         headers.insert(label_id);
 
         align_loop_headers(&mut insts, &label_defs, &headers, &size);
@@ -135,7 +135,7 @@ mod tests {
         ];
         let label_id: LabelId = 2;
         let label_defs = [(7, label_id)];
-        let mut headers = HashSet::new();
+        let mut headers = BTreeSet::new();
         headers.insert(label_id);
 
         align_loop_headers(&mut insts, &label_defs, &headers, &size);

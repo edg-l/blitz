@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::EGraph;
 use crate::egraph::extract::VReg;
@@ -15,7 +15,7 @@ use crate::x86::reg::Reg;
 /// corresponding VRegs in the ClassId -> VReg map from extraction.
 pub(super) fn assign_param_vregs_from_map(
     func: &Function,
-    class_to_vreg: &HashMap<ClassId, VReg>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
     egraph: &EGraph,
 ) -> Vec<(VReg, Reg)> {
     if func.param_class_ids.is_empty() {
@@ -58,9 +58,9 @@ pub(super) fn add_shift_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec
 pub(super) fn add_call_precolors(
     func: &Function,
     egraph: &EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
     param_vregs: &mut Vec<(VReg, Reg)>,
-    live_out: &mut HashSet<VReg>,
+    live_out: &mut BTreeSet<VReg>,
 ) {
     for block in &func.blocks {
         // Count how many calls are in this block (excluding the terminator).
@@ -134,7 +134,7 @@ pub(super) fn add_call_precolors(
 /// - The X86Idiv/X86Div Pair node itself is NOT pre-colored.
 pub(super) fn add_div_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(VReg, Reg)>) {
     // Collect VRegs defined by X86Idiv/X86Div instructions.
-    let mut div_dst_vregs: HashSet<VReg> = HashSet::new();
+    let mut div_dst_vregs: BTreeSet<VReg> = BTreeSet::new();
     for inst in insts {
         if !matches!(inst.op, Op::X86Idiv | Op::X86Div) {
             continue;
@@ -197,7 +197,7 @@ pub(super) fn collect_call_points_for_block(
     func: &Function,
     block_idx: usize,
     block_sched: &[ScheduledInst],
-    class_to_vreg: &HashMap<ClassId, VReg>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
     egraph: &EGraph,
 ) -> Vec<usize> {
     let block = &func.blocks[block_idx];

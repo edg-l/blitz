@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::x86::abi::{CALLEE_SAVED, CALLER_SAVED_GPR};
 use crate::x86::reg::{Reg, RegClass};
@@ -62,7 +62,7 @@ pub struct ColoringResult {
 pub fn greedy_color(
     graph: &InterferenceGraph,
     ordering: &[usize],
-    pre_coloring: &HashMap<usize, u32>,
+    pre_coloring: &BTreeMap<usize, u32>,
 ) -> ColoringResult {
     let n = graph.num_vregs;
     let mut colors: Vec<Option<u32>> = vec![None; n];
@@ -82,7 +82,7 @@ pub fn greedy_color(
         }
 
         // Collect colors used by already-colored neighbors.
-        let mut forbidden: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut forbidden: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         for &neighbor in &graph.adj[v] {
             if let Some(c) = colors[neighbor] {
                 forbidden.insert(c);
@@ -128,7 +128,7 @@ pub fn greedy_color(
 pub fn interval_color(
     insts: &[crate::schedule::scheduler::ScheduledInst],
     liveness: &super::liveness::LivenessInfo,
-    pre_coloring: &HashMap<usize, u32>,
+    pre_coloring: &BTreeMap<usize, u32>,
     num_vregs: usize,
 ) -> ColoringResult {
     let mut colors: Vec<Option<u32>> = vec![None; num_vregs];
@@ -148,7 +148,7 @@ pub fn interval_color(
             continue;
         }
         // Forbidden: colors of VRegs alive before this instruction.
-        let mut forbidden = std::collections::HashSet::new();
+        let mut forbidden = std::collections::BTreeSet::new();
         if i < liveness.live_at.len() {
             for v in &liveness.live_at[i] {
                 let idx = v.0 as usize;
@@ -196,10 +196,10 @@ pub fn interval_color(
 pub fn map_colors_to_regs(
     coloring: &ColoringResult,
     reg_class: RegClass,
-    pre_coloring: &HashMap<usize, Reg>,
+    pre_coloring: &BTreeMap<usize, Reg>,
     uses_frame_pointer: bool,
-) -> HashMap<u32, Reg> {
-    let mut color_to_reg: HashMap<u32, Reg> = HashMap::new();
+) -> BTreeMap<u32, Reg> {
+    let mut color_to_reg: BTreeMap<u32, Reg> = BTreeMap::new();
 
     // First, establish color->reg from pre-colored VRegs.
     for (&vreg_idx, &reg) in pre_coloring {
@@ -238,7 +238,7 @@ pub fn map_colors_to_regs(
     };
 
     // Track which physical registers are already claimed.
-    let claimed: std::collections::HashSet<Reg> = color_to_reg.values().copied().collect();
+    let claimed: std::collections::BTreeSet<Reg> = color_to_reg.values().copied().collect();
     let mut free_regs: Vec<Reg> = available
         .iter()
         .filter(|r| !claimed.contains(r))
@@ -308,7 +308,7 @@ mod tests {
     fn make_graph(n: usize, edges: &[(usize, usize)]) -> InterferenceGraph {
         let mut g = InterferenceGraph {
             num_vregs: n,
-            adj: vec![std::collections::HashSet::new(); n],
+            adj: vec![std::collections::BTreeSet::new(); n],
             reg_class: vec![RegClass::GPR; n],
         };
         for &(a, b) in edges {
@@ -322,7 +322,7 @@ mod tests {
     fn no_interference_all_color_zero() {
         let graph = make_graph(4, &[]);
         let ordering = mcs_ordering(&graph);
-        let result = greedy_color(&graph, &ordering, &HashMap::new());
+        let result = greedy_color(&graph, &ordering, &BTreeMap::new());
 
         for c in &result.colors {
             assert_eq!(*c, Some(0), "all isolated nodes should get color 0");
@@ -336,7 +336,7 @@ mod tests {
     fn chain_two_colors() {
         let graph = make_graph(3, &[(0, 1), (1, 2)]);
         let ordering = mcs_ordering(&graph);
-        let result = greedy_color(&graph, &ordering, &HashMap::new());
+        let result = greedy_color(&graph, &ordering, &BTreeMap::new());
 
         // Adjacent nodes must have different colors.
         assert_ne!(result.colors[0], result.colors[1]);
@@ -351,7 +351,7 @@ mod tests {
         let edges = &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
         let graph = make_graph(4, edges);
         let ordering = mcs_ordering(&graph);
-        let result = greedy_color(&graph, &ordering, &HashMap::new());
+        let result = greedy_color(&graph, &ordering, &BTreeMap::new());
 
         // All nodes in a clique must have distinct colors.
         let c: Vec<u32> = result.colors.iter().map(|c| c.unwrap()).collect();
@@ -368,7 +368,7 @@ mod tests {
         // Two nodes with no interference; v0 pre-colored to color 5.
         let graph = make_graph(2, &[]);
         let ordering = mcs_ordering(&graph);
-        let mut pre = HashMap::new();
+        let mut pre = BTreeMap::new();
         pre.insert(0usize, 5u32); // v0 -> color 5
         let result = greedy_color(&graph, &ordering, &pre);
 
@@ -381,7 +381,7 @@ mod tests {
         // v0 -- v1; v0 pre-colored to color 0.
         let graph = make_graph(2, &[(0, 1)]);
         let ordering = mcs_ordering(&graph);
-        let mut pre = HashMap::new();
+        let mut pre = BTreeMap::new();
         pre.insert(0usize, 0u32);
         let result = greedy_color(&graph, &ordering, &pre);
 
@@ -398,8 +398,8 @@ mod tests {
     fn color_to_reg_basic() {
         let graph = make_graph(2, &[(0, 1)]);
         let ordering = mcs_ordering(&graph);
-        let result = greedy_color(&graph, &ordering, &HashMap::new());
-        let color_to_reg = map_colors_to_regs(&result, RegClass::GPR, &HashMap::new(), true);
+        let result = greedy_color(&graph, &ordering, &BTreeMap::new());
+        let color_to_reg = map_colors_to_regs(&result, RegClass::GPR, &BTreeMap::new(), true);
 
         // Two colors, two distinct registers.
         let r0 = color_to_reg[&0];
@@ -415,8 +415,8 @@ mod tests {
     fn color_to_reg_no_rbp_with_frame_pointer() {
         let graph = make_graph(2, &[(0, 1)]);
         let ordering = mcs_ordering(&graph);
-        let result = greedy_color(&graph, &ordering, &HashMap::new());
-        let color_to_reg = map_colors_to_regs(&result, RegClass::GPR, &HashMap::new(), true);
+        let result = greedy_color(&graph, &ordering, &BTreeMap::new());
+        let color_to_reg = map_colors_to_regs(&result, RegClass::GPR, &BTreeMap::new(), true);
         for &reg in color_to_reg.values() {
             assert_ne!(
                 reg,

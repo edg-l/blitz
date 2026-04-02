@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::*;
 use crate::ir::builder::FunctionBuilder;
 use crate::ir::types::Type;
@@ -3143,10 +3145,10 @@ fn assign_barrier_groups_load_result_anchored_at_barrier_plus_one() {
         make_inst(1, Op::Iconst(10, Type::I64), &[]),
         make_inst(2, Op::X86Add, &[0, 1]),
     ];
-    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     // vreg_to_arg says VReg(0) is consumed by barrier 2 — the old bug would
     // use this to move the LoadResult group from 1 to 2.
-    let vreg_to_arg = HashMap::from([(VReg(0), 2usize)]);
+    let vreg_to_arg = BTreeMap::from([(VReg(0), 2usize)]);
 
     let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
 
@@ -3167,8 +3169,8 @@ fn assign_barrier_groups_multiple_load_results_distinct_groups() {
         make_inst(1, Op::LoadResult(1, Type::I64), &[]),
         make_inst(2, Op::X86Add, &[0, 1]),
     ];
-    let vreg_to_result = HashMap::from([(VReg(0), 0usize), (VReg(1), 1usize)]);
-    let vreg_to_arg = HashMap::new();
+    let vreg_to_result = BTreeMap::from([(VReg(0), 0usize), (VReg(1), 1usize)]);
+    let vreg_to_arg = BTreeMap::new();
 
     let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
 
@@ -3192,8 +3194,8 @@ fn assign_barrier_groups_call_result_anchored_at_barrier_plus_one() {
         make_inst(2, Op::CallResult(0, Type::I64), &[]),
         make_inst(3, Op::X86Add, &[2, 1]),
     ];
-    let vreg_to_result = HashMap::from([(VReg(2), 2usize)]);
-    let vreg_to_arg = HashMap::new();
+    let vreg_to_result = BTreeMap::from([(VReg(2), 2usize)]);
+    let vreg_to_arg = BTreeMap::new();
 
     let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
 
@@ -3215,8 +3217,8 @@ fn assign_barrier_groups_pure_op_after_load_result_group() {
         make_inst(0, Op::LoadResult(0, Type::I64), &[]),
         make_inst(1, Op::X86Add, &[0, 0]),
     ];
-    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
-    let vreg_to_arg = HashMap::new();
+    let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = BTreeMap::new();
 
     let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
 
@@ -3242,9 +3244,9 @@ fn assign_barrier_groups_load_result_backward_pass_skipped() {
         make_inst(2, Op::Iconst(0, Type::I64), &[]),
         make_inst(3, Op::X86Add, &[0, 2]),
     ];
-    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     // vreg_to_arg pushes VReg(0) to barrier 3, but LoadResult must stay at 1.
-    let vreg_to_arg = HashMap::from([(VReg(0), 3usize)]);
+    let vreg_to_arg = BTreeMap::from([(VReg(0), 3usize)]);
 
     let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
 
@@ -3276,8 +3278,8 @@ fn assign_barrier_groups_load_result_not_pushed_behind_pure_ops() {
         make_inst(0, Op::LoadResult(0, Type::I64), &[]), // barrier 0 result
         make_inst(13, Op::X86Add, &[0, 12]),             // uses LoadResult
     ];
-    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
-    let vreg_to_arg = HashMap::new();
+    let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = BTreeMap::new();
 
     let groups = super::barrier::assign_barrier_groups(&sched, &vreg_to_result, &vreg_to_arg);
 
@@ -3515,16 +3517,16 @@ fn early_spill_distant_barrier_result() {
         make_inst(3, Op::X86Add, &[0, 2]),               // consumer of LoadResult
         make_inst(4, Op::Proj0, &[3]),
     ];
-    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
-    let vreg_to_arg = HashMap::new();
-    let mut vreg_group = HashMap::from([
+    let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = BTreeMap::new();
+    let mut vreg_group = BTreeMap::from([
         (VReg(0), 1usize), // barrier 0 result -> group 1
         (VReg(1), 1),
         (VReg(2), 2),
         (VReg(3), 3), // consumer in group 3
         (VReg(4), 3),
     ]);
-    let vreg_types = HashMap::from([
+    let vreg_types = BTreeMap::from([
         (VReg(0), Type::I32),
         (VReg(1), Type::I32),
         (VReg(2), Type::I32),
@@ -3592,13 +3594,13 @@ fn early_spill_skips_close_consumer() {
         make_inst(0, Op::LoadResult(0, Type::I32), &[]),
         make_inst(1, Op::X86Add, &[0, 0]),
     ];
-    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
-    let vreg_to_arg = HashMap::new();
-    let mut vreg_group = HashMap::from([
+    let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = BTreeMap::new();
+    let mut vreg_group = BTreeMap::from([
         (VReg(0), 1usize),
         (VReg(1), 2), // only 1 group away
     ]);
-    let vreg_types = HashMap::from([(VReg(0), Type::I32), (VReg(1), Type::I32)]);
+    let vreg_types = BTreeMap::from([(VReg(0), Type::I32), (VReg(1), Type::I32)]);
     let mut next_vreg = 10u32;
     let mut spill_counter = 0u32;
 
@@ -3626,11 +3628,11 @@ fn early_spill_skips_effectful_consumer() {
         make_inst(1, Op::Iconst(10, Type::I32), &[]),
         make_inst(2, Op::X86Add, &[0, 1]),
     ];
-    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
+    let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     // VReg(0) is also consumed by barrier 2 (a Store).
-    let vreg_to_arg = HashMap::from([(VReg(0), 2usize)]);
-    let mut vreg_group = HashMap::from([(VReg(0), 1usize), (VReg(1), 1), (VReg(2), 3)]);
-    let vreg_types = HashMap::from([
+    let vreg_to_arg = BTreeMap::from([(VReg(0), 2usize)]);
+    let mut vreg_group = BTreeMap::from([(VReg(0), 1usize), (VReg(1), 1), (VReg(2), 3)]);
+    let vreg_types = BTreeMap::from([
         (VReg(0), Type::I32),
         (VReg(1), Type::I32),
         (VReg(2), Type::I32),
@@ -3655,10 +3657,10 @@ fn early_spill_skips_effectful_consumer() {
 fn early_spill_skips_no_consumers() {
     // LoadResult at barrier 0 with no scheduled consumers at all.
     let mut schedule = vec![make_inst(0, Op::LoadResult(0, Type::I32), &[])];
-    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
-    let vreg_to_arg = HashMap::new();
-    let mut vreg_group = HashMap::from([(VReg(0), 1usize)]);
-    let vreg_types = HashMap::from([(VReg(0), Type::I32)]);
+    let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = BTreeMap::new();
+    let mut vreg_group = BTreeMap::from([(VReg(0), 1usize)]);
+    let vreg_types = BTreeMap::from([(VReg(0), Type::I32)]);
     let mut next_vreg = 10u32;
     let mut spill_counter = 0u32;
 
@@ -3687,16 +3689,16 @@ fn early_spill_multiple_consumers_uses_earliest() {
         make_inst(3, Op::X86Add, &[0, 1]), // consumer 1 in group 4
         make_inst(4, Op::X86Sub, &[0, 2]), // consumer 2 in group 5
     ];
-    let vreg_to_result = HashMap::from([(VReg(0), 0usize)]);
-    let vreg_to_arg = HashMap::new();
-    let mut vreg_group = HashMap::from([
+    let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
+    let vreg_to_arg = BTreeMap::new();
+    let mut vreg_group = BTreeMap::from([
         (VReg(0), 1usize),
         (VReg(1), 2),
         (VReg(2), 3),
         (VReg(3), 4),
         (VReg(4), 5),
     ]);
-    let vreg_types = HashMap::from([
+    let vreg_types = BTreeMap::from([
         (VReg(0), Type::I32),
         (VReg(1), Type::I32),
         (VReg(2), Type::I32),

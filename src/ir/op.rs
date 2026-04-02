@@ -3,7 +3,7 @@ use crate::ir::types::Type;
 
 /// Opaque identifier for an e-class.
 /// `ClassId::NONE` is used as a sentinel for absent optional operands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClassId(pub u32);
 
 impl ClassId {
@@ -15,7 +15,7 @@ impl ClassId {
 ///
 /// Every `Op` node has a fixed arity and a well-defined result type derivable
 /// from `result_type(&self, child_types)`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Op {
     // ── Arithmetic ───────────────────────────────────────────────────────────
     Add,

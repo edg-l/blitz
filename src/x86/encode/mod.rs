@@ -5,7 +5,7 @@ mod sse;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::ir::condcode::CondCode;
 
@@ -57,7 +57,7 @@ struct Fixup {
 
 pub struct Encoder {
     pub buf: Vec<u8>,
-    labels: HashMap<LabelId, usize>,
+    labels: BTreeMap<LabelId, usize>,
     fixups: Vec<Fixup>,
     pub relocations: Vec<Reloc>,
 }
@@ -66,7 +66,7 @@ impl Encoder {
     pub fn new() -> Self {
         Self {
             buf: Vec::new(),
-            labels: HashMap::new(),
+            labels: BTreeMap::new(),
             fixups: Vec::new(),
             relocations: Vec::new(),
         }

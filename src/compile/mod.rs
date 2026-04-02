@@ -13,7 +13,7 @@
 //! 10. Encoding
 //! 11. ELF emission
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::cost::{CostModel, OptGoal};
 use crate::egraph::extract::{VReg, VRegInst, build_vreg_types, extract, vreg_insts_for_block};
@@ -223,7 +223,7 @@ pub fn compile(
     // DO NOT pre-populate class_to_vreg here — let the DFS assign VRegs
     // naturally so that param/block-param VRegInsts appear in the scheduled
     // list and regalloc can see them.
-    let mut class_to_vreg: HashMap<ClassId, VReg> = HashMap::new();
+    let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
     let mut next_vreg: u32 = 0;
 
     // Build the block param class map (needed for phi copy generation).
@@ -238,7 +238,7 @@ pub fn compile(
     let mut block_param_vreg_overrides: BTreeMap<(BlockId, u32), VReg> = BTreeMap::new();
 
     let idom = compute_idom(func, &rpo_order);
-    let mut class_emitted_in: HashMap<ClassId, usize> = HashMap::new();
+    let mut class_emitted_in: BTreeMap<ClassId, usize> = BTreeMap::new();
 
     // Build per-block VRegInst lists in RPO order, stored by block index.
     let mut block_vreg_insts: Vec<Vec<VRegInst>> = vec![Vec::new(); func.blocks.len()];
@@ -269,7 +269,7 @@ pub fn compile(
         }
         all_roots.sort_by_key(|c| c.0);
         all_roots.dedup();
-        let pre_emission: HashSet<ClassId> = class_to_vreg.keys().copied().collect();
+        let pre_emission: BTreeSet<ClassId> = class_to_vreg.keys().copied().collect();
         let mut insts =
             vreg_insts_for_block(&extraction, &all_roots, &mut class_to_vreg, &mut next_vreg);
 
@@ -497,7 +497,7 @@ pub fn compile(
             }
         }
 
-        let mut live_out: HashSet<VReg> = HashSet::new();
+        let mut live_out: BTreeSet<VReg> = BTreeSet::new();
         collect_phi_source_vregs(func, &egraph, &class_to_vreg, &mut live_out);
         // Add Ret operands to live_out. Ret is the terminator (no EffectfulUse
         // marker) so its operands must survive until end of block.
@@ -550,7 +550,7 @@ pub fn compile(
         })?;
 
         let rewritten = vec![rewrite_vregs(&result.insts, &result.vreg_to_reg)];
-        let rename_maps: Vec<HashMap<VReg, VReg>> = vec![HashMap::new()];
+        let rename_maps: Vec<BTreeMap<VReg, VReg>> = vec![BTreeMap::new()];
         (result, rewritten, rename_maps)
     } else {
         // --- Multi-block path ---
@@ -568,7 +568,7 @@ pub fn compile(
         // global VReg with the override VReg so cross-block liveness keeps
         // it alive. Only apply on back edges (source RPO position >= target)
         // because forward edges should use the original VReg.
-        let rpo_pos: HashMap<BlockId, usize> = rpo_order
+        let rpo_pos: BTreeMap<BlockId, usize> = rpo_order
             .iter()
             .enumerate()
             .map(|(pos, &idx)| (func.blocks[idx].id, pos))
@@ -648,7 +648,7 @@ pub fn compile(
         let cross_block_slots = spill_map.num_slots;
 
         // Step 5: Build def_insts map for rematerialization.
-        let def_insts: HashMap<VReg, ScheduledInst> = block_schedules
+        let def_insts: BTreeMap<VReg, ScheduledInst> = block_schedules
             .iter()
             .flatten()
             .map(|inst| (inst.dst, inst.clone()))
@@ -669,7 +669,7 @@ pub fn compile(
             add_shift_precolors(&all_scheduled, &mut func_level_param_vregs);
             add_div_precolors(&all_scheduled, &mut func_level_param_vregs);
         }
-        let mut dummy_live_out: HashSet<VReg> = HashSet::new();
+        let mut dummy_live_out: BTreeSet<VReg> = BTreeSet::new();
         add_call_precolors(
             func,
             &egraph,
@@ -680,13 +680,13 @@ pub fn compile(
 
         // Step 8: Per-block allocation loop (RPO order).
         let mut shared_next_vreg = shared_next_vreg_start;
-        let mut merged_vreg_to_reg: HashMap<VReg, Reg> = HashMap::new();
+        let mut merged_vreg_to_reg: BTreeMap<VReg, Reg> = BTreeMap::new();
         let mut merged_callee_saved: Vec<Reg> = Vec::new();
         let mut spill_slot_counter = cross_block_slots;
         let mut block_rewritten_storage: Vec<Vec<ScheduledInst>> =
             vec![Vec::new(); func.blocks.len()];
-        let mut block_rename_maps: Vec<HashMap<VReg, VReg>> =
-            vec![HashMap::new(); func.blocks.len()];
+        let mut block_rename_maps: Vec<BTreeMap<VReg, VReg>> =
+            vec![BTreeMap::new(); func.blocks.len()];
 
         for &block_idx in &rpo_order {
             let block = &func.blocks[block_idx];
@@ -816,7 +816,7 @@ pub fn compile(
                 let non_term_ops = &block.ops[..non_term_count];
                 if non_term_count > 0 {
                     // Build block_class_to_vreg with renames applied.
-                    let mut bcv: HashMap<ClassId, VReg> = class_to_vreg
+                    let mut bcv: BTreeMap<ClassId, VReg> = class_to_vreg
                         .iter()
                         .map(|(&cid, &vreg)| {
                             let renamed = rename.get(&vreg).copied().unwrap_or(vreg);
@@ -841,7 +841,7 @@ pub fn compile(
                     // this block's schedule (because global liveness didn't
                     // detect it as cross-block live), insert a remat instruction.
                     {
-                        let sched_vregs: HashSet<VReg> =
+                        let sched_vregs: BTreeSet<VReg> =
                             split_schedule.iter().map(|i| i.dst).collect();
                         for op in non_term_ops {
                             let cids: Vec<ClassId> = match op {
@@ -908,7 +908,7 @@ pub fn compile(
             //   - effectful op operands are NOT in live_out: they're handled by
             //     EffectfulUse markers in the instruction stream.
             //   - Ret operands ARE in live_out (terminator, no marker).
-            let mut block_live_out: HashSet<VReg> = phi_uses[block_idx]
+            let mut block_live_out: BTreeSet<VReg> = phi_uses[block_idx]
                 .iter()
                 .map(|v| rename.get(v).copied().unwrap_or(*v))
                 .chain(block_param_vregs_per_block[block_idx].iter().copied())
@@ -921,7 +921,7 @@ pub fn compile(
                 }
             }
             // Step 8c: Filter pre-colorings to VRegs in this block's schedule.
-            let split_vreg_set: HashSet<VReg> = split_schedule
+            let split_vreg_set: BTreeSet<VReg> = split_schedule
                 .iter()
                 .flat_map(|i| std::iter::once(i.dst).chain(i.operands.iter().copied()))
                 .collect();
@@ -953,7 +953,7 @@ pub fn compile(
             block_combined_points.extend_from_slice(&block_div_points);
 
             // Step 8f: Per-block loop depths.
-            let block_loop_depths: HashMap<VReg, u32> = loop_depths
+            let block_loop_depths: BTreeMap<VReg, u32> = loop_depths
                 .iter()
                 .filter(|(v, _)| split_vreg_set.contains(v))
                 .map(|(&v, &d)| (v, d))
@@ -1031,7 +1031,7 @@ pub fn compile(
     }
 
     // Build the set of param VRegs so lowering can skip their Iconst sentinels.
-    let param_vreg_set: HashSet<VReg> = param_vregs.iter().map(|(v, _)| *v).collect();
+    let param_vreg_set: BTreeSet<VReg> = param_vregs.iter().map(|(v, _)| *v).collect();
 
     // Compute frame layout early so spill lowering can use it during Phase 7.
     let frame_layout = compute_frame_layout(
@@ -1072,9 +1072,9 @@ pub fn compile(
         // Build a block-local class_to_vreg that applies cross-block renames.
         // When a VReg was renamed (SpillLoad/remat) in this block, effectful ops
         // must use the renamed VReg to get the correct physical register.
-        let block_class_to_vreg: HashMap<ClassId, VReg> = {
+        let block_class_to_vreg: BTreeMap<ClassId, VReg> = {
             let renames = &block_rename_maps[block_idx];
-            let mut map: HashMap<ClassId, VReg> = if renames.is_empty() {
+            let mut map: BTreeMap<ClassId, VReg> = if renames.is_empty() {
                 class_to_vreg.clone()
             } else {
                 class_to_vreg
@@ -1138,9 +1138,9 @@ pub fn compile(
         let lower_group = |group: &[&ScheduledInst],
                            regalloc_result: &RegAllocResult,
                            func: &Function,
-                           param_vreg_set: &HashSet<VReg>,
+                           param_vreg_set: &BTreeSet<VReg>,
                            frame_layout: &crate::x86::abi::FrameLayout,
-                           vreg_types: &HashMap<VReg, Type>|
+                           vreg_types: &BTreeMap<VReg, Type>|
          -> Result<Vec<MachInst>, CompileError> {
             lower_block_pure_ops(
                 &group.iter().map(|&i| i.clone()).collect::<Vec<_>>(),
@@ -1237,7 +1237,7 @@ pub fn compile(
     // label_positions: label -> instruction index (for relax_branches).
     // Block labels use block.id (not block_idx) so Jump targets resolve correctly.
     let mut flat_insts: Vec<MachInst> = Vec::new();
-    let mut label_positions: HashMap<LabelId, usize> = HashMap::new();
+    let mut label_positions: BTreeMap<LabelId, usize> = BTreeMap::new();
 
     for (rpo_pos, items) in block_items.iter().enumerate() {
         let block_id = func.blocks[rpo_order[rpo_pos]].id;
@@ -1381,7 +1381,7 @@ pub fn compile_to_ir_string(
     })?;
 
     // Phase 3: Build per-block VRegInst lists.
-    let mut class_to_vreg: HashMap<ClassId, VReg> = HashMap::new();
+    let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
     let mut next_vreg: u32 = 0;
     let block_param_map = build_block_param_class_map(&egraph);
     let rpo_order = compute_rpo(func);

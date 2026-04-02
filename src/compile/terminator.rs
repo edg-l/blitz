@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::egraph::EGraph;
 use crate::egraph::extract::VReg;
@@ -44,7 +44,7 @@ pub(super) fn thread_branches(
 ) {
     loop {
         // Build a map: block_id -> jump_target for blocks that are just a Jmp.
-        let mut redirect: HashMap<LabelId, LabelId> = HashMap::new();
+        let mut redirect: BTreeMap<LabelId, LabelId> = BTreeMap::new();
         for (rpo_pos, items) in block_items.iter().enumerate() {
             let block_id = func.blocks[rpo_order[rpo_pos]].id as LabelId;
             // Count real instructions (not BindLabel).
@@ -73,7 +73,7 @@ pub(super) fn thread_branches(
         let keys: Vec<LabelId> = redirect.keys().copied().collect();
         for k in keys {
             let mut dest = redirect[&k];
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = std::collections::BTreeSet::new();
             seen.insert(k);
             while let Some(&next) = redirect.get(&dest) {
                 if seen.contains(&next) {
@@ -129,15 +129,15 @@ pub(super) fn lower_terminator(
     op: &EffectfulOp,
     next_block_id: Option<BlockId>,
     egraph: &EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-    ret_class_to_vreg: &HashMap<ClassId, VReg>,
-    block_param_map: &HashMap<(BlockId, u32), ClassId>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    ret_class_to_vreg: &BTreeMap<ClassId, VReg>,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
     next_label: &mut LabelId,
 ) -> Result<Vec<BlockItem>, CompileError> {
-    let get_reg = |cid: ClassId, ctv: &HashMap<ClassId, VReg>| -> Option<Reg> {
+    let get_reg = |cid: ClassId, ctv: &BTreeMap<ClassId, VReg>| -> Option<Reg> {
         let canon = egraph.unionfind.find_immutable(cid);
         ctv.get(&canon)
             .and_then(|v| regalloc.vreg_to_reg.get(v).copied())
@@ -315,9 +315,9 @@ fn build_phi_copies(
     target: BlockId,
     args: &[ClassId],
     egraph: &EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-    block_class_to_vreg: &HashMap<ClassId, VReg>,
-    block_param_map: &HashMap<(BlockId, u32), ClassId>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    block_class_to_vreg: &BTreeMap<ClassId, VReg>,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     regalloc: &RegAllocResult,
     func: &Function,

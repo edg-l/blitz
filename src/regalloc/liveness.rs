@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::egraph::extract::VReg;
 use crate::schedule::scheduler::ScheduledInst;
@@ -6,11 +6,11 @@ use crate::schedule::scheduler::ScheduledInst;
 pub struct LivenessInfo {
     /// For each program point (instruction index), the set of live VRegs.
     /// live_at[i] is the set live *before* instruction i executes.
-    pub live_at: Vec<HashSet<VReg>>,
+    pub live_at: Vec<BTreeSet<VReg>>,
     /// Live-in set for the block (live before the first instruction).
-    pub live_in: HashSet<VReg>,
+    pub live_in: BTreeSet<VReg>,
     /// Live-out set for the block (live after the last instruction).
-    pub live_out: HashSet<VReg>,
+    pub live_out: BTreeSet<VReg>,
 }
 
 /// Compute liveness for a single basic block's scheduled instructions.
@@ -25,10 +25,10 @@ pub struct LivenessInfo {
 ///     Remove dst from live (if this inst defines it)
 ///     Add all operands to live
 ///   live_in = live after processing all instructions
-pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &HashSet<VReg>) -> LivenessInfo {
+pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &BTreeSet<VReg>) -> LivenessInfo {
     let n = insts.len();
-    let mut live_at: Vec<HashSet<VReg>> = vec![HashSet::new(); n];
-    let mut live: HashSet<VReg> = block_live_out.clone();
+    let mut live_at: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
+    let mut live: BTreeSet<VReg> = block_live_out.clone();
 
     for i in (0..n).rev() {
         let inst = &insts[i];
@@ -104,7 +104,7 @@ mod tests {
             add_inst(2, 0, 1), // v2 = add(v0, v1)
             use_inst(3, 2),    // v3 = use(v2)
         ];
-        let live_out: HashSet<VReg> = HashSet::new();
+        let live_out: BTreeSet<VReg> = BTreeSet::new();
         let info = compute_liveness(&insts, &live_out);
 
         // Before inst 2 (add): v0 and v1 must be live.
@@ -137,7 +137,7 @@ mod tests {
             iconst_inst(0), // v0 = iconst
             iconst_inst(1), // v1 = iconst
         ];
-        let mut live_out: HashSet<VReg> = HashSet::new();
+        let mut live_out: BTreeSet<VReg> = BTreeSet::new();
         live_out.insert(VReg(0)); // v0 is used in a successor block
 
         let info = compute_liveness(&insts, &live_out);
@@ -164,7 +164,7 @@ mod tests {
         // The block uses v5 which is defined outside (in a predecessor).
         // Inst: v6 = use(v5)
         let insts = vec![use_inst(6, 5)];
-        let live_out: HashSet<VReg> = HashSet::new();
+        let live_out: BTreeSet<VReg> = BTreeSet::new();
 
         let info = compute_liveness(&insts, &live_out);
 

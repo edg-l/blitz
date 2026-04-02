@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::egraph::egraph::EGraph;
 use crate::egraph::enode::ENode;
@@ -17,7 +17,7 @@ pub enum Pattern {
 }
 
 /// Variable bindings from a pattern match.
-pub type Substitution = HashMap<VarId, ClassId>;
+pub type Substitution = BTreeMap<VarId, ClassId>;
 
 /// A rewrite rule is a function that inspects the e-graph and may add equivalences.
 /// Returns true if any changes were made.

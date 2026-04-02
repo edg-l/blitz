@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::egraph::extract::{ExtractionResult, VReg};
 use crate::egraph::unionfind::UnionFind;
@@ -22,7 +22,7 @@ fn build_mem_addr(
     addr_cid: ClassId,
     addr_reg: Reg,
     extraction: &ExtractionResult,
-    class_to_vreg: &HashMap<ClassId, VReg>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
     regalloc: &RegAllocResult,
     conflict_reg: Option<Reg>,
 ) -> Addr {
@@ -74,7 +74,7 @@ fn build_mem_addr(
 /// Lower a non-terminator effectful op (Load, Store, Call) to MachInsts.
 pub(super) fn lower_effectful_op(
     op: &EffectfulOp,
-    class_to_vreg: &HashMap<ClassId, VReg>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
     regalloc: &RegAllocResult,
     extraction: &ExtractionResult,
     func: &Function,

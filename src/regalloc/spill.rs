@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
 use crate::ir::op::Op;
@@ -50,9 +50,9 @@ pub fn spill_slot_of(inst: &ScheduledInst) -> u32 {
 /// For each VReg index, scans instructions to find the defining position
 /// (where `inst.dst == VReg(idx)`) and the last use position (last appearance
 /// in any `inst.operands`). Range length = last_use - def_pos (or 1 if not found).
-pub fn compute_live_range_length(insts: &[ScheduledInst]) -> HashMap<usize, usize> {
-    let mut def_pos: HashMap<usize, usize> = HashMap::new();
-    let mut last_use: HashMap<usize, usize> = HashMap::new();
+pub fn compute_live_range_length(insts: &[ScheduledInst]) -> BTreeMap<usize, usize> {
+    let mut def_pos: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut last_use: BTreeMap<usize, usize> = BTreeMap::new();
 
     for (i, inst) in insts.iter().enumerate() {
         let dst_idx = inst.dst.0 as usize;
@@ -64,8 +64,8 @@ pub fn compute_live_range_length(insts: &[ScheduledInst]) -> HashMap<usize, usiz
         }
     }
 
-    let mut range_lengths = HashMap::new();
-    let all_vregs: HashSet<usize> = def_pos.keys().chain(last_use.keys()).copied().collect();
+    let mut range_lengths = BTreeMap::new();
+    let all_vregs: BTreeSet<usize> = def_pos.keys().chain(last_use.keys()).copied().collect();
     for idx in all_vregs {
         let dp = def_pos.get(&idx).copied().unwrap_or(0);
         let lu = last_use.get(&idx).copied().unwrap_or(dp);
@@ -89,8 +89,8 @@ pub fn select_spill(
     liveness: &LivenessInfo,
     insts: &[ScheduledInst],
     available_regs: u32,
-    loop_depths: &HashMap<VReg, u32>,
-    excluded: &HashSet<usize>,
+    loop_depths: &BTreeMap<VReg, u32>,
+    excluded: &BTreeSet<usize>,
 ) -> Option<usize> {
     let range_lengths = compute_live_range_length(insts);
 
@@ -149,8 +149,8 @@ fn find_pressure_point(liveness: &LivenessInfo, available_regs: u32) -> Option<u
     best.map(|(_, i)| i)
 }
 
-fn compute_next_use(insts: &[ScheduledInst], from: usize) -> HashMap<usize, usize> {
-    let mut next_use: HashMap<usize, usize> = HashMap::new();
+fn compute_next_use(insts: &[ScheduledInst], from: usize) -> BTreeMap<usize, usize> {
+    let mut next_use: BTreeMap<usize, usize> = BTreeMap::new();
     for (i, inst) in insts.iter().enumerate().skip(from) {
         for &op in &inst.operands {
             let idx = op.0 as usize;
@@ -185,17 +185,17 @@ pub fn is_rematerializable(inst: &ScheduledInst) -> bool {
 /// `next_vreg` is updated to allocate new VReg indices.
 pub fn insert_spills(
     insts: &mut Vec<ScheduledInst>,
-    spilled: &HashSet<usize>,
+    spilled: &BTreeSet<usize>,
     spill_slots: &mut u32,
     next_vreg: &mut u32,
-    vreg_classes: &HashMap<VReg, crate::x86::reg::RegClass>,
-) -> HashMap<VReg, Vec<VReg>> {
+    vreg_classes: &BTreeMap<VReg, crate::x86::reg::RegClass>,
+) -> BTreeMap<VReg, Vec<VReg>> {
     if spilled.is_empty() {
-        return HashMap::new();
+        return BTreeMap::new();
     }
 
     // Build a map of VReg -> defining instruction op (for rematerialization).
-    let def_ops: HashMap<usize, ScheduledInst> = insts
+    let def_ops: BTreeMap<usize, ScheduledInst> = insts
         .iter()
         .filter(|inst| spilled.contains(&(inst.dst.0 as usize)))
         .map(|inst| {
@@ -211,7 +211,7 @@ pub fn insert_spills(
         .collect();
 
     // Assign spill slots to non-rematerializable VRegs.
-    let mut vreg_to_slot: HashMap<usize, u32> = HashMap::new();
+    let mut vreg_to_slot: BTreeMap<usize, u32> = BTreeMap::new();
     for &idx in spilled {
         if let Some(def) = def_ops.get(&idx)
             && !is_rematerializable(def)
@@ -222,7 +222,7 @@ pub fn insert_spills(
         }
     }
 
-    let mut reload_map: HashMap<VReg, Vec<VReg>> = HashMap::new();
+    let mut reload_map: BTreeMap<VReg, Vec<VReg>> = BTreeMap::new();
 
     // We need to process the instruction list and insert spill/reload code.
     // We do a single pass, building a new instruction list.
@@ -231,7 +231,7 @@ pub fn insert_spills(
 
     // Track current reload VRegs for each spilled VReg.
     // Maps original VReg index -> current reload VReg (if a reload was just inserted).
-    let mut current_reload: HashMap<usize, VReg> = HashMap::new();
+    let mut current_reload: BTreeMap<usize, VReg> = BTreeMap::new();
 
     for mut inst in old_insts {
         // Before this instruction, insert reloads for any spilled operands.
@@ -373,7 +373,7 @@ mod tests {
         ];
 
         let mut insts = insts_base.clone();
-        let mut spilled = HashSet::new();
+        let mut spilled = BTreeSet::new();
         spilled.insert(0usize); // spill v0
         let mut spill_slots = 0u32;
         let mut next_vreg = 100u32;
@@ -383,7 +383,7 @@ mod tests {
             &spilled,
             &mut spill_slots,
             &mut next_vreg,
-            &HashMap::new(),
+            &BTreeMap::new(),
         );
 
         // spill_slots should now be 1.
@@ -429,7 +429,7 @@ mod tests {
         ];
 
         // Manually create a liveness info where both v0 and v1 are live at inst 0.
-        let live_at: Vec<HashSet<VReg>> = vec![
+        let live_at: Vec<BTreeSet<VReg>> = vec![
             [VReg(0), VReg(1)].iter().copied().collect(), // pressure at inst 0
             [VReg(0), VReg(1)].iter().copied().collect(),
             [VReg(1)].iter().copied().collect(),
@@ -437,30 +437,30 @@ mod tests {
         ];
         let liveness = LivenessInfo {
             live_at,
-            live_in: HashSet::new(),
-            live_out: HashSet::new(),
+            live_in: BTreeSet::new(),
+            live_out: BTreeSet::new(),
         };
 
         // Both VRegs are in the interference graph (num_vregs=4).
         let graph = InterferenceGraph {
             num_vregs: 4,
             adj: vec![
-                HashSet::new(),
-                HashSet::new(),
-                HashSet::new(),
-                HashSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
             ],
             reg_class: vec![RegClass::GPR; 4],
         };
 
-        let mut loop_depths = HashMap::new();
+        let mut loop_depths = BTreeMap::new();
         loop_depths.insert(VReg(0), 0u32); // outside loop
         loop_depths.insert(VReg(1), 2u32); // inside loop (depth 2)
 
         // select_spill with 1 available register: must pick one of the two.
         // Due to loop penalty, VReg 1 (depth=2) should NOT be spilled.
         // VReg 0 (depth=0) should be chosen.
-        let excluded = HashSet::new();
+        let excluded = BTreeSet::new();
         let candidate = select_spill(&graph, &liveness, &insts, 1, &loop_depths, &excluded);
         assert_eq!(
             candidate,
@@ -477,7 +477,7 @@ mod tests {
             use_inst(1, 0),     // v1 = use(v0)
             use_inst(2, 0),     // v2 = use(v0)
         ];
-        let mut spilled = HashSet::new();
+        let mut spilled = BTreeSet::new();
         spilled.insert(0usize);
         let mut spill_slots = 0u32;
         let mut next_vreg = 10u32;
@@ -487,7 +487,7 @@ mod tests {
             &spilled,
             &mut spill_slots,
             &mut next_vreg,
-            &HashMap::new(),
+            &BTreeMap::new(),
         );
 
         // No SpillStore: constants are rematerializable.
@@ -525,13 +525,13 @@ mod tests {
             use_inst(2, 0),
         ];
 
-        let mut spilled = HashSet::new();
+        let mut spilled = BTreeSet::new();
         spilled.insert(0usize);
         let mut spill_slots = 0u32;
         let mut next_vreg = 100u32;
 
         // Mark v0 as XMM class.
-        let mut vreg_classes = HashMap::new();
+        let mut vreg_classes = BTreeMap::new();
         vreg_classes.insert(VReg(0), RegClass::XMM);
 
         insert_spills(
@@ -605,7 +605,7 @@ mod tests {
         ];
 
         // Both v0 and v1 live at every instruction from 0 onward.
-        let live_at: Vec<HashSet<VReg>> = vec![
+        let live_at: Vec<BTreeSet<VReg>> = vec![
             [VReg(0), VReg(1)].iter().copied().collect(), // pressure point (size 2 >= avail 1)
             [VReg(0), VReg(1)].iter().copied().collect(),
             [VReg(0), VReg(1)].iter().copied().collect(),
@@ -614,13 +614,13 @@ mod tests {
         ];
         let liveness = LivenessInfo {
             live_at,
-            live_in: HashSet::new(),
-            live_out: HashSet::new(),
+            live_in: BTreeSet::new(),
+            live_out: BTreeSet::new(),
         };
 
         // v0: degree 1 (interferes with v1 only)
         // v1: degree 3 (interferes with v0, v2, v3)
-        let mut adj = vec![HashSet::new(); 5];
+        let mut adj = vec![BTreeSet::new(); 5];
         adj[0].insert(1);
         adj[1].insert(0);
         adj[1].insert(2);
@@ -633,8 +633,8 @@ mod tests {
             reg_class: vec![RegClass::GPR; 5],
         };
 
-        let loop_depths = HashMap::new();
-        let excluded = HashSet::new();
+        let loop_depths = BTreeMap::new();
+        let excluded = BTreeSet::new();
         let candidate = select_spill(&graph, &liveness, &insts, 1, &loop_depths, &excluded);
         // Both have same next-use (4) and same range (4), so tiebreaker is degree*range.
         // v1: degree=3, range=4 -> 12. v0: degree=1, range=4 -> 4. v1 wins.
@@ -666,19 +666,19 @@ mod tests {
             },
         ];
 
-        let live_at: Vec<HashSet<VReg>> = vec![
+        let live_at: Vec<BTreeSet<VReg>> = vec![
             [VReg(0), VReg(1)].iter().copied().collect(),
             [VReg(0), VReg(1)].iter().copied().collect(),
             [VReg(0), VReg(1)].iter().copied().collect(),
         ];
         let liveness = LivenessInfo {
             live_at,
-            live_in: HashSet::new(),
-            live_out: HashSet::new(),
+            live_in: BTreeSet::new(),
+            live_out: BTreeSet::new(),
         };
 
         // v0 has higher degree (better spill target), but is excluded.
-        let mut adj = vec![HashSet::new(); 3];
+        let mut adj = vec![BTreeSet::new(); 3];
         adj[0].insert(1);
         adj[0].insert(2);
         adj[1].insert(0);
@@ -689,8 +689,8 @@ mod tests {
             reg_class: vec![RegClass::GPR; 3],
         };
 
-        let loop_depths = HashMap::new();
-        let mut excluded = HashSet::new();
+        let loop_depths = BTreeMap::new();
+        let mut excluded = BTreeSet::new();
         excluded.insert(0usize); // exclude v0
 
         let candidate = select_spill(&graph, &liveness, &insts, 1, &loop_depths, &excluded);

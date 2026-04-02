@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::egraph::extract::VReg;
 use crate::schedule::scheduler::ScheduledInst;
@@ -22,10 +22,10 @@ use crate::x86::reg::Reg;
 ///
 /// For now, rewrite returns a Vec<ScheduledInst> where dst and operands
 /// have been remapped through coalescing (aliases). Physical register
-/// assignment is conveyed via the returned `HashMap<VReg, Reg>`.
+/// assignment is conveyed via the returned `BTreeMap<VReg, Reg>`.
 pub fn rewrite_vregs(
     insts: &[ScheduledInst],
-    vreg_to_reg: &HashMap<VReg, Reg>,
+    vreg_to_reg: &BTreeMap<VReg, Reg>,
 ) -> Vec<ScheduledInst> {
     insts
         .iter()
@@ -67,7 +67,7 @@ pub fn apply_coalescing(
     }
 
     // Build alias map: merged_from -> merged_into.
-    let mut alias: HashMap<u32, u32> = HashMap::new();
+    let mut alias: BTreeMap<u32, u32> = BTreeMap::new();
     for &(into, from) in coalesced {
         alias.insert(from as u32, into as u32);
     }
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn rewrite_preserves_structure() {
         let insts = vec![iconst_inst(0), use_inst(1, 0)];
-        let mut map = HashMap::new();
+        let mut map = BTreeMap::new();
         map.insert(VReg(0), Reg::RAX);
         map.insert(VReg(1), Reg::RCX);
 

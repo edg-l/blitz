@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
 use crate::ir::effectful::EffectfulOp;
@@ -9,9 +9,9 @@ use crate::schedule::scheduler::ScheduledInst;
 /// Per-block liveness information computed by global iterative dataflow.
 pub struct GlobalLiveness {
     /// VRegs live at the start of each block (indexed by block index).
-    pub live_in: Vec<HashSet<VReg>>,
+    pub live_in: Vec<BTreeSet<VReg>>,
     /// VRegs live at the end of each block (indexed by block index).
-    pub live_out: Vec<HashSet<VReg>>,
+    pub live_out: Vec<BTreeSet<VReg>>,
 }
 
 /// Compute per-block live_in and live_out sets using backward iterative dataflow.
@@ -30,19 +30,19 @@ pub struct GlobalLiveness {
 pub fn compute_global_liveness(
     block_schedules: &[Vec<ScheduledInst>],
     successors: &[Vec<usize>],
-    phi_uses: &[HashSet<VReg>],
+    phi_uses: &[BTreeSet<VReg>],
 ) -> GlobalLiveness {
     let n = block_schedules.len();
     assert_eq!(successors.len(), n);
     assert_eq!(phi_uses.len(), n);
 
     // Compute def(B) and use(B) for each block.
-    let mut block_def: Vec<HashSet<VReg>> = Vec::with_capacity(n);
-    let mut block_use: Vec<HashSet<VReg>> = Vec::with_capacity(n);
+    let mut block_def: Vec<BTreeSet<VReg>> = Vec::with_capacity(n);
+    let mut block_use: Vec<BTreeSet<VReg>> = Vec::with_capacity(n);
 
     for (b, sched) in block_schedules.iter().enumerate() {
-        let mut def: HashSet<VReg> = HashSet::new();
-        let mut uses: HashSet<VReg> = HashSet::new();
+        let mut def: BTreeSet<VReg> = BTreeSet::new();
+        let mut uses: BTreeSet<VReg> = BTreeSet::new();
 
         // Process instructions in forward order to compute upward-exposed uses.
         for inst in sched {
@@ -67,8 +67,8 @@ pub fn compute_global_liveness(
         block_use.push(uses);
     }
 
-    let mut live_in: Vec<HashSet<VReg>> = vec![HashSet::new(); n];
-    let mut live_out: Vec<HashSet<VReg>> = vec![HashSet::new(); n];
+    let mut live_in: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
+    let mut live_out: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 
     // Initialize live_in = use(B).
     for b in 0..n {
@@ -82,7 +82,7 @@ pub fn compute_global_liveness(
         // Process in reverse order (backward pass heuristic for faster convergence).
         for b in (0..n).rev() {
             // live_out(B) = union of live_in(S) for each successor S.
-            let mut new_out: HashSet<VReg> = HashSet::new();
+            let mut new_out: BTreeSet<VReg> = BTreeSet::new();
             for &s in &successors[b] {
                 for &v in &live_in[s] {
                     new_out.insert(v);
@@ -117,7 +117,7 @@ pub fn compute_global_liveness(
 /// Returns `successors[i]` = list of block indices that block `i` can jump to.
 /// Indices are into `func.blocks` (not block IDs).
 pub fn cfg_successors(func: &Function) -> Vec<Vec<usize>> {
-    let id_to_idx: HashMap<u32, usize> = func
+    let id_to_idx: BTreeMap<u32, usize> = func
         .blocks
         .iter()
         .enumerate()
@@ -162,10 +162,10 @@ pub fn cfg_successors(func: &Function) -> Vec<Vec<usize>> {
 pub fn compute_phi_uses(
     func: &Function,
     egraph_unionfind: &crate::egraph::unionfind::UnionFind,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-) -> Vec<HashSet<VReg>> {
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+) -> Vec<BTreeSet<VReg>> {
     let n = func.blocks.len();
-    let mut phi_uses: Vec<HashSet<VReg>> = vec![HashSet::new(); n];
+    let mut phi_uses: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
         if let Some(term) = block.ops.last() {
@@ -205,10 +205,10 @@ pub fn compute_phi_uses(
 pub fn collect_block_param_vregs_per_block(
     func: &Function,
     egraph: &crate::egraph::EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-) -> Vec<HashSet<VReg>> {
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+) -> Vec<BTreeSet<VReg>> {
     let n = func.blocks.len();
-    let mut result: Vec<HashSet<VReg>> = vec![HashSet::new(); n];
+    let mut result: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
         for pidx in 0..block.param_types.len() as u32 {
@@ -266,8 +266,8 @@ mod tests {
         }
     }
 
-    fn empty_phi_uses(n: usize) -> Vec<HashSet<VReg>> {
-        vec![HashSet::new(); n]
+    fn empty_phi_uses(n: usize) -> Vec<BTreeSet<VReg>> {
+        vec![BTreeSet::new(); n]
     }
 
     // Test 1: Straight-line CFG (0 -> 1 -> 2).

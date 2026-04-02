@@ -63,7 +63,7 @@ mod tests {
     fn make_graph(n: usize, edges: &[(usize, usize)]) -> InterferenceGraph {
         let mut g = InterferenceGraph {
             num_vregs: n,
-            adj: vec![std::collections::HashSet::new(); n],
+            adj: vec![std::collections::BTreeSet::new(); n],
             reg_class: vec![RegClass::GPR; n],
         };
         for &(a, b) in edges {

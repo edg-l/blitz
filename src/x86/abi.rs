@@ -313,7 +313,7 @@ pub fn emit_epilogue(encoder: &mut Encoder, layout: &FrameLayout) {
 /// final destination.
 pub fn sequentialize_copies(copies: &[(Reg, Reg)], temp: Reg) -> Vec<(Reg, Reg)> {
     // Build adjacency: dst_map[src] = dst
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet};
 
     let mut pending: Vec<(Reg, Reg)> = copies.to_vec();
     let mut result: Vec<(Reg, Reg)> = Vec::new();
@@ -324,7 +324,7 @@ pub fn sequentialize_copies(copies: &[(Reg, Reg)], temp: Reg) -> Vec<(Reg, Reg)>
         }
 
         // Build a set of all sources.
-        let srcs: HashSet<Reg> = pending.iter().map(|&(s, _)| s).collect();
+        let srcs: BTreeSet<Reg> = pending.iter().map(|&(s, _)| s).collect();
 
         // Find a copy whose dst is not a src of another pending copy
         // (i.e., safe to emit without clobbering a needed value).
@@ -339,7 +339,7 @@ pub fn sequentialize_copies(copies: &[(Reg, Reg)], temp: Reg) -> Vec<(Reg, Reg)>
             let cycle_start_src = pending[0].0;
 
             // Walk the cycle: build the chain src0->dst0->dst1->...
-            let dst_map: HashMap<Reg, Reg> = pending.iter().map(|&(s, d)| (s, d)).collect();
+            let dst_map: BTreeMap<Reg, Reg> = pending.iter().map(|&(s, d)| (s, d)).collect();
 
             let mut cycle: Vec<Reg> = vec![cycle_start_src];
             let mut cur = dst_map[&cycle_start_src];
@@ -660,7 +660,7 @@ mod tests {
 
     // ── sequentialize_copies ─────────────────────────────────────────────────
 
-    fn apply_copies(copies: &[(Reg, Reg)], state: &mut std::collections::HashMap<Reg, u64>) {
+    fn apply_copies(copies: &[(Reg, Reg)], state: &mut std::collections::BTreeMap<Reg, u64>) {
         // Apply copies sequentially (order matters here – this simulates execution).
         for &(src, dst) in copies {
             let v = state[&src];
@@ -668,7 +668,7 @@ mod tests {
         }
     }
 
-    fn regs_to_state(pairs: &[(Reg, u64)]) -> std::collections::HashMap<Reg, u64> {
+    fn regs_to_state(pairs: &[(Reg, u64)]) -> std::collections::BTreeMap<Reg, u64> {
         pairs.iter().cloned().collect()
     }
 

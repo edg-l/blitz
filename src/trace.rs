@@ -149,12 +149,12 @@ pub fn init_tracing() {
 
 use crate::egraph::extract::VReg;
 use crate::schedule::scheduler::ScheduledInst;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Format a schedule with optional barrier group annotations.
 pub fn format_schedule(
     insts: &[ScheduledInst],
-    vreg_group: Option<&HashMap<VReg, usize>>,
+    vreg_group: Option<&BTreeMap<VReg, usize>>,
 ) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -176,7 +176,7 @@ pub fn format_schedule(
 }
 
 /// Format a VReg-to-Reg mapping sorted by VReg index.
-pub fn format_vreg_to_reg(map: &HashMap<VReg, crate::x86::reg::Reg>) -> String {
+pub fn format_vreg_to_reg(map: &BTreeMap<VReg, crate::x86::reg::Reg>) -> String {
     use std::fmt::Write;
     let mut sorted: Vec<_> = map.iter().collect();
     sorted.sort_by_key(|(v, _)| v.0);
@@ -190,8 +190,8 @@ pub fn format_vreg_to_reg(map: &HashMap<VReg, crate::x86::reg::Reg>) -> String {
 /// Format a liveness info's live_at sets.
 pub fn format_liveness(
     insts: &[ScheduledInst],
-    live_at: &[HashSet<VReg>],
-    live_out: &HashSet<VReg>,
+    live_at: &[BTreeSet<VReg>],
+    live_out: &BTreeSet<VReg>,
 ) -> String {
     use std::fmt::Write;
     let mut out = String::new();

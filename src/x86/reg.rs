@@ -1,12 +1,12 @@
 /// x86-64 register class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RegClass {
     GPR,
     XMM,
 }
 
 /// Physical x86-64 registers (GPR and XMM).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Reg {
     RAX = 0,

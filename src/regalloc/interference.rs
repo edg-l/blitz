@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
 use crate::schedule::scheduler::ScheduledInst;
@@ -9,7 +9,7 @@ use super::liveness::LivenessInfo;
 pub struct InterferenceGraph {
     pub num_vregs: usize,
     /// Adjacency list: VReg index -> set of interfering VReg indices.
-    pub adj: Vec<HashSet<usize>>,
+    pub adj: Vec<BTreeSet<usize>>,
     /// Register class of each VReg.
     pub reg_class: Vec<RegClass>,
 }
@@ -37,7 +37,7 @@ impl InterferenceGraph {
 pub fn build_interference(
     liveness: &LivenessInfo,
     insts: &[ScheduledInst],
-    vreg_classes: &HashMap<VReg, RegClass>,
+    vreg_classes: &BTreeMap<VReg, RegClass>,
 ) -> InterferenceGraph {
     // Determine the total number of VRegs (max index + 1).
     let num_vregs = {
@@ -83,7 +83,7 @@ pub fn build_interference(
 
     let mut graph = InterferenceGraph {
         num_vregs,
-        adj: vec![HashSet::new(); num_vregs],
+        adj: vec![BTreeSet::new(); num_vregs],
         reg_class,
     };
 
@@ -114,7 +114,7 @@ pub fn build_interference(
     graph
 }
 
-fn add_interferences_in_set(graph: &mut InterferenceGraph, live_set: &HashSet<VReg>) {
+fn add_interferences_in_set(graph: &mut InterferenceGraph, live_set: &BTreeSet<VReg>) {
     let live: Vec<usize> = live_set.iter().map(|v| v.0 as usize).collect();
     for i in 0..live.len() {
         for j in (i + 1)..live.len() {
@@ -152,8 +152,8 @@ mod tests {
         }
     }
 
-    fn default_classes(insts: &[ScheduledInst]) -> HashMap<VReg, RegClass> {
-        let mut m = HashMap::new();
+    fn default_classes(insts: &[ScheduledInst]) -> BTreeMap<VReg, RegClass> {
+        let mut m = BTreeMap::new();
         for inst in insts {
             m.insert(inst.dst, RegClass::GPR);
             for &op in &inst.operands {
@@ -170,7 +170,7 @@ mod tests {
         // v1 = iconst  (inst 1)
         // v2 = add(v0, v1)  (inst 2) -- v0 and v1 live simultaneously
         let insts = vec![iconst_inst(0), iconst_inst(1), add_inst(2, 0, 1)];
-        let live_out = HashSet::new();
+        let live_out = BTreeSet::new();
         let liveness = compute_liveness(&insts, &live_out);
         let classes = default_classes(&insts);
         let graph = build_interference(&liveness, &insts, &classes);
@@ -203,7 +203,7 @@ mod tests {
                 operands: vec![VReg(2)],
             },
         ];
-        let live_out = HashSet::new();
+        let live_out = BTreeSet::new();
         let liveness = compute_liveness(&insts, &live_out);
         let classes = default_classes(&insts);
         let graph = build_interference(&liveness, &insts, &classes);
@@ -224,9 +224,9 @@ mod tests {
             iconst_inst(1), // v1 = XMM
             add_inst(2, 0, 1),
         ];
-        let live_out = HashSet::new();
+        let live_out = BTreeSet::new();
         let liveness = compute_liveness(&insts, &live_out);
-        let mut classes = HashMap::new();
+        let mut classes = BTreeMap::new();
         classes.insert(VReg(0), RegClass::GPR);
         classes.insert(VReg(1), RegClass::XMM);
         classes.insert(VReg(2), RegClass::GPR);

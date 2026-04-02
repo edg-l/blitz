@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::egraph::cost::CostModel;
 use crate::egraph::egraph::EGraph;
@@ -39,7 +39,7 @@ pub struct ExtractedNode {
 /// Maps e-class ID to the chosen extraction for that class.
 #[derive(Debug)]
 pub struct ExtractionResult {
-    pub choices: HashMap<ClassId, ExtractedNode>,
+    pub choices: BTreeMap<ClassId, ExtractedNode>,
 }
 
 // ── Bottom-up extractor ───────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ pub fn extract(
     // before parents (bottom-up).
     let order = reachable_postorder(egraph, &roots);
 
-    let mut memo: HashMap<ClassId, ExtractedNode> = HashMap::new();
+    let mut memo: BTreeMap<ClassId, ExtractedNode> = BTreeMap::new();
 
     // Iterative extraction: repeat until all classes are extracted or no progress.
     // This handles cycles from constant-folding merges (e.g., And(a, b) where b
@@ -163,7 +163,7 @@ pub fn extract(
     }
 
     // Report error for any unextracted classes.
-    for class_id in &remaining {
+    if let Some(class_id) = remaining.first() {
         let class = egraph.class(*class_id);
         let ops: Vec<Op> = class.nodes.iter().map(|n| n.op.clone()).collect();
         let op_names: Vec<String> = ops.iter().map(|o| format!("{o:?}")).collect();
@@ -185,7 +185,7 @@ pub fn extract(
 ///
 /// Each class appears exactly once (after all its children).
 fn reachable_postorder(egraph: &EGraph, roots: &[ClassId]) -> Vec<ClassId> {
-    let mut visited: HashMap<ClassId, bool> = HashMap::new(); // false = on stack, true = done
+    let mut visited: BTreeMap<ClassId, bool> = BTreeMap::new(); // false = on stack, true = done
     let mut order: Vec<ClassId> = Vec::new();
 
     for &root in roots {
@@ -198,7 +198,7 @@ fn reachable_postorder(egraph: &EGraph, roots: &[ClassId]) -> Vec<ClassId> {
 fn dfs(
     egraph: &EGraph,
     id: ClassId,
-    visited: &mut HashMap<ClassId, bool>,
+    visited: &mut BTreeMap<ClassId, bool>,
     order: &mut Vec<ClassId>,
 ) {
     if id == ClassId::NONE {
@@ -228,7 +228,7 @@ fn dfs(
 // ── VReg / VRegInst ───────────────────────────────────────────────────────────
 
 /// A virtual register allocated during extraction linearization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VReg(pub u32);
 
 /// An extracted instruction with virtual register operands.
@@ -250,11 +250,11 @@ pub struct VRegInst {
 pub fn extraction_to_vreg_insts_with_map(
     extraction: &ExtractionResult,
     roots: &[ClassId],
-) -> (Vec<VRegInst>, HashMap<ClassId, VReg>) {
-    let mut class_to_vreg: HashMap<ClassId, VReg> = HashMap::new();
+) -> (Vec<VRegInst>, BTreeMap<ClassId, VReg>) {
+    let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
     let mut next_vreg: u32 = 0;
 
-    let mut visited: std::collections::HashSet<ClassId> = std::collections::HashSet::new();
+    let mut visited: std::collections::BTreeSet<ClassId> = std::collections::BTreeSet::new();
     let mut emit_order: Vec<ClassId> = Vec::new();
 
     for &root in roots {
@@ -294,11 +294,11 @@ pub fn extraction_to_vreg_insts_with_map(
 
 pub fn extraction_to_vreg_insts(extraction: &ExtractionResult, roots: &[ClassId]) -> Vec<VRegInst> {
     // Assign a VReg to each class in the extraction result.
-    let mut class_to_vreg: HashMap<ClassId, VReg> = HashMap::new();
+    let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
     let mut next_vreg: u32 = 0;
 
     // Build emission order: post-order DFS over extraction DAG from roots.
-    let mut visited: std::collections::HashSet<ClassId> = std::collections::HashSet::new();
+    let mut visited: std::collections::BTreeSet<ClassId> = std::collections::BTreeSet::new();
     let mut emit_order: Vec<ClassId> = Vec::new();
 
     for &root in roots {
@@ -348,11 +348,11 @@ pub fn extraction_to_vreg_insts(extraction: &ExtractionResult, roots: &[ClassId]
 pub fn vreg_insts_for_block(
     extraction: &ExtractionResult,
     roots: &[ClassId],
-    class_to_vreg: &mut HashMap<ClassId, VReg>,
+    class_to_vreg: &mut BTreeMap<ClassId, VReg>,
     next_vreg: &mut u32,
 ) -> Vec<VRegInst> {
     // DFS to find emission order for classes not yet visited.
-    let mut visited: std::collections::HashSet<ClassId> = class_to_vreg.keys().copied().collect();
+    let mut visited: std::collections::BTreeSet<ClassId> = class_to_vreg.keys().copied().collect();
     let mut emit_order: Vec<ClassId> = Vec::new();
 
     for &root in roots {
@@ -396,10 +396,10 @@ pub fn vreg_insts_for_block(
 /// in the egraph. The egraph stores a `ty: Type` on every e-class, so this is
 /// a straightforward lookup rather than a bottom-up type inference pass.
 pub fn build_vreg_types(
-    class_to_vreg: &HashMap<ClassId, VReg>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
     egraph: &EGraph,
-) -> HashMap<VReg, Type> {
-    let mut vreg_types = HashMap::with_capacity(class_to_vreg.len());
+) -> BTreeMap<VReg, Type> {
+    let mut vreg_types = BTreeMap::new();
     for (&class_id, &vreg) in class_to_vreg {
         let canon = egraph.unionfind.find_immutable(class_id);
         let ty = egraph.class(canon).ty.clone();
@@ -411,7 +411,7 @@ pub fn build_vreg_types(
 fn vreg_dfs(
     id: ClassId,
     extraction: &ExtractionResult,
-    visited: &mut std::collections::HashSet<ClassId>,
+    visited: &mut std::collections::BTreeSet<ClassId>,
     order: &mut Vec<ClassId>,
 ) {
     if id == ClassId::NONE || !extraction.choices.contains_key(&id) {
@@ -538,7 +538,7 @@ mod tests {
         let insts = extraction_to_vreg_insts(&extraction, &[g.unionfind.find_immutable(p0)]);
 
         // Verify every operand VReg is defined before it is used.
-        let mut defined: std::collections::HashSet<VReg> = std::collections::HashSet::new();
+        let mut defined: std::collections::BTreeSet<VReg> = std::collections::BTreeSet::new();
         for inst in &insts {
             for &op in inst.operands.iter().flatten() {
                 assert!(
@@ -713,7 +713,7 @@ mod tests {
     }
 
     fn check_def_before_use(insts: &[VRegInst]) {
-        let mut defined: std::collections::HashSet<VReg> = std::collections::HashSet::new();
+        let mut defined: std::collections::BTreeSet<VReg> = std::collections::BTreeSet::new();
         for inst in insts {
             for &op in inst.operands.iter().flatten() {
                 assert!(

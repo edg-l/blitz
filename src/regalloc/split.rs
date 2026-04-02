@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
 use crate::ir::op::Op;
@@ -11,9 +11,9 @@ use super::global_liveness::GlobalLiveness;
 /// Maps cross-block VRegs to dedicated spill slots.
 pub struct CrossBlockSpillMap {
     /// Spill slot assigned to each cross-block VReg that requires a stack slot.
-    pub vreg_to_slot: HashMap<VReg, u32>,
+    pub vreg_to_slot: BTreeMap<VReg, u32>,
     /// VRegs that can be rematerialized (defined by Iconst) instead of spilled.
-    pub remat_vregs: HashSet<VReg>,
+    pub remat_vregs: BTreeSet<VReg>,
     /// Total number of cross-block spill slots allocated.
     pub num_slots: u32,
 }
@@ -29,10 +29,10 @@ pub struct CrossBlockSpillMap {
 pub fn assign_cross_block_slots(
     global_liveness: &GlobalLiveness,
     block_schedules: &[Vec<ScheduledInst>],
-    block_param_vregs: &[HashSet<VReg>],
+    block_param_vregs: &[BTreeSet<VReg>],
 ) -> CrossBlockSpillMap {
     // Build a map from VReg to its defining instruction (for rematerialization check).
-    let mut def_inst: HashMap<VReg, &ScheduledInst> = HashMap::new();
+    let mut def_inst: BTreeMap<VReg, &ScheduledInst> = BTreeMap::new();
     for sched in block_schedules {
         for inst in sched {
             def_inst.entry(inst.dst).or_insert(inst);
@@ -40,13 +40,13 @@ pub fn assign_cross_block_slots(
     }
 
     // Collect all VRegs that cross block boundaries: appear in some block's live_in.
-    let mut cross_block_vregs: HashSet<VReg> = HashSet::new();
+    let mut cross_block_vregs: BTreeSet<VReg> = BTreeSet::new();
     for (b, live_in) in global_liveness.live_in.iter().enumerate() {
         let params = if b < block_param_vregs.len() {
             &block_param_vregs[b]
         } else {
             // No param set for this block, treat as empty.
-            &HashSet::new()
+            &BTreeSet::new()
         };
         for &v in live_in {
             if !params.contains(&v) {
@@ -55,8 +55,8 @@ pub fn assign_cross_block_slots(
         }
     }
 
-    let mut vreg_to_slot: HashMap<VReg, u32> = HashMap::new();
-    let mut remat_vregs: HashSet<VReg> = HashSet::new();
+    let mut vreg_to_slot: BTreeMap<VReg, u32> = BTreeMap::new();
+    let mut remat_vregs: BTreeSet<VReg> = BTreeSet::new();
     let mut num_slots = 0u32;
 
     for v in &cross_block_vregs {
@@ -111,24 +111,24 @@ pub fn rewrite_block_for_splitting(
     block_idx: usize,
     global_liveness: &GlobalLiveness,
     spill_map: &CrossBlockSpillMap,
-    block_defs: &[HashSet<VReg>],
-    def_insts: &HashMap<VReg, ScheduledInst>,
+    block_defs: &[BTreeSet<VReg>],
+    def_insts: &BTreeMap<VReg, ScheduledInst>,
     next_vreg: &mut u32,
-    block_params: &HashSet<VReg>,
-    vreg_classes: &HashMap<VReg, RegClass>,
-) -> (Vec<ScheduledInst>, HashMap<VReg, VReg>) {
+    block_params: &BTreeSet<VReg>,
+    vreg_classes: &BTreeMap<VReg, RegClass>,
+) -> (Vec<ScheduledInst>, BTreeMap<VReg, VReg>) {
     let live_in = &global_liveness.live_in[block_idx];
     let live_out = &global_liveness.live_out[block_idx];
     let defs_in_block = &block_defs[block_idx];
 
     // Determine which VRegs are used or defined in this block (for pass-through detection).
-    let used_in_block: HashSet<VReg> = schedule
+    let used_in_block: BTreeSet<VReg> = schedule
         .iter()
         .flat_map(|inst| inst.operands.iter().copied())
         .collect();
 
     // Build a rename map: original VReg -> fresh VReg (for reloads/remats at block entry).
-    let mut rename: HashMap<VReg, VReg> = HashMap::new();
+    let mut rename: BTreeMap<VReg, VReg> = BTreeMap::new();
     let mut entry_insts: Vec<ScheduledInst> = Vec::new();
 
     for &v in live_in {
@@ -239,7 +239,7 @@ pub fn rewrite_block_for_splitting(
 }
 
 /// Compute def sets per block: which VRegs are defined in each block's schedule.
-pub fn compute_block_defs(block_schedules: &[Vec<ScheduledInst>]) -> Vec<HashSet<VReg>> {
+pub fn compute_block_defs(block_schedules: &[Vec<ScheduledInst>]) -> Vec<BTreeSet<VReg>> {
     block_schedules
         .iter()
         .map(|sched| sched.iter().map(|inst| inst.dst).collect())
@@ -249,8 +249,8 @@ pub fn compute_block_defs(block_schedules: &[Vec<ScheduledInst>]) -> Vec<HashSet
 /// Build a vreg_classes map from block schedules, identifying XMM VRegs.
 pub fn build_vreg_classes_from_schedules(
     block_schedules: &[Vec<ScheduledInst>],
-) -> HashMap<VReg, RegClass> {
-    let mut map: HashMap<VReg, RegClass> = HashMap::new();
+) -> BTreeMap<VReg, RegClass> {
+    let mut map: BTreeMap<VReg, RegClass> = BTreeMap::new();
 
     for sched in block_schedules {
         for inst in sched {
@@ -324,12 +324,12 @@ mod tests {
         }
     }
 
-    fn empty_params(n: usize) -> Vec<HashSet<VReg>> {
-        vec![HashSet::new(); n]
+    fn empty_params(n: usize) -> Vec<BTreeSet<VReg>> {
+        vec![BTreeSet::new(); n]
     }
 
-    fn make_def_insts(schedules: &[Vec<ScheduledInst>]) -> HashMap<VReg, ScheduledInst> {
-        let mut map = HashMap::new();
+    fn make_def_insts(schedules: &[Vec<ScheduledInst>]) -> BTreeMap<VReg, ScheduledInst> {
+        let mut map = BTreeMap::new();
         for sched in schedules {
             for inst in sched {
                 map.entry(inst.dst).or_insert_with(|| inst.clone());
@@ -362,7 +362,7 @@ mod tests {
         let block_defs = compute_block_defs(&schedules);
         let spill_map = assign_cross_block_slots(&gl, &schedules, &params);
         let def_insts = make_def_insts(&schedules);
-        let vreg_classes = HashMap::new();
+        let vreg_classes = BTreeMap::new();
 
         // v0 should get a slot (not rematerializable).
         assert!(spill_map.vreg_to_slot.contains_key(&VReg(0)));
@@ -433,7 +433,7 @@ mod tests {
         let block_defs = compute_block_defs(&schedules);
         let spill_map = assign_cross_block_slots(&gl, &schedules, &params);
         let def_insts = make_def_insts(&schedules);
-        let vreg_classes = HashMap::new();
+        let vreg_classes = BTreeMap::new();
 
         // v0 should be rematerializable, no slot.
         assert!(spill_map.remat_vregs.contains(&VReg(0)));
@@ -508,7 +508,7 @@ mod tests {
         let block_defs = compute_block_defs(&schedules);
         let spill_map = assign_cross_block_slots(&gl, &schedules, &params);
         let def_insts = make_def_insts(&schedules);
-        let vreg_classes = HashMap::new();
+        let vreg_classes = BTreeMap::new();
 
         // v0 is in live_in[1] AND live_out[1] (pass-through).
         assert!(gl.live_in[1].contains(&VReg(0)));
@@ -576,7 +576,7 @@ mod tests {
         let block_defs = compute_block_defs(&schedules);
         let spill_map = assign_cross_block_slots(&gl, &schedules, &params);
         let def_insts = make_def_insts(&schedules);
-        let vreg_classes = HashMap::new();
+        let vreg_classes = BTreeMap::new();
 
         let mut next_vreg = 100u32;
 

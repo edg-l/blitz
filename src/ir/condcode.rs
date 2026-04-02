@@ -1,5 +1,5 @@
 /// Condition codes for integer comparisons and conditional x86-64 instructions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CondCode {
     /// Equal (ZF=1)
     Eq,

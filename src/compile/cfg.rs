@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::EGraph;
 use crate::egraph::extract::VReg;
@@ -24,7 +24,7 @@ pub(super) fn compute_rpo(func: &Function) -> Vec<usize> {
     let n = func.blocks.len();
 
     // Map block id -> block index for fast lookup.
-    let id_to_idx: HashMap<BlockId, usize> = func
+    let id_to_idx: BTreeMap<BlockId, usize> = func
         .blocks
         .iter()
         .enumerate()
@@ -101,7 +101,7 @@ pub(super) fn compute_idom(func: &Function, rpo: &[usize]) -> Vec<Option<usize>>
         return vec![];
     }
 
-    let id_to_idx: HashMap<BlockId, usize> = func
+    let id_to_idx: BTreeMap<BlockId, usize> = func
         .blocks
         .iter()
         .enumerate()
@@ -274,8 +274,8 @@ pub(super) fn collect_block_roots(block: &BasicBlock, egraph: &EGraph) -> Vec<Cl
 /// Build a map from (block_id, param_idx) -> canonical ClassId for all block params.
 ///
 /// Scans the egraph for BlockParam nodes and records their canonical class IDs.
-pub(super) fn build_block_param_class_map(egraph: &EGraph) -> HashMap<(BlockId, u32), ClassId> {
-    let mut map: HashMap<(BlockId, u32), ClassId> = HashMap::new();
+pub(super) fn build_block_param_class_map(egraph: &EGraph) -> BTreeMap<(BlockId, u32), ClassId> {
+    let mut map: BTreeMap<(BlockId, u32), ClassId> = BTreeMap::new();
     for i in 0..egraph.classes.len() as u32 {
         let cid = ClassId(i);
         let canon = egraph.unionfind.find_immutable(cid);
@@ -300,8 +300,8 @@ pub(super) fn build_block_param_class_map(egraph: &EGraph) -> HashMap<(BlockId, 
 pub(super) fn collect_phi_source_vregs(
     func: &Function,
     egraph: &EGraph,
-    class_to_vreg: &HashMap<ClassId, VReg>,
-    result: &mut HashSet<VReg>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    result: &mut BTreeSet<VReg>,
 ) {
     for block in &func.blocks {
         for op in &block.ops {
@@ -339,9 +339,9 @@ pub(super) fn collect_phi_source_vregs(
 /// and add them as copy pairs: (arg_vreg, param_vreg).
 pub(super) fn compute_copy_pairs(
     func: &Function,
-    class_to_vreg: &HashMap<ClassId, VReg>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
     egraph: &EGraph,
-    block_param_map: &HashMap<(BlockId, u32), ClassId>,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
 ) -> Vec<(VReg, VReg)> {
     let mut pairs: Vec<(VReg, VReg)> = Vec::new();
@@ -424,7 +424,7 @@ pub(super) fn compute_copy_pairs(
 pub(super) fn compute_loop_depths(
     func: &Function,
     block_schedules: &[Vec<ScheduledInst>],
-) -> HashMap<VReg, u32> {
+) -> BTreeMap<VReg, u32> {
     let n = func.blocks.len();
     // Compute per-block loop depth using back-edge counting.
     let mut block_depth: Vec<u32> = vec![0u32; n];
@@ -454,7 +454,7 @@ pub(super) fn compute_loop_depths(
     }
 
     // Map each VReg to its block's loop depth.
-    let mut result: HashMap<VReg, u32> = HashMap::new();
+    let mut result: BTreeMap<VReg, u32> = BTreeMap::new();
     for (block_idx, sched) in block_schedules.iter().enumerate() {
         let depth = block_depth[block_idx];
         if depth == 0 {

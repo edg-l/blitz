@@ -1,5 +1,5 @@
 /// IR type system for the Blitz compiler backend.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Type {
     I8,
     I16,
