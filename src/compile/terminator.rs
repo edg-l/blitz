@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use crate::egraph::EGraph;
 use crate::egraph::extract::VReg;
-use crate::egraph::isel::find_cc_in_class;
 use crate::emit::phi_elim::phi_copies;
 use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffectfulOp};
@@ -13,7 +12,7 @@ use crate::x86::abi::GPR_RETURN_REG;
 use crate::x86::inst::{LabelId, MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
-use super::{BlockItem, CompileError, IrLocation};
+use super::{BlockItem, CompileError};
 
 /// Negate a CondCode.
 fn negate_cc(cc: CondCode) -> CondCode {
@@ -194,25 +193,14 @@ pub(super) fn lower_terminator(
         }
 
         EffectfulOp::Branch {
-            cond,
+            cond: _,
+            cc,
             bb_true,
             bb_false,
             true_args,
             false_args,
         } => {
-            let canon_cond = egraph.unionfind.find_immutable(*cond);
-            let cc = find_cc_in_class(egraph, canon_cond).ok_or_else(|| CompileError {
-                phase: "lowering".into(),
-                message: format!(
-                    "branch condition class {:?} has no Icmp node; cannot determine CondCode",
-                    canon_cond
-                ),
-                location: Some(IrLocation {
-                    function: func.name.clone(),
-                    block: None,
-                    inst: None,
-                }),
-            })?;
+            let cc = *cc;
 
             let true_copies = build_phi_copies(
                 *bb_true,

@@ -180,6 +180,7 @@ pub fn compile(
         phase3_limit: opts.phase3_limit,
         max_classes: 500_000,
     };
+    crate::egraph::algebraic::propagate_block_params(func, &mut egraph);
     run_phases(&mut egraph, &egraph_opts).map_err(|e| CompileError {
         phase: "egraph".into(),
         message: e,
@@ -189,6 +190,11 @@ pub fn compile(
             inst: None,
         }),
     })?;
+    // Second pass catches constants revealed by folding in the first pass,
+    // then re-run algebraic rules to fold newly exposed constant expressions.
+    crate::egraph::algebraic::propagate_block_params(func, &mut egraph);
+    crate::egraph::algebraic::apply_algebraic_rules(&mut egraph);
+    egraph.rebuild();
 
     if let Some(s) = sink.as_mut() {
         s.phase_stats(
@@ -1387,6 +1393,7 @@ pub fn compile_to_ir_string(
         phase3_limit: opts.phase3_limit,
         max_classes: 500_000,
     };
+    crate::egraph::algebraic::propagate_block_params(func, &mut egraph);
     run_phases(&mut egraph, &egraph_opts).map_err(|e| CompileError {
         phase: "egraph".into(),
         message: e,
@@ -1396,6 +1403,11 @@ pub fn compile_to_ir_string(
             inst: None,
         }),
     })?;
+    // Second pass catches constants revealed by folding in the first pass,
+    // then re-run algebraic rules to fold newly exposed constant expressions.
+    crate::egraph::algebraic::propagate_block_params(func, &mut egraph);
+    crate::egraph::algebraic::apply_algebraic_rules(&mut egraph);
+    egraph.rebuild();
 
     // Collect all root ClassIds from all effectful ops across all blocks.
     let all_roots = collect_roots(func);

@@ -1,4 +1,6 @@
 use crate::egraph::EGraph;
+#[cfg(test)]
+use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::op::ClassId;
 use crate::ir::types::Type;
@@ -273,6 +275,7 @@ mod tests {
         });
         bb.ops.push(EffectfulOp::Branch {
             cond: ClassId(3),
+            cc: CondCode::Ne,
             bb_true: 1,
             bb_false: 2,
             true_args: vec![],

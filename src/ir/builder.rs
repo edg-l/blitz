@@ -524,6 +524,23 @@ impl FunctionBuilder {
         false_args: &[Value],
     ) {
         let current = self.current_block.expect("no current block set");
+        // Look up the Icmp CC from the cond's e-class before borrowing the block mutably.
+        // If no Icmp is found (bare truthiness test), default to Ne (test != 0).
+        let cc = {
+            let canon = self.egraph.unionfind.find_immutable(cond.0);
+            let class = self.egraph.class(canon);
+            class
+                .nodes
+                .iter()
+                .find_map(|n| {
+                    if let Op::Icmp(cc) = &n.op {
+                        Some(*cc)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(CondCode::Ne)
+        };
         let block = self.current_block_mut();
         assert!(
             !block.terminated,
@@ -532,6 +549,7 @@ impl FunctionBuilder {
         );
         block.ops.push(EffectfulOp::Branch {
             cond: cond.0,
+            cc,
             bb_true,
             bb_false,
             true_args: true_args.iter().map(|v| v.0).collect(),

@@ -134,7 +134,7 @@ fn ir_diamond_cfg() {
         // CHECK-NEXT: v1 = param(1, I64)
         // CHECK-NEXT: v2 = x86_sub(v0, v1)
         // CHECK-NEXT: v3 = proj1(v2)
-        // CHECK: branch v3 block1() block2()
+        // CHECK: branch Sgt v3 block1() block2()
         // CHECK-LABEL: block1:
         // CHECK: v6 = addr(scale=1, disp=0)(v0, v4)
         // CHECK: jump block3
@@ -182,7 +182,7 @@ fn ir_counted_loop() {
         // CHECK-NEXT: v8 = proj1(v7)
         // CHECK: v1 = block_param(b1, 0, I64)
         // CHECK-NEXT: v3 = addr(scale=1, disp=0)(v1, v2)
-        // CHECK: branch v8 block1(v3, v5) block2(v3)
+        // CHECK: branch Slt v8 block1(v3, v5) block2(v3)
         // CHECK-LABEL: block2(p0: I64):
         // CHECK: ret v9
         ",

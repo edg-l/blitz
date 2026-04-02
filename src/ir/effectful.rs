@@ -1,3 +1,4 @@
+use crate::ir::condcode::CondCode;
 use crate::ir::op::ClassId;
 use crate::ir::types::Type;
 
@@ -44,6 +45,7 @@ pub enum EffectfulOp {
     /// `true_args` / `false_args` are passed as block parameters.
     Branch {
         cond: ClassId,
+        cc: CondCode,
         bb_true: BlockId,
         bb_false: BlockId,
         true_args: Vec<ClassId>,

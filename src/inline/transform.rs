@@ -254,12 +254,14 @@ fn substitute_class_ids(op: &EffectfulOp, subst: &[(ClassId, ClassId)]) -> Effec
         },
         EffectfulOp::Branch {
             cond,
+            cc,
             bb_true,
             bb_false,
             true_args,
             false_args,
         } => EffectfulOp::Branch {
             cond: sub(*cond),
+            cc: *cc,
             bb_true: *bb_true,
             bb_false: *bb_false,
             true_args: true_args.iter().map(|&a| sub(a)).collect(),

@@ -195,6 +195,7 @@ fn fmt_effectful(
         }
         EffectfulOp::Branch {
             cond,
+            cc,
             bb_true,
             bb_false,
             true_args,
@@ -210,7 +211,7 @@ fn fmt_effectful(
                 .map(|a| resolve_cid(*a, class_to_vreg, egraph_uf))
                 .collect();
             format!(
-                "branch {cond_s} block{bb_true}({}) block{bb_false}({})",
+                "branch {cc:?} {cond_s} block{bb_true}({}) block{bb_false}({})",
                 true_arg_strs.join(", "),
                 false_arg_strs.join(", ")
             )

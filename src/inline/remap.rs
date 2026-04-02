@@ -173,12 +173,14 @@ impl RemapContext {
             },
             EffectfulOp::Branch {
                 cond,
+                cc,
                 bb_true,
                 bb_false,
                 true_args,
                 false_args,
             } => EffectfulOp::Branch {
                 cond: self.remap_class_id(*cond),
+                cc: *cc,
                 bb_true: self.remap_block_id(*bb_true),
                 bb_false: self.remap_block_id(*bb_false),
                 true_args: true_args.iter().map(|&a| self.remap_class_id(a)).collect(),

@@ -11,8 +11,8 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_alu_isel(egraph);
     changed |= apply_shift_isel(egraph);
     changed |= apply_shift_imm_isel(egraph);
-    changed |= apply_icmp_isel(egraph);
     changed |= apply_select_isel(egraph);
+    changed |= apply_icmp_isel(egraph);
     changed |= apply_sext_zext_trunc_isel(egraph);
     changed |= apply_bitcast_isel(egraph);
     changed |= apply_fp_isel(egraph);

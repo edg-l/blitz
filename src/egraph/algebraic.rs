@@ -1,7 +1,11 @@
+use std::collections::BTreeMap;
+
 use smallvec::smallvec;
 
 use crate::egraph::egraph::{EGraph, snapshot_all};
 use crate::egraph::enode::ENode;
+use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 
@@ -367,6 +371,97 @@ fn apply_commutativity_rules(egraph: &mut EGraph) -> bool {
         }
     }
     changed
+}
+
+// ── Block-param constant propagation ─────────────────────────────────────────
+
+/// For blocks with a single predecessor, merge each block parameter's e-class
+/// with the corresponding argument e-class from that predecessor. This enables
+/// constant folding through inlined function boundaries.
+pub fn propagate_block_params(func: &Function, egraph: &mut EGraph) {
+    // Step 1: Build predecessor map: block -> vec of (source_block, args).
+    let mut pred_map: BTreeMap<BlockId, Vec<(BlockId, Vec<ClassId>)>> = BTreeMap::new();
+    for block in &func.blocks {
+        for op in &block.ops {
+            match op {
+                EffectfulOp::Jump { target, args } => {
+                    pred_map
+                        .entry(*target)
+                        .or_default()
+                        .push((block.id, args.clone()));
+                }
+                EffectfulOp::Branch {
+                    bb_true,
+                    bb_false,
+                    true_args,
+                    false_args,
+                    ..
+                } => {
+                    pred_map
+                        .entry(*bb_true)
+                        .or_default()
+                        .push((block.id, true_args.clone()));
+                    pred_map
+                        .entry(*bb_false)
+                        .or_default()
+                        .push((block.id, false_args.clone()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Step 2: Build block_param lookup: (block_id, param_index) -> ClassId.
+    let mut block_param_map: BTreeMap<(BlockId, u32), ClassId> = BTreeMap::new();
+    for i in 0..egraph.classes.len() as u32 {
+        let id = ClassId(i);
+        if egraph.unionfind.find_immutable(id) != id {
+            continue;
+        }
+        let class = egraph.class(id);
+        for node in &class.nodes {
+            if let Op::BlockParam(block_id, param_idx, _) = &node.op {
+                block_param_map.insert((*block_id, *param_idx), id);
+            }
+        }
+    }
+
+    // Step 3: For single-predecessor blocks, merge block params with constant args.
+    // Only merge when the source arg contains a constant, since merging with
+    // non-constant values can cause extraction to schedule computations in the
+    // wrong block (the source computation may not dominate the target block).
+    let mut merged = false;
+    for block in &func.blocks {
+        if block.param_types.is_empty() {
+            continue;
+        }
+        let preds = match pred_map.get(&block.id) {
+            Some(p) if p.len() == 1 => p,
+            _ => continue,
+        };
+        let (_, ref args) = preds[0];
+        for i in 0..block.param_types.len() {
+            let Some(&bp_class) = block_param_map.get(&(block.id, i as u32)) else {
+                continue;
+            };
+            let source_class = args[i];
+            // Only propagate constants to avoid extraction scheduling issues.
+            if find_iconst(egraph, source_class).is_none() {
+                continue;
+            }
+            let bp_canon = egraph.unionfind.find(bp_class);
+            let src_canon = egraph.unionfind.find(source_class);
+            if bp_canon != src_canon {
+                egraph.merge(bp_class, source_class);
+                merged = true;
+            }
+        }
+    }
+
+    // Step 4: Rebuild if any merges happened.
+    if merged {
+        egraph.rebuild();
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
