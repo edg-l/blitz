@@ -178,10 +178,12 @@ pub(super) fn collect_call_points_for_block(
                     class_to_vreg.get(&canon).copied()
                 })
                 .collect();
-            if let Some(pos) = block_sched.iter().position(|inst| {
-                matches!(inst.op, Op::VoidCallBarrier)
-                    && arg_vregs.iter().all(|v| inst.operands.contains(v))
-            }) {
+            if !arg_vregs.is_empty()
+                && let Some(pos) = block_sched.iter().position(|inst| {
+                    matches!(inst.op, Op::VoidCallBarrier)
+                        && arg_vregs.iter().all(|v| inst.operands.contains(v))
+                })
+            {
                 cp = pos;
             } else if !arg_cids.is_empty() {
                 // Fallback: position after the last argument.

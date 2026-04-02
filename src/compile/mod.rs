@@ -484,7 +484,7 @@ pub fn compile(
         let mut all_scheduled: Vec<ScheduledInst> =
             block_schedules.iter().flatten().cloned().collect();
 
-        // Insert EffectfulUse markers right before regalloc so it sees
+        // Populate effectful-op operands right before regalloc so it sees
         // effectful op operand liveness at the correct barrier positions.
         {
             let block = &func.blocks[0];
@@ -527,8 +527,8 @@ pub fn compile(
 
         let mut live_out: BTreeSet<VReg> = BTreeSet::new();
         collect_phi_source_vregs(func, &egraph, &class_to_vreg, &mut live_out);
-        // Add Ret operands to live_out. Ret is the terminator (no EffectfulUse
-        // marker) so its operands must survive until end of block.
+        // Add Ret operands to live_out. Ret is the terminator (no barrier
+        // instruction) so its operands must survive until end of block.
         if let Some(EffectfulOp::Ret { val: Some(cid) }) = func.blocks[0].ops.last() {
             let canon = egraph.unionfind.find_immutable(*cid);
             if let Some(&vreg) = class_to_vreg.get(&canon) {
