@@ -70,11 +70,53 @@ run_exit_test() {
     fi
 }
 
+run_output_test() {
+    local file="$1"
+    local name
+    name="$(echo "$file" | sed "s|^$SCRIPT_DIR/||")"
+    total=$((total + 1))
+
+    local tmpfile
+    tmpfile="$(mktemp /tmp/blitztest_XXXXXX)"
+    local outfile
+    outfile="$(mktemp /tmp/blitztest_out_XXXXXX)"
+    local expectfile
+    expectfile="$(mktemp /tmp/blitztest_exp_XXXXXX)"
+
+    # Extract expected output lines from // OUTPUT: directives
+    sed -n 's|.*// OUTPUT: \(.*\)|\1|p' "$file" > "$expectfile"
+
+    if "$TINYC" "$file" -o "$tmpfile" 2>/dev/null; then
+        timeout 10 "$tmpfile" > "$outfile" 2>/dev/null
+        local actual=$?
+        if [ "$actual" -eq 124 ]; then
+            rm -f "$tmpfile" "$outfile" "$expectfile"
+            failed=$((failed + 1))
+            printf "\nFAIL: %s (timeout)\n" "$name"
+            return
+        fi
+        if diff -u "$expectfile" "$outfile" > /dev/null 2>&1; then
+            passed=$((passed + 1))
+            printf "."
+        else
+            failed=$((failed + 1))
+            printf "\nFAIL: %s (output mismatch)\n" "$name"
+            diff -u "$expectfile" "$outfile" | head -20
+        fi
+        rm -f "$tmpfile" "$outfile" "$expectfile"
+    else
+        rm -f "$tmpfile" "$outfile" "$expectfile"
+        failed=$((failed + 1))
+        printf "\nFAIL: %s (compilation failed)\n" "$name"
+    fi
+}
+
 # Find and run all .c test files
 for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
     # Parse directives from the file
     has_check=false
     has_exit=false
+    has_output=false
     exit_code=0
     mode=""
 
@@ -86,6 +128,9 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
             *"// EXIT:"*)
                 has_exit=true
                 exit_code="$(echo "$line" | sed 's/.*\/\/ EXIT: *//')"
+                ;;
+            *"// OUTPUT:"*)
+                has_output=true
                 ;;
             *"// RUN:"*"--emit-ir"*)
                 mode="--emit-ir"
@@ -101,6 +146,9 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
     fi
     if [ "$has_exit" = true ]; then
         run_exit_test "$file" "$exit_code"
+    fi
+    if [ "$has_output" = true ]; then
+        run_output_test "$file"
     fi
 done
 
