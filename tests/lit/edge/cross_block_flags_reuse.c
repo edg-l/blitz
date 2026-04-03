@@ -1,7 +1,15 @@
 // EXIT: 2
-// XFAIL: cross-block flags reuse bug -- EFLAGS from block0's x>5 comparison
-// gets clobbered by block3's x>20 subtraction, but the backend reuses the
-// stale proj1 value instead of recomputing the comparison.
+// RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
+// CHECK-LABEL: # main
+// block0: first x > 5 comparison
+// CHECK: sub
+// CHECK: jg
+// block1: x > 20 comparison (clobbers EFLAGS)
+// CHECK: sub
+// CHECK: jg
+// block3: fresh x > 5 comparison (must not reuse stale flags from block0)
+// CHECK: sub
+// CHECK: jg
 
 int main() {
     int x = 10;
@@ -9,8 +17,6 @@ int main() {
         if (x > 20) {
             return 1;
         }
-        // This should be true (10 > 5), but the backend reuses stale flags
-        // from the x > 20 comparison above.
         if (x > 5) {
             return 2;
         }

@@ -15,9 +15,8 @@ int main() {
     int b = x < 5 ? 100 : 200;
     if (b != 200) { return 2; }
 
-    // nested ternary with distinct comparisons
-    // (avoids cross-block flags reuse bug)
-    int c = x > 20 ? 1 : x > 8 ? 2 : 3;
+    // nested ternary (right-associative), same comparison reused cross-block
+    int c = x > 20 ? 1 : x > 5 ? 2 : 3;
     if (c != 2) { return 3; }
 
     // ternary as abs(x)

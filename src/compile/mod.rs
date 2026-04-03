@@ -265,13 +265,30 @@ pub fn compile(
     let mut block_vreg_insts: Vec<Vec<VRegInst>> = vec![Vec::new(); func.blocks.len()];
     for &block_idx in &rpo_order {
         // Remove classes emitted in non-dominating blocks so they get fresh VRegs.
-        let non_dom_classes: Vec<ClassId> = class_emitted_in
+        // Also remove flags-typed classes from ALL prior blocks: EFLAGS cannot
+        // survive cross-block boundaries because any arithmetic instruction
+        // clobbers them.
+        let removable_classes: Vec<ClassId> = class_emitted_in
             .iter()
-            .filter(|(_, emitter)| !dominates(**emitter, block_idx, &idom))
+            .filter(|(cid, emitter)| {
+                if !dominates(**emitter, block_idx, &idom) {
+                    return true;
+                }
+                // Flags-typed classes must be re-emitted per-block.
+                if **emitter != block_idx {
+                    let ty = &egraph.classes[cid.0 as usize].ty;
+                    if matches!(ty, Type::Flags)
+                        || matches!(ty, Type::Pair(_, b) if **b == Type::Flags)
+                    {
+                        return true;
+                    }
+                }
+                false
+            })
             .map(|(cid, _)| *cid)
             .collect();
         let mut removed: Vec<(ClassId, VReg)> = Vec::new();
-        for cid in non_dom_classes {
+        for cid in removable_classes {
             if let Some(vreg) = class_to_vreg.remove(&cid) {
                 removed.push((cid, vreg));
             }
