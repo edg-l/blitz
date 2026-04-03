@@ -725,12 +725,11 @@ pub fn compile(
         }
 
         // Step 4: Assign cross-block spill slots.
-        let spill_map = crate::regalloc::split::assign_cross_block_slots(
+        let mut spill_map = crate::regalloc::split::assign_cross_block_slots(
             &global_liveness,
             &block_schedules,
             &block_param_vregs_per_block,
         );
-        let cross_block_slots = spill_map.num_slots;
 
         // Step 5: Build def_insts map for rematerialization.
         let def_insts: BTreeMap<VReg, ScheduledInst> = block_schedules
@@ -742,6 +741,52 @@ pub fn compile(
         // Step 6: Build vreg_classes map from all schedules.
         let vreg_classes =
             crate::regalloc::split::build_vreg_classes_from_schedules(&block_schedules);
+
+        // Step 6b: Ensure ALL XMM vregs that flow across block boundaries
+        // (as phi args or block params) have cross-block spill slots.
+        // All XMM registers are caller-saved in SysV ABI, so XMM values
+        // can never survive calls in registers. They must go through spill
+        // slots for cross-block persistence.
+        {
+            use crate::x86::reg::RegClass;
+            for (_block_idx, phi_set) in phi_uses.iter().enumerate() {
+                for &v in phi_set {
+                    let is_xmm = vreg_classes
+                        .get(&v)
+                        .copied()
+                        .map(|c| c == RegClass::XMM)
+                        .unwrap_or(false);
+                    if is_xmm
+                        && !spill_map.vreg_to_slot.contains_key(&v)
+                        && !spill_map.remat_vregs.contains(&v)
+                    {
+                        let slot = spill_map.num_slots;
+                        spill_map.num_slots += 1;
+                        spill_map.vreg_to_slot.insert(v, slot);
+                    }
+                }
+            }
+            // Also ensure XMM block params that appear in phi_uses of successors
+            // have spill slots.
+            for block_param_set in &block_param_vregs_per_block {
+                for &v in block_param_set {
+                    let is_xmm = vreg_classes
+                        .get(&v)
+                        .copied()
+                        .map(|c| c == RegClass::XMM)
+                        .unwrap_or(false);
+                    if is_xmm
+                        && !spill_map.vreg_to_slot.contains_key(&v)
+                        && !spill_map.remat_vregs.contains(&v)
+                    {
+                        let slot = spill_map.num_slots;
+                        spill_map.num_slots += 1;
+                        spill_map.vreg_to_slot.insert(v, slot);
+                    }
+                }
+            }
+        }
+        let cross_block_slots = spill_map.num_slots;
 
         // Step 7: Compute block defs.
         let block_defs = crate::regalloc::split::compute_block_defs(&block_schedules);
@@ -1027,6 +1072,40 @@ pub fn compile(
                     block_live_out.insert(renamed);
                 }
             }
+            // All XMM registers are caller-saved in SysV ABI. XMM vregs
+            // in live_out force the per-block regalloc to keep them alive
+            // across calls, which is impossible when there are no callee-
+            // saved XMM registers. Remove XMM vregs that have exit spill
+            // stores from live_out -- the value is already persisted to the
+            // spill slot and successors will reload from it.
+            {
+                use crate::x86::reg::RegClass;
+                let spilled_xmm_in_schedule: BTreeSet<VReg> = split_schedule
+                    .iter()
+                    .filter(|inst| {
+                        matches!(inst.op, Op::XmmSpillStore(_)) && !inst.operands.is_empty()
+                    })
+                    .flat_map(|inst| inst.operands.iter().copied())
+                    .collect();
+                // Also remove XMM block params from live_out. They flow to
+                // successors through phi copies, but since XMM values can't
+                // survive calls, we need to ensure they go through spill slots.
+                // Their exit spill stores were added by step 6b + split pass.
+                block_live_out.retain(|v| {
+                    if spilled_xmm_in_schedule.contains(v) {
+                        return false;
+                    }
+                    let is_xmm = vreg_classes
+                        .get(v)
+                        .copied()
+                        .map(|c| c == RegClass::XMM)
+                        .unwrap_or(false);
+                    if is_xmm && spill_map.vreg_to_slot.contains_key(v) {
+                        return false;
+                    }
+                    true
+                });
+            }
             // Step 8c: Filter pre-colorings to VRegs in this block's schedule.
             let split_vreg_set: BTreeSet<VReg> = split_schedule
                 .iter()
@@ -1124,9 +1203,38 @@ pub fn compile(
                 }
             }
 
+            // Offset per-block spill slot numbers in ScheduledInsts to avoid
+            // overlap with cross-block spill slots and other blocks' slots.
+            // This must happen before lowering to MachInst since spill_addr
+            // converts slot numbers to memory addresses.
+            let per_block_offset = spill_slot_counter as i64;
+            let block_result_insts: Vec<ScheduledInst> =
+                if block_result.spill_slots > 0 && per_block_offset > 0 {
+                    block_result
+                        .insts
+                        .iter()
+                        .map(|inst| {
+                            let mut inst = inst.clone();
+                            match &mut inst.op {
+                                Op::SpillStore(slot)
+                                | Op::SpillLoad(slot)
+                                | Op::XmmSpillStore(slot)
+                                | Op::XmmSpillLoad(slot) => {
+                                    *slot += per_block_offset;
+                                }
+                                _ => {}
+                            }
+                            inst
+                        })
+                        .collect()
+                } else {
+                    block_result.insts.clone()
+                };
+
             // Rewrite with physical registers. Use the allocator's final
             // instruction list which includes intra-block spill/reload code.
-            let rewritten_insts = rewrite_vregs(&block_result.insts, &block_result.vreg_to_reg);
+            let rewritten_insts = rewrite_vregs(&block_result_insts, &block_result.vreg_to_reg);
+            // Note: rewritten_insts are ScheduledInsts, lowered to MachInst later.
             spill_slot_counter += block_result.spill_slots;
             block_rewritten_storage[block_idx] = rewritten_insts;
             block_rename_maps[block_idx] = rename;
@@ -1250,6 +1358,32 @@ pub fn compile(
             &block_class_to_vreg,
             &mut vreg_to_arg_of_barrier,
         );
+
+        // After spilling, CallResult/VoidCallBarrier operands may be SpillLoad
+        // vregs that aren't in the original barrier arg map. Scan the schedule
+        // and add them so barrier group assignment places them before the call.
+        for inst in rewritten.iter() {
+            if let Some(&barrier_k) = vreg_to_result_of_barrier.get(&inst.dst) {
+                // This is a CallResult/LoadResult at barrier_k.
+                // Its operands (possibly SpillLoad vregs) should be ready at barrier_k.
+                for &op in &inst.operands {
+                    let entry = vreg_to_arg_of_barrier.entry(op).or_insert(barrier_k);
+                    *entry = (*entry).min(barrier_k);
+                }
+            }
+            if matches!(inst.op, Op::VoidCallBarrier | Op::StoreBarrier) {
+                // Find which barrier this belongs to by checking vreg_to_result_of_barrier.
+                // VoidCallBarrier/StoreBarrier vregs aren't in vreg_to_result_of_barrier,
+                // so check vreg_to_arg_of_barrier for operands.
+                for &op in &inst.operands {
+                    if let Some(&barrier_k) = vreg_to_arg_of_barrier.get(&inst.dst) {
+                        let entry = vreg_to_arg_of_barrier.entry(op).or_insert(barrier_k);
+                        *entry = (*entry).min(barrier_k);
+                    }
+                }
+            }
+        }
+
         let num_barriers = non_term_ops.len();
 
         // Partition scheduled pure insts into groups relative to barriers.

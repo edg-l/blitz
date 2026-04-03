@@ -592,6 +592,24 @@ impl Encoder {
             MachInst::UcomissRR { src1, src2 } => {
                 self.encode_ucomiss_rr(Self::expect_reg(src1), Self::expect_reg(src2));
             }
+            MachInst::Cvtsi2sdRR { dst, src } => {
+                self.encode_cvtsi2sd_rr(Self::expect_reg(dst), Self::expect_reg(src));
+            }
+            MachInst::Cvtsi2ssRR { dst, src } => {
+                self.encode_cvtsi2ss_rr(Self::expect_reg(dst), Self::expect_reg(src));
+            }
+            MachInst::Cvttsd2siRR { dst, src } => {
+                self.encode_cvttsd2si_rr(Self::expect_reg(dst), Self::expect_reg(src));
+            }
+            MachInst::Cvttss2siRR { dst, src } => {
+                self.encode_cvttss2si_rr(Self::expect_reg(dst), Self::expect_reg(src));
+            }
+            MachInst::Cvtsd2ssRR { dst, src } => {
+                self.encode_cvtsd2ss_rr(Self::expect_reg(dst), Self::expect_reg(src));
+            }
+            MachInst::Cvtss2sdRR { dst, src } => {
+                self.encode_cvtss2sd_rr(Self::expect_reg(dst), Self::expect_reg(src));
+            }
             MachInst::MovqToXmm { dst, src } => {
                 self.encode_movq_to_xmm(Self::expect_reg(dst), Self::expect_reg(src));
             }

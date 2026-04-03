@@ -209,6 +209,34 @@ impl<'b> FnCtx<'b> {
         if from.is_struct() || to.is_struct() {
             panic!("emit_convert() called with struct type");
         }
+
+        // Pointer <-> float: compile error (caught at codegen level).
+        if (from.is_pointer() && to.is_float()) || (from.is_float() && to.is_pointer()) {
+            panic!("cannot convert between pointer and float types");
+        }
+
+        // Float <-> float conversions.
+        if from.is_float() && to.is_float() {
+            return if *from == CType::Float && *to == CType::Double {
+                self.builder.float_ext(val)
+            } else {
+                // Double -> Float
+                self.builder.float_trunc(val)
+            };
+        }
+
+        // Integer -> float conversion.
+        if from.is_integer() && to.is_float() {
+            let target = to.to_ir_type().unwrap();
+            return self.builder.int_to_float(val, target);
+        }
+
+        // Float -> integer conversion.
+        if from.is_float() && to.is_integer() {
+            let target = to.to_ir_type().unwrap();
+            return self.builder.float_to_int(val, target);
+        }
+
         // Pointer-to-pointer: identity (both I64).
         if from.is_pointer() && to.is_pointer() {
             return val;
@@ -276,6 +304,14 @@ impl<'b> FnCtx<'b> {
     /// Emit icmp+select yielding an I32 0/1 value (C standard: comparison yields int).
     fn emit_icmp_val(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
         let flags = self.builder.icmp(cc, a, b);
+        let one = self.builder.iconst(1, Type::I32);
+        let zero = self.builder.iconst(0, Type::I32);
+        self.builder.select(flags, one, zero)
+    }
+
+    /// Emit fcmp+select yielding an I32 0/1 value for float comparisons.
+    fn emit_fcmp_val(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
+        let flags = self.builder.fcmp(cc, a, b);
         let one = self.builder.iconst(1, Type::I32);
         let zero = self.builder.iconst(0, Type::I32);
         self.builder.select(flags, one, zero)
@@ -362,6 +398,14 @@ impl<'b> FnCtx<'b> {
         if ty.is_struct() {
             panic!("val_to_flags() called on struct type");
         }
+        if ty.is_float() {
+            let zero = if *ty == CType::Float {
+                self.builder.fconst_f32(0.0f32)
+            } else {
+                self.builder.fconst(0.0f64)
+            };
+            return self.builder.fcmp(CondCode::Ne, val, zero);
+        }
         let ir_ty = ty.to_ir_type().unwrap();
         let zero = self.builder.iconst(0, ir_ty);
         self.builder.icmp(CondCode::Ne, val, zero)
@@ -384,6 +428,19 @@ impl<'b> FnCtx<'b> {
                     let (l, lt) = self.compile_expr(lhs)?;
                     let (r, rt) = self.compile_expr(rhs)?;
                     let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
+                    if common.is_float() {
+                        // Float comparisons use unsigned condition codes (ucomisd/ucomiss).
+                        let cc = match op {
+                            BinOp::Eq => CondCode::Eq,
+                            BinOp::Ne => CondCode::Ne,
+                            BinOp::Lt => CondCode::Ult,
+                            BinOp::Gt => CondCode::Ugt,
+                            BinOp::Le => CondCode::Ule,
+                            BinOp::Ge => CondCode::Uge,
+                            _ => unreachable!(),
+                        };
+                        return Ok(self.builder.fcmp(cc, l, r));
+                    }
                     // Pick signed/unsigned condition code.
                     let cc = match op {
                         BinOp::Eq => CondCode::Eq,
@@ -429,9 +486,18 @@ impl<'b> FnCtx<'b> {
                 expr: inner,
             } => {
                 let (val, ty) = self.compile_expr(inner)?;
-                let (val, ty) = self.emit_promote(val, &ty);
-                let zero = self.builder.iconst(0, ty.to_ir_type().unwrap());
-                Ok(self.builder.icmp(CondCode::Eq, val, zero))
+                if ty.is_float() {
+                    let zero = if ty == CType::Float {
+                        self.builder.fconst_f32(0.0f32)
+                    } else {
+                        self.builder.fconst(0.0f64)
+                    };
+                    Ok(self.builder.fcmp(CondCode::Eq, val, zero))
+                } else {
+                    let (val, ty) = self.emit_promote(val, &ty);
+                    let zero = self.builder.iconst(0, ty.to_ir_type().unwrap());
+                    Ok(self.builder.icmp(CondCode::Eq, val, zero))
+                }
             }
             _ => {
                 let (val, ty) = self.compile_expr(expr)?;
@@ -450,6 +516,20 @@ impl<'b> FnCtx<'b> {
                 } else {
                     let val = self.builder.iconst(*v, Type::I64);
                     Ok((val, CType::Long))
+                }
+            }
+            Expr::FloatLit(bits, is_float) => {
+                if *is_float {
+                    // f suffix: interpret as f32
+                    let f64_val = f64::from_bits(*bits);
+                    let f32_val = f64_val as f32;
+                    let val = self.builder.fconst_f32(f32_val);
+                    Ok((val, CType::Float))
+                } else {
+                    // No suffix: double
+                    let f64_val = f64::from_bits(*bits);
+                    let val = self.builder.fconst(f64_val);
+                    Ok((val, CType::Double))
                 }
             }
             Expr::StringLit(bytes) => {
@@ -564,14 +644,32 @@ impl<'b> FnCtx<'b> {
                 let (val, ty) = self.compile_expr(expr)?;
                 match op {
                     UnaryOp::Neg => {
-                        let (val, ty) = self.emit_promote(val, &ty);
-                        Ok((self.builder.neg(val), ty))
+                        if ty.is_float() {
+                            let zero = if ty == CType::Float {
+                                self.builder.fconst_f32(0.0f32)
+                            } else {
+                                self.builder.fconst(0.0f64)
+                            };
+                            Ok((self.builder.fsub(zero, val), ty))
+                        } else {
+                            let (val, ty) = self.emit_promote(val, &ty);
+                            Ok((self.builder.neg(val), ty))
+                        }
                     }
                     UnaryOp::Not => {
                         // !x == (x == 0) -> I32 result
-                        let (val, ty) = self.emit_promote(val, &ty);
-                        let zero = self.builder.iconst(0, ty.to_ir_type().unwrap());
-                        Ok((self.emit_icmp_val(CondCode::Eq, val, zero), CType::Int))
+                        if ty.is_float() {
+                            let zero = if ty == CType::Float {
+                                self.builder.fconst_f32(0.0f32)
+                            } else {
+                                self.builder.fconst(0.0f64)
+                            };
+                            Ok((self.emit_fcmp_val(CondCode::Eq, val, zero), CType::Int))
+                        } else {
+                            let (val, ty) = self.emit_promote(val, &ty);
+                            let zero = self.builder.iconst(0, ty.to_ir_type().unwrap());
+                            Ok((self.emit_icmp_val(CondCode::Eq, val, zero), CType::Int))
+                        }
                     }
                     UnaryOp::BitNot => {
                         // ~x == x ^ -1
@@ -604,9 +702,7 @@ impl<'b> FnCtx<'b> {
                     BinOp::And => {
                         // Short-circuit: if left is false, result is 0.
                         let (l, lt) = self.compile_expr(lhs)?;
-                        let (l, lt) = self.emit_promote(l, &lt);
-                        let lzero = self.builder.iconst(0, lt.to_ir_type().unwrap());
-                        let lcond = self.builder.icmp(CondCode::Ne, l, lzero);
+                        let lcond = self.val_to_flags(l, &lt);
 
                         let bb_rhs = self.builder.create_block();
                         let (bb_merge, merge_params) =
@@ -620,9 +716,10 @@ impl<'b> FnCtx<'b> {
                         self.builder.seal_block(bb_rhs);
                         self.builder.set_block(bb_rhs);
                         let (r, rt) = self.compile_expr(rhs)?;
-                        let (r, rt) = self.emit_promote(r, &rt);
-                        let rzero = self.builder.iconst(0, rt.to_ir_type().unwrap());
-                        let rbool = self.emit_icmp_val(CondCode::Ne, r, rzero);
+                        let r_flags = self.val_to_flags(r, &rt);
+                        let one = self.builder.iconst(1, Type::I32);
+                        let zero2 = self.builder.iconst(0, Type::I32);
+                        let rbool = self.builder.select(r_flags, one, zero2);
                         if !self.builder.is_current_block_terminated() {
                             self.builder.jump(bb_merge, &[rbool]);
                         }
@@ -634,9 +731,7 @@ impl<'b> FnCtx<'b> {
                     BinOp::Or => {
                         // Short-circuit: if left is true, result is 1.
                         let (l, lt) = self.compile_expr(lhs)?;
-                        let (l, lt) = self.emit_promote(l, &lt);
-                        let lzero = self.builder.iconst(0, lt.to_ir_type().unwrap());
-                        let lcond = self.builder.icmp(CondCode::Ne, l, lzero);
+                        let lcond = self.val_to_flags(l, &lt);
 
                         let bb_rhs = self.builder.create_block();
                         let (bb_merge, merge_params) =
@@ -650,9 +745,10 @@ impl<'b> FnCtx<'b> {
                         self.builder.seal_block(bb_rhs);
                         self.builder.set_block(bb_rhs);
                         let (r, rt) = self.compile_expr(rhs)?;
-                        let (r, rt) = self.emit_promote(r, &rt);
-                        let rzero = self.builder.iconst(0, rt.to_ir_type().unwrap());
-                        let rbool = self.emit_icmp_val(CondCode::Ne, r, rzero);
+                        let r_flags = self.val_to_flags(r, &rt);
+                        let one = self.builder.iconst(1, Type::I32);
+                        let zero2 = self.builder.iconst(0, Type::I32);
+                        let rbool = self.builder.select(r_flags, one, zero2);
                         if !self.builder.is_current_block_terminated() {
                             self.builder.jump(bb_merge, &[rbool]);
                         }
@@ -696,7 +792,11 @@ impl<'b> FnCtx<'b> {
                             self.emit_ptr_add(r, &rt, l, &lt)
                         } else {
                             let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
-                            Ok((self.builder.add(l, r), common))
+                            if common.is_float() {
+                                Ok((self.builder.fadd(l, r), common))
+                            } else {
+                                Ok((self.builder.add(l, r), common))
+                            }
                         }
                     }
                     // Pointer - integer arithmetic.
@@ -707,7 +807,11 @@ impl<'b> FnCtx<'b> {
                             self.emit_ptr_sub(l, &lt, r, &rt)
                         } else {
                             let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
-                            Ok((self.builder.sub(l, r), common))
+                            if common.is_float() {
+                                Ok((self.builder.fsub(l, r), common))
+                            } else {
+                                Ok((self.builder.sub(l, r), common))
+                            }
                         }
                     }
                     _ => {
@@ -715,54 +819,97 @@ impl<'b> FnCtx<'b> {
                         let (r, rt) = self.compile_expr(rhs)?;
                         let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
                         match op {
-                            BinOp::Mul => Ok((self.builder.mul(l, r), common)),
+                            BinOp::Mul => {
+                                if common.is_float() {
+                                    Ok((self.builder.fmul(l, r), common))
+                                } else {
+                                    Ok((self.builder.mul(l, r), common))
+                                }
+                            }
                             BinOp::Div => {
-                                if common.is_unsigned() {
+                                if common.is_float() {
+                                    Ok((self.builder.fdiv(l, r), common))
+                                } else if common.is_unsigned() {
                                     Ok((self.builder.udiv(l, r), common))
                                 } else {
                                     Ok((self.builder.sdiv(l, r), common))
                                 }
                             }
                             BinOp::Mod => {
+                                if common.is_float() {
+                                    return Err(TinyErr {
+                                        line: 0,
+                                        col: 0,
+                                        msg: "modulo operator '%' not supported on float types (use fmod from libm)".into(),
+                                    });
+                                }
                                 if common.is_unsigned() {
                                     Ok((self.builder.urem(l, r), common))
                                 } else {
                                     Ok((self.builder.srem(l, r), common))
                                 }
                             }
-                            BinOp::Eq => Ok((self.emit_icmp_val(CondCode::Eq, l, r), CType::Int)),
-                            BinOp::Ne => Ok((self.emit_icmp_val(CondCode::Ne, l, r), CType::Int)),
-                            BinOp::Lt => {
-                                let cc = if common.is_unsigned() {
-                                    CondCode::Ult
+                            BinOp::Eq => {
+                                if common.is_float() {
+                                    Ok((self.emit_fcmp_val(CondCode::Eq, l, r), CType::Int))
                                 } else {
-                                    CondCode::Slt
-                                };
-                                Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                                    Ok((self.emit_icmp_val(CondCode::Eq, l, r), CType::Int))
+                                }
+                            }
+                            BinOp::Ne => {
+                                if common.is_float() {
+                                    Ok((self.emit_fcmp_val(CondCode::Ne, l, r), CType::Int))
+                                } else {
+                                    Ok((self.emit_icmp_val(CondCode::Ne, l, r), CType::Int))
+                                }
+                            }
+                            BinOp::Lt => {
+                                if common.is_float() {
+                                    Ok((self.emit_fcmp_val(CondCode::Ult, l, r), CType::Int))
+                                } else {
+                                    let cc = if common.is_unsigned() {
+                                        CondCode::Ult
+                                    } else {
+                                        CondCode::Slt
+                                    };
+                                    Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                                }
                             }
                             BinOp::Gt => {
-                                let cc = if common.is_unsigned() {
-                                    CondCode::Ugt
+                                if common.is_float() {
+                                    Ok((self.emit_fcmp_val(CondCode::Ugt, l, r), CType::Int))
                                 } else {
-                                    CondCode::Sgt
-                                };
-                                Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                                    let cc = if common.is_unsigned() {
+                                        CondCode::Ugt
+                                    } else {
+                                        CondCode::Sgt
+                                    };
+                                    Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                                }
                             }
                             BinOp::Le => {
-                                let cc = if common.is_unsigned() {
-                                    CondCode::Ule
+                                if common.is_float() {
+                                    Ok((self.emit_fcmp_val(CondCode::Ule, l, r), CType::Int))
                                 } else {
-                                    CondCode::Sle
-                                };
-                                Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                                    let cc = if common.is_unsigned() {
+                                        CondCode::Ule
+                                    } else {
+                                        CondCode::Sle
+                                    };
+                                    Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                                }
                             }
                             BinOp::Ge => {
-                                let cc = if common.is_unsigned() {
-                                    CondCode::Uge
+                                if common.is_float() {
+                                    Ok((self.emit_fcmp_val(CondCode::Uge, l, r), CType::Int))
                                 } else {
-                                    CondCode::Sge
-                                };
-                                Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                                    let cc = if common.is_unsigned() {
+                                        CondCode::Uge
+                                    } else {
+                                        CondCode::Sge
+                                    };
+                                    Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                                }
                             }
                             BinOp::BitAnd => Ok((self.builder.and(l, r), common)),
                             BinOp::BitOr => Ok((self.builder.or(l, r), common)),

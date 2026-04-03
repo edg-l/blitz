@@ -9,6 +9,8 @@ pub enum Token {
     Long,
     Unsigned,
     Void,
+    Float,
+    Double,
     // Other keywords
     If,
     Else,
@@ -21,6 +23,8 @@ pub enum Token {
     Extern,
     // Literals and names
     IntLit(i64),
+    /// Float literal: (value, has_f_suffix)
+    FloatLit(u64, bool),
     StringLit(Vec<u8>),
     Ident(String),
     // Arithmetic operators
@@ -183,9 +187,50 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 Token::Semi
             }
             '.' => {
-                pos += 1;
-                col += 1;
-                Token::Dot
+                // Check if this is a float literal starting with '.' (e.g. `.5`)
+                if pos + 1 < chars.len() && chars[pos + 1].is_ascii_digit() {
+                    // Parse as float literal starting with '.'
+                    let start = pos;
+                    pos += 1; // consume '.'
+                    col += 1;
+                    while pos < chars.len() && chars[pos].is_ascii_digit() {
+                        pos += 1;
+                        col += 1;
+                    }
+                    // Optional exponent
+                    if pos < chars.len() && (chars[pos] == 'e' || chars[pos] == 'E') {
+                        pos += 1;
+                        col += 1;
+                        if pos < chars.len() && (chars[pos] == '+' || chars[pos] == '-') {
+                            pos += 1;
+                            col += 1;
+                        }
+                        while pos < chars.len() && chars[pos].is_ascii_digit() {
+                            pos += 1;
+                            col += 1;
+                        }
+                    }
+                    let s: String = chars[start..pos].iter().collect();
+                    // Optional f/F suffix
+                    let has_f_suffix =
+                        if pos < chars.len() && (chars[pos] == 'f' || chars[pos] == 'F') {
+                            pos += 1;
+                            col += 1;
+                            true
+                        } else {
+                            false
+                        };
+                    let val: f64 = s.parse().map_err(|_| TinyErr {
+                        line,
+                        col: span.col,
+                        msg: format!("invalid float literal '{s}'"),
+                    })?;
+                    Token::FloatLit(val.to_bits(), has_f_suffix)
+                } else {
+                    pos += 1;
+                    col += 1;
+                    Token::Dot
+                }
             }
             '?' => {
                 pos += 1;
@@ -314,13 +359,59 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                         pos += 1;
                         col += 1;
                     }
-                    let s: String = chars[start..pos].iter().collect();
-                    let val: i64 = s.parse().map_err(|_| TinyErr {
-                        line,
-                        col: span.col,
-                        msg: format!("invalid integer literal '{s}'"),
-                    })?;
-                    Token::IntLit(val)
+                    // Check if this is a float literal (has '.' or 'e'/'E')
+                    let is_float = (pos < chars.len()
+                        && chars[pos] == '.'
+                        && (pos + 1 >= chars.len() || chars[pos + 1] != '.'))
+                        || (pos < chars.len() && (chars[pos] == 'e' || chars[pos] == 'E'));
+                    if is_float {
+                        // Consume fractional part
+                        if pos < chars.len() && chars[pos] == '.' {
+                            pos += 1;
+                            col += 1;
+                            while pos < chars.len() && chars[pos].is_ascii_digit() {
+                                pos += 1;
+                                col += 1;
+                            }
+                        }
+                        // Consume exponent
+                        if pos < chars.len() && (chars[pos] == 'e' || chars[pos] == 'E') {
+                            pos += 1;
+                            col += 1;
+                            if pos < chars.len() && (chars[pos] == '+' || chars[pos] == '-') {
+                                pos += 1;
+                                col += 1;
+                            }
+                            while pos < chars.len() && chars[pos].is_ascii_digit() {
+                                pos += 1;
+                                col += 1;
+                            }
+                        }
+                        let s: String = chars[start..pos].iter().collect();
+                        // Optional f/F suffix
+                        let has_f_suffix =
+                            if pos < chars.len() && (chars[pos] == 'f' || chars[pos] == 'F') {
+                                pos += 1;
+                                col += 1;
+                                true
+                            } else {
+                                false
+                            };
+                        let val: f64 = s.parse().map_err(|_| TinyErr {
+                            line,
+                            col: span.col,
+                            msg: format!("invalid float literal '{s}'"),
+                        })?;
+                        Token::FloatLit(val.to_bits(), has_f_suffix)
+                    } else {
+                        let s: String = chars[start..pos].iter().collect();
+                        let val: i64 = s.parse().map_err(|_| TinyErr {
+                            line,
+                            col: span.col,
+                            msg: format!("invalid integer literal '{s}'"),
+                        })?;
+                        Token::IntLit(val)
+                    }
                 }
             }
             c if c.is_alphabetic() || c == '_' => {
@@ -337,6 +428,8 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     "long" => Token::Long,
                     "unsigned" => Token::Unsigned,
                     "void" => Token::Void,
+                    "float" => Token::Float,
+                    "double" => Token::Double,
                     "if" => Token::If,
                     "else" => Token::Else,
                     "while" => Token::While,

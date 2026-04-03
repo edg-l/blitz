@@ -6,7 +6,7 @@ use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 use crate::schedule::scheduler::ScheduledInst;
-use crate::x86::abi::{ArgLoc, GPR_RETURN_REG, assign_args};
+use crate::x86::abi::{ArgLoc, FP_RETURN_REG, GPR_RETURN_REG, assign_args};
 use crate::x86::reg::Reg;
 
 /// Map function parameters to (VReg, Reg) pairs for pre-coloring.
@@ -39,6 +39,10 @@ pub(super) fn assign_param_vregs_from_map(
             // can't resolve the conflict. The param will get a callee-saved
             // register and a mov will be emitted at function entry.
             if block_has_calls && CALLER_SAVED_GPR.contains(&reg) {
+                continue;
+            }
+            // All XMM registers are caller-saved in SystemV AMD64 ABI.
+            if block_has_calls && reg.is_xmm() {
                 continue;
             }
             pairs.push((vreg, reg));
@@ -243,6 +247,7 @@ pub(super) fn add_call_precolors_for_block(
         if let EffectfulOp::Call {
             args,
             arg_tys,
+            ret_tys,
             results,
             ..
         } = op
@@ -273,7 +278,13 @@ pub(super) fn add_call_precolors_for_block(
                 if let Some(&vreg) = class_to_vreg.get(&canon)
                     && !param_vregs.iter().any(|&(v, _)| v == vreg)
                 {
-                    param_vregs.push((vreg, GPR_RETURN_REG));
+                    let is_float_ret = ret_tys.first().is_some_and(|t| t.is_float());
+                    let abi_reg = if is_float_ret {
+                        FP_RETURN_REG
+                    } else {
+                        GPR_RETURN_REG
+                    };
+                    param_vregs.push((vreg, abi_reg));
                 }
             }
         }

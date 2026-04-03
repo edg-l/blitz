@@ -11,6 +11,8 @@ pub enum CType {
     UShort, // u16
     UInt,   // u32
     ULong,  // u64
+    Float,  // f32
+    Double, // f64
     Ptr(Box<CType>),
     Struct(String),
     Array(Box<CType>, usize),
@@ -24,6 +26,8 @@ impl CType {
             CType::Short | CType::UShort => Some(Type::I16),
             CType::Int | CType::UInt => Some(Type::I32),
             CType::Long | CType::ULong => Some(Type::I64),
+            CType::Float => Some(Type::F32),
+            CType::Double => Some(Type::F64),
             CType::Ptr(_) => Some(Type::I64),
             CType::Struct(_) => None,
             CType::Array(_, _) => None,
@@ -35,8 +39,8 @@ impl CType {
             CType::Void => panic!("bit_width called on Void"),
             CType::Char | CType::UChar => 8,
             CType::Short | CType::UShort => 16,
-            CType::Int | CType::UInt => 32,
-            CType::Long | CType::ULong | CType::Ptr(_) => 64,
+            CType::Int | CType::UInt | CType::Float => 32,
+            CType::Long | CType::ULong | CType::Double | CType::Ptr(_) => 64,
             CType::Struct(_) => panic!("use StructRegistry::byte_size()"),
             CType::Array(_, _) => panic!("use array_total_byte_size()"),
         }
@@ -53,10 +57,19 @@ impl CType {
         matches!(self, CType::Char | CType::Short | CType::Int | CType::Long)
     }
 
+    pub fn is_float(&self) -> bool {
+        matches!(self, CType::Float | CType::Double)
+    }
+
     pub fn is_integer(&self) -> bool {
         !matches!(
             self,
-            CType::Void | CType::Ptr(_) | CType::Struct(_) | CType::Array(_, _)
+            CType::Void
+                | CType::Float
+                | CType::Double
+                | CType::Ptr(_)
+                | CType::Struct(_)
+                | CType::Array(_, _)
         )
     }
 
@@ -128,12 +141,15 @@ impl CType {
             CType::Int | CType::UInt => 3,
             CType::Long | CType::ULong => 4,
             CType::Ptr(_) => 5,
+            CType::Float => panic!("rank() called on float type"),
+            CType::Double => panic!("rank() called on double type"),
             CType::Struct(_) => panic!("rank() called on struct type"),
             CType::Array(_, _) => panic!("rank() called on array type"),
         }
     }
 
     /// Integer promotion per C standard 6.3.1.1: Char/Short/UChar/UShort -> Int.
+    /// Float/Double pass through unchanged.
     pub fn promoted(&self) -> CType {
         match self {
             CType::Char | CType::Short | CType::UChar | CType::UShort => CType::Int,
@@ -152,6 +168,14 @@ impl CType {
         }
         if b.is_pointer() {
             return b.clone();
+        }
+
+        // Float promotions take priority: double > float > integer types.
+        if matches!(a, CType::Double) || matches!(b, CType::Double) {
+            return CType::Double;
+        }
+        if matches!(a, CType::Float) || matches!(b, CType::Float) {
+            return CType::Float;
         }
 
         if a == b {
@@ -257,6 +281,8 @@ pub enum Stmt {
 
 pub enum Expr {
     IntLit(i64),
+    /// Float literal: (bits as u64, has_f_suffix). If has_f_suffix, type is float; otherwise double.
+    FloatLit(u64, bool),
     StringLit(Vec<u8>),
     Var(String),
     BinOp {

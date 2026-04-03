@@ -336,7 +336,15 @@ impl FunctionBuilder {
 
     pub fn fconst(&mut self, val: f64) -> Value {
         let node = ENode {
-            op: Op::Fconst(val.to_bits()),
+            op: Op::Fconst(val.to_bits(), Type::F64),
+            children: smallvec![],
+        };
+        self.add_node(node)
+    }
+
+    pub fn fconst_f32(&mut self, val: f32) -> Value {
+        let node = ENode {
+            op: Op::Fconst(val.to_bits() as u64, Type::F32),
             children: smallvec![],
         };
         self.add_node(node)
@@ -378,6 +386,46 @@ impl FunctionBuilder {
         let node = ENode {
             op: Op::Icmp(cc),
             children: smallvec![a.0, b.0],
+        };
+        self.add_node(node)
+    }
+
+    pub fn fcmp(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
+        let node = ENode {
+            op: Op::Fcmp(cc),
+            children: smallvec![a.0, b.0],
+        };
+        self.add_node(node)
+    }
+
+    pub fn int_to_float(&mut self, val: Value, target: Type) -> Value {
+        let node = ENode {
+            op: Op::IntToFloat(target),
+            children: smallvec![val.0],
+        };
+        self.add_node(node)
+    }
+
+    pub fn float_to_int(&mut self, val: Value, target: Type) -> Value {
+        let node = ENode {
+            op: Op::FloatToInt(target),
+            children: smallvec![val.0],
+        };
+        self.add_node(node)
+    }
+
+    pub fn float_ext(&mut self, val: Value) -> Value {
+        let node = ENode {
+            op: Op::FloatExt,
+            children: smallvec![val.0],
+        };
+        self.add_node(node)
+    }
+
+    pub fn float_trunc(&mut self, val: Value) -> Value {
+        let node = ENode {
+            op: Op::FloatTrunc,
+            children: smallvec![val.0],
         };
         self.add_node(node)
     }
@@ -540,12 +588,9 @@ impl FunctionBuilder {
             class
                 .nodes
                 .iter()
-                .find_map(|n| {
-                    if let Op::Icmp(cc) = &n.op {
-                        Some(*cc)
-                    } else {
-                        None
-                    }
+                .find_map(|n| match &n.op {
+                    Op::Icmp(cc) | Op::Fcmp(cc) => Some(*cc),
+                    _ => None,
                 })
                 .unwrap_or(CondCode::Ne)
         };

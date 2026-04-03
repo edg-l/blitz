@@ -53,6 +53,13 @@ pub fn phi_copies(copies: &[(Reg, Reg, OpSize)], temp: Reg) -> Vec<MachInst> {
 
     seq.into_iter()
         .map(|(src, dst)| {
+            // XMM-to-XMM copies use MovsdRR instead of MovRR.
+            if src.is_xmm() || dst.is_xmm() {
+                return MachInst::MovsdRR {
+                    dst: Operand::Reg(dst),
+                    src: Operand::Reg(src),
+                };
+            }
             // Look up the original OpSize. For temp-register moves (cycle breaking),
             // fall back to the size associated with the non-temp register.
             let size = size_map

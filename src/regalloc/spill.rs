@@ -147,6 +147,80 @@ fn find_pressure_point(liveness: &LivenessInfo, available_regs: u32) -> Option<u
     best.map(|(_, i)| i)
 }
 
+/// Select a spill candidate targeting a specific register class.
+///
+/// Finds the XMM pressure point (instruction where the most XMM vregs are
+/// simultaneously live) and picks the best XMM vreg to spill at that point.
+pub fn select_spill_for_class(
+    graph: &InterferenceGraph,
+    liveness: &LivenessInfo,
+    insts: &[ScheduledInst],
+    available_regs: u32,
+    loop_depths: &std::collections::BTreeMap<VReg, u32>,
+    excluded: &std::collections::BTreeSet<usize>,
+    target_class: crate::x86::reg::RegClass,
+) -> Option<usize> {
+    let range_lengths = compute_live_range_length(insts);
+
+    // Find the instruction index where the target class has maximum pressure.
+    let pressure_point = {
+        let mut best: Option<(usize, usize)> = None;
+        for (i, live_set) in liveness.live_at.iter().enumerate() {
+            let class_pressure = live_set
+                .iter()
+                .filter(|v| {
+                    let idx = v.0 as usize;
+                    idx < graph.num_vregs && graph.reg_class[idx] == target_class
+                })
+                .count();
+            if class_pressure >= available_regs as usize
+                && best.is_none_or(|(bp, _)| class_pressure > bp)
+            {
+                best = Some((class_pressure, i));
+            }
+        }
+        best.map(|(_, i)| i)
+    };
+
+    if let Some(pp) = pressure_point {
+        let next_use = compute_next_use(insts, pp);
+        let live_at_pressure = &liveness.live_at[pp];
+
+        let candidates: Vec<usize> = live_at_pressure
+            .iter()
+            .map(|v| v.0 as usize)
+            .filter(|&idx| idx < graph.num_vregs)
+            .filter(|idx| !excluded.contains(idx))
+            .filter(|&idx| graph.reg_class[idx] == target_class)
+            .collect();
+
+        if let Some(best) = candidates.into_iter().max_by_key(|&idx| {
+            let next = next_use.get(&idx).copied().unwrap_or(usize::MAX) as u64;
+            let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
+            let penalty = 10u64.saturating_pow(depth).max(1);
+            let degree = graph.adj[idx].len() as u64;
+            let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
+            let tiebreaker = (degree * range_len) / penalty;
+            (next / penalty, tiebreaker, idx)
+        }) {
+            return Some(best);
+        }
+    }
+
+    // Fallback: pick the target-class VReg with highest degree*range_length.
+    (0..graph.num_vregs)
+        .filter(|&idx| graph.reg_class[idx] == target_class)
+        .filter(|&idx| !graph.adj[idx].is_empty())
+        .filter(|idx| !excluded.contains(idx))
+        .max_by_key(|&idx| {
+            let degree = graph.adj[idx].len() as u64;
+            let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
+            let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
+            let penalty = 10u64.saturating_pow(depth).max(1);
+            ((degree * range_len) / penalty, idx)
+        })
+}
+
 fn compute_next_use(insts: &[ScheduledInst], from: usize) -> BTreeMap<usize, usize> {
     let mut next_use: BTreeMap<usize, usize> = BTreeMap::new();
     for (i, inst) in insts.iter().enumerate().skip(from) {

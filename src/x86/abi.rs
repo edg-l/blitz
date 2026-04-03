@@ -41,6 +41,26 @@ pub const CALLER_SAVED_GPR: [Reg; 9] = [
     Reg::R11,
 ];
 
+/// All XMM registers are caller-saved in the SystemV AMD64 ABI.
+pub const CALLER_SAVED_XMM: [Reg; 16] = [
+    Reg::XMM0,
+    Reg::XMM1,
+    Reg::XMM2,
+    Reg::XMM3,
+    Reg::XMM4,
+    Reg::XMM5,
+    Reg::XMM6,
+    Reg::XMM7,
+    Reg::XMM8,
+    Reg::XMM9,
+    Reg::XMM10,
+    Reg::XMM11,
+    Reg::XMM12,
+    Reg::XMM13,
+    Reg::XMM14,
+    Reg::XMM15,
+];
+
 // ── 8.2 Argument assignment ───────────────────────────────────────────────────
 
 /// Where a single function argument is passed.
@@ -444,11 +464,19 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
     // the call. Using S64 here avoids partial register writes.
     let seq = sequentialize_copies(&reg_copies, temp);
     for (src, dst) in seq {
-        insts.push(MachInst::MovRR {
-            size: OpSize::S64,
-            dst: Operand::Reg(dst),
-            src: Operand::Reg(src),
-        });
+        if src.is_xmm() || dst.is_xmm() {
+            // XMM-to-XMM copy: use movsd (safe for both f32 and f64 values).
+            insts.push(MachInst::MovsdRR {
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+            });
+        } else {
+            insts.push(MachInst::MovRR {
+                size: OpSize::S64,
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+            });
+        }
     }
 
     insts

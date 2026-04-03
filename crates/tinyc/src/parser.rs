@@ -147,6 +147,8 @@ impl Parser {
                 | Token::Int
                 | Token::Long
                 | Token::Unsigned
+                | Token::Float
+                | Token::Double
                 | Token::Struct
         )
     }
@@ -201,6 +203,14 @@ impl Parser {
             Token::Long => {
                 self.advance();
                 CType::Long
+            }
+            Token::Float => {
+                self.advance();
+                CType::Float
+            }
+            Token::Double => {
+                self.advance();
+                CType::Double
             }
             Token::Struct => {
                 self.advance();
@@ -899,6 +909,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::IntLit(v))
             }
+            Token::FloatLit(bits, has_f_suffix) => {
+                self.advance();
+                Ok(Expr::FloatLit(bits, has_f_suffix))
+            }
             Token::StringLit(bytes) => {
                 self.advance();
                 Ok(Expr::StringLit(bytes))
@@ -935,6 +949,8 @@ impl Parser {
                             | Token::Int
                             | Token::Long
                             | Token::Unsigned
+                            | Token::Float
+                            | Token::Double
                             | Token::Struct
                     );
                 if next_is_type {

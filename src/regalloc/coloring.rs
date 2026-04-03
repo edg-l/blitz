@@ -299,6 +299,33 @@ pub fn available_gpr_colors(uses_frame_pointer: bool) -> u32 {
 /// Number of usable XMM colors (16 XMM registers).
 pub const AVAILABLE_XMM_COLORS: u32 = 16;
 
+/// Returns the ordered list of allocatable XMM registers (XMM0-XMM15).
+///
+/// All XMM registers are caller-saved in SysV ABI (no callee-saved XMMs).
+/// This ordering must be kept consistent with `map_colors_to_regs` and
+/// `add_xmm_call_clobber_interferences` so that color numbers correspond
+/// to the correct physical registers.
+pub fn allocatable_xmm_order() -> Vec<Reg> {
+    vec![
+        Reg::XMM0,
+        Reg::XMM1,
+        Reg::XMM2,
+        Reg::XMM3,
+        Reg::XMM4,
+        Reg::XMM5,
+        Reg::XMM6,
+        Reg::XMM7,
+        Reg::XMM8,
+        Reg::XMM9,
+        Reg::XMM10,
+        Reg::XMM11,
+        Reg::XMM12,
+        Reg::XMM13,
+        Reg::XMM14,
+        Reg::XMM15,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

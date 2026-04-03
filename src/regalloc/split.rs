@@ -284,12 +284,33 @@ pub fn build_vreg_classes_from_schedules(
 
 fn is_fp_op(op: &Op) -> bool {
     match op {
+        // F64 arithmetic
         Op::X86Addsd
         | Op::X86Subsd
         | Op::X86Mulsd
         | Op::X86Divsd
         | Op::X86Sqrtsd
-        | Op::Fconst(_) => true,
+        // F32 arithmetic
+        | Op::X86Addss
+        | Op::X86Subss
+        | Op::X86Mulss
+        | Op::X86Divss
+        | Op::X86Sqrtss
+        // Conversions that produce XMM results
+        | Op::X86Cvtsi2sd
+        | Op::X86Cvtsi2ss
+        | Op::X86Cvtsd2ss
+        | Op::X86Cvtss2sd
+        // FP constants
+        | Op::Fconst(_, _)
+        // XMM spill reloads produce XMM values
+        | Op::XmmSpillLoad(_) => true,
+        // Block parameters (phi destinations) with float types
+        Op::BlockParam(_, _, ty) => ty.is_float(),
+        // Call results with float return types
+        Op::CallResult(_, ty) => ty.is_float(),
+        // Function parameters with float types
+        Op::Param(_, ty) => ty.is_float(),
         Op::X86Bitcast { to, .. } => matches!(to, Type::F32 | Type::F64),
         _ => false,
     }

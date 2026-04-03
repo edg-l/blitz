@@ -50,8 +50,9 @@ pub enum Op {
     // ── Constants ────────────────────────────────────────────────────────────
     /// Typed integer constant; the `Type` determines the e-class type.
     Iconst(i64, Type),
-    /// FP constant stored as raw IEEE 754 bits (use `f64::to_bits()`).
-    Fconst(u64),
+    /// FP constant stored as raw IEEE 754 bits (use `f64::to_bits()` / `f32::to_bits()`).
+    /// The `Type` determines F32 vs F64.
+    Fconst(u64, Type),
 
     // ── Function parameters ───────────────────────────────────────────────────
     /// A function parameter. The `u32` is the zero-based parameter index.
@@ -65,6 +66,18 @@ pub enum Op {
 
     // ── Comparison ───────────────────────────────────────────────────────────
     Icmp(CondCode),
+    /// Float comparison: takes 2 float children, produces `Type::Flags`.
+    Fcmp(CondCode),
+
+    // ── Float/int conversion ───────────────────────────────────────────────
+    /// Signed integer -> float. Type param is target float type (F32 or F64).
+    IntToFloat(Type),
+    /// Float -> signed integer (truncation). Type param is target int type (I32 or I64).
+    FloatToInt(Type),
+    /// F32 -> F64 extension.
+    FloatExt,
+    /// F64 -> F32 truncation.
+    FloatTrunc,
 
     // ── Floating-point ───────────────────────────────────────────────────────
     Fadd,
@@ -166,6 +179,26 @@ pub enum Op {
     X86Divss,
     /// `sqrtss dst, src` — sqrt(f32) → f32.
     X86Sqrtss,
+
+    // ── x86-64 FP conversion ops ────────────────────────────────────────────────
+    /// `cvtsi2sd` — signed int -> f64; 1 child (GPR), result F64.
+    X86Cvtsi2sd,
+    /// `cvtsi2ss` — signed int -> f32; 1 child (GPR), result F32.
+    X86Cvtsi2ss,
+    /// `cvttsd2si` — f64 -> signed int (truncation); 1 child (XMM), result = Type param.
+    X86Cvttsd2si(Type),
+    /// `cvttss2si` — f32 -> signed int (truncation); 1 child (XMM), result = Type param.
+    X86Cvttss2si(Type),
+    /// `cvtsd2ss` — f64 -> f32; 1 child (XMM), result F32.
+    X86Cvtsd2ss,
+    /// `cvtss2sd` — f32 -> f64; 1 child (XMM), result F64.
+    X86Cvtss2sd,
+
+    // ── x86-64 FP comparison ops (Op variants for isel) ──────────────────────
+    /// `ucomisd` — compare two f64 values, sets flags; 2 children, result Flags.
+    X86Ucomisd,
+    /// `ucomiss` — compare two f32 values, sets flags; 2 children, result Flags.
+    X86Ucomiss,
 
     // ── Stack slot address ─────────────────────────────────────────────────────
     /// Address of stack slot N. Zero children, returns I64.
@@ -327,9 +360,9 @@ impl Op {
                 assert_eq!(child_types.len(), 0, "Iconst requires 0 children");
                 ty.clone()
             }
-            Op::Fconst(_) => {
+            Op::Fconst(_, ty) => {
                 assert_eq!(child_types.len(), 0, "Fconst requires 0 children");
-                Type::F64
+                ty.clone()
             }
             Op::Param(_idx, ty) => {
                 assert_eq!(child_types.len(), 0, "Param requires 0 children");
@@ -367,6 +400,57 @@ impl Op {
                     t, &child_types[1]
                 );
                 Type::Flags
+            }
+            Op::Fcmp(_cc) => {
+                assert_eq!(child_types.len(), 2, "Fcmp requires 2 children");
+                let t = &child_types[0];
+                assert!(t.is_float(), "Fcmp requires float operands, got {t:?}");
+                assert_eq!(
+                    &child_types[1], t,
+                    "Fcmp operand type mismatch: {:?} vs {:?}",
+                    t, &child_types[1]
+                );
+                Type::Flags
+            }
+
+            // ── Float/int conversions ────────────────────────────────────────
+            Op::IntToFloat(target) => {
+                assert_eq!(child_types.len(), 1, "IntToFloat requires 1 child");
+                assert!(
+                    child_types[0].is_integer(),
+                    "IntToFloat requires integer child, got {:?}",
+                    child_types[0]
+                );
+                target.clone()
+            }
+            Op::FloatToInt(target) => {
+                assert_eq!(child_types.len(), 1, "FloatToInt requires 1 child");
+                assert!(
+                    child_types[0].is_float(),
+                    "FloatToInt requires float child, got {:?}",
+                    child_types[0]
+                );
+                target.clone()
+            }
+            Op::FloatExt => {
+                assert_eq!(child_types.len(), 1, "FloatExt requires 1 child");
+                assert_eq!(
+                    child_types[0],
+                    Type::F32,
+                    "FloatExt requires F32 child, got {:?}",
+                    child_types[0]
+                );
+                Type::F64
+            }
+            Op::FloatTrunc => {
+                assert_eq!(child_types.len(), 1, "FloatTrunc requires 1 child");
+                assert_eq!(
+                    child_types[0],
+                    Type::F64,
+                    "FloatTrunc requires F64 child, got {:?}",
+                    child_types[0]
+                );
+                Type::F32
             }
 
             // ── FP binary ops ─────────────────────────────────────────────────
@@ -613,6 +697,100 @@ impl Op {
                 Type::F32
             }
 
+            // ── x86 FP conversion ops ────────────────────────────────────────
+            Op::X86Cvtsi2sd => {
+                assert_eq!(child_types.len(), 1, "X86Cvtsi2sd requires 1 child");
+                assert!(
+                    child_types[0].is_integer(),
+                    "X86Cvtsi2sd requires integer child, got {:?}",
+                    child_types[0]
+                );
+                Type::F64
+            }
+            Op::X86Cvtsi2ss => {
+                assert_eq!(child_types.len(), 1, "X86Cvtsi2ss requires 1 child");
+                assert!(
+                    child_types[0].is_integer(),
+                    "X86Cvtsi2ss requires integer child, got {:?}",
+                    child_types[0]
+                );
+                Type::F32
+            }
+            Op::X86Cvttsd2si(target) => {
+                assert_eq!(child_types.len(), 1, "X86Cvttsd2si requires 1 child");
+                assert_eq!(
+                    child_types[0],
+                    Type::F64,
+                    "X86Cvttsd2si requires F64 child, got {:?}",
+                    child_types[0]
+                );
+                target.clone()
+            }
+            Op::X86Cvttss2si(target) => {
+                assert_eq!(child_types.len(), 1, "X86Cvttss2si requires 1 child");
+                assert_eq!(
+                    child_types[0],
+                    Type::F32,
+                    "X86Cvttss2si requires F32 child, got {:?}",
+                    child_types[0]
+                );
+                target.clone()
+            }
+            Op::X86Cvtsd2ss => {
+                assert_eq!(child_types.len(), 1, "X86Cvtsd2ss requires 1 child");
+                assert_eq!(
+                    child_types[0],
+                    Type::F64,
+                    "X86Cvtsd2ss requires F64 child, got {:?}",
+                    child_types[0]
+                );
+                Type::F32
+            }
+            Op::X86Cvtss2sd => {
+                assert_eq!(child_types.len(), 1, "X86Cvtss2sd requires 1 child");
+                assert_eq!(
+                    child_types[0],
+                    Type::F32,
+                    "X86Cvtss2sd requires F32 child, got {:?}",
+                    child_types[0]
+                );
+                Type::F64
+            }
+
+            // ── x86 FP comparison ops ────────────────────────────────────────
+            Op::X86Ucomisd => {
+                assert_eq!(child_types.len(), 2, "X86Ucomisd requires 2 children");
+                assert_eq!(
+                    child_types[0],
+                    Type::F64,
+                    "X86Ucomisd requires F64 operands, got {:?}",
+                    child_types[0]
+                );
+                assert_eq!(
+                    child_types[1],
+                    Type::F64,
+                    "X86Ucomisd requires F64 operands, got {:?}",
+                    child_types[1]
+                );
+                Type::Flags
+            }
+            Op::X86Ucomiss => {
+                assert_eq!(child_types.len(), 2, "X86Ucomiss requires 2 children");
+                assert_eq!(
+                    child_types[0],
+                    Type::F32,
+                    "X86Ucomiss requires F32 operands, got {:?}",
+                    child_types[0]
+                );
+                assert_eq!(
+                    child_types[1],
+                    Type::F32,
+                    "X86Ucomiss requires F32 operands, got {:?}",
+                    child_types[1]
+                );
+                Type::Flags
+            }
+
             // ── Addr (base I64, index I64 → I64) ─────────────────────────────
             Op::Addr { .. } => {
                 assert_eq!(
@@ -786,7 +964,12 @@ mod tests {
 
     #[test]
     fn fconst_is_f64() {
-        assert_eq!(Op::Fconst(0u64).result_type(&[]), Type::F64);
+        assert_eq!(Op::Fconst(0u64, Type::F64).result_type(&[]), Type::F64);
+    }
+
+    #[test]
+    fn fconst_is_f32() {
+        assert_eq!(Op::Fconst(0u64, Type::F32).result_type(&[]), Type::F32);
     }
 
     // ── Comparison ────────────────────────────────────────────────────────────

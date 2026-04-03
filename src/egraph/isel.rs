@@ -13,9 +13,11 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_shift_imm_isel(egraph);
     changed |= apply_select_isel(egraph);
     changed |= apply_icmp_isel(egraph);
+    changed |= apply_fcmp_isel(egraph);
     changed |= apply_sext_zext_trunc_isel(egraph);
     changed |= apply_bitcast_isel(egraph);
     changed |= apply_fp_isel(egraph);
+    changed |= apply_conv_isel(egraph);
     changed |= apply_div_isel(egraph);
     changed
 }
@@ -282,6 +284,47 @@ fn apply_icmp_isel(egraph: &mut EGraph) -> bool {
     changed
 }
 
+/// Fcmp(cc, a, b) -> X86Ucomisd(a, b) for F64, X86Ucomiss(a, b) for F32
+/// The condition code is preserved in the Fcmp node for later extraction.
+fn apply_fcmp_isel(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
+    let mut changed = false;
+
+    for snap in &snaps {
+        let class_id = snap.class_id;
+        if snap.children.len() != 2 {
+            continue;
+        }
+        let Op::Fcmp(_cc) = &snap.op else { continue };
+
+        let a = snap.children[0];
+        let b = snap.children[1];
+
+        // Determine F32 vs F64 from the first operand type.
+        let child_ty = infer_class_type(egraph, a);
+        let is_f32 = matches!(child_ty, Some(Type::F32));
+
+        let x86_op = if is_f32 {
+            Op::X86Ucomiss
+        } else {
+            Op::X86Ucomisd
+        };
+
+        let ucomis = egraph.add(ENode {
+            op: x86_op,
+            children: smallvec![a, b],
+        });
+
+        let canon = egraph.unionfind.find_immutable(class_id);
+        let ucomis_canon = egraph.unionfind.find_immutable(ucomis);
+        if canon != ucomis_canon {
+            egraph.merge(class_id, ucomis);
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Select(flags, t, f) -> X86Cmov(cc, flags, t, f)
 /// The cc is taken from the Icmp that produced the flags class.
 fn apply_select_isel(egraph: &mut EGraph) -> bool {
@@ -488,6 +531,56 @@ fn apply_fp_isel(egraph: &mut EGraph) -> bool {
     changed
 }
 
+/// IntToFloat / FloatToInt / FloatExt / FloatTrunc -> x86 conversion ops
+fn apply_conv_isel(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
+    let mut changed = false;
+
+    for snap in &snaps {
+        let class_id = snap.class_id;
+        if snap.children.len() != 1 {
+            continue;
+        }
+
+        let child = snap.children[0];
+
+        let machine_op = match &snap.op {
+            Op::IntToFloat(target) => match target {
+                Type::F64 => Op::X86Cvtsi2sd,
+                Type::F32 => Op::X86Cvtsi2ss,
+                other => {
+                    unreachable!("IntToFloat target must be F32 or F64, got {:?}", other);
+                }
+            },
+            Op::FloatToInt(target) => {
+                let child_ty = infer_class_type(egraph, child);
+                let is_f32 = matches!(child_ty, Some(Type::F32));
+                if is_f32 {
+                    Op::X86Cvttss2si(target.clone())
+                } else {
+                    Op::X86Cvttsd2si(target.clone())
+                }
+            }
+            Op::FloatExt => Op::X86Cvtss2sd,
+            Op::FloatTrunc => Op::X86Cvtsd2ss,
+            _ => continue,
+        };
+
+        let machine_node = egraph.add(ENode {
+            op: machine_op,
+            children: smallvec![child],
+        });
+
+        let canon = egraph.unionfind.find_immutable(class_id);
+        let machine_canon = egraph.unionfind.find_immutable(machine_node);
+        if canon != machine_canon {
+            egraph.merge(class_id, machine_node);
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Search the flags class for an Icmp node and extract its condition code.
 pub(crate) fn find_cc_in_class(egraph: &EGraph, flags_class: ClassId) -> Option<CondCode> {
     let canon = egraph.unionfind.find_immutable(flags_class);
@@ -497,6 +590,9 @@ pub(crate) fn find_cc_in_class(egraph: &EGraph, flags_class: ClassId) -> Option<
     let class = egraph.class(canon);
     for node in &class.nodes {
         if let Op::Icmp(cc) = &node.op {
+            return Some(*cc);
+        }
+        if let Op::Fcmp(cc) = &node.op {
             return Some(*cc);
         }
         // Also look through Proj1 -> X86Sub nodes: the cc comes from the original Icmp

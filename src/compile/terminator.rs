@@ -8,7 +8,7 @@ use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::ClassId;
 use crate::regalloc::allocator::RegAllocResult;
-use crate::x86::abi::GPR_RETURN_REG;
+use crate::x86::abi::{FP_RETURN_REG, GPR_RETURN_REG};
 use crate::x86::inst::{LabelId, MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
@@ -147,19 +147,32 @@ pub(super) fn lower_terminator(
             let mut items = Vec::new();
             if let Some(&ret_cid) = val.as_ref()
                 && let Some(ret_reg) = get_reg(ret_cid, ret_class_to_vreg)
-                && ret_reg != GPR_RETURN_REG
             {
-                // Use the function's return type for the MOV size.
-                let ret_size = func
-                    .return_types
-                    .first()
-                    .map(OpSize::from_type)
-                    .unwrap_or(OpSize::S64);
-                items.push(BlockItem::Inst(MachInst::MovRR {
-                    size: ret_size,
-                    dst: Operand::Reg(GPR_RETURN_REG),
-                    src: Operand::Reg(ret_reg),
-                }));
+                let is_float_ret = func.return_types.first().is_some_and(|t| t.is_float());
+                let abi_reg = if is_float_ret {
+                    FP_RETURN_REG
+                } else {
+                    GPR_RETURN_REG
+                };
+                if ret_reg != abi_reg {
+                    if is_float_ret {
+                        items.push(BlockItem::Inst(MachInst::MovsdRR {
+                            dst: Operand::Reg(abi_reg),
+                            src: Operand::Reg(ret_reg),
+                        }));
+                    } else {
+                        let ret_size = func
+                            .return_types
+                            .first()
+                            .map(OpSize::from_type)
+                            .unwrap_or(OpSize::S64);
+                        items.push(BlockItem::Inst(MachInst::MovRR {
+                            size: ret_size,
+                            dst: Operand::Reg(abi_reg),
+                            src: Operand::Reg(ret_reg),
+                        }));
+                    }
+                }
             }
             // Ret marker: replaced with emit_epilogue() in the encoding loop.
             items.push(BlockItem::Inst(MachInst::Ret));
@@ -348,15 +361,15 @@ fn build_phi_copies(
                 message: format!("arg class {:?} not in class_to_vreg", canon_arg),
                 location: None,
             })?;
-        let src_reg = regalloc
-            .vreg_to_reg
-            .get(&arg_vreg)
-            .copied()
-            .ok_or_else(|| CompileError {
-                phase: "phi-elim".into(),
-                message: format!("arg vreg {:?} not in regalloc", arg_vreg),
-                location: None,
-            })?;
+        let src_reg = match regalloc.vreg_to_reg.get(&arg_vreg).copied() {
+            Some(r) => r,
+            None => {
+                // XMM values that flow through cross-block spill slots
+                // are not assigned registers. Skip the phi copy; the
+                // successor will load from the spill slot at block entry.
+                continue;
+            }
+        };
 
         let param_vreg = param_vreg_overrides
             .get(&(target, param_idx as u32))
@@ -367,18 +380,23 @@ fn build_phi_copies(
                 message: format!("param class {:?} not in class_to_vreg", param_cid),
                 location: None,
             })?;
-        let dst_reg = regalloc
-            .vreg_to_reg
-            .get(&param_vreg)
-            .copied()
-            .ok_or_else(|| CompileError {
-                phase: "phi-elim".into(),
-                message: format!("param vreg {:?} not in regalloc", param_vreg),
-                location: None,
-            })?;
+        let dst_reg = match regalloc.vreg_to_reg.get(&param_vreg).copied() {
+            Some(r) => r,
+            None => {
+                // Same: XMM block param with no register assignment.
+                continue;
+            }
+        };
 
         // Derive OpSize from the block parameter's type.
-        let size = OpSize::from_type(&target_block.param_types[param_idx]);
+        // Float types use S64 here; phi_copies detects XMM registers and
+        // emits MovsdRR/MovssRR instead of MovRR.
+        let param_ty = &target_block.param_types[param_idx];
+        let size = if param_ty.is_float() {
+            OpSize::S64
+        } else {
+            OpSize::from_type(param_ty)
+        };
 
         copies.push((src_reg, dst_reg, size));
     }

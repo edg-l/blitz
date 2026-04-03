@@ -46,7 +46,7 @@ impl CostModel {
     pub fn cost(&self, op: &Op) -> f64 {
         match op {
             // ── Constants: free (materialized as immediate or folded into insn) ──
-            Op::Iconst(..) | Op::Fconst(_) => 0.0,
+            Op::Iconst(..) | Op::Fconst(_, _) => 0.0,
 
             // ── Function parameters: free (value lives in an ABI register on entry) ──
             Op::Param(..) => 0.0,
@@ -191,6 +191,34 @@ impl CostModel {
             }
             .weighted(self.goal),
 
+            // ── x86 FP conversion ops ─────────────────────────────────────────────
+            Op::X86Cvtsi2sd | Op::X86Cvtsi2ss => CostTuple {
+                latency: 4.0,
+                throughput: 1.0,
+                size: 5.0,
+            }
+            .weighted(self.goal),
+            Op::X86Cvttsd2si(_) | Op::X86Cvttss2si(_) => CostTuple {
+                latency: 4.0,
+                throughput: 1.0,
+                size: 5.0,
+            }
+            .weighted(self.goal),
+            Op::X86Cvtsd2ss | Op::X86Cvtss2sd => CostTuple {
+                latency: 3.0,
+                throughput: 1.0,
+                size: 4.0,
+            }
+            .weighted(self.goal),
+
+            // ── x86 FP comparison ops ─────────────────────────────────────────────
+            Op::X86Ucomisd | Op::X86Ucomiss => CostTuple {
+                latency: 3.0,
+                throughput: 1.0,
+                size: 4.0,
+            }
+            .weighted(self.goal),
+
             // ── X86Movsx/X86Movzx: latency=1, throughput=0.25, size=4 ────────────
             Op::X86Movsx { .. } | Op::X86Movzx { .. } => CostTuple {
                 latency: 1.0,
@@ -242,7 +270,12 @@ impl CostModel {
             | Op::Fmul
             | Op::Fdiv
             | Op::Fsqrt
-            | Op::Select => f64::INFINITY,
+            | Op::Select
+            | Op::Fcmp(_)
+            | Op::IntToFloat(_)
+            | Op::FloatToInt(_)
+            | Op::FloatExt
+            | Op::FloatTrunc => f64::INFINITY,
 
             // Spill pseudo-ops are never costed by the e-graph.
             Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {

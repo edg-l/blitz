@@ -388,6 +388,38 @@ pub enum MachInst {
         src2: Operand,
     },
 
+    // ── SSE FP conversion ──────────────────────────────────────────────────────
+    /// cvtsi2sd: GPR -> XMM (int -> f64)
+    Cvtsi2sdRR {
+        dst: Operand,
+        src: Operand,
+    },
+    /// cvtsi2ss: GPR -> XMM (int -> f32)
+    Cvtsi2ssRR {
+        dst: Operand,
+        src: Operand,
+    },
+    /// cvttsd2si: XMM -> GPR (f64 -> int, truncation)
+    Cvttsd2siRR {
+        dst: Operand,
+        src: Operand,
+    },
+    /// cvttss2si: XMM -> GPR (f32 -> int, truncation)
+    Cvttss2siRR {
+        dst: Operand,
+        src: Operand,
+    },
+    /// cvtsd2ss: XMM -> XMM (f64 -> f32)
+    Cvtsd2ssRR {
+        dst: Operand,
+        src: Operand,
+    },
+    /// cvtss2sd: XMM -> XMM (f32 -> f64)
+    Cvtss2sdRR {
+        dst: Operand,
+        src: Operand,
+    },
+
     // ── Bitcast / MOVQ between GPR and XMM ───────────────────────────────────
     /// MOVQ xmm, r/m64  (66 REX.W 0F 6E /r) — move 64-bit integer into XMM.
     MovqToXmm {

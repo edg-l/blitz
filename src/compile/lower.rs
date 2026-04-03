@@ -664,7 +664,7 @@ fn lower_op(
 
         // Fconst: load FP constant bits into a scratch GPR (R11), then move to XMM.
         // R11 is caller-saved and not used by regalloc for any persistent value.
-        Op::Fconst(bits) => {
+        Op::Fconst(bits, _ty) => {
             let dst = dst_reg.ok_or_else(|| "Fconst: no register for dst".to_string())?;
             Ok(vec![
                 MachInst::MovRI {
@@ -704,7 +704,12 @@ fn lower_op(
         | Op::Fmul
         | Op::Fdiv
         | Op::Fsqrt
-        | Op::Select => Err(format!(
+        | Op::Select
+        | Op::Fcmp(_)
+        | Op::IntToFloat(_)
+        | Op::FloatToInt(_)
+        | Op::FloatExt
+        | Op::FloatTrunc => Err(format!(
             "unlowered op {op:?}: generic IR must be lowered by isel phases before lowering"
         )),
         Op::X86Movsx { from, to: _ } => {
@@ -830,6 +835,74 @@ fn lower_op(
             Ok(vec![MachInst::LeaRipRelative {
                 dst: Operand::Reg(dst),
                 symbol: name.clone(),
+            }])
+        }
+
+        // x86 FP conversion ops (lowering implemented in Phase 2)
+        Op::X86Cvtsi2sd => {
+            let dst = get_dst("X86Cvtsi2sd", dst_reg)?;
+            let src = get_op("X86Cvtsi2sd", operand_regs, 0)?;
+            Ok(vec![MachInst::Cvtsi2sdRR {
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+            }])
+        }
+        Op::X86Cvtsi2ss => {
+            let dst = get_dst("X86Cvtsi2ss", dst_reg)?;
+            let src = get_op("X86Cvtsi2ss", operand_regs, 0)?;
+            Ok(vec![MachInst::Cvtsi2ssRR {
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+            }])
+        }
+        Op::X86Cvttsd2si(_) => {
+            let dst = get_dst("X86Cvttsd2si", dst_reg)?;
+            let src = get_op("X86Cvttsd2si", operand_regs, 0)?;
+            Ok(vec![MachInst::Cvttsd2siRR {
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+            }])
+        }
+        Op::X86Cvttss2si(_) => {
+            let dst = get_dst("X86Cvttss2si", dst_reg)?;
+            let src = get_op("X86Cvttss2si", operand_regs, 0)?;
+            Ok(vec![MachInst::Cvttss2siRR {
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+            }])
+        }
+        Op::X86Cvtsd2ss => {
+            let dst = get_dst("X86Cvtsd2ss", dst_reg)?;
+            let src = get_op("X86Cvtsd2ss", operand_regs, 0)?;
+            Ok(vec![MachInst::Cvtsd2ssRR {
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+            }])
+        }
+        Op::X86Cvtss2sd => {
+            let dst = get_dst("X86Cvtss2sd", dst_reg)?;
+            let src = get_op("X86Cvtss2sd", operand_regs, 0)?;
+            Ok(vec![MachInst::Cvtss2sdRR {
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+            }])
+        }
+
+        // x86 FP comparison ops
+        Op::X86Ucomisd => {
+            let src1 = get_op("X86Ucomisd", operand_regs, 0)?;
+            let src2 = get_op("X86Ucomisd", operand_regs, 1)?;
+            Ok(vec![MachInst::UcomisdRR {
+                src1: Operand::Reg(src1),
+                src2: Operand::Reg(src2),
+            }])
+        }
+        Op::X86Ucomiss => {
+            let src1 = get_op("X86Ucomiss", operand_regs, 0)?;
+            let src2 = get_op("X86Ucomiss", operand_regs, 1)?;
+            Ok(vec![MachInst::UcomissRR {
+                src1: Operand::Reg(src1),
+                src2: Operand::Reg(src2),
             }])
         }
 

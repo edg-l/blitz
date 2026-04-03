@@ -35,7 +35,7 @@ pub fn fmt_op(op: &Op) -> String {
 
         // Constants
         Op::Iconst(val, ty) => format!("iconst({val}, {ty:?})"),
-        Op::Fconst(bits) => format!("fconst(0x{bits:x})"),
+        Op::Fconst(bits, ty) => format!("fconst(0x{bits:x}, {ty:?})"),
 
         // Parameters
         Op::Param(idx, ty) => format!("param({idx}, {ty:?})"),
@@ -43,6 +43,13 @@ pub fn fmt_op(op: &Op) -> String {
 
         // Comparison
         Op::Icmp(cc) => format!("icmp({cc:?})"),
+        Op::Fcmp(cc) => format!("fcmp({cc:?})"),
+
+        // Float/int conversions
+        Op::IntToFloat(ty) => format!("int_to_float({ty:?})"),
+        Op::FloatToInt(ty) => format!("float_to_int({ty:?})"),
+        Op::FloatExt => "float_ext".into(),
+        Op::FloatTrunc => "float_trunc".into(),
 
         // FP ops
         Op::Fadd => "fadd".into(),
@@ -107,6 +114,18 @@ pub fn fmt_op(op: &Op) -> String {
         Op::X86Mulss => "x86_mulss".into(),
         Op::X86Divss => "x86_divss".into(),
         Op::X86Sqrtss => "x86_sqrtss".into(),
+
+        // x86 FP conversion
+        Op::X86Cvtsi2sd => "x86_cvtsi2sd".into(),
+        Op::X86Cvtsi2ss => "x86_cvtsi2ss".into(),
+        Op::X86Cvttsd2si(ty) => format!("x86_cvttsd2si({ty:?})"),
+        Op::X86Cvttss2si(ty) => format!("x86_cvttss2si({ty:?})"),
+        Op::X86Cvtsd2ss => "x86_cvtsd2ss".into(),
+        Op::X86Cvtss2sd => "x86_cvtss2sd".into(),
+
+        // x86 FP comparison
+        Op::X86Ucomisd => "x86_ucomisd".into(),
+        Op::X86Ucomiss => "x86_ucomiss".into(),
 
         // Stack address
         Op::StackAddr(slot) => format!("stack_addr({slot})"),

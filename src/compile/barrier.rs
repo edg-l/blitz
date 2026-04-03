@@ -368,11 +368,11 @@ pub(super) fn populate_effectful_operands(
             }
             EffectfulOp::Call { args, results, .. } => {
                 let vregs = resolve_vregs(args);
-                if vregs.is_empty() {
-                    continue;
-                }
                 if let Some(first_result) = results.first() {
                     // Non-void call: attach to existing CallResult.
+                    if vregs.is_empty() {
+                        continue;
+                    }
                     let result_canon = egraph.unionfind.find_immutable(*first_result);
                     let Some(&result_vreg) = class_to_vreg.get(&result_canon) else {
                         continue;
@@ -383,7 +383,9 @@ pub(super) fn populate_effectful_operands(
                         inst.operands.dedup();
                     }
                 } else {
-                    // Void call: insert VoidCallBarrier.
+                    // Void call: always insert VoidCallBarrier, even with no
+                    // arg VRegs. The barrier is needed as a call-clobber marker
+                    // so the register allocator sees the call point.
                     let dst = VReg(*next_vreg);
                     *next_vreg += 1;
                     markers.push((
