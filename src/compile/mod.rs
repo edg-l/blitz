@@ -207,8 +207,17 @@ pub fn compile(
         );
     }
 
-    // Collect all root ClassIds from all effectful ops across all blocks.
-    let all_roots = collect_roots(func);
+    // Build the block param class map (needed for phi copy generation and extraction roots).
+    let block_param_map = build_block_param_class_map(&egraph);
+
+    // Collect all root ClassIds from effectful ops + block params.
+    // Block params must be roots so that continuation block params created
+    // by inlining (which may not be reachable from any effectful op) still
+    // get extracted and assigned VRegs.
+    let mut all_roots = collect_roots(func);
+    all_roots.extend(block_param_map.values().copied());
+    all_roots.sort_by_key(|c| c.0);
+    all_roots.dedup();
 
     // Phase 2: Extraction (shared across all blocks).
     let cost_model = CostModel::new(opts.opt_goal);
@@ -240,9 +249,6 @@ pub fn compile(
     // list and regalloc can see them.
     let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
     let mut next_vreg: u32 = 0;
-
-    // Build the block param class map (needed for phi copy generation).
-    let block_param_map = build_block_param_class_map(&egraph);
 
     // Compute RPO block ordering (indices into func.blocks).
     let rpo_order = compute_rpo(func);
@@ -1483,8 +1489,13 @@ pub fn compile_to_ir_string(
     crate::egraph::algebraic::apply_algebraic_rules(&mut egraph);
     egraph.rebuild();
 
-    // Collect all root ClassIds from all effectful ops across all blocks.
-    let all_roots = collect_roots(func);
+    // Build block param class map before extraction so params are roots.
+    let block_param_map = build_block_param_class_map(&egraph);
+
+    let mut all_roots = collect_roots(func);
+    all_roots.extend(block_param_map.values().copied());
+    all_roots.sort_by_key(|c| c.0);
+    all_roots.dedup();
 
     // Phase 2: Extraction.
     let cost_model = CostModel::new(opts.opt_goal);
@@ -1501,7 +1512,6 @@ pub fn compile_to_ir_string(
     // Phase 3: Build per-block VRegInst lists.
     let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
     let mut next_vreg: u32 = 0;
-    let block_param_map = build_block_param_class_map(&egraph);
     let rpo_order = compute_rpo(func);
 
     let mut block_vreg_insts: Vec<Vec<crate::egraph::extract::VRegInst>> =
