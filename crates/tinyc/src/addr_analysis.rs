@@ -62,6 +62,15 @@ fn walk_expr(expr: &Expr, set: &mut HashSet<String>) {
         Expr::FieldAccess { expr: inner, .. } => {
             walk_expr(inner, set);
         }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            walk_expr(cond, set);
+            walk_expr(then_expr, set);
+            walk_expr(else_expr, set);
+        }
     }
 }
 
@@ -110,5 +119,23 @@ fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
                 walk_stmt(s, set);
             }
         }
+        Stmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => {
+            if let Some(init) = init {
+                walk_stmt(init, set);
+            }
+            walk_expr(cond, set);
+            if let Some(update) = update {
+                walk_stmt(update, set);
+            }
+            for s in body {
+                walk_stmt(s, set);
+            }
+        }
+        Stmt::Break | Stmt::Continue => {}
     }
 }

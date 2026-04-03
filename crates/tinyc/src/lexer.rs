@@ -14,6 +14,8 @@ pub enum Token {
     Else,
     While,
     For,
+    Break,
+    Continue,
     Return,
     Sizeof,
     Extern,
@@ -50,6 +52,8 @@ pub enum Token {
     Dot,
     Arrow,
     // Punctuation
+    Question,
+    Colon,
     Assign,
     LParen,
     RParen,
@@ -183,6 +187,16 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 col += 1;
                 Token::Dot
             }
+            '?' => {
+                pos += 1;
+                col += 1;
+                Token::Question
+            }
+            ':' => {
+                pos += 1;
+                col += 1;
+                Token::Colon
+            }
             '=' => {
                 if pos + 1 < chars.len() && chars[pos + 1] == '=' {
                     pos += 2;
@@ -268,18 +282,46 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 Token::Tilde
             }
             c if c.is_ascii_digit() => {
-                let start = pos;
-                while pos < chars.len() && chars[pos].is_ascii_digit() {
-                    pos += 1;
-                    col += 1;
+                if c == '0'
+                    && pos + 1 < chars.len()
+                    && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
+                {
+                    // Hex literal: 0x...
+                    pos += 2;
+                    col += 2;
+                    let start = pos;
+                    while pos < chars.len() && chars[pos].is_ascii_hexdigit() {
+                        pos += 1;
+                        col += 1;
+                    }
+                    if pos == start {
+                        return Err(TinyErr {
+                            line,
+                            col: span.col,
+                            msg: "expected hex digits after '0x'".into(),
+                        });
+                    }
+                    let s: String = chars[start..pos].iter().collect();
+                    let val = i64::from_str_radix(&s, 16).map_err(|_| TinyErr {
+                        line,
+                        col: span.col,
+                        msg: format!("invalid hex literal '0x{s}'"),
+                    })?;
+                    Token::IntLit(val)
+                } else {
+                    let start = pos;
+                    while pos < chars.len() && chars[pos].is_ascii_digit() {
+                        pos += 1;
+                        col += 1;
+                    }
+                    let s: String = chars[start..pos].iter().collect();
+                    let val: i64 = s.parse().map_err(|_| TinyErr {
+                        line,
+                        col: span.col,
+                        msg: format!("invalid integer literal '{s}'"),
+                    })?;
+                    Token::IntLit(val)
                 }
-                let s: String = chars[start..pos].iter().collect();
-                let val: i64 = s.parse().map_err(|_| TinyErr {
-                    line,
-                    col: span.col,
-                    msg: format!("invalid integer literal '{s}'"),
-                })?;
-                Token::IntLit(val)
             }
             c if c.is_alphabetic() || c == '_' => {
                 let start = pos;
@@ -299,6 +341,8 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     "else" => Token::Else,
                     "while" => Token::While,
                     "for" => Token::For,
+                    "break" => Token::Break,
+                    "continue" => Token::Continue,
                     "return" => Token::Return,
                     "sizeof" => Token::Sizeof,
                     "extern" => Token::Extern,

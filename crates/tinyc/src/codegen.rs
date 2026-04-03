@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use blitz::ir::builder::{FunctionBuilder, Value, Variable};
 use blitz::ir::condcode::CondCode;
+use blitz::ir::effectful::BlockId;
 use blitz::ir::function::{Function, StackSlot};
 use blitz::ir::types::Type;
 
@@ -120,6 +121,11 @@ impl Codegen {
     }
 }
 
+struct LoopContext {
+    header_block: BlockId,
+    exit_block: BlockId,
+}
+
 struct FnCtx<'b> {
     builder: &'b mut FunctionBuilder,
     locals: HashMap<String, Variable>,
@@ -130,6 +136,7 @@ struct FnCtx<'b> {
     fn_signatures: &'b HashMap<String, (CType, Vec<CType>)>,
     struct_registry: &'b StructRegistry,
     global_types: &'b HashMap<String, CType>,
+    loop_stack: Vec<LoopContext>,
 }
 
 impl<'b> FnCtx<'b> {
@@ -151,6 +158,7 @@ impl<'b> FnCtx<'b> {
             fn_signatures,
             struct_registry,
             global_types,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -923,6 +931,52 @@ impl<'b> FnCtx<'b> {
                     Ok((loaded, pointee))
                 }
             }
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let flags = self.compile_cond(cond)?;
+                let then_block = self.builder.create_block();
+                let else_block = self.builder.create_block();
+
+                self.builder.branch(flags, then_block, else_block, &[], &[]);
+
+                // Then arm
+                self.builder.set_block(then_block);
+                self.builder.seal_block(then_block);
+                let (then_val, then_ty) = self.compile_expr(then_expr)?;
+                let then_ir_ty = then_ty.to_ir_type().unwrap();
+                let then_exit = self.builder.current_block();
+                let then_terminated = self.is_terminated();
+
+                // Else arm
+                self.builder.set_block(else_block);
+                self.builder.seal_block(else_block);
+                let (else_val, else_ty) = self.compile_expr(else_expr)?;
+                let else_exit = self.builder.current_block();
+                let else_terminated = self.is_terminated();
+
+                // Merge
+                let (merge_block, merge_params) =
+                    self.builder.create_block_with_params(&[then_ir_ty]);
+                let result = merge_params[0];
+
+                if !then_terminated {
+                    self.builder.set_block(then_exit.unwrap());
+                    let converted = self.emit_convert(then_val, &then_ty, &then_ty);
+                    self.builder.jump(merge_block, &[converted]);
+                }
+                if !else_terminated {
+                    self.builder.set_block(else_exit.unwrap());
+                    let converted = self.emit_convert(else_val, &else_ty, &then_ty);
+                    self.builder.jump(merge_block, &[converted]);
+                }
+
+                self.builder.seal_block(merge_block);
+                self.builder.set_block(merge_block);
+                Ok((result, then_ty.clone()))
+            }
             Expr::FieldAccess { expr, field } => {
                 let (struct_addr, struct_ty) = self.compile_expr(expr)?;
                 let struct_name = match &struct_ty {
@@ -1439,6 +1493,35 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         Stmt::While { cond, body } => {
             compile_while(ctx, cond, body)?;
         }
+        Stmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => {
+            if let Some(init) = init {
+                compile_stmt(ctx, init)?;
+            }
+            compile_for(ctx, cond, update.as_deref(), body)?;
+        }
+        Stmt::Break => {
+            let lc = ctx.loop_stack.last().ok_or_else(|| TinyErr {
+                line: 0,
+                col: 0,
+                msg: "'break' outside of loop".into(),
+            })?;
+            let exit = lc.exit_block;
+            ctx.builder.jump(exit, &[]);
+        }
+        Stmt::Continue => {
+            let lc = ctx.loop_stack.last().ok_or_else(|| TinyErr {
+                line: 0,
+                col: 0,
+                msg: "'continue' outside of loop".into(),
+            })?;
+            let header = lc.header_block;
+            ctx.builder.jump(header, &[]);
+        }
         Stmt::DerefAssign { addr_expr, value } => {
             // The parser stores the full `*expr` as addr_expr (including the Deref).
             // We need the pointer address, so unwrap the outer Deref.
@@ -1624,12 +1707,67 @@ fn compile_while(ctx: &mut FnCtx, cond: &Expr, body: &[Stmt]) -> Result<(), Tiny
     // Body
     ctx.builder.set_block(body_block);
     ctx.builder.seal_block(body_block);
+    ctx.loop_stack.push(LoopContext {
+        header_block,
+        exit_block,
+    });
     compile_stmts(ctx, body)?;
+    ctx.loop_stack.pop();
     if !ctx.is_terminated() {
         ctx.builder.jump(header_block, &[]);
     }
 
     // Now all predecessors of header are known.
+    ctx.builder.seal_block(header_block);
+
+    // Exit
+    ctx.builder.seal_block(exit_block);
+    ctx.builder.set_block(exit_block);
+
+    Ok(())
+}
+
+fn compile_for(
+    ctx: &mut FnCtx,
+    cond: &Expr,
+    update: Option<&Stmt>,
+    body: &[Stmt],
+) -> Result<(), TinyErr> {
+    let header_block = ctx.builder.create_block();
+    let body_block = ctx.builder.create_block();
+    let latch_block = ctx.builder.create_block();
+    let exit_block = ctx.builder.create_block();
+
+    // Jump to header from current block.
+    ctx.builder.jump(header_block, &[]);
+
+    // Header: do NOT seal yet (back edge from latch not yet known).
+    ctx.builder.set_block(header_block);
+    let flags = ctx.compile_cond(cond)?;
+    ctx.builder.branch(flags, body_block, exit_block, &[], &[]);
+
+    // Body -- continue jumps to latch (where update runs), break jumps to exit.
+    ctx.builder.set_block(body_block);
+    ctx.builder.seal_block(body_block);
+    ctx.loop_stack.push(LoopContext {
+        header_block: latch_block, // continue -> latch (runs update before header)
+        exit_block,
+    });
+    compile_stmts(ctx, body)?;
+    ctx.loop_stack.pop();
+    if !ctx.is_terminated() {
+        ctx.builder.jump(latch_block, &[]);
+    }
+
+    // Latch: execute update, then jump back to header.
+    ctx.builder.seal_block(latch_block);
+    ctx.builder.set_block(latch_block);
+    if let Some(upd) = update {
+        compile_stmt(ctx, upd)?;
+    }
+    ctx.builder.jump(header_block, &[]);
+
+    // Now all predecessors of header are known (entry + latch).
     ctx.builder.seal_block(header_block);
 
     // Exit

@@ -442,7 +442,7 @@ impl Parser {
         Ok(stmts)
     }
 
-    /// Parse `for(init; cond; update) { body }` and desugar to `init; while(cond) { body; update; }`.
+    /// Parse `for(init; cond; update) { body }`.
     fn parse_for(&mut self) -> Result<Vec<Stmt>, TinyErr> {
         self.advance(); // consume `for`
         self.expect(Token::LParen)?;
@@ -478,16 +478,20 @@ impl Parser {
         };
         self.expect(Token::RParen)?;
 
-        let mut body = self.parse_block()?;
-        if let Some(upd) = update {
-            body.push(upd);
-        }
+        let body = self.parse_block()?;
 
+        // The init is a separate statement before the for loop, so we return
+        // a Vec that may contain [init, for] or just [for].
         let mut result = Vec::new();
         if let Some(init_stmt) = init {
             result.push(init_stmt);
         }
-        result.push(Stmt::While { cond, body });
+        result.push(Stmt::For {
+            init: None, // init already extracted above
+            cond,
+            update: update.map(Box::new),
+            body,
+        });
         Ok(result)
     }
 
@@ -573,6 +577,16 @@ impl Parser {
         }
 
         match self.peek().clone() {
+            Token::Break => {
+                self.advance();
+                self.expect(Token::Semi)?;
+                Ok(Stmt::Break)
+            }
+            Token::Continue => {
+                self.advance();
+                self.expect(Token::Semi)?;
+                Ok(Stmt::Continue)
+            }
             Token::Return => {
                 self.advance();
                 if self.at(Token::Semi) {
@@ -764,6 +778,23 @@ impl Parser {
                         expr: Box::new(lhs),
                     }),
                     field,
+                };
+                continue;
+            }
+
+            // Ternary operator: cond ? then : else (right-associative, below ||)
+            if self.at(Token::Question) {
+                if 1 <= min_bp {
+                    break;
+                }
+                self.advance();
+                let then_expr = self.parse_expr()?;
+                self.expect(Token::Colon)?;
+                let else_expr = self.parse_expr_bp(0)?;
+                lhs = Expr::Ternary {
+                    cond: Box::new(lhs),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
                 };
                 continue;
             }

@@ -222,6 +222,12 @@ pub enum Stmt {
         cond: Expr,
         body: Vec<Stmt>,
     },
+    For {
+        init: Option<Box<Stmt>>,
+        cond: Expr,
+        update: Option<Box<Stmt>>,
+        body: Vec<Stmt>,
+    },
     VarDecl {
         ty: CType,
         name: String,
@@ -245,6 +251,8 @@ pub enum Stmt {
         field: String,
         value: Expr,
     },
+    Break,
+    Continue,
     ExprStmt(Expr),
 }
 
@@ -277,6 +285,11 @@ pub enum Expr {
     FieldAccess {
         expr: Box<Expr>,
         field: String,
+    },
+    Ternary {
+        cond: Box<Expr>,
+        then_expr: Box<Expr>,
+        else_expr: Box<Expr>,
     },
 }
 
