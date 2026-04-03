@@ -35,6 +35,8 @@ pub struct ObjectFile {
     pub externals: Vec<String>,
     /// Global variable definitions
     pub globals: Vec<GlobalInfo>,
+    /// Read-only data (.rodata) entries (e.g. string literals)
+    pub rodata: Vec<GlobalInfo>,
 }
 
 // ── Alignment helpers ─────────────────────────────────────────────────────────
@@ -53,6 +55,7 @@ fn pad_to(buf: &mut Vec<u8>, align: usize) {
 /// Computed section indices that adjust based on which optional sections exist.
 struct SectionLayout {
     sec_text: u16,
+    sec_rodata: Option<u16>,
     sec_data: Option<u16>,
     sec_bss: Option<u16>,
     #[allow(dead_code)]
@@ -65,11 +68,18 @@ struct SectionLayout {
 }
 
 impl SectionLayout {
-    fn compute(has_data: bool, has_bss: bool) -> Self {
-        // Section order: null(0), .text, [.data], [.bss], .rela.text, .symtab, .strtab, .shstrtab, .note.GNU-stack
+    fn compute(has_rodata: bool, has_data: bool, has_bss: bool) -> Self {
+        // Section order: null(0), .text, [.rodata], [.data], [.bss], .rela.text, .symtab, .strtab, .shstrtab, .note.GNU-stack
         let mut next: u16 = 1; // 0 is null
         let sec_text = next;
         next += 1;
+        let sec_rodata = if has_rodata {
+            let idx = next;
+            next += 1;
+            Some(idx)
+        } else {
+            None
+        };
         let sec_data = if has_data {
             let idx = next;
             next += 1;
@@ -96,6 +106,7 @@ impl SectionLayout {
         next += 1;
         SectionLayout {
             sec_text,
+            sec_rodata,
             sec_data,
             sec_bss,
             sec_rela_text,
@@ -118,9 +129,31 @@ impl ObjectFile {
         let bss_globals: Vec<&GlobalInfo> =
             self.globals.iter().filter(|g| g.init.is_none()).collect();
 
+        let has_rodata = !self.rodata.is_empty();
         let has_data = !data_globals.is_empty();
         let has_bss = !bss_globals.is_empty();
-        let layout = SectionLayout::compute(has_data, has_bss);
+        let layout = SectionLayout::compute(has_rodata, has_data, has_bss);
+
+        // ── Build .rodata section content ────────────────────────────────────
+        let mut rodata_content: Vec<u8> = Vec::new();
+        // Map: symbol name -> (section index, offset within section, size)
+        let mut rodata_section_info: HashMap<String, (u16, u64, u64)> = HashMap::new();
+
+        for g in &self.rodata {
+            let align = g.align.max(1);
+            let padded_offset = align_up(rodata_content.len(), align);
+            rodata_content.resize(padded_offset, 0);
+            let offset = rodata_content.len();
+            let init = g.init.as_ref().expect("rodata entries must have init data");
+            rodata_content.extend_from_slice(init);
+            if init.len() < g.size {
+                rodata_content.resize(offset + g.size, 0);
+            }
+            rodata_section_info.insert(
+                g.name.clone(),
+                (layout.sec_rodata.unwrap(), offset as u64, g.size as u64),
+            );
+        }
 
         // ── Build .data section content ──────────────────────────────────────
         let mut data_content: Vec<u8> = Vec::new();
@@ -159,6 +192,11 @@ impl ObjectFile {
         // ── Build .shstrtab ───────────────────────────────────────────────────
         let mut shstrtab = StringTable::new();
         let name_text = shstrtab.add(".text");
+        let name_rodata = if has_rodata {
+            Some(shstrtab.add(".rodata"))
+        } else {
+            None
+        };
         let name_data = if has_data {
             Some(shstrtab.add(".data"))
         } else {
@@ -188,16 +226,28 @@ impl ObjectFile {
         let func_strtab: Vec<u32> = self.functions.iter().map(|f| strtab.add(&f.name)).collect();
         // Global name strtab offsets
         let global_strtab: Vec<u32> = self.globals.iter().map(|g| strtab.add(&g.name)).collect();
+        // Rodata name strtab offsets
+        let rodata_strtab: Vec<u32> = self.rodata.iter().map(|g| strtab.add(&g.name)).collect();
 
         // ── Build .symtab ─────────────────────────────────────────────────────
         let mut symtab = SymbolTable::new();
         // Local section symbols
         symtab.add_section(layout.sec_text);
+        if let Some(sec) = layout.sec_rodata {
+            symtab.add_section(sec);
+        }
         if let Some(sec) = layout.sec_data {
             symtab.add_section(sec);
         }
         if let Some(sec) = layout.sec_bss {
             symtab.add_section(sec);
+        }
+        // Local rodata symbols (must be added before globals)
+        let mut global_sym_idx: HashMap<String, u32> = HashMap::new();
+        for (i, g) in self.rodata.iter().enumerate() {
+            let (section, offset, size) = rodata_section_info[&g.name];
+            let idx = symtab.add_local_object(rodata_strtab[i], section, offset, size);
+            global_sym_idx.insert(g.name.clone(), idx);
         }
         // Global function symbols
         for (i, func) in self.functions.iter().enumerate() {
@@ -209,7 +259,6 @@ impl ObjectFile {
             );
         }
         // Global data symbols
-        let mut global_sym_idx: HashMap<String, u32> = HashMap::new();
         for (i, g) in self.globals.iter().enumerate() {
             let idx = symtab.len() as u32;
             let (section, offset, size) = global_section_info[&g.name];
@@ -230,7 +279,7 @@ impl ObjectFile {
         let mut rela = RelocationTable::new();
         for reloc in &self.relocations {
             let (sym_idx, r_type) = if let Some(&idx) = global_sym_idx.get(&reloc.symbol) {
-                // Reference to a global variable
+                // Reference to a global/rodata variable
                 let r_type = match reloc.kind {
                     RelocKind::PLT32 => R_X86_64_PLT32,
                     RelocKind::PC32 => R_X86_64_PC32,
@@ -273,6 +322,16 @@ impl ObjectFile {
         pad_to(&mut buf, 16);
         let off_text = buf.len();
         buf.extend_from_slice(text_bytes);
+
+        // .rodata (if any)
+        let off_rodata = if has_rodata {
+            pad_to(&mut buf, 1);
+            let off = buf.len();
+            buf.extend_from_slice(&rodata_content);
+            off
+        } else {
+            0
+        };
 
         // .data (if any)
         let off_data = if has_data {
@@ -341,6 +400,25 @@ impl ObjectFile {
             }
             .to_bytes(),
         );
+
+        // .rodata section header (if any)
+        if has_rodata {
+            buf.extend_from_slice(
+                &Elf64Shdr {
+                    sh_name: name_rodata.unwrap(),
+                    sh_type: SHT_PROGBITS,
+                    sh_flags: SHF_ALLOC,
+                    sh_addr: 0,
+                    sh_offset: off_rodata as u64,
+                    sh_size: rodata_content.len() as u64,
+                    sh_link: 0,
+                    sh_info: 0,
+                    sh_addralign: 1,
+                    sh_entsize: 0,
+                }
+                .to_bytes(),
+            );
+        }
 
         // .data section header (if any)
         if has_data {
@@ -528,6 +606,7 @@ mod tests {
             }],
             externals: vec![],
             globals: vec![],
+            rodata: vec![],
         }
     }
 
@@ -628,6 +707,7 @@ mod tests {
             }],
             externals: vec![],
             globals: vec![],
+            rodata: vec![],
         };
 
         let dir = std::env::temp_dir();
@@ -688,6 +768,7 @@ mod tests {
             }],
             externals: vec!["printf".into()],
             globals: vec![],
+            rodata: vec![],
         };
         let bytes = obj.finalize();
         assert_eq!(&bytes[0..4], b"\x7fELF");

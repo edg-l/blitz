@@ -1031,9 +1031,10 @@ fn test_extern_multiple_decls() {
 fn test_string_lit_high_bytes() {
     // Regression: packed I32/I16 stores used signed from_le_bytes which
     // sign-extended bytes with the high bit set (>= 0x80).
+    // Uses a stack-allocated char array since string literals are now in .rodata.
     let src = r#"
         int main() {
-            char *s = "\t\t";
+            char s[4];
             s[0] = (char)200;
             return (int)(unsigned char)s[0] - 200 + 42;
         }"#;
@@ -1046,9 +1047,10 @@ fn test_string_lit_many_stores() {
     // effectful operand VRegs were kept alive until end of block.
     // Deadline-based liveness fixes this by letting VRegs die at their
     // barrier position.
+    // Uses a stack-allocated char array since string literals are now in .rodata.
     let src = r#"
         int main() {
-            char *s = "\t\t\t";
+            char s[4];
             s[0] = (char)65;
             s[1] = (char)66;
             int a = (int)(unsigned char)s[0];
@@ -1085,9 +1087,10 @@ fn test_string_lit_exact_8() {
 fn test_high_register_pressure() {
     // Regression: 3 pointer writes + 3 reads in one block previously exhausted
     // registers. Deadline-based liveness + frame layout fix resolved this.
+    // Uses a stack-allocated char array since string literals are now in .rodata.
     let src = r#"
         int main() {
-            char *s = "\t\t\t\t\t";
+            char s[8];
             s[0] = (char)200;
             s[1] = (char)128;
             s[2] = (char)255;

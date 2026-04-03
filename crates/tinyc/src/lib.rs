@@ -20,8 +20,12 @@ pub fn compile_source(src: &str) -> Result<Vec<u8>, TinyErr> {
     let tokens = lexer::tokenize(src)?;
     let program = parser::Parser::parse(tokens)?;
     let cg = codegen::Codegen::generate(&program)?;
-    let obj =
-        blitz::compile::compile_module_with_globals(cg.functions, &default_opts(), cg.globals)?;
+    let obj = blitz::compile::compile_module_with_globals(
+        cg.functions,
+        &default_opts(),
+        cg.globals,
+        cg.rodata,
+    )?;
     Ok(obj.finalize())
 }
 
@@ -30,8 +34,12 @@ pub fn compile_to_object(src: &str) -> Result<blitz::emit::object::ObjectFile, T
     let tokens = lexer::tokenize(src)?;
     let program = parser::Parser::parse(tokens)?;
     let cg = codegen::Codegen::generate(&program)?;
-    let obj =
-        blitz::compile::compile_module_with_globals(cg.functions, &default_opts(), cg.globals)?;
+    let obj = blitz::compile::compile_module_with_globals(
+        cg.functions,
+        &default_opts(),
+        cg.globals,
+        cg.rodata,
+    )?;
     Ok(obj)
 }
 

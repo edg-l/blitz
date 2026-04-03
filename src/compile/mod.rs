@@ -1463,6 +1463,7 @@ pub fn compile(
         }],
         externals,
         globals: vec![],
+        rodata: vec![],
     })
 }
 
@@ -1728,7 +1729,7 @@ pub fn compile_module(
     functions: Vec<Function>,
     opts: &CompileOptions,
 ) -> Result<ObjectFile, CompileError> {
-    compile_module_with_globals(functions, opts, vec![])
+    compile_module_with_globals(functions, opts, vec![], vec![])
 }
 
 /// Compile multiple functions into a single object file, with global variable definitions.
@@ -1736,12 +1737,16 @@ pub fn compile_module_with_globals(
     mut functions: Vec<Function>,
     opts: &CompileOptions,
     globals: Vec<crate::emit::object::GlobalInfo>,
+    rodata: Vec<crate::emit::object::GlobalInfo>,
 ) -> Result<ObjectFile, CompileError> {
     crate::inline::inline_module(&mut functions, opts);
 
-    // Collect global names so we can filter them from externals.
-    let global_names: std::collections::HashSet<String> =
-        globals.iter().map(|g| g.name.clone()).collect();
+    // Collect global and rodata names so we can filter them from externals.
+    let global_names: std::collections::HashSet<String> = globals
+        .iter()
+        .chain(rodata.iter())
+        .map(|g| g.name.clone())
+        .collect();
 
     let mut combined_code: Vec<u8> = Vec::new();
     let mut combined_relocs = Vec::new();
@@ -1780,6 +1785,7 @@ pub fn compile_module_with_globals(
         functions: combined_funcs,
         externals: combined_externals,
         globals,
+        rodata,
     })
 }
 

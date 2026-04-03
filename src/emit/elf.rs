@@ -235,6 +235,23 @@ impl SymbolTable {
         self.first_global = self.symbols.len() as u32;
     }
 
+    /// Add a local object symbol. Inserts before first_global and increments it.
+    /// Returns the symbol index.
+    pub fn add_local_object(&mut self, name_idx: u32, section: u16, offset: u64, size: u64) -> u32 {
+        let sym = Elf64Sym {
+            st_name: name_idx,
+            st_info: (STB_LOCAL << 4) | STT_OBJECT,
+            st_other: 0,
+            st_shndx: section,
+            st_value: offset,
+            st_size: size,
+        };
+        let idx = self.first_global as usize;
+        self.symbols.insert(idx, sym);
+        self.first_global += 1;
+        idx as u32
+    }
+
     pub fn add_function(&mut self, name_idx: u32, text_section: u16, offset: u64, size: u64) {
         let sym = Elf64Sym {
             st_name: name_idx,

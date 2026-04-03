@@ -21,6 +21,7 @@ pub type StructRegistry = HashMap<String, StructLayout>;
 pub struct Codegen {
     pub functions: Vec<Function>,
     pub globals: Vec<blitz::emit::object::GlobalInfo>,
+    pub rodata: Vec<blitz::emit::object::GlobalInfo>,
 }
 
 impl Codegen {
@@ -66,6 +67,8 @@ impl Codegen {
 
         let mut functions = Vec::new();
         let mut globals = Vec::new();
+        let mut rodata = Vec::new();
+        let mut string_counter: usize = 0;
         let mut global_types: HashMap<String, CType> = HashMap::new();
 
         // Process global variable declarations.
@@ -115,9 +118,15 @@ impl Codegen {
                 &fn_signatures,
                 &struct_registry,
                 &global_types,
+                &mut rodata,
+                &mut string_counter,
             )?);
         }
-        Ok(Codegen { functions, globals })
+        Ok(Codegen {
+            functions,
+            globals,
+            rodata,
+        })
     }
 }
 
@@ -137,6 +146,8 @@ struct FnCtx<'b> {
     struct_registry: &'b StructRegistry,
     global_types: &'b HashMap<String, CType>,
     loop_stack: Vec<LoopContext>,
+    rodata: &'b mut Vec<blitz::emit::object::GlobalInfo>,
+    string_counter: &'b mut usize,
 }
 
 impl<'b> FnCtx<'b> {
@@ -147,6 +158,8 @@ impl<'b> FnCtx<'b> {
         addressed_vars: HashSet<String>,
         struct_registry: &'b StructRegistry,
         global_types: &'b HashMap<String, CType>,
+        rodata: &'b mut Vec<blitz::emit::object::GlobalInfo>,
+        string_counter: &'b mut usize,
     ) -> Self {
         FnCtx {
             builder,
@@ -159,6 +172,8 @@ impl<'b> FnCtx<'b> {
             struct_registry,
             global_types,
             loop_stack: Vec::new(),
+            rodata,
+            string_counter,
         }
     }
 
@@ -438,58 +453,21 @@ impl<'b> FnCtx<'b> {
                 }
             }
             Expr::StringLit(bytes) => {
-                // Append null terminator to get the full data to store.
+                let label = format!(".L.str.{}", self.string_counter);
+                *self.string_counter += 1;
+
                 let mut data: Vec<u8> = bytes.clone();
-                data.push(0);
-                // Round up to multiple of 8 so wide stores don't overflow the slot.
-                let slot_size = ((data.len() as u32) + 7) & !7;
-                let slot = self.builder.create_stack_slot(slot_size, 8);
+                data.push(0u8);
 
-                // Pack bytes into widest possible stores (I64/I32/I16/I8)
-                // to reduce register pressure.
-                let base_addr = self.builder.stack_addr(slot);
-                let mut pos = 0;
-                while pos < data.len() {
-                    let remaining = data.len() - pos;
-                    let (val, ty, advance) = if remaining >= 8 {
-                        let v = i64::from_le_bytes([
-                            data[pos],
-                            data[pos + 1],
-                            data[pos + 2],
-                            data[pos + 3],
-                            data[pos + 4],
-                            data[pos + 5],
-                            data[pos + 6],
-                            data[pos + 7],
-                        ]);
-                        (v, Type::I64, 8)
-                    } else if remaining >= 4 {
-                        let v = u32::from_le_bytes([
-                            data[pos],
-                            data[pos + 1],
-                            data[pos + 2],
-                            data[pos + 3],
-                        ]) as i64;
-                        (v, Type::I32, 4)
-                    } else if remaining >= 2 {
-                        let v = u16::from_le_bytes([data[pos], data[pos + 1]]) as i64;
-                        (v, Type::I16, 2)
-                    } else {
-                        (data[pos] as i64, Type::I8, 1)
-                    };
+                self.rodata.push(blitz::emit::object::GlobalInfo {
+                    name: label.clone(),
+                    size: data.len(),
+                    align: 1,
+                    init: Some(data),
+                });
 
-                    let store_val = self.builder.iconst(val, ty);
-                    let addr = if pos > 0 {
-                        let offset = self.builder.iconst(pos as i64, Type::I64);
-                        self.builder.add(base_addr, offset)
-                    } else {
-                        base_addr
-                    };
-                    self.builder.store(addr, store_val);
-                    pos += advance;
-                }
-
-                Ok((base_addr, CType::Ptr(Box::new(CType::Char))))
+                let addr = self.builder.global_addr(&label);
+                Ok((addr, CType::Ptr(Box::new(CType::Char))))
             }
             Expr::Var(name) => {
                 if let Some((slot, ty)) = self.stack_slots.get(name) {
@@ -1267,6 +1245,8 @@ fn compile_fn(
     fn_sigs: &HashMap<String, (CType, Vec<CType>)>,
     struct_registry: &StructRegistry,
     global_types: &HashMap<String, CType>,
+    rodata: &mut Vec<blitz::emit::object::GlobalInfo>,
+    string_counter: &mut usize,
 ) -> Result<Function, TinyErr> {
     let param_ir_types: Vec<Type> = fn_def
         .params
@@ -1297,6 +1277,8 @@ fn compile_fn(
         addressed_vars,
         struct_registry,
         global_types,
+        rodata,
+        string_counter,
     );
 
     for ((ty, name), val) in fn_def.params.iter().zip(param_vals.iter()) {
