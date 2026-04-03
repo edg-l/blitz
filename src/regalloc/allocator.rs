@@ -28,6 +28,11 @@ pub struct RegAllocResult {
     /// aliases applied. Callers must use this instead of their original
     /// instruction list, since `vreg_to_reg` was computed for this version.
     pub insts: Vec<ScheduledInst>,
+    /// Function parameter VRegs whose precoloring was removed because they are
+    /// live across a call that clobbers their ABI register. The lowering must
+    /// emit a mov from the ABI register to the allocated register at function
+    /// entry for these params.
+    pub unprecolored_params: Vec<(VReg, Reg)>,
 }
 
 /// Allocate physical registers for a single basic block's scheduled instruction list.
@@ -141,7 +146,9 @@ pub fn allocate(
         );
 
         // Merge phantom pre-colorings (caller-saved phantoms at call sites) with
-        // param pre-colorings.
+        // param pre-colorings. Remove param precolorings that conflict with
+        // phantoms: a function param in a caller-saved register (e.g. RDI) that
+        // is live across a call cannot keep that register -- the call clobbers it.
         let mut pre_coloring_colors2 = pre_coloring_colors.clone();
         pre_coloring_colors2.extend(phantom_precolors);
 
@@ -229,6 +236,7 @@ pub fn allocate(
                 spill_slots,
                 callee_saved_used,
                 insts: insts_coalesced,
+                unprecolored_params: vec![],
             });
         }
 

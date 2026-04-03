@@ -478,7 +478,11 @@ pub fn compile(
     // Multi-block path: compute global liveness, assign cross-block spill slots,
     // rewrite each block to insert spill/reload code at boundaries, then run
     // allocate() per block and merge results.
-    let param_vregs = assign_param_vregs_from_map(func, &class_to_vreg, &egraph);
+    let entry_has_calls = func.blocks[0]
+        .ops
+        .iter()
+        .any(|op| matches!(op, EffectfulOp::Call { .. }));
+    let param_vregs = assign_param_vregs_from_map(func, &class_to_vreg, &egraph, entry_has_calls);
 
     // Build phi copy pairs from block parameter passing for coalescing.
     let copy_pairs = compute_copy_pairs(
@@ -1139,7 +1143,8 @@ pub fn compile(
             vreg_to_reg: merged_vreg_to_reg,
             spill_slots: spill_slot_counter,
             callee_saved_used: merged_callee_saved,
-            insts: vec![], // per-block insts already consumed above
+            insts: vec![],               // per-block insts already consumed above
+            unprecolored_params: vec![], // multi-block handles this separately
         };
 
         (merged_result, block_rewritten_storage, block_rename_maps)
@@ -1267,6 +1272,30 @@ pub fn compile(
         // For each barrier K: emit group[K] pure ops, then barrier K.
         // After all barriers: emit group[num_barriers] (trailing pure ops).
         let mut all_insts: Vec<MachInst> = Vec::new();
+
+        // Emit movs for register params not precolored (live across a call
+        // that clobbers their ABI register). Must be at the very start of
+        // the function, before any barrier group / call arg setup.
+        for inst in rewritten.iter() {
+            if let Op::Param(param_idx, _) = &inst.op {
+                if !param_vreg_set.contains(&inst.dst) {
+                    let arg_locs = crate::x86::abi::assign_args(&func.param_types);
+                    if let Some(crate::x86::abi::ArgLoc::Reg(abi_reg)) =
+                        arg_locs.get(*param_idx as usize)
+                    {
+                        if let Some(&dst_reg) = regalloc_result.vreg_to_reg.get(&inst.dst) {
+                            if dst_reg != *abi_reg {
+                                all_insts.push(MachInst::MovRR {
+                                    size: crate::x86::inst::OpSize::S64,
+                                    src: crate::x86::inst::Operand::Reg(*abi_reg),
+                                    dst: crate::x86::inst::Operand::Reg(dst_reg),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let lower_group = |group: &[&ScheduledInst],
                            regalloc_result: &RegAllocResult,

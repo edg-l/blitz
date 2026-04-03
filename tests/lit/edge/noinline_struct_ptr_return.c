@@ -1,7 +1,11 @@
 // EXIT: 10
-// BUG: noinline function returning struct pointer -- the function parameter
-// in rdi gets clobbered by the malloc call's argument (also rdi). The
-// register allocator should save the parameter across the call but doesn't.
+// RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
+// CHECK-LABEL: # new_node
+// param saved to callee-saved register before call
+// CHECK: mov    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: call
+// store param value (not clobbered malloc arg)
+// CHECK: mov    DWORD PTR
 
 extern char* malloc(int size);
 

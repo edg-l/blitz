@@ -17,7 +17,10 @@ pub(super) fn assign_param_vregs_from_map(
     func: &Function,
     class_to_vreg: &BTreeMap<ClassId, VReg>,
     egraph: &EGraph,
+    block_has_calls: bool,
 ) -> Vec<(VReg, Reg)> {
+    use crate::x86::abi::CALLER_SAVED_GPR;
+
     if func.param_class_ids.is_empty() {
         return vec![];
     }
@@ -31,6 +34,13 @@ pub(super) fn assign_param_vregs_from_map(
         if let Some(&vreg) = class_to_vreg.get(&canon)
             && let ArgLoc::Reg(reg) = arg_locs[param_idx]
         {
+            // Don't precolor params to caller-saved registers when the block
+            // has calls -- the call clobbers the register and the regalloc
+            // can't resolve the conflict. The param will get a callee-saved
+            // register and a mov will be emitted at function entry.
+            if block_has_calls && CALLER_SAVED_GPR.contains(&reg) {
+                continue;
+            }
             pairs.push((vreg, reg));
         }
     }
@@ -243,7 +253,10 @@ pub(super) fn add_call_precolors_for_block(
                 if let Some(&vreg) = class_to_vreg.get(&canon) {
                     match loc {
                         ArgLoc::Reg(reg) => {
-                            if call_count == 1 && !param_vregs.iter().any(|&(v, _)| v == vreg) {
+                            if call_count == 1
+                                && !param_vregs.iter().any(|&(v, _)| v == vreg)
+                                && !param_vregs.iter().any(|&(_, r)| r == *reg)
+                            {
                                 param_vregs.push((vreg, *reg));
                             }
                         }
