@@ -114,11 +114,7 @@ pub(super) fn add_call_precolors_for_block(
     param_vregs: &mut Vec<(VReg, Reg)>,
     live_out: &mut BTreeSet<VReg>,
 ) {
-    let non_term_count = if block.ops.is_empty() {
-        0
-    } else {
-        block.ops.len() - 1
-    };
+    let non_term_count = block.non_term_count();
     let call_count = block.ops[..non_term_count]
         .iter()
         .filter(|op| matches!(op, EffectfulOp::Call { .. }))

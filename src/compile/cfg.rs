@@ -428,6 +428,14 @@ pub(super) fn compute_loop_depths(
     // Compute per-block loop depth using back-edge counting.
     let mut block_depth: Vec<u32> = vec![0u32; n];
 
+    // Build BlockId -> index map for O(1) lookups.
+    let block_id_to_idx: std::collections::HashMap<BlockId, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+
     // For each block, check its terminator for back-edges.
     for (src_idx, block) in func.blocks.iter().enumerate() {
         if let Some(terminator) = block.ops.last() {
@@ -440,7 +448,7 @@ pub(super) fn compute_loop_depths(
             };
             for target in targets {
                 // Find target block index.
-                if let Some(target_idx) = func.blocks.iter().position(|b| b.id == target)
+                if let Some(&target_idx) = block_id_to_idx.get(&target)
                     && target_idx <= src_idx
                 {
                     // Back-edge: all blocks from target_idx to src_idx are in the loop.

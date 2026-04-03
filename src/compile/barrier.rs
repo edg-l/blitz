@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use crate::egraph::egraph::EGraph;
 use crate::egraph::extract::VReg;
 use crate::ir::effectful::EffectfulOp;
+use crate::ir::function::BasicBlock;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 use crate::schedule::scheduler::ScheduledInst;
@@ -28,6 +29,28 @@ pub(super) fn mark_branch_cond_barrier(
             *entry = (*entry).max(non_term_count);
         }
     }
+}
+
+/// Build barrier maps and mark the branch condition in one step.
+///
+/// Combines `build_barrier_maps` + `mark_branch_cond_barrier` which are always
+/// called together.
+pub(super) fn build_barrier_context(
+    block: &BasicBlock,
+    egraph: &EGraph,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+) -> (BTreeMap<VReg, usize>, BTreeMap<VReg, usize>) {
+    let non_term_count = block.non_term_count();
+    let non_term_ops = &block.ops[..non_term_count];
+    let (result_map, mut arg_map) = build_barrier_maps(non_term_ops, egraph, class_to_vreg);
+    mark_branch_cond_barrier(
+        block.ops.last(),
+        non_term_count,
+        egraph,
+        class_to_vreg,
+        &mut arg_map,
+    );
+    (result_map, arg_map)
 }
 
 /// Build barrier maps: which VRegs are produced/consumed by each effectful op.

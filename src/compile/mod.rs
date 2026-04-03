@@ -13,7 +13,7 @@
 //! 10. Encoding
 //! 11. ELF emission
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::egraph::cost::{CostModel, OptGoal};
 use crate::egraph::extract::{VReg, VRegInst, build_vreg_types, extract, vreg_insts_for_block};
@@ -34,8 +34,8 @@ use crate::x86::reg::Reg;
 
 mod barrier;
 use barrier::{
-    assign_barrier_groups, build_barrier_maps, insert_early_barrier_spills,
-    mark_branch_cond_barrier, populate_effectful_operands,
+    assign_barrier_groups, build_barrier_context, insert_early_barrier_spills,
+    populate_effectful_operands,
 };
 mod cfg;
 use cfg::{
@@ -148,6 +148,60 @@ fn func_has_calls(func: &Function) -> bool {
     })
 }
 
+// ── Shared egraph + extraction phases ────────────────────────────────────────
+
+use crate::egraph::egraph::EGraph;
+use crate::egraph::extract::ExtractionResult;
+
+/// Run the e-graph rewrite rules and cost-based extraction (phases 1-2).
+///
+/// Shared between `compile()` and `compile_to_ir_string()`.
+fn run_egraph_and_extract(
+    func: &Function,
+    egraph: &mut EGraph,
+    opts: &CompileOptions,
+) -> Result<(BTreeMap<(BlockId, u32), ClassId>, ExtractionResult), CompileError> {
+    let egraph_opts = EGraphOptions {
+        phase1_limit: opts.phase1_limit,
+        phase2_limit: opts.phase2_limit,
+        phase3_limit: opts.phase3_limit,
+        max_classes: 500_000,
+    };
+    crate::egraph::algebraic::propagate_block_params(func, egraph);
+    run_phases(egraph, &egraph_opts).map_err(|e| CompileError {
+        phase: "egraph".into(),
+        message: e,
+        location: Some(IrLocation {
+            function: func.name.clone(),
+            block: None,
+            inst: None,
+        }),
+    })?;
+    crate::egraph::algebraic::propagate_block_params(func, egraph);
+    crate::egraph::algebraic::apply_algebraic_rules(egraph);
+    egraph.rebuild();
+
+    let block_param_map = build_block_param_class_map(egraph);
+
+    let mut all_roots = collect_roots(func);
+    all_roots.extend(block_param_map.values().copied());
+    all_roots.sort_by_key(|c| c.0);
+    all_roots.dedup();
+
+    let cost_model = CostModel::new(opts.opt_goal);
+    let extraction = extract(egraph, &all_roots, &cost_model).map_err(|e| CompileError {
+        phase: "extraction".into(),
+        message: e.to_string(),
+        location: Some(IrLocation {
+            function: func.name.clone(),
+            block: None,
+            inst: None,
+        }),
+    })?;
+
+    Ok((block_param_map, extraction))
+}
+
 // ── compile() ────────────────────────────────────────────────────────────────
 
 /// Compile a single function to an object file.
@@ -169,32 +223,20 @@ pub fn compile(
         .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
     let func = &func;
 
+    // Build BlockId -> index map for O(1) lookups.
+    let block_id_to_idx: HashMap<BlockId, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+
     // Detect whether this function contains any call instructions.
     // This is needed for frame layout decisions (leaf detection, red zone eligibility).
     let has_calls = func_has_calls(func);
 
-    // Phase 1: E-graph rewrite rules.
-    let egraph_opts = EGraphOptions {
-        phase1_limit: opts.phase1_limit,
-        phase2_limit: opts.phase2_limit,
-        phase3_limit: opts.phase3_limit,
-        max_classes: 500_000,
-    };
-    crate::egraph::algebraic::propagate_block_params(func, &mut egraph);
-    run_phases(&mut egraph, &egraph_opts).map_err(|e| CompileError {
-        phase: "egraph".into(),
-        message: e,
-        location: Some(IrLocation {
-            function: func.name.clone(),
-            block: None,
-            inst: None,
-        }),
-    })?;
-    // Second pass catches constants revealed by folding in the first pass,
-    // then re-run algebraic rules to fold newly exposed constant expressions.
-    crate::egraph::algebraic::propagate_block_params(func, &mut egraph);
-    crate::egraph::algebraic::apply_algebraic_rules(&mut egraph);
-    egraph.rebuild();
+    // Phases 1-2: E-graph rewrites and cost-based extraction.
+    let (block_param_map, extraction) = run_egraph_and_extract(func, &mut egraph, opts)?;
 
     if let Some(s) = sink.as_mut() {
         s.phase_stats(
@@ -205,33 +247,6 @@ pub fn compile(
                 egraph.node_count()
             ),
         );
-    }
-
-    // Build the block param class map (needed for phi copy generation and extraction roots).
-    let block_param_map = build_block_param_class_map(&egraph);
-
-    // Collect all root ClassIds from effectful ops + block params.
-    // Block params must be roots so that continuation block params created
-    // by inlining (which may not be reachable from any effectful op) still
-    // get extracted and assigned VRegs.
-    let mut all_roots = collect_roots(func);
-    all_roots.extend(block_param_map.values().copied());
-    all_roots.sort_by_key(|c| c.0);
-    all_roots.dedup();
-
-    // Phase 2: Extraction (shared across all blocks).
-    let cost_model = CostModel::new(opts.opt_goal);
-    let extraction = extract(&egraph, &all_roots, &cost_model).map_err(|e| CompileError {
-        phase: "extraction".into(),
-        message: e.to_string(),
-        location: Some(IrLocation {
-            function: func.name.clone(),
-            block: None,
-            inst: None,
-        }),
-    })?;
-
-    if let Some(s) = sink.as_mut() {
         s.phase_stats(
             "extraction",
             &format!("classes_extracted={}", extraction.choices.len()),
@@ -378,7 +393,7 @@ pub fn compile(
 
     // Insert types for fresh block param VRegs allocated above.
     for (&(bid, pidx), &fresh_vreg) in &block_param_vreg_overrides {
-        let block = func.blocks.iter().find(|b| b.id == bid).unwrap();
+        let block = &func.blocks[block_id_to_idx[&bid]];
         let ty = block.param_types[pidx as usize].clone();
         vreg_types.insert(fresh_vreg, ty);
     }
@@ -405,26 +420,12 @@ pub fn compile(
     // scheduler doesn't know about effectful ops, so we reorder the schedule
     // here so the regalloc sees correct liveness.
     for (block_idx, block) in func.blocks.iter().enumerate() {
-        let non_term_count = if block.ops.is_empty() {
-            0
-        } else {
-            block.ops.len() - 1
-        };
-        if non_term_count == 0 {
+        if block.non_term_count() == 0 {
             continue; // No effectful ops to constrain ordering.
         }
-        let non_term_ops = &block.ops[..non_term_count];
 
-        // Build barrier maps: which VRegs are produced/consumed by each barrier.
-        let (vreg_to_result_of_barrier, mut vreg_to_arg_of_barrier) =
-            build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
-        mark_branch_cond_barrier(
-            block.ops.last(),
-            non_term_count,
-            &egraph,
-            &class_to_vreg,
-            &mut vreg_to_arg_of_barrier,
-        );
+        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
+            build_barrier_context(block, &egraph, &class_to_vreg);
 
         let sched = &block_schedules[block_idx];
         let vreg_group =
@@ -515,22 +516,10 @@ pub fn compile(
         // effectful op operand liveness at the correct barrier positions.
         {
             let block = &func.blocks[0];
-            let non_term_count = if block.ops.is_empty() {
-                0
-            } else {
-                block.ops.len() - 1
-            };
+            let non_term_count = block.non_term_count();
             if non_term_count > 0 {
                 let non_term_ops = &block.ops[..non_term_count];
-                let (result_map, mut arg_map) =
-                    build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
-                mark_branch_cond_barrier(
-                    block.ops.last(),
-                    non_term_count,
-                    &egraph,
-                    &class_to_vreg,
-                    &mut arg_map,
-                );
+                let (result_map, arg_map) = build_barrier_context(block, &egraph, &class_to_vreg);
                 let mut vreg_group = assign_barrier_groups(&all_scheduled, &result_map, &arg_map);
                 populate_effectful_operands(
                     &mut all_scheduled,
@@ -668,22 +657,10 @@ pub fn compile(
         // BEFORE global liveness, so compute_global_liveness sees them as regular
         // instruction operands and includes them in cross-block liveness.
         for (block_idx, block) in func.blocks.iter().enumerate() {
-            let non_term_count = if block.ops.is_empty() {
-                0
-            } else {
-                block.ops.len() - 1
-            };
+            let non_term_count = block.non_term_count();
             if non_term_count > 0 {
                 let non_term_ops = &block.ops[..non_term_count];
-                let (result_map, mut arg_map) =
-                    build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
-                mark_branch_cond_barrier(
-                    block.ops.last(),
-                    non_term_count,
-                    &egraph,
-                    &class_to_vreg,
-                    &mut arg_map,
-                );
+                let (result_map, arg_map) = build_barrier_context(block, &egraph, &class_to_vreg);
                 let mut vreg_group =
                     assign_barrier_groups(&block_schedules[block_idx], &result_map, &arg_map);
                 populate_effectful_operands(
@@ -714,7 +691,7 @@ pub fn compile(
 
         // Include fresh block param VRegs in the per-block sets.
         for (&(bid, _pidx), &fresh_vreg) in &block_param_vreg_overrides {
-            let block_idx = func.blocks.iter().position(|b| b.id == bid).unwrap();
+            let block_idx = block_id_to_idx[&bid];
             block_param_vregs_per_block[block_idx].insert(fresh_vreg);
         }
 
@@ -929,11 +906,7 @@ pub fn compile(
                 })
                 .collect();
             {
-                let non_term_count = if block.ops.is_empty() {
-                    0
-                } else {
-                    block.ops.len() - 1
-                };
+                let non_term_count = block.non_term_count();
                 let non_term_ops = &block.ops[..non_term_count];
                 if non_term_count > 0 {
                     // Build block_class_to_vreg with renames applied.
@@ -944,14 +917,7 @@ pub fn compile(
                             (cid, renamed)
                         })
                         .collect();
-                    let (result_map, mut arg_map) = build_barrier_maps(non_term_ops, &egraph, &bcv);
-                    mark_branch_cond_barrier(
-                        block.ops.last(),
-                        non_term_count,
-                        &egraph,
-                        &bcv,
-                        &mut arg_map,
-                    );
+                    let (result_map, arg_map) = build_barrier_context(block, &egraph, &bcv);
                     let mut vreg_group =
                         assign_barrier_groups(&split_schedule, &result_map, &arg_map);
                     insert_early_barrier_spills(
@@ -1322,24 +1288,13 @@ pub fn compile(
         };
 
         // Handle non-terminator effectful ops (loads, stores, calls).
-        let non_term_count = if block.ops.is_empty() {
-            0
-        } else {
-            block.ops.len() - 1
-        };
+        let non_term_count = block.non_term_count();
         let non_term_ops = &block.ops[..non_term_count];
 
         // Build barrier maps using block_class_to_vreg (with cross-block renames
         // applied) so barrier operand caps match the renamed VRegs in the schedule.
         let (vreg_to_result_of_barrier, mut vreg_to_arg_of_barrier) =
-            build_barrier_maps(non_term_ops, &egraph, &block_class_to_vreg);
-        mark_branch_cond_barrier(
-            block.ops.last(),
-            non_term_count,
-            &egraph,
-            &block_class_to_vreg,
-            &mut vreg_to_arg_of_barrier,
-        );
+            build_barrier_context(block, &egraph, &block_class_to_vreg);
 
         // After spilling, CallResult/VoidCallBarrier operands may be SpillLoad
         // vregs that aren't in the original barrier arg map. Scan the schedule
@@ -1625,48 +1580,8 @@ pub fn compile_to_ir_string(
         .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
     let func = &func;
 
-    // Phase 1: E-graph rewrite rules.
-    let egraph_opts = EGraphOptions {
-        phase1_limit: opts.phase1_limit,
-        phase2_limit: opts.phase2_limit,
-        phase3_limit: opts.phase3_limit,
-        max_classes: 500_000,
-    };
-    crate::egraph::algebraic::propagate_block_params(func, &mut egraph);
-    run_phases(&mut egraph, &egraph_opts).map_err(|e| CompileError {
-        phase: "egraph".into(),
-        message: e,
-        location: Some(IrLocation {
-            function: func.name.clone(),
-            block: None,
-            inst: None,
-        }),
-    })?;
-    // Second pass catches constants revealed by folding in the first pass,
-    // then re-run algebraic rules to fold newly exposed constant expressions.
-    crate::egraph::algebraic::propagate_block_params(func, &mut egraph);
-    crate::egraph::algebraic::apply_algebraic_rules(&mut egraph);
-    egraph.rebuild();
-
-    // Build block param class map before extraction so params are roots.
-    let block_param_map = build_block_param_class_map(&egraph);
-
-    let mut all_roots = collect_roots(func);
-    all_roots.extend(block_param_map.values().copied());
-    all_roots.sort_by_key(|c| c.0);
-    all_roots.dedup();
-
-    // Phase 2: Extraction.
-    let cost_model = CostModel::new(opts.opt_goal);
-    let extraction = extract(&egraph, &all_roots, &cost_model).map_err(|e| CompileError {
-        phase: "extraction".into(),
-        message: e.to_string(),
-        location: Some(IrLocation {
-            function: func.name.clone(),
-            block: None,
-            inst: None,
-        }),
-    })?;
+    // Phases 1-2: E-graph rewrites and cost-based extraction.
+    let (block_param_map, extraction) = run_egraph_and_extract(func, &mut egraph, opts)?;
 
     // Phase 3: Build per-block VRegInst lists.
     let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
@@ -1739,25 +1654,12 @@ pub fn compile_to_ir_string(
 
     // Phase 4b: Reorder each block's schedule to respect effectful op barriers.
     for (block_idx, block) in func.blocks.iter().enumerate() {
-        let non_term_count = if block.ops.is_empty() {
-            0
-        } else {
-            block.ops.len() - 1
-        };
-        if non_term_count == 0 {
+        if block.non_term_count() == 0 {
             continue;
         }
-        let non_term_ops = &block.ops[..non_term_count];
 
-        let (vreg_to_result_of_barrier, mut vreg_to_arg_of_barrier) =
-            build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
-        mark_branch_cond_barrier(
-            block.ops.last(),
-            non_term_count,
-            &egraph,
-            &class_to_vreg,
-            &mut vreg_to_arg_of_barrier,
-        );
+        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
+            build_barrier_context(block, &egraph, &class_to_vreg);
 
         let sched = &block_schedules[block_idx];
         let vreg_group =
@@ -1781,24 +1683,12 @@ pub fn compile_to_ir_string(
     // Build PrintableBlocks for the printer.
     let mut printable_blocks: Vec<PrintableBlock> = Vec::new();
     for (block_idx, block) in func.blocks.iter().enumerate() {
-        let non_term_count = if block.ops.is_empty() {
-            0
-        } else {
-            block.ops.len() - 1
-        };
+        let non_term_count = block.non_term_count();
         let non_term_ops = &block.ops[..non_term_count];
         let num_barriers = non_term_ops.len();
 
-        // Build barrier groups for this block's schedule.
-        let (vreg_to_result_of_barrier, mut vreg_to_arg_of_barrier) =
-            build_barrier_maps(non_term_ops, &egraph, &class_to_vreg);
-        mark_branch_cond_barrier(
-            block.ops.last(),
-            non_term_count,
-            &egraph,
-            &class_to_vreg,
-            &mut vreg_to_arg_of_barrier,
-        );
+        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
+            build_barrier_context(block, &egraph, &class_to_vreg);
         let vreg_group = assign_barrier_groups(
             &block_schedules[block_idx],
             &vreg_to_result_of_barrier,

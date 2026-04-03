@@ -42,6 +42,15 @@ impl BasicBlock {
         }
     }
 
+    /// Number of non-terminator operations (all ops except the last).
+    pub fn non_term_count(&self) -> usize {
+        if self.ops.is_empty() {
+            0
+        } else {
+            self.ops.len() - 1
+        }
+    }
+
     /// Returns `true` if the block's last operation is a terminator.
     pub fn is_well_formed(&self) -> bool {
         if self.ops.is_empty() {

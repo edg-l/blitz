@@ -317,13 +317,14 @@ impl<'b> FnCtx<'b> {
         self.builder.select(flags, one, zero)
     }
 
-    /// Emit pointer + integer arithmetic: scale the integer by pointee size, add.
-    fn emit_ptr_add(
+    /// Emit pointer +/- integer arithmetic: scale the integer by pointee size.
+    fn emit_ptr_arith(
         &mut self,
         ptr: Value,
         ptr_ty: &CType,
         idx: Value,
         idx_ty: &CType,
+        is_sub: bool,
     ) -> Result<(Value, CType), TinyErr> {
         if *ptr_ty.pointee() == CType::Void {
             return Err(TinyErr {
@@ -332,65 +333,41 @@ impl<'b> FnCtx<'b> {
                 msg: "pointer arithmetic on void* is not allowed".into(),
             });
         }
-        let elem_size = if ptr_ty.pointee().is_array() {
-            array_total_byte_size(ptr_ty.pointee(), self.struct_registry) as i64
-        } else if ptr_ty.pointee().is_struct() {
-            let name = match ptr_ty.pointee() {
-                CType::Struct(s) => s.clone(),
-                _ => unreachable!(),
-            };
-            let layout = self.struct_registry.get(&name).ok_or_else(|| TinyErr {
-                line: 0,
-                col: 0,
-                msg: format!("unknown struct '{name}'"),
-            })?;
-            layout.byte_size as i64
-        } else {
-            ptr_ty.pointee_size() as i64
-        };
+        let elem_size = self.pointee_elem_size(ptr_ty.pointee())?;
         let idx = self.emit_convert(idx, idx_ty, &CType::Long);
         let scale = self.builder.iconst(elem_size, Type::I64);
         let offset = self.builder.mul(idx, scale);
-        let result = self.builder.add(ptr, offset);
+        let result = if is_sub {
+            self.builder.sub(ptr, offset)
+        } else {
+            self.builder.add(ptr, offset)
+        };
         Ok((result, ptr_ty.clone()))
     }
 
-    /// Emit pointer - integer arithmetic: scale the integer by pointee size, subtract.
-    fn emit_ptr_sub(
-        &mut self,
-        ptr: Value,
-        ptr_ty: &CType,
-        idx: Value,
-        idx_ty: &CType,
-    ) -> Result<(Value, CType), TinyErr> {
-        if *ptr_ty.pointee() == CType::Void {
-            return Err(TinyErr {
-                line: 0,
-                col: 0,
-                msg: "pointer arithmetic on void* is not allowed".into(),
-            });
+    /// Build a float zero constant matching the given float type.
+    fn emit_float_zero(&mut self, ty: &CType) -> Value {
+        if *ty == CType::Float {
+            self.builder.fconst_f32(0.0f32)
+        } else {
+            self.builder.fconst(0.0f64)
         }
-        let elem_size = if ptr_ty.pointee().is_array() {
-            array_total_byte_size(ptr_ty.pointee(), self.struct_registry) as i64
-        } else if ptr_ty.pointee().is_struct() {
-            let name = match ptr_ty.pointee() {
-                CType::Struct(s) => s.clone(),
-                _ => unreachable!(),
-            };
-            let layout = self.struct_registry.get(&name).ok_or_else(|| TinyErr {
+    }
+
+    /// Compute the byte size of a pointee type, looking up structs in the registry.
+    fn pointee_elem_size(&self, pointee: &CType) -> Result<i64, TinyErr> {
+        if pointee.is_array() {
+            Ok(type_byte_size(pointee, self.struct_registry) as i64)
+        } else if let Some(name) = pointee.struct_name() {
+            let layout = self.struct_registry.get(name).ok_or_else(|| TinyErr {
                 line: 0,
                 col: 0,
                 msg: format!("unknown struct '{name}'"),
             })?;
-            layout.byte_size as i64
+            Ok(layout.byte_size as i64)
         } else {
-            ptr_ty.pointee_size() as i64
-        };
-        let idx = self.emit_convert(idx, idx_ty, &CType::Long);
-        let scale = self.builder.iconst(elem_size, Type::I64);
-        let offset = self.builder.mul(idx, scale);
-        let result = self.builder.sub(ptr, offset);
-        Ok((result, ptr_ty.clone()))
+            Ok((pointee.bit_width() / 8) as i64)
+        }
     }
 
     /// Convert a value to Flags using a typed zero constant.
@@ -399,11 +376,7 @@ impl<'b> FnCtx<'b> {
             panic!("val_to_flags() called on struct type");
         }
         if ty.is_float() {
-            let zero = if *ty == CType::Float {
-                self.builder.fconst_f32(0.0f32)
-            } else {
-                self.builder.fconst(0.0f64)
-            };
+            let zero = self.emit_float_zero(ty);
             return self.builder.fcmp(CondCode::Ne, val, zero);
         }
         let ir_ty = ty.to_ir_type().unwrap();
@@ -487,11 +460,7 @@ impl<'b> FnCtx<'b> {
             } => {
                 let (val, ty) = self.compile_expr(inner)?;
                 if ty.is_float() {
-                    let zero = if ty == CType::Float {
-                        self.builder.fconst_f32(0.0f32)
-                    } else {
-                        self.builder.fconst(0.0f64)
-                    };
+                    let zero = self.emit_float_zero(&ty);
                     Ok(self.builder.fcmp(CondCode::Eq, val, zero))
                 } else {
                     let (val, ty) = self.emit_promote(val, &ty);
@@ -645,11 +614,7 @@ impl<'b> FnCtx<'b> {
                 match op {
                     UnaryOp::Neg => {
                         if ty.is_float() {
-                            let zero = if ty == CType::Float {
-                                self.builder.fconst_f32(0.0f32)
-                            } else {
-                                self.builder.fconst(0.0f64)
-                            };
+                            let zero = self.emit_float_zero(&ty);
                             Ok((self.builder.fsub(zero, val), ty))
                         } else {
                             let (val, ty) = self.emit_promote(val, &ty);
@@ -659,11 +624,7 @@ impl<'b> FnCtx<'b> {
                     UnaryOp::Not => {
                         // !x == (x == 0) -> I32 result
                         if ty.is_float() {
-                            let zero = if ty == CType::Float {
-                                self.builder.fconst_f32(0.0f32)
-                            } else {
-                                self.builder.fconst(0.0f64)
-                            };
+                            let zero = self.emit_float_zero(&ty);
                             Ok((self.emit_fcmp_val(CondCode::Eq, val, zero), CType::Int))
                         } else {
                             let (val, ty) = self.emit_promote(val, &ty);
@@ -697,302 +658,8 @@ impl<'b> FnCtx<'b> {
                     }
                 }
             }
-            Expr::BinOp { op, lhs, rhs } => {
-                match op {
-                    BinOp::And => {
-                        // Short-circuit: if left is false, result is 0.
-                        let (l, lt) = self.compile_expr(lhs)?;
-                        let lcond = self.val_to_flags(l, &lt);
-
-                        let bb_rhs = self.builder.create_block();
-                        let (bb_merge, merge_params) =
-                            self.builder.create_block_with_params(&[Type::I32]);
-                        let merge_val = merge_params[0];
-
-                        let zero_i32 = self.builder.iconst(0, Type::I32);
-                        self.builder
-                            .branch(lcond, bb_rhs, bb_merge, &[], &[zero_i32]);
-
-                        self.builder.seal_block(bb_rhs);
-                        self.builder.set_block(bb_rhs);
-                        let (r, rt) = self.compile_expr(rhs)?;
-                        let r_flags = self.val_to_flags(r, &rt);
-                        let one = self.builder.iconst(1, Type::I32);
-                        let zero2 = self.builder.iconst(0, Type::I32);
-                        let rbool = self.builder.select(r_flags, one, zero2);
-                        if !self.builder.is_current_block_terminated() {
-                            self.builder.jump(bb_merge, &[rbool]);
-                        }
-
-                        self.builder.seal_block(bb_merge);
-                        self.builder.set_block(bb_merge);
-                        Ok((merge_val, CType::Int))
-                    }
-                    BinOp::Or => {
-                        // Short-circuit: if left is true, result is 1.
-                        let (l, lt) = self.compile_expr(lhs)?;
-                        let lcond = self.val_to_flags(l, &lt);
-
-                        let bb_rhs = self.builder.create_block();
-                        let (bb_merge, merge_params) =
-                            self.builder.create_block_with_params(&[Type::I32]);
-                        let merge_val = merge_params[0];
-
-                        let one_i32 = self.builder.iconst(1, Type::I32);
-                        self.builder
-                            .branch(lcond, bb_merge, bb_rhs, &[one_i32], &[]);
-
-                        self.builder.seal_block(bb_rhs);
-                        self.builder.set_block(bb_rhs);
-                        let (r, rt) = self.compile_expr(rhs)?;
-                        let r_flags = self.val_to_flags(r, &rt);
-                        let one = self.builder.iconst(1, Type::I32);
-                        let zero2 = self.builder.iconst(0, Type::I32);
-                        let rbool = self.builder.select(r_flags, one, zero2);
-                        if !self.builder.is_current_block_terminated() {
-                            self.builder.jump(bb_merge, &[rbool]);
-                        }
-
-                        self.builder.seal_block(bb_merge);
-                        self.builder.set_block(bb_merge);
-                        Ok((merge_val, CType::Int))
-                    }
-                    // Shift operators: promote independently, result type is promoted left type.
-                    BinOp::Shl => {
-                        let (l, lt) = self.compile_expr(lhs)?;
-                        let (l, lt) = self.emit_promote(l, &lt);
-                        let (r, _rt) = self.compile_expr(rhs)?;
-                        let (r, _rt) = self.emit_promote(r, &_rt);
-                        // Shift amount must match the left operand's type for the IR.
-                        let r = self.emit_convert(r, &_rt, &lt);
-                        Ok((self.builder.shl(l, r), lt))
-                    }
-                    BinOp::Shr => {
-                        let (l, lt) = self.compile_expr(lhs)?;
-                        let (l, lt) = self.emit_promote(l, &lt);
-                        let (r, _rt) = self.compile_expr(rhs)?;
-                        let (r, _rt) = self.emit_promote(r, &_rt);
-                        // Shift amount must match the left operand's type for the IR.
-                        let r = self.emit_convert(r, &_rt, &lt);
-                        // sar for signed, shr for unsigned.
-                        if lt.is_signed() {
-                            Ok((self.builder.sar(l, r), lt))
-                        } else {
-                            Ok((self.builder.shr(l, r), lt))
-                        }
-                    }
-                    // Pointer + integer or integer + pointer arithmetic.
-                    BinOp::Add => {
-                        let (l, lt) = self.compile_expr(lhs)?;
-                        let (r, rt) = self.compile_expr(rhs)?;
-                        if lt.is_pointer() && rt.is_integer() {
-                            self.emit_ptr_add(l, &lt, r, &rt)
-                        } else if lt.is_integer() && rt.is_pointer() {
-                            // Commutative: int + ptr => ptr + int.
-                            self.emit_ptr_add(r, &rt, l, &lt)
-                        } else {
-                            let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
-                            if common.is_float() {
-                                Ok((self.builder.fadd(l, r), common))
-                            } else {
-                                Ok((self.builder.add(l, r), common))
-                            }
-                        }
-                    }
-                    // Pointer - integer arithmetic.
-                    BinOp::Sub => {
-                        let (l, lt) = self.compile_expr(lhs)?;
-                        let (r, rt) = self.compile_expr(rhs)?;
-                        if lt.is_pointer() && rt.is_integer() {
-                            self.emit_ptr_sub(l, &lt, r, &rt)
-                        } else {
-                            let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
-                            if common.is_float() {
-                                Ok((self.builder.fsub(l, r), common))
-                            } else {
-                                Ok((self.builder.sub(l, r), common))
-                            }
-                        }
-                    }
-                    _ => {
-                        let (l, lt) = self.compile_expr(lhs)?;
-                        let (r, rt) = self.compile_expr(rhs)?;
-                        let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
-                        match op {
-                            BinOp::Mul => {
-                                if common.is_float() {
-                                    Ok((self.builder.fmul(l, r), common))
-                                } else {
-                                    Ok((self.builder.mul(l, r), common))
-                                }
-                            }
-                            BinOp::Div => {
-                                if common.is_float() {
-                                    Ok((self.builder.fdiv(l, r), common))
-                                } else if common.is_unsigned() {
-                                    Ok((self.builder.udiv(l, r), common))
-                                } else {
-                                    Ok((self.builder.sdiv(l, r), common))
-                                }
-                            }
-                            BinOp::Mod => {
-                                if common.is_float() {
-                                    return Err(TinyErr {
-                                        line: 0,
-                                        col: 0,
-                                        msg: "modulo operator '%' not supported on float types (use fmod from libm)".into(),
-                                    });
-                                }
-                                if common.is_unsigned() {
-                                    Ok((self.builder.urem(l, r), common))
-                                } else {
-                                    Ok((self.builder.srem(l, r), common))
-                                }
-                            }
-                            BinOp::Eq => {
-                                if common.is_float() {
-                                    Ok((self.emit_fcmp_val(CondCode::Eq, l, r), CType::Int))
-                                } else {
-                                    Ok((self.emit_icmp_val(CondCode::Eq, l, r), CType::Int))
-                                }
-                            }
-                            BinOp::Ne => {
-                                if common.is_float() {
-                                    Ok((self.emit_fcmp_val(CondCode::Ne, l, r), CType::Int))
-                                } else {
-                                    Ok((self.emit_icmp_val(CondCode::Ne, l, r), CType::Int))
-                                }
-                            }
-                            BinOp::Lt => {
-                                if common.is_float() {
-                                    Ok((self.emit_fcmp_val(CondCode::Ult, l, r), CType::Int))
-                                } else {
-                                    let cc = if common.is_unsigned() {
-                                        CondCode::Ult
-                                    } else {
-                                        CondCode::Slt
-                                    };
-                                    Ok((self.emit_icmp_val(cc, l, r), CType::Int))
-                                }
-                            }
-                            BinOp::Gt => {
-                                if common.is_float() {
-                                    Ok((self.emit_fcmp_val(CondCode::Ugt, l, r), CType::Int))
-                                } else {
-                                    let cc = if common.is_unsigned() {
-                                        CondCode::Ugt
-                                    } else {
-                                        CondCode::Sgt
-                                    };
-                                    Ok((self.emit_icmp_val(cc, l, r), CType::Int))
-                                }
-                            }
-                            BinOp::Le => {
-                                if common.is_float() {
-                                    Ok((self.emit_fcmp_val(CondCode::Ule, l, r), CType::Int))
-                                } else {
-                                    let cc = if common.is_unsigned() {
-                                        CondCode::Ule
-                                    } else {
-                                        CondCode::Sle
-                                    };
-                                    Ok((self.emit_icmp_val(cc, l, r), CType::Int))
-                                }
-                            }
-                            BinOp::Ge => {
-                                if common.is_float() {
-                                    Ok((self.emit_fcmp_val(CondCode::Uge, l, r), CType::Int))
-                                } else {
-                                    let cc = if common.is_unsigned() {
-                                        CondCode::Uge
-                                    } else {
-                                        CondCode::Sge
-                                    };
-                                    Ok((self.emit_icmp_val(cc, l, r), CType::Int))
-                                }
-                            }
-                            BinOp::BitAnd => Ok((self.builder.and(l, r), common)),
-                            BinOp::BitOr => Ok((self.builder.or(l, r), common)),
-                            BinOp::BitXor => Ok((self.builder.xor(l, r), common)),
-                            BinOp::Add
-                            | BinOp::Sub
-                            | BinOp::And
-                            | BinOp::Or
-                            | BinOp::Shl
-                            | BinOp::Shr => unreachable!(),
-                        }
-                    }
-                }
-            }
-            Expr::Call { name, args } => {
-                let (ret_type, param_types) = self
-                    .fn_signatures
-                    .get(name.as_str())
-                    .map(|(r, p)| (r.clone(), p.clone()))
-                    .ok_or_else(|| TinyErr {
-                        line: 0,
-                        col: 0,
-                        msg: format!("undefined function '{name}'"),
-                    })?;
-
-                // Validate arity.
-                if args.len() != param_types.len() {
-                    return Err(TinyErr {
-                        line: 0,
-                        col: 0,
-                        msg: format!(
-                            "function '{}' expects {} argument(s), got {}",
-                            name,
-                            param_types.len(),
-                            args.len()
-                        ),
-                    });
-                }
-
-                // Compile and convert each argument to the expected parameter type.
-                let mut arg_vals: Vec<Value> = Vec::new();
-                for (i, arg_expr) in args.iter().enumerate() {
-                    let param_ty = &param_types[i];
-                    if param_ty.is_struct() {
-                        // Struct arg: allocate temp slot, copy struct into it, pass address
-                        let struct_name = match param_ty {
-                            CType::Struct(s) => s.clone(),
-                            _ => unreachable!(),
-                        };
-                        let layout =
-                            self.struct_registry
-                                .get(&struct_name)
-                                .ok_or_else(|| TinyErr {
-                                    line: 0,
-                                    col: 0,
-                                    msg: format!("unknown struct '{struct_name}'"),
-                                })?;
-                        let byte_size = layout.byte_size;
-                        let alignment = layout.alignment;
-                        let tmp_slot = self.builder.create_stack_slot(byte_size, alignment);
-                        let tmp_addr = self.builder.stack_addr(tmp_slot);
-                        let (src_addr, _) = self.compile_expr(arg_expr)?;
-                        emit_struct_copy(self, tmp_addr, src_addr, &struct_name)?;
-                        arg_vals.push(tmp_addr);
-                    } else {
-                        let (arg_val, arg_ty) = self.compile_expr(arg_expr)?;
-                        let converted = self.emit_convert(arg_val, &arg_ty, param_ty);
-                        arg_vals.push(converted);
-                    }
-                }
-
-                let ret_ir_tys: Vec<Type> =
-                    ret_type.to_ir_type().map(|t| vec![t]).unwrap_or_default();
-                let results = self.builder.call(name, &arg_vals, &ret_ir_tys);
-
-                if ret_type == CType::Void {
-                    // Return a dummy value; void calls shouldn't appear in expression context.
-                    let dummy = self.builder.iconst(0, Type::I32);
-                    Ok((dummy, CType::Int))
-                } else {
-                    Ok((results[0], ret_type))
-                }
-            }
+            Expr::BinOp { op, lhs, rhs } => self.compile_binop(*op, lhs, rhs),
+            Expr::Call { name, args } => self.compile_call(name, args),
             Expr::Cast { ty, expr } => {
                 let (val, from_ty) = self.compile_expr(expr)?;
                 let converted = self.emit_convert(val, &from_ty, ty);
@@ -1000,7 +667,7 @@ impl<'b> FnCtx<'b> {
             }
             Expr::Sizeof(ty) => {
                 let size = if ty.is_array() {
-                    array_total_byte_size(ty, self.struct_registry) as i64
+                    type_byte_size(ty, self.struct_registry) as i64
                 } else if let CType::Struct(name) = ty {
                     let layout = self.struct_registry.get(name).ok_or_else(|| TinyErr {
                         line: 0,
@@ -1024,22 +691,7 @@ impl<'b> FnCtx<'b> {
                         msg: "pointer arithmetic on void* is not allowed".into(),
                     });
                 }
-                let elem_size = if pointee.is_array() {
-                    array_total_byte_size(&pointee, self.struct_registry) as i64
-                } else if pointee.is_struct() {
-                    let name = match &pointee {
-                        CType::Struct(s) => s.clone(),
-                        _ => unreachable!(),
-                    };
-                    let layout = self.struct_registry.get(&name).ok_or_else(|| TinyErr {
-                        line: 0,
-                        col: 0,
-                        msg: format!("unknown struct '{name}'"),
-                    })?;
-                    layout.byte_size as i64
-                } else {
-                    base_ty.pointee_size() as i64
-                };
+                let elem_size = self.pointee_elem_size(&pointee)?;
                 let (idx_val, idx_ty) = self.compile_expr(index)?;
                 let idx_val = self.emit_convert(idx_val, &idx_ty, &CType::Long);
                 let scale = self.builder.iconst(elem_size, Type::I64);
@@ -1060,51 +712,7 @@ impl<'b> FnCtx<'b> {
                 cond,
                 then_expr,
                 else_expr,
-            } => {
-                let flags = self.compile_cond(cond)?;
-                let then_block = self.builder.create_block();
-                let else_block = self.builder.create_block();
-
-                self.builder.branch(flags, then_block, else_block, &[], &[]);
-
-                // Then arm
-                self.builder.set_block(then_block);
-                self.builder.seal_block(then_block);
-                let (then_val, then_ty) = self.compile_expr(then_expr)?;
-                let then_ir_ty = then_ty.to_ir_type().ok_or_else(|| TinyErr {
-                    line: 0,
-                    col: 0,
-                    msg: "ternary operand must be a scalar type".into(),
-                })?;
-                let then_exit = self.builder.current_block();
-                let then_terminated = self.is_terminated();
-
-                // Else arm
-                self.builder.set_block(else_block);
-                self.builder.seal_block(else_block);
-                let (else_val, else_ty) = self.compile_expr(else_expr)?;
-                let else_exit = self.builder.current_block();
-                let else_terminated = self.is_terminated();
-
-                // Merge
-                let (merge_block, merge_params) =
-                    self.builder.create_block_with_params(&[then_ir_ty]);
-                let result = merge_params[0];
-
-                if !then_terminated {
-                    self.builder.set_block(then_exit.unwrap());
-                    self.builder.jump(merge_block, &[then_val]);
-                }
-                if !else_terminated {
-                    self.builder.set_block(else_exit.unwrap());
-                    let converted = self.emit_convert(else_val, &else_ty, &then_ty);
-                    self.builder.jump(merge_block, &[converted]);
-                }
-
-                self.builder.seal_block(merge_block);
-                self.builder.set_block(merge_block);
-                Ok((result, then_ty.clone()))
-            }
+            } => self.compile_ternary(cond, then_expr, else_expr),
             Expr::FieldAccess { expr, field } => {
                 let (struct_addr, struct_ty) = self.compile_expr(expr)?;
                 let struct_name = match &struct_ty {
@@ -1134,34 +742,370 @@ impl<'b> FnCtx<'b> {
             }
         }
     }
+
+    fn compile_binop(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+    ) -> Result<(Value, CType), TinyErr> {
+        match op {
+            BinOp::And => {
+                // Short-circuit: if left is false, result is 0.
+                let (l, lt) = self.compile_expr(lhs)?;
+                let lcond = self.val_to_flags(l, &lt);
+
+                let bb_rhs = self.builder.create_block();
+                let (bb_merge, merge_params) = self.builder.create_block_with_params(&[Type::I32]);
+                let merge_val = merge_params[0];
+
+                let zero_i32 = self.builder.iconst(0, Type::I32);
+                self.builder
+                    .branch(lcond, bb_rhs, bb_merge, &[], &[zero_i32]);
+
+                self.builder.seal_block(bb_rhs);
+                self.builder.set_block(bb_rhs);
+                let (r, rt) = self.compile_expr(rhs)?;
+                let r_flags = self.val_to_flags(r, &rt);
+                let one = self.builder.iconst(1, Type::I32);
+                let zero2 = self.builder.iconst(0, Type::I32);
+                let rbool = self.builder.select(r_flags, one, zero2);
+                if !self.builder.is_current_block_terminated() {
+                    self.builder.jump(bb_merge, &[rbool]);
+                }
+
+                self.builder.seal_block(bb_merge);
+                self.builder.set_block(bb_merge);
+                Ok((merge_val, CType::Int))
+            }
+            BinOp::Or => {
+                // Short-circuit: if left is true, result is 1.
+                let (l, lt) = self.compile_expr(lhs)?;
+                let lcond = self.val_to_flags(l, &lt);
+
+                let bb_rhs = self.builder.create_block();
+                let (bb_merge, merge_params) = self.builder.create_block_with_params(&[Type::I32]);
+                let merge_val = merge_params[0];
+
+                let one_i32 = self.builder.iconst(1, Type::I32);
+                self.builder
+                    .branch(lcond, bb_merge, bb_rhs, &[one_i32], &[]);
+
+                self.builder.seal_block(bb_rhs);
+                self.builder.set_block(bb_rhs);
+                let (r, rt) = self.compile_expr(rhs)?;
+                let r_flags = self.val_to_flags(r, &rt);
+                let one = self.builder.iconst(1, Type::I32);
+                let zero2 = self.builder.iconst(0, Type::I32);
+                let rbool = self.builder.select(r_flags, one, zero2);
+                if !self.builder.is_current_block_terminated() {
+                    self.builder.jump(bb_merge, &[rbool]);
+                }
+
+                self.builder.seal_block(bb_merge);
+                self.builder.set_block(bb_merge);
+                Ok((merge_val, CType::Int))
+            }
+            // Shift operators: promote independently, result type is promoted left type.
+            BinOp::Shl => {
+                let (l, lt) = self.compile_expr(lhs)?;
+                let (l, lt) = self.emit_promote(l, &lt);
+                let (r, _rt) = self.compile_expr(rhs)?;
+                let (r, _rt) = self.emit_promote(r, &_rt);
+                let r = self.emit_convert(r, &_rt, &lt);
+                Ok((self.builder.shl(l, r), lt))
+            }
+            BinOp::Shr => {
+                let (l, lt) = self.compile_expr(lhs)?;
+                let (l, lt) = self.emit_promote(l, &lt);
+                let (r, _rt) = self.compile_expr(rhs)?;
+                let (r, _rt) = self.emit_promote(r, &_rt);
+                let r = self.emit_convert(r, &_rt, &lt);
+                if lt.is_signed() {
+                    Ok((self.builder.sar(l, r), lt))
+                } else {
+                    Ok((self.builder.shr(l, r), lt))
+                }
+            }
+            BinOp::Add => {
+                let (l, lt) = self.compile_expr(lhs)?;
+                let (r, rt) = self.compile_expr(rhs)?;
+                if lt.is_pointer() && rt.is_integer() {
+                    self.emit_ptr_arith(l, &lt, r, &rt, false)
+                } else if lt.is_integer() && rt.is_pointer() {
+                    self.emit_ptr_arith(r, &rt, l, &lt, false)
+                } else {
+                    let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
+                    if common.is_float() {
+                        Ok((self.builder.fadd(l, r), common))
+                    } else {
+                        Ok((self.builder.add(l, r), common))
+                    }
+                }
+            }
+            BinOp::Sub => {
+                let (l, lt) = self.compile_expr(lhs)?;
+                let (r, rt) = self.compile_expr(rhs)?;
+                if lt.is_pointer() && rt.is_integer() {
+                    self.emit_ptr_arith(l, &lt, r, &rt, true)
+                } else {
+                    let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
+                    if common.is_float() {
+                        Ok((self.builder.fsub(l, r), common))
+                    } else {
+                        Ok((self.builder.sub(l, r), common))
+                    }
+                }
+            }
+            _ => {
+                let (l, lt) = self.compile_expr(lhs)?;
+                let (r, rt) = self.compile_expr(rhs)?;
+                let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
+                match op {
+                    BinOp::Mul => {
+                        if common.is_float() {
+                            Ok((self.builder.fmul(l, r), common))
+                        } else {
+                            Ok((self.builder.mul(l, r), common))
+                        }
+                    }
+                    BinOp::Div => {
+                        if common.is_float() {
+                            Ok((self.builder.fdiv(l, r), common))
+                        } else if common.is_unsigned() {
+                            Ok((self.builder.udiv(l, r), common))
+                        } else {
+                            Ok((self.builder.sdiv(l, r), common))
+                        }
+                    }
+                    BinOp::Mod => {
+                        if common.is_float() {
+                            return Err(TinyErr {
+                                line: 0,
+                                col: 0,
+                                msg: "modulo operator '%' not supported on float types (use fmod from libm)".into(),
+                            });
+                        }
+                        if common.is_unsigned() {
+                            Ok((self.builder.urem(l, r), common))
+                        } else {
+                            Ok((self.builder.srem(l, r), common))
+                        }
+                    }
+                    BinOp::Eq => {
+                        if common.is_float() {
+                            Ok((self.emit_fcmp_val(CondCode::Eq, l, r), CType::Int))
+                        } else {
+                            Ok((self.emit_icmp_val(CondCode::Eq, l, r), CType::Int))
+                        }
+                    }
+                    BinOp::Ne => {
+                        if common.is_float() {
+                            Ok((self.emit_fcmp_val(CondCode::Ne, l, r), CType::Int))
+                        } else {
+                            Ok((self.emit_icmp_val(CondCode::Ne, l, r), CType::Int))
+                        }
+                    }
+                    BinOp::Lt => {
+                        if common.is_float() {
+                            Ok((self.emit_fcmp_val(CondCode::Ult, l, r), CType::Int))
+                        } else {
+                            let cc = if common.is_unsigned() {
+                                CondCode::Ult
+                            } else {
+                                CondCode::Slt
+                            };
+                            Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                        }
+                    }
+                    BinOp::Gt => {
+                        if common.is_float() {
+                            Ok((self.emit_fcmp_val(CondCode::Ugt, l, r), CType::Int))
+                        } else {
+                            let cc = if common.is_unsigned() {
+                                CondCode::Ugt
+                            } else {
+                                CondCode::Sgt
+                            };
+                            Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                        }
+                    }
+                    BinOp::Le => {
+                        if common.is_float() {
+                            Ok((self.emit_fcmp_val(CondCode::Ule, l, r), CType::Int))
+                        } else {
+                            let cc = if common.is_unsigned() {
+                                CondCode::Ule
+                            } else {
+                                CondCode::Sle
+                            };
+                            Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                        }
+                    }
+                    BinOp::Ge => {
+                        if common.is_float() {
+                            Ok((self.emit_fcmp_val(CondCode::Uge, l, r), CType::Int))
+                        } else {
+                            let cc = if common.is_unsigned() {
+                                CondCode::Uge
+                            } else {
+                                CondCode::Sge
+                            };
+                            Ok((self.emit_icmp_val(cc, l, r), CType::Int))
+                        }
+                    }
+                    BinOp::BitAnd => Ok((self.builder.and(l, r), common)),
+                    BinOp::BitOr => Ok((self.builder.or(l, r), common)),
+                    BinOp::BitXor => Ok((self.builder.xor(l, r), common)),
+                    BinOp::Add | BinOp::Sub | BinOp::And | BinOp::Or | BinOp::Shl | BinOp::Shr => {
+                        unreachable!()
+                    }
+                }
+            }
+        }
+    }
+
+    fn compile_call(&mut self, name: &str, args: &[Expr]) -> Result<(Value, CType), TinyErr> {
+        let (ret_type, param_types) = self
+            .fn_signatures
+            .get(name)
+            .map(|(r, p)| (r.clone(), p.clone()))
+            .ok_or_else(|| TinyErr {
+                line: 0,
+                col: 0,
+                msg: format!("undefined function '{name}'"),
+            })?;
+
+        if args.len() != param_types.len() {
+            return Err(TinyErr {
+                line: 0,
+                col: 0,
+                msg: format!(
+                    "function '{}' expects {} argument(s), got {}",
+                    name,
+                    param_types.len(),
+                    args.len()
+                ),
+            });
+        }
+
+        let mut arg_vals: Vec<Value> = Vec::new();
+        for (i, arg_expr) in args.iter().enumerate() {
+            let param_ty = &param_types[i];
+            if let Some(sn) = param_ty.struct_name() {
+                let struct_name = sn.to_owned();
+                let layout = self
+                    .struct_registry
+                    .get(&struct_name)
+                    .ok_or_else(|| TinyErr {
+                        line: 0,
+                        col: 0,
+                        msg: format!("unknown struct '{struct_name}'"),
+                    })?;
+                let byte_size = layout.byte_size;
+                let alignment = layout.alignment;
+                let tmp_slot = self.builder.create_stack_slot(byte_size, alignment);
+                let tmp_addr = self.builder.stack_addr(tmp_slot);
+                let (src_addr, _) = self.compile_expr(arg_expr)?;
+                emit_struct_copy(self, tmp_addr, src_addr, &struct_name)?;
+                arg_vals.push(tmp_addr);
+            } else {
+                let (arg_val, arg_ty) = self.compile_expr(arg_expr)?;
+                let converted = self.emit_convert(arg_val, &arg_ty, param_ty);
+                arg_vals.push(converted);
+            }
+        }
+
+        let ret_ir_tys: Vec<Type> = ret_type.to_ir_type().map(|t| vec![t]).unwrap_or_default();
+        let results = self.builder.call(name, &arg_vals, &ret_ir_tys);
+
+        if ret_type == CType::Void {
+            let dummy = self.builder.iconst(0, Type::I32);
+            Ok((dummy, CType::Int))
+        } else {
+            Ok((results[0], ret_type))
+        }
+    }
+
+    fn compile_ternary(
+        &mut self,
+        cond: &Expr,
+        then_expr: &Expr,
+        else_expr: &Expr,
+    ) -> Result<(Value, CType), TinyErr> {
+        let flags = self.compile_cond(cond)?;
+        let then_block = self.builder.create_block();
+        let else_block = self.builder.create_block();
+
+        self.builder.branch(flags, then_block, else_block, &[], &[]);
+
+        // Then arm
+        self.builder.set_block(then_block);
+        self.builder.seal_block(then_block);
+        let (then_val, then_ty) = self.compile_expr(then_expr)?;
+        let then_ir_ty = then_ty.to_ir_type().ok_or_else(|| TinyErr {
+            line: 0,
+            col: 0,
+            msg: "ternary operand must be a scalar type".into(),
+        })?;
+        let then_exit = self.builder.current_block();
+        let then_terminated = self.is_terminated();
+
+        // Else arm
+        self.builder.set_block(else_block);
+        self.builder.seal_block(else_block);
+        let (else_val, else_ty) = self.compile_expr(else_expr)?;
+        let else_exit = self.builder.current_block();
+        let else_terminated = self.is_terminated();
+
+        // Merge
+        let (merge_block, merge_params) = self.builder.create_block_with_params(&[then_ir_ty]);
+        let result = merge_params[0];
+
+        if !then_terminated {
+            self.builder.set_block(then_exit.unwrap());
+            self.builder.jump(merge_block, &[then_val]);
+        }
+        if !else_terminated {
+            self.builder.set_block(else_exit.unwrap());
+            let converted = self.emit_convert(else_val, &else_ty, &then_ty);
+            self.builder.jump(merge_block, &[converted]);
+        }
+
+        self.builder.seal_block(merge_block);
+        self.builder.set_block(merge_block);
+        Ok((result, then_ty.clone()))
+    }
 }
 
-fn array_total_byte_size(ty: &CType, registry: &StructRegistry) -> u32 {
+/// Compute the total byte size of a type, recursing through arrays and structs.
+fn type_byte_size(ty: &CType, registry: &StructRegistry) -> u32 {
     match ty {
-        CType::Array(elem, count) => *count as u32 * array_total_byte_size(elem, registry),
+        CType::Array(elem, count) => *count as u32 * type_byte_size(elem, registry),
         CType::Struct(name) => {
             let layout = registry
-                .get(name)
-                .unwrap_or_else(|| panic!("unknown struct '{name}' in array_total_byte_size"));
+                .get(name.as_str())
+                .unwrap_or_else(|| panic!("unknown struct '{name}' in type_byte_size"));
             layout.byte_size
         }
         CType::Ptr(_) => 8,
-        CType::Void => panic!("array_total_byte_size() called on Void"),
+        CType::Void => panic!("type_byte_size() called on Void"),
         _ => ty.bit_width() / 8,
     }
 }
 
-fn array_element_alignment(ty: &CType, registry: &StructRegistry) -> u32 {
+/// Compute the alignment of a type, recursing through arrays and structs.
+fn type_alignment(ty: &CType, registry: &StructRegistry) -> u32 {
     match ty {
-        CType::Array(elem, _) => array_element_alignment(elem, registry),
+        CType::Array(elem, _) => type_alignment(elem, registry),
         CType::Struct(name) => {
             let layout = registry
-                .get(name)
-                .unwrap_or_else(|| panic!("unknown struct '{name}' in array_element_alignment"));
+                .get(name.as_str())
+                .unwrap_or_else(|| panic!("unknown struct '{name}' in type_alignment"));
             layout.alignment
         }
         CType::Ptr(_) => 8,
-        CType::Void => panic!("array_element_alignment() called on Void"),
+        CType::Void => panic!("type_alignment() called on Void"),
         _ => ty.bit_width() / 8,
     }
 }
@@ -1178,8 +1122,8 @@ fn compute_global_size_align(
             msg: "cannot declare global of type void".into(),
         }),
         CType::Array(_, _) => {
-            let size = array_total_byte_size(ty, registry) as usize;
-            let align = array_element_alignment(ty, registry) as usize;
+            let size = type_byte_size(ty, registry) as usize;
+            let align = type_alignment(ty, registry) as usize;
             Ok((size, align))
         }
         CType::Struct(name) => {
@@ -1195,34 +1139,6 @@ fn compute_global_size_align(
             let bytes = (ty.bit_width() / 8) as usize;
             Ok((bytes, bytes))
         }
-    }
-}
-
-fn field_byte_size(ty: &CType, registry: &StructRegistry) -> u32 {
-    match ty {
-        CType::Array(elem, count) => *count as u32 * field_byte_size(elem, registry),
-        CType::Struct(name) => {
-            let layout = registry
-                .get(name)
-                .unwrap_or_else(|| panic!("unknown struct '{name}' in field_byte_size"));
-            layout.byte_size
-        }
-        CType::Ptr(_) => 8,
-        _ => ty.bit_width() / 8,
-    }
-}
-
-fn field_alignment(ty: &CType, registry: &StructRegistry) -> u32 {
-    match ty {
-        CType::Array(elem, _) => field_alignment(elem, registry),
-        CType::Struct(name) => {
-            let layout = registry
-                .get(name)
-                .unwrap_or_else(|| panic!("unknown struct '{name}' in field_alignment"));
-            layout.alignment
-        }
-        CType::Ptr(_) => 8,
-        _ => ty.bit_width() / 8,
     }
 }
 
@@ -1278,8 +1194,8 @@ fn build_struct_registry(
         let mut layout_fields = Vec::new();
 
         for (fname, fty) in fields {
-            let align = field_alignment(fty, &registry);
-            let size = field_byte_size(fty, &registry);
+            let align = type_alignment(fty, &registry);
+            let size = type_byte_size(fty, &registry);
             // Align offset
             offset = (offset + align - 1) & !(align - 1);
             layout_fields.push((fname.clone(), fty.clone(), offset));
@@ -1347,7 +1263,7 @@ fn emit_struct_copy(
         let dst_field = ctx.builder.add(dst_addr, offset_val);
         if fty.is_array() {
             // Copy array field word-by-word (8-byte chunks + trailing)
-            let total = array_total_byte_size(fty, ctx.struct_registry) as usize;
+            let total = type_byte_size(fty, ctx.struct_registry) as usize;
             let mut pos = 0;
             while pos < total {
                 let remaining = total - pos;
@@ -1429,12 +1345,9 @@ fn compile_fn(
     );
 
     for ((ty, name), val) in fn_def.params.iter().zip(param_vals.iter()) {
-        if ty.is_struct() {
+        if let Some(sn) = ty.struct_name() {
             // Struct param: val is a hidden pointer. Create local stack slot and copy.
-            let struct_name = match ty {
-                CType::Struct(s) => s.clone(),
-                _ => unreachable!(),
-            };
+            let struct_name = sn.to_owned();
             let layout = struct_registry.get(&struct_name).ok_or_else(|| TinyErr {
                 line: 0,
                 col: 0,
@@ -1512,16 +1425,13 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         Stmt::VarDecl { ty, name, init } => {
             if ty.is_array() {
                 // Arrays always live on the stack
-                let size = array_total_byte_size(ty, ctx.struct_registry);
-                let alignment = array_element_alignment(ty, ctx.struct_registry);
+                let size = type_byte_size(ty, ctx.struct_registry);
+                let alignment = type_alignment(ty, ctx.struct_registry);
                 let slot = ctx.builder.create_stack_slot(size, alignment);
                 ctx.stack_slots.insert(name.clone(), (slot, ty.clone()));
                 // No initializer support for arrays (rejected by parser)
-            } else if ty.is_struct() {
-                let struct_name = match ty {
-                    CType::Struct(s) => s.clone(),
-                    _ => unreachable!(),
-                };
+            } else if let Some(sn) = ty.struct_name() {
+                let struct_name = sn.to_owned();
                 let layout = ctx
                     .struct_registry
                     .get(&struct_name)
@@ -1580,11 +1490,8 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
                     msg: "cannot assign to array variable".into(),
                 });
             }
-            if local_ty.is_struct() {
-                let struct_name = match &local_ty {
-                    CType::Struct(s) => s.clone(),
-                    _ => unreachable!(),
-                };
+            if let Some(struct_name) = local_ty.struct_name() {
+                let struct_name = struct_name.to_owned();
                 let (src_addr, _) = ctx.compile_expr(expr)?;
                 if ctx.is_global(name) {
                     let dst_addr = ctx.builder.global_addr(name);
@@ -1665,11 +1572,8 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
                     msg: "cannot assign to array via deref".into(),
                 });
             }
-            if pointee.is_struct() {
-                let inner_name = match &pointee {
-                    CType::Struct(s) => s.clone(),
-                    _ => unreachable!(),
-                };
+            if let Some(inner_name) = pointee.struct_name() {
+                let inner_name = inner_name.to_owned();
                 let (src_addr, _) = ctx.compile_expr(value)?;
                 emit_struct_copy(ctx, addr_val, src_addr, &inner_name)?;
             } else {
@@ -1701,12 +1605,9 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
                     msg: "cannot assign directly to array field".into(),
                 });
             }
-            if field_ty.is_struct() {
+            if let Some(inner_name) = field_ty.struct_name() {
+                let inner_name = inner_name.to_owned();
                 let (src_addr, _) = ctx.compile_expr(value)?;
-                let inner_name = match &field_ty {
-                    CType::Struct(s) => s.clone(),
-                    _ => unreachable!(),
-                };
                 emit_struct_copy(ctx, field_addr, src_addr, &inner_name)?;
             } else {
                 let (val, val_ty) = ctx.compile_expr(value)?;
@@ -1724,34 +1625,14 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
                     msg: "pointer arithmetic on void* is not allowed".into(),
                 });
             }
-            let elem_size = if pointee.is_array() {
-                array_total_byte_size(&pointee, ctx.struct_registry) as i64
-            } else if pointee.is_struct() {
-                let name = match &pointee {
-                    CType::Struct(s) => s,
-                    _ => unreachable!(),
-                };
-                ctx.struct_registry
-                    .get(name.as_str())
-                    .ok_or_else(|| TinyErr {
-                        line: 0,
-                        col: 0,
-                        msg: format!("unknown struct '{name}'"),
-                    })?
-                    .byte_size as i64
-            } else {
-                base_ty.pointee_size() as i64
-            };
+            let elem_size = ctx.pointee_elem_size(&pointee)?;
             let (idx_val, idx_ty) = ctx.compile_expr(index)?;
             let idx_val = ctx.emit_convert(idx_val, &idx_ty, &CType::Long);
             let scale = ctx.builder.iconst(elem_size, Type::I64);
             let offset = ctx.builder.mul(idx_val, scale);
             let addr = ctx.builder.add(base_val, offset);
-            if pointee.is_struct() {
-                let inner_name = match &pointee {
-                    CType::Struct(s) => s.clone(),
-                    _ => unreachable!(),
-                };
+            if let Some(inner_name) = pointee.struct_name() {
+                let inner_name = inner_name.to_owned();
                 let (src_addr, _) = ctx.compile_expr(value)?;
                 emit_struct_copy(ctx, addr, src_addr, &inner_name)?;
             } else {

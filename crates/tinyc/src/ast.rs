@@ -81,6 +81,13 @@ impl CType {
         matches!(self, CType::Struct(_))
     }
 
+    pub fn struct_name(&self) -> Option<&str> {
+        match self {
+            CType::Struct(name) => Some(name),
+            _ => None,
+        }
+    }
+
     pub fn is_array(&self) -> bool {
         matches!(self, CType::Array(_, _))
     }
