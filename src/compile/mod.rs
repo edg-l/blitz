@@ -49,7 +49,7 @@ use lower::lower_block_pure_ops;
 mod precolor;
 use precolor::{
     add_call_precolors_for_block, add_div_precolors, add_shift_precolors,
-    assign_param_vregs_from_map, collect_call_points_for_block, collect_div_clobber_points,
+    assign_param_vregs_from_map,
 };
 mod terminator;
 use terminator::{lower_terminator, thread_branches};
@@ -576,18 +576,12 @@ pub fn compile(
             &mut all_param_vregs,
             &mut live_out,
         );
-        let call_points =
-            collect_call_points_for_block(func, 0, &all_scheduled, &class_to_vreg, &egraph);
-        let div_points = collect_div_clobber_points(&all_scheduled);
-
         let result = allocate(
             &all_scheduled,
             &all_param_vregs,
             &live_out,
             &copy_pairs,
             &loop_depths,
-            &call_points,
-            &div_points,
             opts.force_frame_pointer,
             &func.name,
         )
@@ -749,7 +743,7 @@ pub fn compile(
         // slots for cross-block persistence.
         {
             use crate::x86::reg::RegClass;
-            for (_block_idx, phi_set) in phi_uses.iter().enumerate() {
+            for phi_set in &phi_uses {
                 for &v in phi_set {
                     let is_xmm = vreg_classes
                         .get(&v)
@@ -1140,32 +1134,20 @@ pub fn compile(
                 .copied()
                 .collect();
 
-            // Step 8e: Per-block call points (local instruction indices).
-            let block_call_points = collect_call_points_for_block(
-                func,
-                block_idx,
-                &split_schedule,
-                &class_to_vreg,
-                &egraph,
-            );
-            let block_div_points = collect_div_clobber_points(&split_schedule);
-
-            // Step 8f: Per-block loop depths.
+            // Step 8e: Per-block loop depths.
             let block_loop_depths: BTreeMap<VReg, u32> = loop_depths
                 .iter()
                 .filter(|(v, _)| split_vreg_set.contains(v))
                 .map(|(&v, &d)| (v, d))
                 .collect();
 
-            // Step 8g: Run per-block allocation.
+            // Step 8f: Run per-block allocation.
             let block_result = allocate(
                 &split_schedule,
                 &block_param_vregs,
                 &block_live_out,
                 &block_copy_pairs,
                 &block_loop_depths,
-                &block_call_points,
-                &block_div_points,
                 opts.force_frame_pointer,
                 &func.name,
             )

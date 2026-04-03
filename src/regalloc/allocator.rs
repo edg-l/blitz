@@ -58,8 +58,6 @@ pub fn allocate(
     block_live_out: &BTreeSet<VReg>,
     copy_pairs: &[(VReg, VReg)], // phi copy pairs for coalescing
     loop_depths: &std::collections::BTreeMap<VReg, u32>, // loop-depth info for spill selection
-    _call_points: &[usize],      // recomputed each round after spill insertion shifts indices
-    _div_points: &[usize],       // recomputed each round after spill insertion shifts indices
     uses_frame_pointer: bool,
     func_name: &str,
 ) -> Result<RegAllocResult, String> {
@@ -860,8 +858,6 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
-            &[],
-            &[],
             false,
             "",
         )
@@ -897,8 +893,6 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
-            &[],
-            &[],
             false,
             "",
         )
@@ -936,8 +930,6 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
-            &[],
-            &[],
             false,
             "",
         )
@@ -980,8 +972,6 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
-            &[],
-            &[],
             false,
             "",
         );
@@ -1027,8 +1017,6 @@ mod tests {
             &live_out,
             &copy_pairs,
             &std::collections::BTreeMap::new(),
-            &[],
-            &[],
             false,
             "",
         )
@@ -1066,8 +1054,6 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
-            &[],
-            &[],
             false,
             "",
         )
