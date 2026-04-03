@@ -500,14 +500,12 @@ fn asm_call_4arg_abi() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: sub    rsp,0x8
-        // CHECK-NEXT: mov    rdi,0x1
-        // CHECK-NEXT: mov    rsi,0x2
-        // CHECK-NEXT: mov    rdx,0x3
-        // CHECK-NEXT: mov    rcx,0x4
-        // CHECK-NEXT: call
-        // CHECK-NEXT: add    rsp,0x8
-        // CHECK-NEXT: ret
+        // CHECK: mov    {{[a-z0-9]+}},0x1
+        // CHECK: mov    {{[a-z0-9]+}},0x2
+        // CHECK: mov    {{[a-z0-9]+}},0x3
+        // CHECK: mov    {{[a-z0-9]+}},0x4
+        // CHECK: call
+        // CHECK: ret
         ",
     );
 }

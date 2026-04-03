@@ -58,7 +58,8 @@ pub fn allocate(
     block_live_out: &BTreeSet<VReg>,
     copy_pairs: &[(VReg, VReg)], // phi copy pairs for coalescing
     loop_depths: &std::collections::BTreeMap<VReg, u32>, // loop-depth info for spill selection
-    call_points: &[usize],       // instruction indices after which a call occurs
+    call_points: &[usize],       // instruction indices where a call clobbers all caller-saved regs
+    div_points: &[usize],        // instruction indices where div clobbers RAX/RDX only
     uses_frame_pointer: bool,
     func_name: &str,
 ) -> Result<RegAllocResult, String> {
@@ -75,9 +76,10 @@ pub fn allocate(
         .unwrap_or(0);
 
     // Build pre-coloring map from function parameters.
-    // Map: VReg index -> color (we assign colors 0..N to the ABI arg regs in order).
-    // We also keep a VReg -> Reg mapping for pre-colored nodes.
+    // Track which VRegs are function params (vs shift/div/call precolors).
     let mut param_vreg_to_reg: BTreeMap<VReg, Reg> = BTreeMap::new();
+    let param_vreg_indices: BTreeSet<usize> =
+        param_vregs.iter().map(|(v, _)| v.0 as usize).collect();
     for &(vreg, reg) in param_vregs {
         param_vreg_to_reg.insert(vreg, reg);
     }
@@ -106,6 +108,13 @@ pub fn allocate(
             graph,
             &liveness,
             call_points,
+            &mut next_vreg,
+            uses_frame_pointer,
+        );
+        let (graph, _) = add_div_clobber_interferences(
+            graph,
+            &liveness,
+            div_points,
             &mut next_vreg,
             uses_frame_pointer,
         );
@@ -144,13 +153,41 @@ pub fn allocate(
             &mut next_vreg,
             uses_frame_pointer,
         );
+        let (graph2, div_phantom_precolors) = add_div_clobber_interferences(
+            graph2,
+            &liveness2,
+            div_points,
+            &mut next_vreg,
+            uses_frame_pointer,
+        );
 
-        // Merge phantom pre-colorings (caller-saved phantoms at call sites) with
-        // param pre-colorings. Remove param precolorings that conflict with
-        // phantoms: a function param in a caller-saved register (e.g. RDI) that
-        // is live across a call cannot keep that register -- the call clobbers it.
+        // Merge phantom pre-colorings with param pre-colorings. Phantoms
+        // represent hardware constraints (call clobbers, div clobbers) that
+        // cannot be changed. If a param precoloring conflicts with a phantom
+        // (same color + interference edge), remove the param precoloring --
+        // the param will get a free register from the coloring instead.
         let mut pre_coloring_colors2 = pre_coloring_colors.clone();
+        for (&phantom_vreg, &phantom_color) in &phantom_precolors {
+            // Find and remove any param precoloring that conflicts.
+            let conflicting: Vec<usize> = pre_coloring_colors2
+                .iter()
+                .filter(|(pv, pc)| {
+                    let (pv, pc) = (**pv, **pc);
+                    pc == phantom_color
+                        && param_vreg_indices.contains(&pv)
+                        && phantom_vreg < graph2.num_vregs
+                        && pv < graph2.num_vregs
+                        && graph2.adj[phantom_vreg].contains(&pv)
+                })
+                .map(|(pv, _)| *pv)
+                .collect();
+            for pv in conflicting {
+                pre_coloring_colors2.remove(&pv);
+                param_vreg_to_reg.remove(&VReg(pv as u32));
+            }
+        }
         pre_coloring_colors2.extend(phantom_precolors);
+        pre_coloring_colors2.extend(div_phantom_precolors);
 
         let ordering = mcs_ordering(&graph2);
         let mut coloring = greedy_color(&graph2, &ordering, &pre_coloring_colors2);
@@ -381,6 +418,68 @@ fn add_call_clobber_interferences(
     (graph, phantom_precolors)
 }
 
+/// Like `add_call_clobber_interferences` but only adds phantoms for RAX and RDX,
+/// which are the registers clobbered by x86 DIV/IDIV instructions.
+fn add_div_clobber_interferences(
+    mut graph: super::interference::InterferenceGraph,
+    liveness: &super::liveness::LivenessInfo,
+    div_points: &[usize],
+    next_vreg: &mut u32,
+    uses_frame_pointer: bool,
+) -> (super::interference::InterferenceGraph, BTreeMap<usize, u32>) {
+    if div_points.is_empty() {
+        return (graph, BTreeMap::new());
+    }
+
+    let ordered_regs = allocatable_gpr_order(uses_frame_pointer);
+    let reg_to_color: BTreeMap<Reg, u32> = ordered_regs
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| (r, i as u32))
+        .collect();
+
+    let n = liveness.live_at.len();
+    let mut phantom_precolors: BTreeMap<usize, u32> = BTreeMap::new();
+
+    // DIV/IDIV only clobbers RAX (quotient) and RDX (remainder).
+    let div_clobbered = [Reg::RAX, Reg::RDX];
+
+    for &cp in div_points {
+        let live_at_cp: &std::collections::BTreeSet<VReg> = if cp < n {
+            &liveness.live_at[cp]
+        } else {
+            &liveness.live_out
+        };
+
+        for &reg in &div_clobbered {
+            let Some(&color) = reg_to_color.get(&reg) else {
+                continue;
+            };
+
+            let phantom_idx = *next_vreg as usize;
+            *next_vreg += 1;
+
+            if phantom_idx >= graph.num_vregs {
+                let new_n = phantom_idx + 1;
+                graph.adj.resize(new_n, std::collections::BTreeSet::new());
+                graph.reg_class.resize(new_n, RegClass::GPR);
+                graph.num_vregs = new_n;
+            }
+
+            phantom_precolors.insert(phantom_idx, color);
+
+            for &live_v in live_at_cp {
+                let live_idx = live_v.0 as usize;
+                if live_idx < graph.num_vregs && graph.reg_class[live_idx] == RegClass::GPR {
+                    graph.add_edge(phantom_idx, live_idx);
+                }
+            }
+        }
+    }
+
+    (graph, phantom_precolors)
+}
+
 /// Returns true if `op` produces an XMM (FP) register as its destination.
 fn is_fp_op(op: &Op) -> bool {
     use crate::ir::types::Type;
@@ -511,6 +610,7 @@ mod tests {
             &[],
             &std::collections::BTreeMap::new(),
             &[],
+            &[],
             false,
             "",
         )
@@ -546,6 +646,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
+            &[],
             &[],
             false,
             "",
@@ -584,6 +685,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
+            &[],
             &[],
             false,
             "",
@@ -627,6 +729,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
+            &[],
             &[],
             false,
             "",
@@ -674,6 +777,7 @@ mod tests {
             &copy_pairs,
             &std::collections::BTreeMap::new(),
             &[],
+            &[],
             false,
             "",
         )
@@ -711,6 +815,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
+            &[],
             &[],
             false,
             "",

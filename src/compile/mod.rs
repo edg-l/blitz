@@ -579,9 +579,6 @@ pub fn compile(
         let call_points =
             collect_call_points_for_block(func, 0, &all_scheduled, &class_to_vreg, &egraph);
         let div_points = collect_div_clobber_points(&all_scheduled);
-        // Combine div clobber points with call clobber points for regalloc.
-        let mut combined_points = call_points;
-        combined_points.extend_from_slice(&div_points);
 
         let result = allocate(
             &all_scheduled,
@@ -589,7 +586,8 @@ pub fn compile(
             &live_out,
             &copy_pairs,
             &loop_depths,
-            &combined_points,
+            &call_points,
+            &div_points,
             opts.force_frame_pointer,
             &func.name,
         )
@@ -1072,9 +1070,6 @@ pub fn compile(
                 &egraph,
             );
             let block_div_points = collect_div_clobber_points(&split_schedule);
-            // Combine call and div clobber points for regalloc.
-            let mut block_combined_points = block_call_points;
-            block_combined_points.extend_from_slice(&block_div_points);
 
             // Step 8f: Per-block loop depths.
             let block_loop_depths: BTreeMap<VReg, u32> = loop_depths
@@ -1090,7 +1085,8 @@ pub fn compile(
                 &block_live_out,
                 &block_copy_pairs,
                 &block_loop_depths,
-                &block_combined_points,
+                &block_call_points,
+                &block_div_points,
                 opts.force_frame_pointer,
                 &func.name,
             )
