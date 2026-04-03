@@ -490,10 +490,17 @@ impl Parser {
                         field,
                         value,
                     }),
+                    Expr::UnaryOp {
+                        op: UnaryOp::Deref, ..
+                    } => Some(Stmt::DerefAssign {
+                        addr_expr: expr,
+                        value,
+                    }),
                     _ => {
+                        let span = self.span().clone();
                         return Err(TinyErr {
-                            line: 0,
-                            col: 0,
+                            line: span.line,
+                            col: span.col,
                             msg: "invalid for-loop update assignment target".into(),
                         });
                     }
