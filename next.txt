@@ -1,21 +1,29 @@
-Possible Next Directions
+## Next steps for Blitz
 
-Language features (tinyc):
-1. Arrays - stack-allocated arrays, multidimensional
-2. Strings - string literals, char arrays, printf-style formatting
-3. Global variables - .data/.bss sections, relocations
-4. Float support - f32/f64 (backend has SSE2 instructions already, tinyc just needs the frontend)
+### Language features (tinyc)
+- ++/-- (increment/decrement operators)
+- +=, -=, *=, etc. (compound assignment)
+- do { } while() loops
+- switch/case
+- enum support
+- Comma operator
+- Float support (f32/f64) -- backend has SSE2 infra, needs frontend wiring
 
-Backend improvements:
-5. Floating point end-to-end - wire up XMM regalloc + SSE2 encoding (infra exists but untested e2e)
-6. Better spill code - split live ranges at loop boundaries, register hints
-7. DWARF debug info - .debug_info, .debug_line for gdb/lldb
-8. Tail call optimization
-9. Extend block param const propagation to multi-predecessor case (all preds pass same constant)
+### Backend optimization
+- Param precoloring is conservative: skips ALL params when block has calls,
+  even params that die before the call. Could check per-param liveness at
+  each call point to allow precoloring for short-lived params.
+- E-graph equality saturation: more rewrite rules (strength reduction,
+  constant folding, algebraic simplifications)
+- Loop optimizations (LICM, strength reduction, induction variables)
+- Better register coalescing across blocks
+- Better spill code: split live ranges at loop boundaries, register hints
+- Tail call optimization
+- Block param const propagation for multi-predecessor case
 
-Infrastructure:
-10. CI/benchmarks - compile-time benchmarks, runtime correctness suite
-11. More codegen tests - expand the builder-based CHECK tests for edge cases
-
-Known bugs:
-  (none currently known)
+### Infrastructure
+- CI pipeline / benchmarks / compile-time tracking
+- Better error messages with source locations in tinyc
+- DWARF debug info (.debug_info, .debug_line for gdb/lldb)
+- Multi-file compilation / linking
+- .rodata string deduplication (minor optimization)
