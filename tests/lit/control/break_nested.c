@@ -1,4 +1,14 @@
 // EXIT: 6
+// RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
+// CHECK-LABEL: # main
+// outer loop comparison
+// CHECK: sub
+// CHECK: jl
+// inner loop comparison
+// CHECK: sub
+// CHECK: jl
+// break jump
+// CHECK: jmp
 
 // break only exits the inner loop
 int main() {

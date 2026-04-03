@@ -119,15 +119,7 @@ fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
                 walk_stmt(s, set);
             }
         }
-        Stmt::For {
-            init,
-            cond,
-            update,
-            body,
-        } => {
-            if let Some(init) = init {
-                walk_stmt(init, set);
-            }
+        Stmt::For { cond, update, body } => {
             walk_expr(cond, set);
             if let Some(update) = update {
                 walk_stmt(update, set);

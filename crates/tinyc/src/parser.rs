@@ -487,7 +487,6 @@ impl Parser {
             result.push(init_stmt);
         }
         result.push(Stmt::For {
-            init: None, // init already extracted above
             cond,
             update: update.map(Box::new),
             body,

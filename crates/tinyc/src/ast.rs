@@ -223,7 +223,6 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     For {
-        init: Option<Box<Stmt>>,
         cond: Expr,
         update: Option<Box<Stmt>>,
         body: Vec<Stmt>,

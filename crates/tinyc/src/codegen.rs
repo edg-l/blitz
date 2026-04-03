@@ -946,7 +946,11 @@ impl<'b> FnCtx<'b> {
                 self.builder.set_block(then_block);
                 self.builder.seal_block(then_block);
                 let (then_val, then_ty) = self.compile_expr(then_expr)?;
-                let then_ir_ty = then_ty.to_ir_type().unwrap();
+                let then_ir_ty = then_ty.to_ir_type().ok_or_else(|| TinyErr {
+                    line: 0,
+                    col: 0,
+                    msg: "ternary operand must be a scalar type".into(),
+                })?;
                 let then_exit = self.builder.current_block();
                 let then_terminated = self.is_terminated();
 
@@ -964,8 +968,7 @@ impl<'b> FnCtx<'b> {
 
                 if !then_terminated {
                     self.builder.set_block(then_exit.unwrap());
-                    let converted = self.emit_convert(then_val, &then_ty, &then_ty);
-                    self.builder.jump(merge_block, &[converted]);
+                    self.builder.jump(merge_block, &[then_val]);
                 }
                 if !else_terminated {
                     self.builder.set_block(else_exit.unwrap());
@@ -1493,15 +1496,7 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         Stmt::While { cond, body } => {
             compile_while(ctx, cond, body)?;
         }
-        Stmt::For {
-            init,
-            cond,
-            update,
-            body,
-        } => {
-            if let Some(init) = init {
-                compile_stmt(ctx, init)?;
-            }
+        Stmt::For { cond, update, body } => {
             compile_for(ctx, cond, update.as_deref(), body)?;
         }
         Stmt::Break => {
@@ -1711,8 +1706,9 @@ fn compile_while(ctx: &mut FnCtx, cond: &Expr, body: &[Stmt]) -> Result<(), Tiny
         header_block,
         exit_block,
     });
-    compile_stmts(ctx, body)?;
+    let body_result = compile_stmts(ctx, body);
     ctx.loop_stack.pop();
+    body_result?;
     if !ctx.is_terminated() {
         ctx.builder.jump(header_block, &[]);
     }
@@ -1753,8 +1749,9 @@ fn compile_for(
         header_block: latch_block, // continue -> latch (runs update before header)
         exit_block,
     });
-    compile_stmts(ctx, body)?;
+    let body_result = compile_stmts(ctx, body);
     ctx.loop_stack.pop();
+    body_result?;
     if !ctx.is_terminated() {
         ctx.builder.jump(latch_block, &[]);
     }
