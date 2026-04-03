@@ -455,9 +455,9 @@ impl Parser {
             let stmt = self.parse_stmt()?; // parses VarDecl including trailing `;`
             Some(stmt)
         } else {
-            let expr = self.parse_expr()?;
+            let stmt = self.parse_expr_or_assign()?;
             self.expect(Token::Semi)?;
-            Some(Stmt::ExprStmt(expr))
+            Some(stmt)
         };
 
         // cond: expression or empty (infinite loop)
@@ -474,40 +474,7 @@ impl Parser {
         let update = if self.at(Token::RParen) {
             None
         } else {
-            let expr = self.parse_expr()?;
-            if self.at(Token::Assign) {
-                self.advance();
-                let value = self.parse_expr()?;
-                match expr {
-                    Expr::Var(name) => Some(Stmt::Assign { name, expr: value }),
-                    Expr::Index { base, index } => Some(Stmt::IndexAssign {
-                        base: *base,
-                        index: *index,
-                        value,
-                    }),
-                    Expr::FieldAccess { expr: e, field } => Some(Stmt::FieldAssign {
-                        expr: *e,
-                        field,
-                        value,
-                    }),
-                    Expr::UnaryOp {
-                        op: UnaryOp::Deref, ..
-                    } => Some(Stmt::DerefAssign {
-                        addr_expr: expr,
-                        value,
-                    }),
-                    _ => {
-                        let span = self.span().clone();
-                        return Err(TinyErr {
-                            line: span.line,
-                            col: span.col,
-                            msg: "invalid for-loop update assignment target".into(),
-                        });
-                    }
-                }
-            } else {
-                Some(Stmt::ExprStmt(expr))
-            }
+            Some(self.parse_expr_or_assign()?)
         };
         self.expect(Token::RParen)?;
 
@@ -522,6 +489,44 @@ impl Parser {
         }
         result.push(Stmt::While { cond, body });
         Ok(result)
+    }
+
+    /// Parse an expression, then optionally an `= value` turning it into an assignment statement.
+    fn parse_expr_or_assign(&mut self) -> Result<Stmt, TinyErr> {
+        let expr = self.parse_expr()?;
+        if self.at(Token::Assign) {
+            self.advance();
+            let value = self.parse_expr()?;
+            match expr {
+                Expr::Var(name) => Ok(Stmt::Assign { name, expr: value }),
+                Expr::Index { base, index } => Ok(Stmt::IndexAssign {
+                    base: *base,
+                    index: *index,
+                    value,
+                }),
+                Expr::FieldAccess { expr: e, field } => Ok(Stmt::FieldAssign {
+                    expr: *e,
+                    field,
+                    value,
+                }),
+                Expr::UnaryOp {
+                    op: UnaryOp::Deref, ..
+                } => Ok(Stmt::DerefAssign {
+                    addr_expr: expr,
+                    value,
+                }),
+                _ => {
+                    let span = self.span().clone();
+                    Err(TinyErr {
+                        line: span.line,
+                        col: span.col,
+                        msg: "invalid assignment target".into(),
+                    })
+                }
+            }
+        } else {
+            Ok(Stmt::ExprStmt(expr))
+        }
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, TinyErr> {
