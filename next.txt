@@ -7,7 +7,70 @@
 - switch/case
 - enum support
 - Comma operator
-- Float support (f32/f64) -- backend has SSE2 infra, needs frontend wiring
+
+### Float support (f32/f64) -- NEXT PRIORITY
+Full plan: .claude/plans/float-support.md (6 phases, ~30 tasks)
+
+What exists: XMM regs, RegClass::XMM, FP_ARG_REGS/FP_RETURN_REG, Fadd/Fsub/Fmul/Fdiv/Fsqrt
+and x86 sd/ss machine ops, isel rules, UcomisdRR/UcomissRR MachInst+encoding,
+MovsdRR/MovssRR, XMM spill ops, interference graph class-aware, map_colors_to_regs XMM path.
+
+What's missing (by phase):
+
+Phase 1 - IR infrastructure:
+  - Fconst(u64) -> Fconst(u64, Type) for F32 support (touches op.rs, builder, cost, isel, lower, is_fp_op x2)
+  - Add Op::Fcmp(CondCode) -> Type::Flags
+  - Add Op::IntToFloat(Type), FloatToInt(Type), FloatExt, FloatTrunc
+  - Add X86 machine ops: X86Ucomisd/X86Ucomiss (Op variants, MachInst already exists),
+    X86Cvtsi2sd/ss, X86Cvttsd2si/ss2si, X86Cvtsd2ss, X86Cvtss2sd
+  - Add MachInst variants + SSE2 encoding for 6 CVT instructions:
+    cvtsi2sd=F2 0F 2A, cvtsi2ss=F3 0F 2A, cvttsd2si=F2 0F 2C,
+    cvttss2si=F3 0F 2C, cvtsd2ss=F2 0F 5A, cvtss2sd=F3 0F 5A
+
+Phase 2 - Isel, lowering, regalloc fixes:
+  - Isel rules: Fcmp->Ucomisd/ss, IntToFloat->Cvtsi2sd/ss, FloatToInt->Cvttsd2si/ss2si,
+    FloatExt->Cvtss2sd, FloatTrunc->Cvtsd2ss
+  - Cost entries for all new ops
+  - Lowering for Ucomisd/Ucomiss (flags-only, no dst reg write) and all CVT ops
+  - FIX is_fp_op: add X86Addss/Subss/Mulss/Divss/Sqrtss + Cvtsi2sd/ss/Cvtsd2ss/Cvtss2sd
+    (both allocator.rs and split.rs copies)
+  - ADD XMM call clobber: CALLER_SAVED_XMM constant in abi.rs,
+    add_xmm_call_clobber_interferences (phantom XMM vregs at call points)
+  - ADD XMM pressure check: compute per-class chromatic numbers after coloring,
+    check GPR vs available_gpr_colors AND XMM vs AVAILABLE_XMM_COLORS,
+    two map_colors_to_regs calls (GPR + XMM), merge vreg_to_reg maps
+
+Phase 3 - Float ABI wiring:
+  - setup_call_args: emit MovsdRR for XMM copies instead of MovRR (split by reg class after sequentialize_copies)
+  - effectful.rs: call result uses FP_RETURN_REG + MovsdRR when ret type is float (avoid OpSize::from_type panic)
+  - terminator.rs: return uses FP_RETURN_REG + MovsdRR when ret type is float (same panic issue)
+  - precolor.rs: precolor call result to FP_RETURN_REG when float return type
+  - precolor.rs: add `reg.is_xmm()` check in param precoloring skip (all XMM caller-saved)
+
+Phase 4 - tinyc frontend:
+  - Lexer: Float/Double keyword tokens, FloatLit(f64) with `.`/`e`/`f` suffix support
+  - AST: CType::Float/Double (to_ir_type, bit_width, is_float), Expr::FloatLit(f64, bool)
+  - Parser: parse_type handles float/double, parse float literals
+  - usual_arithmetic_conversion: double > float > integer promotions
+  - addr_analysis: walk new AST nodes
+
+Phase 5 - tinyc codegen:
+  - FloatLit: fconst/fconst_f32 based on suffix
+  - emit_convert: int<->float, F32<->F64 conversions
+  - Arithmetic: Fadd/Fsub/Fmul/Fdiv when common type is float; % is compile error
+  - Comparisons: fcmp with unsigned condition codes (Ult/Ule/Ugt/Uge for ordered relational)
+  - Negation: fsub(0.0, x) for v1 (wrong for -(+0.0), acceptable; TODO xorps later)
+  - Skip integer promotion for float types in emit_promote
+
+Phase 6 - Tests:
+  - Lit tests: basic arithmetic, comparisons, conversions, function calls, edge cases
+  - Full regression: cargo test + lit tests
+
+Known risks/limitations:
+  - NaN==NaN: ucomisd+sete incorrectly returns true (needs jp guard for IEEE compliance, defer)
+  - Float negation -(+0.0) gives +0.0 not -0.0 with fsub approach
+  - R11 scratch in Fconst lowering (safe but undocumented assumption)
+  - No float globals, struct fields, or modulo in v1
 
 ### Backend optimization
 - Param precoloring is conservative: skips ALL params when block has calls,
