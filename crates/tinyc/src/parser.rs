@@ -431,10 +431,90 @@ impl Parser {
         self.expect(Token::LBrace)?;
         let mut stmts = Vec::new();
         while !self.at(Token::RBrace) {
-            stmts.push(self.parse_stmt()?);
+            if self.at(Token::For) {
+                let for_stmts = self.parse_for()?;
+                stmts.extend(for_stmts);
+            } else {
+                stmts.push(self.parse_stmt()?);
+            }
         }
         self.expect(Token::RBrace)?;
         Ok(stmts)
+    }
+
+    /// Parse `for(init; cond; update) { body }` and desugar to `init; while(cond) { body; update; }`.
+    fn parse_for(&mut self) -> Result<Vec<Stmt>, TinyErr> {
+        self.advance(); // consume `for`
+        self.expect(Token::LParen)?;
+
+        // init: variable declaration, expression statement, or empty
+        let init = if self.at(Token::Semi) {
+            self.advance();
+            None
+        } else if self.peek_is_type() {
+            let stmt = self.parse_stmt()?; // parses VarDecl including trailing `;`
+            Some(stmt)
+        } else {
+            let expr = self.parse_expr()?;
+            self.expect(Token::Semi)?;
+            Some(Stmt::ExprStmt(expr))
+        };
+
+        // cond: expression or empty (infinite loop)
+        let cond = if self.at(Token::Semi) {
+            self.advance();
+            Expr::IntLit(1) // always true
+        } else {
+            let c = self.parse_expr()?;
+            self.expect(Token::Semi)?;
+            c
+        };
+
+        // update: assignment or expression or empty (no trailing semicolon)
+        let update = if self.at(Token::RParen) {
+            None
+        } else {
+            let expr = self.parse_expr()?;
+            if self.at(Token::Assign) {
+                self.advance();
+                let value = self.parse_expr()?;
+                match expr {
+                    Expr::Var(name) => Some(Stmt::Assign { name, expr: value }),
+                    Expr::Index { base, index } => Some(Stmt::IndexAssign {
+                        base: *base,
+                        index: *index,
+                        value,
+                    }),
+                    Expr::FieldAccess { expr: e, field } => Some(Stmt::FieldAssign {
+                        expr: *e,
+                        field,
+                        value,
+                    }),
+                    _ => {
+                        return Err(TinyErr {
+                            line: 0,
+                            col: 0,
+                            msg: "invalid for-loop update assignment target".into(),
+                        });
+                    }
+                }
+            } else {
+                Some(Stmt::ExprStmt(expr))
+            }
+        };
+        self.expect(Token::RParen)?;
+
+        let mut body = self.parse_block()?;
+        if let Some(upd) = update {
+            body.push(upd);
+        }
+
+        let mut result = Vec::new();
+        if let Some(init_stmt) = init {
+            result.push(init_stmt);
+        }
+        result.push(Stmt::While { cond, body });
+        Ok(result)
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, TinyErr> {
