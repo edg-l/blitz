@@ -17,6 +17,8 @@ impl std::error::Error for TinyErr {}
 
 impl From<blitz::compile::CompileError> for TinyErr {
     fn from(e: blitz::compile::CompileError) -> Self {
+        // Backend errors (regalloc failures, encoding errors, etc.) are not tied
+        // to source lines. line/col 0 signals a compiler-internal error.
         TinyErr {
             line: 0,
             col: 0,

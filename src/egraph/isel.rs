@@ -1,24 +1,25 @@
 use smallvec::smallvec;
 
-use crate::egraph::egraph::{EGraph, snapshot_all};
+use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::condcode::CondCode;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 
 pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
-    changed |= apply_alu_isel(egraph);
-    changed |= apply_shift_isel(egraph);
-    changed |= apply_shift_imm_isel(egraph);
-    changed |= apply_select_isel(egraph);
-    changed |= apply_icmp_isel(egraph);
-    changed |= apply_fcmp_isel(egraph);
-    changed |= apply_sext_zext_trunc_isel(egraph);
-    changed |= apply_bitcast_isel(egraph);
-    changed |= apply_fp_isel(egraph);
-    changed |= apply_conv_isel(egraph);
-    changed |= apply_div_isel(egraph);
+    changed |= apply_alu_isel(egraph, &snaps);
+    changed |= apply_shift_isel(egraph, &snaps);
+    changed |= apply_shift_imm_isel(egraph, &snaps);
+    changed |= apply_select_isel(egraph, &snaps);
+    changed |= apply_icmp_isel(egraph, &snaps);
+    changed |= apply_fcmp_isel(egraph, &snaps);
+    changed |= apply_sext_zext_trunc_isel(egraph, &snaps);
+    changed |= apply_bitcast_isel(egraph, &snaps);
+    changed |= apply_fp_isel(egraph, &snaps);
+    changed |= apply_conv_isel(egraph, &snaps);
+    changed |= apply_div_isel(egraph, &snaps);
     changed
 }
 
@@ -29,11 +30,10 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
 ///
 /// Egraph memoization ensures that SDiv and SRem on the same operands share
 /// one X86Idiv node.
-fn apply_div_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_div_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.children.len() != 2 {
             continue;
@@ -85,11 +85,10 @@ fn alu_x86_op(op: &Op) -> Option<Op> {
 }
 
 /// Add(a,b) -> Proj0(X86Add(a,b)), Sub(a,b) -> Proj0(X86Sub(a,b)), etc.
-fn apply_alu_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_alu_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.children.len() != 2 {
             continue;
@@ -139,11 +138,10 @@ fn find_iconst_in_class(egraph: &EGraph, class_id: ClassId) -> Option<i64> {
 }
 
 /// Shl/Sar/Shr -> X86Shl/X86Sar/X86Shr (as Proj0)
-fn apply_shift_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_shift_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.children.len() != 2 {
             continue;
@@ -180,11 +178,10 @@ fn apply_shift_isel(egraph: &mut EGraph) -> bool {
 /// X86Shl(a, Iconst(n)) -> add X86ShlImm(n)(a) as an alternative in the same class.
 /// Looks for Proj0(X86Shl(a, b)) where b has a constant value, and merges that
 /// Proj0 class with Proj0(X86ShlImm(n)(a)). Same for Shr/Sar.
-fn apply_shift_imm_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_shift_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
 
         // Look for Proj0 nodes whose child is X86Shl/X86Shr/X86Sar.
@@ -248,11 +245,10 @@ fn apply_shift_imm_isel(egraph: &mut EGraph) -> bool {
 
 /// Icmp(cc, a, b) -> Proj1(X86Sub(a, b))
 /// Multiple Icmps on same (a,b) share the same X86Sub.
-fn apply_icmp_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_icmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.children.len() != 2 {
             continue;
@@ -286,11 +282,10 @@ fn apply_icmp_isel(egraph: &mut EGraph) -> bool {
 
 /// Fcmp(cc, a, b) -> X86Ucomisd(a, b) for F64, X86Ucomiss(a, b) for F32
 /// The condition code is preserved in the Fcmp node for later extraction.
-fn apply_fcmp_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_fcmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.children.len() != 2 {
             continue;
@@ -327,11 +322,10 @@ fn apply_fcmp_isel(egraph: &mut EGraph) -> bool {
 
 /// Select(flags, t, f) -> X86Cmov(cc, flags, t, f)
 /// The cc is taken from the Icmp that produced the flags class.
-fn apply_select_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_select_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.op != Op::Select || snap.children.len() != 3 {
             continue;
@@ -377,11 +371,10 @@ fn infer_class_type(egraph: &EGraph, class_id: ClassId) -> Option<Type> {
 /// Sext(ty)(a) -> X86Movsx{from, to}(a)
 /// Zext(ty)(a) -> X86Movzx{from, to}(a)
 /// Trunc(ty)(a) -> X86Trunc{from, to}(a)
-fn apply_sext_zext_trunc_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_sext_zext_trunc_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.children.len() != 1 {
             continue;
@@ -424,11 +417,10 @@ fn apply_sext_zext_trunc_isel(egraph: &mut EGraph) -> bool {
 }
 
 /// Bitcast(to)(a) -> X86Bitcast{from, to}(a)
-fn apply_bitcast_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_bitcast_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.children.len() != 1 {
             continue;
@@ -460,11 +452,10 @@ fn apply_bitcast_isel(egraph: &mut EGraph) -> bool {
 
 /// Fadd/Fsub/Fmul/Fdiv/Fsqrt -> X86Addsd/X86Subsd/X86Mulsd/X86Divsd/X86Sqrtsd (F64)
 ///                             -> X86Addss/X86Subss/X86Mulss/X86Divss/X86Sqrtss (F32)
-fn apply_fp_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_fp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
 
         // Determine the operand type from the first child to choose sd vs ss.
@@ -532,11 +523,10 @@ fn apply_fp_isel(egraph: &mut EGraph) -> bool {
 }
 
 /// IntToFloat / FloatToInt / FloatExt / FloatTrunc -> x86 conversion ops
-fn apply_conv_isel(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_conv_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.children.len() != 1 {
             continue;

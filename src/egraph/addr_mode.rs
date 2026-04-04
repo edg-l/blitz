@@ -1,15 +1,16 @@
 use smallvec::smallvec;
 
 use crate::egraph::algebraic::find_iconst;
-use crate::egraph::egraph::{EGraph, snapshot_all};
+use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 
 pub fn apply_addr_mode_rules(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
-    changed |= apply_addr_rules(egraph);
-    changed |= apply_lea_rules(egraph);
+    changed |= apply_addr_rules(egraph, &snaps);
+    changed |= apply_lea_rules(egraph, &snaps);
     changed
 }
 
@@ -20,11 +21,10 @@ fn is_valid_scale(s: u8) -> bool {
 
 // ── Addr formation rules ──────────────────────────────────────────────────────
 
-fn apply_addr_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.op != Op::Add || snap.children.len() != 2 {
             continue;
@@ -142,11 +142,10 @@ fn apply_addr_rules(egraph: &mut EGraph) -> bool {
 
 // ── LEA formation rules ───────────────────────────────────────────────────────
 
-fn apply_lea_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
 
         match &snap.op {
@@ -267,16 +266,15 @@ fn apply_lea_rules(egraph: &mut EGraph) -> bool {
 
     // Three-component LEA: Add(Add(a, Shl(b, Iconst(n))), Iconst(d))
     // -> X86Lea4(a, b, 2^n, d)
-    changed |= apply_three_component_lea(egraph);
+    changed |= apply_three_component_lea(egraph, snaps);
 
     changed
 }
 
-fn apply_three_component_lea(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_three_component_lea(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.op != Op::Add || snap.children.len() != 2 {
             continue;

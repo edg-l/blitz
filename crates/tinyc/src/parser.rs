@@ -1,4 +1,6 @@
-use crate::ast::{BinOp, CType, Expr, ExternDecl, FnDef, GlobalVar, Program, Stmt, UnaryOp};
+use crate::ast::{
+    BinOp, CType, Expr, ExternDecl, FnDef, GlobalVar, Program, SpannedExpr, Stmt, UnaryOp,
+};
 use crate::error::TinyErr;
 use crate::lexer::{Span, SpannedToken, Token};
 
@@ -34,17 +36,8 @@ impl Parser {
                 let save_pos = p.pos;
                 let ty = p.parse_type()?;
 
-                let name_tok = p.advance().clone();
-                let name = match &name_tok.token {
-                    Token::Ident(s) => s.clone(),
-                    other => {
-                        return Err(TinyErr {
-                            line: name_tok.span.line,
-                            col: name_tok.span.col,
-                            msg: format!("expected identifier, got {other:?}"),
-                        });
-                    }
-                };
+                let name_span = p.span().clone();
+                let name = p.expect_ident("identifier")?;
 
                 if p.at(Token::LParen) {
                     // Function definition or forward declaration: restore and re-parse.
@@ -57,8 +50,8 @@ impl Parser {
                     // Global variable declaration.
                     if noinline {
                         return Err(TinyErr {
-                            line: name_tok.span.line,
-                            col: name_tok.span.col,
+                            line: name_span.line,
+                            col: name_span.col,
                             msg: "__attribute__((noinline)) cannot be applied to a global variable"
                                 .into(),
                         });
@@ -87,20 +80,20 @@ impl Parser {
                     };
 
                     p.expect(Token::Semi)?;
-                    global_vars.push(GlobalVar { name, ty, init });
+                    global_vars.push(GlobalVar {
+                        name,
+                        ty,
+                        init,
+                        span: name_span,
+                    });
                 }
             }
         }
-        let global_vars_opt = if global_vars.is_empty() {
-            None
-        } else {
-            Some(global_vars)
-        };
         Ok(Program {
             functions,
             extern_decls,
             struct_defs,
-            global_vars: global_vars_opt,
+            global_vars,
         })
     }
 
@@ -122,6 +115,18 @@ impl Parser {
             self.pos += 1;
         }
         t
+    }
+
+    fn expect_ident(&mut self, context: &str) -> Result<String, TinyErr> {
+        let tok = self.advance().clone();
+        match &tok.token {
+            Token::Ident(s) => Ok(s.clone()),
+            other => Err(TinyErr {
+                line: tok.span.line,
+                col: tok.span.col,
+                msg: format!("expected {context}, got {other:?}"),
+            }),
+        }
     }
 
     fn expect(&mut self, tok: Token) -> Result<&SpannedToken, TinyErr> {
@@ -270,34 +275,15 @@ impl Parser {
         Ok(ty)
     }
 
-    fn parse_struct_def(&mut self) -> Result<(String, Vec<(String, CType)>), TinyErr> {
+    fn parse_struct_def(&mut self) -> Result<(String, Vec<(String, CType)>, Span), TinyErr> {
+        let struct_span = *self.span();
         self.expect(Token::Struct)?;
-        let name_tok = self.advance().clone();
-        let name = match &name_tok.token {
-            Token::Ident(s) => s.clone(),
-            other => {
-                return Err(TinyErr {
-                    line: name_tok.span.line,
-                    col: name_tok.span.col,
-                    msg: format!("expected struct name, got {other:?}"),
-                });
-            }
-        };
+        let name = self.expect_ident("struct name")?;
         self.expect(Token::LBrace)?;
         let mut fields = Vec::new();
         while !self.at(Token::RBrace) {
             let field_ty = self.parse_type()?;
-            let field_tok = self.advance().clone();
-            let field_name = match &field_tok.token {
-                Token::Ident(s) => s.clone(),
-                other => {
-                    return Err(TinyErr {
-                        line: field_tok.span.line,
-                        col: field_tok.span.col,
-                        msg: format!("expected field name, got {other:?}"),
-                    });
-                }
-            };
+            let field_name = self.expect_ident("field name")?;
             // Parse array dimensions on struct fields
             let field_ty = self.parse_array_dims(field_ty)?;
             self.expect(Token::Semi)?;
@@ -305,23 +291,14 @@ impl Parser {
         }
         self.expect(Token::RBrace)?;
         self.expect(Token::Semi)?;
-        Ok((name, fields))
+        Ok((name, fields, struct_span))
     }
 
     fn parse_extern_decl(&mut self) -> Result<ExternDecl, TinyErr> {
+        let extern_span = *self.span();
         self.expect(Token::Extern)?;
         let return_type = self.parse_type()?;
-        let name_tok = self.advance().clone();
-        let name = match &name_tok.token {
-            Token::Ident(s) => s.clone(),
-            other => {
-                return Err(TinyErr {
-                    line: name_tok.span.line,
-                    col: name_tok.span.col,
-                    msg: format!("expected function name, got {other:?}"),
-                });
-            }
-        };
+        let name = self.expect_ident("function name")?;
         self.expect(Token::LParen)?;
         let mut params = Vec::new();
         while !self.at(Token::RParen) {
@@ -345,6 +322,7 @@ impl Parser {
             name,
             return_type,
             params,
+            span: extern_span,
         })
     }
 
@@ -375,39 +353,19 @@ impl Parser {
     fn parse_function_or_forward_decl(&mut self, noinline: bool) -> Result<FnOrForward, TinyErr> {
         // <type> name(<params>) { body }   -- function definition
         // <type> name(<params>) ;          -- forward declaration
+        let fn_span = *self.span();
         let return_type = self.parse_type()?;
 
-        let name_tok = self.advance().clone();
-        let name = match &name_tok.token {
-            Token::Ident(s) => s.clone(),
-            other => {
-                return Err(TinyErr {
-                    line: name_tok.span.line,
-                    col: name_tok.span.col,
-                    msg: format!("expected function name, got {other:?}"),
-                });
-            }
-        };
+        let name = self.expect_ident("function name")?;
 
         self.expect(Token::LParen)?;
         let mut params = Vec::new();
         while !self.at(Token::RParen) {
             let mut param_type = self.parse_type()?;
-            let p = self.advance().clone();
-            match &p.token {
-                Token::Ident(s) => {
-                    // Parse array dimensions and decay to pointer
-                    param_type = self.parse_array_dims(param_type)?.decay();
-                    params.push((param_type, s.clone()));
-                }
-                other => {
-                    return Err(TinyErr {
-                        line: p.span.line,
-                        col: p.span.col,
-                        msg: format!("expected parameter name, got {other:?}"),
-                    });
-                }
-            }
+            let param_name = self.expect_ident("parameter name")?;
+            // Parse array dimensions and decay to pointer
+            param_type = self.parse_array_dims(param_type)?.decay();
+            params.push((param_type, param_name));
             if self.at(Token::Comma) {
                 self.advance();
             } else {
@@ -424,6 +382,7 @@ impl Parser {
                 name,
                 return_type,
                 params: param_types,
+                span: fn_span,
             }));
         }
 
@@ -434,6 +393,7 @@ impl Parser {
             params,
             body,
             noinline,
+            span: fn_span,
         }))
     }
 
@@ -454,6 +414,7 @@ impl Parser {
 
     /// Parse `for(init; cond; update) { body }`.
     fn parse_for(&mut self) -> Result<Vec<Stmt>, TinyErr> {
+        let for_span = *self.span();
         self.advance(); // consume `for`
         self.expect(Token::LParen)?;
 
@@ -472,8 +433,9 @@ impl Parser {
 
         // cond: expression or empty (infinite loop)
         let cond = if self.at(Token::Semi) {
+            let s = *self.span();
             self.advance();
-            Expr::IntLit(1) // always true
+            SpannedExpr::new(Expr::IntLit(1), s) // always true
         } else {
             let c = self.parse_expr()?;
             self.expect(Token::Semi)?;
@@ -500,33 +462,42 @@ impl Parser {
             cond,
             update: update.map(Box::new),
             body,
+            span: for_span,
         });
         Ok(result)
     }
 
     /// Parse an expression, then optionally an `= value` turning it into an assignment statement.
     fn parse_expr_or_assign(&mut self) -> Result<Stmt, TinyErr> {
-        let expr = self.parse_expr()?;
+        let lhs_span = *self.span();
+        let sexpr = self.parse_expr()?;
         if self.at(Token::Assign) {
             self.advance();
             let value = self.parse_expr()?;
-            match expr {
-                Expr::Var(name) => Ok(Stmt::Assign { name, expr: value }),
+            match sexpr.expr {
+                Expr::Var(name) => Ok(Stmt::Assign {
+                    name,
+                    expr: value,
+                    span: lhs_span,
+                }),
                 Expr::Index { base, index } => Ok(Stmt::IndexAssign {
                     base: *base,
                     index: *index,
                     value,
+                    span: lhs_span,
                 }),
                 Expr::FieldAccess { expr: e, field } => Ok(Stmt::FieldAssign {
                     expr: *e,
                     field,
                     value,
+                    span: lhs_span,
                 }),
                 Expr::UnaryOp {
                     op: UnaryOp::Deref, ..
                 } => Ok(Stmt::DerefAssign {
-                    addr_expr: expr,
+                    addr_expr: sexpr,
                     value,
+                    span: lhs_span,
                 }),
                 _ => {
                     let span = self.span().clone();
@@ -538,25 +509,16 @@ impl Parser {
                 }
             }
         } else {
-            Ok(Stmt::ExprStmt(expr))
+            Ok(Stmt::ExprStmt(sexpr, lhs_span))
         }
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, TinyErr> {
+        let stmt_span = *self.span();
         // Check for type-started variable declaration first.
         if self.peek_is_type() {
             let ty = self.parse_type()?;
-            let name_tok = self.advance().clone();
-            let name = match &name_tok.token {
-                Token::Ident(s) => s.clone(),
-                other => {
-                    return Err(TinyErr {
-                        line: name_tok.span.line,
-                        col: name_tok.span.col,
-                        msg: format!("expected variable name, got {other:?}"),
-                    });
-                }
-            };
+            let name = self.expect_ident("variable name")?;
             // Parse array dimensions: e.g. `int arr[3][4]`
             let ty = self.parse_array_dims(ty)?;
             if ty.is_array() && self.at(Token::Assign) {
@@ -573,6 +535,7 @@ impl Parser {
                     ty,
                     name,
                     init: None,
+                    span: stmt_span,
                 });
             }
             self.expect(Token::Assign)?;
@@ -582,6 +545,7 @@ impl Parser {
                 ty,
                 name,
                 init: Some(init),
+                span: stmt_span,
             });
         }
 
@@ -600,11 +564,11 @@ impl Parser {
                 self.advance();
                 if self.at(Token::Semi) {
                     self.advance();
-                    Ok(Stmt::Return(None))
+                    Ok(Stmt::Return(None, stmt_span))
                 } else {
                     let e = self.parse_expr()?;
                     self.expect(Token::Semi)?;
-                    Ok(Stmt::Return(Some(e)))
+                    Ok(Stmt::Return(Some(e), stmt_span))
                 }
             }
             Token::If => {
@@ -623,6 +587,7 @@ impl Parser {
                     cond,
                     then_body,
                     else_body,
+                    span: stmt_span,
                 })
             }
             Token::While => {
@@ -631,22 +596,27 @@ impl Parser {
                 let cond = self.parse_expr()?;
                 self.expect(Token::RParen)?;
                 let body = self.parse_block()?;
-                Ok(Stmt::While { cond, body })
+                Ok(Stmt::While {
+                    cond,
+                    body,
+                    span: stmt_span,
+                })
             }
             Token::Star => {
                 // Could be `*expr = value;` (deref assign) or `*expr;` (expr stmt).
-                let expr = self.parse_expr()?;
+                let sexpr = self.parse_expr()?;
                 if self.at(Token::Assign) {
                     self.advance();
                     let value = self.parse_expr()?;
                     self.expect(Token::Semi)?;
                     Ok(Stmt::DerefAssign {
-                        addr_expr: expr,
+                        addr_expr: sexpr,
                         value,
+                        span: stmt_span,
                     })
                 } else {
                     self.expect(Token::Semi)?;
-                    Ok(Stmt::ExprStmt(expr))
+                    Ok(Stmt::ExprStmt(sexpr, stmt_span))
                 }
             }
             Token::Ident(_) => {
@@ -656,17 +626,23 @@ impl Parser {
                     self.advance();
                     let value = self.parse_expr()?;
                     self.expect(Token::Semi)?;
-                    match lhs {
-                        Expr::Var(name) => Ok(Stmt::Assign { name, expr: value }),
+                    match lhs.expr {
+                        Expr::Var(name) => Ok(Stmt::Assign {
+                            name,
+                            expr: value,
+                            span: stmt_span,
+                        }),
                         Expr::Index { base, index } => Ok(Stmt::IndexAssign {
                             base: *base,
                             index: *index,
                             value,
+                            span: stmt_span,
                         }),
                         Expr::FieldAccess { expr, field } => Ok(Stmt::FieldAssign {
                             expr: *expr,
                             field,
                             value,
+                            span: stmt_span,
                         }),
                         _ => {
                             let span = self.span().clone();
@@ -679,18 +655,18 @@ impl Parser {
                     }
                 } else {
                     self.expect(Token::Semi)?;
-                    Ok(Stmt::ExprStmt(lhs))
+                    Ok(Stmt::ExprStmt(lhs, stmt_span))
                 }
             }
             _ => {
                 let e = self.parse_expr()?;
                 self.expect(Token::Semi)?;
-                Ok(Stmt::ExprStmt(e))
+                Ok(Stmt::ExprStmt(e, stmt_span))
             }
         }
     }
 
-    pub fn parse_expr(&mut self) -> Result<Expr, TinyErr> {
+    pub fn parse_expr(&mut self) -> Result<SpannedExpr, TinyErr> {
         self.parse_expr_bp(0)
     }
 
@@ -721,10 +697,12 @@ impl Parser {
         }
     }
 
-    fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr, TinyErr> {
+    fn parse_expr_bp(&mut self, min_bp: u8) -> Result<SpannedExpr, TinyErr> {
         let mut lhs = self.parse_prefix()?;
 
         loop {
+            let op_span = *self.span();
+
             // Postfix operators bind at bp 25, tighter than any binary op.
             if self.at(Token::LBracket) {
                 if 25 <= min_bp {
@@ -733,10 +711,13 @@ impl Parser {
                 self.advance();
                 let index = self.parse_expr()?;
                 self.expect(Token::RBracket)?;
-                lhs = Expr::Index {
-                    base: Box::new(lhs),
-                    index: Box::new(index),
-                };
+                lhs = SpannedExpr::new(
+                    Expr::Index {
+                        base: Box::new(lhs),
+                        index: Box::new(index),
+                    },
+                    op_span,
+                );
                 continue;
             }
 
@@ -746,21 +727,14 @@ impl Parser {
                     break;
                 }
                 self.advance();
-                let field_tok = self.advance().clone();
-                let field = match &field_tok.token {
-                    Token::Ident(s) => s.clone(),
-                    other => {
-                        return Err(TinyErr {
-                            line: field_tok.span.line,
-                            col: field_tok.span.col,
-                            msg: format!("expected field name after '.', got {other:?}"),
-                        });
-                    }
-                };
-                lhs = Expr::FieldAccess {
-                    expr: Box::new(lhs),
-                    field,
-                };
+                let field = self.expect_ident("field name after '.'")?;
+                lhs = SpannedExpr::new(
+                    Expr::FieldAccess {
+                        expr: Box::new(lhs),
+                        field,
+                    },
+                    op_span,
+                );
                 continue;
             }
 
@@ -770,24 +744,21 @@ impl Parser {
                     break;
                 }
                 self.advance();
-                let field_tok = self.advance().clone();
-                let field = match &field_tok.token {
-                    Token::Ident(s) => s.clone(),
-                    other => {
-                        return Err(TinyErr {
-                            line: field_tok.span.line,
-                            col: field_tok.span.col,
-                            msg: format!("expected field name after '->', got {other:?}"),
-                        });
-                    }
-                };
-                lhs = Expr::FieldAccess {
-                    expr: Box::new(Expr::UnaryOp {
+                let field = self.expect_ident("field name after '->'")?;
+                let deref = SpannedExpr::new(
+                    Expr::UnaryOp {
                         op: UnaryOp::Deref,
                         expr: Box::new(lhs),
-                    }),
-                    field,
-                };
+                    },
+                    op_span,
+                );
+                lhs = SpannedExpr::new(
+                    Expr::FieldAccess {
+                        expr: Box::new(deref),
+                        field,
+                    },
+                    op_span,
+                );
                 continue;
             }
 
@@ -800,11 +771,14 @@ impl Parser {
                 let then_expr = self.parse_expr()?;
                 self.expect(Token::Colon)?;
                 let else_expr = self.parse_expr_bp(0)?;
-                lhs = Expr::Ternary {
-                    cond: Box::new(lhs),
-                    then_expr: Box::new(then_expr),
-                    else_expr: Box::new(else_expr),
-                };
+                lhs = SpannedExpr::new(
+                    Expr::Ternary {
+                        cond: Box::new(lhs),
+                        then_expr: Box::new(then_expr),
+                        else_expr: Box::new(else_expr),
+                    },
+                    op_span,
+                );
                 continue;
             }
 
@@ -836,11 +810,14 @@ impl Parser {
                     Token::Shr => BinOp::Shr,
                     _ => unreachable!(),
                 };
-                lhs = Expr::BinOp {
-                    op,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                };
+                lhs = SpannedExpr::new(
+                    Expr::BinOp {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
+                    op_span,
+                );
                 continue;
             }
 
@@ -850,72 +827,89 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn parse_prefix(&mut self) -> Result<Expr, TinyErr> {
+    fn parse_prefix(&mut self) -> Result<SpannedExpr, TinyErr> {
+        let span = *self.span();
         match self.peek().clone() {
             Token::Minus => {
                 self.advance();
-                let expr = self.parse_expr_bp(21)?; // higher than any binary op
-                Ok(Expr::UnaryOp {
-                    op: UnaryOp::Neg,
-                    expr: Box::new(expr),
-                })
+                let expr = self.parse_expr_bp(21)?;
+                Ok(SpannedExpr::new(
+                    Expr::UnaryOp {
+                        op: UnaryOp::Neg,
+                        expr: Box::new(expr),
+                    },
+                    span,
+                ))
             }
             Token::Bang => {
                 self.advance();
                 let expr = self.parse_expr_bp(21)?;
-                Ok(Expr::UnaryOp {
-                    op: UnaryOp::Not,
-                    expr: Box::new(expr),
-                })
+                Ok(SpannedExpr::new(
+                    Expr::UnaryOp {
+                        op: UnaryOp::Not,
+                        expr: Box::new(expr),
+                    },
+                    span,
+                ))
             }
             Token::Tilde => {
                 self.advance();
                 let expr = self.parse_expr_bp(21)?;
-                Ok(Expr::UnaryOp {
-                    op: UnaryOp::BitNot,
-                    expr: Box::new(expr),
-                })
+                Ok(SpannedExpr::new(
+                    Expr::UnaryOp {
+                        op: UnaryOp::BitNot,
+                        expr: Box::new(expr),
+                    },
+                    span,
+                ))
             }
             Token::Star => {
                 self.advance();
                 let expr = self.parse_expr_bp(21)?;
-                Ok(Expr::UnaryOp {
-                    op: UnaryOp::Deref,
-                    expr: Box::new(expr),
-                })
+                Ok(SpannedExpr::new(
+                    Expr::UnaryOp {
+                        op: UnaryOp::Deref,
+                        expr: Box::new(expr),
+                    },
+                    span,
+                ))
             }
             Token::Amp => {
                 self.advance();
                 let expr = self.parse_expr_bp(21)?;
-                Ok(Expr::UnaryOp {
-                    op: UnaryOp::AddrOf,
-                    expr: Box::new(expr),
-                })
+                Ok(SpannedExpr::new(
+                    Expr::UnaryOp {
+                        op: UnaryOp::AddrOf,
+                        expr: Box::new(expr),
+                    },
+                    span,
+                ))
             }
             Token::Sizeof => {
                 self.advance();
                 self.expect(Token::LParen)?;
                 let ty = self.parse_type()?;
                 self.expect(Token::RParen)?;
-                Ok(Expr::Sizeof(ty))
+                Ok(SpannedExpr::new(Expr::Sizeof(ty), span))
             }
             _ => self.parse_primary(),
         }
     }
 
-    fn parse_primary(&mut self) -> Result<Expr, TinyErr> {
+    fn parse_primary(&mut self) -> Result<SpannedExpr, TinyErr> {
+        let span = *self.span();
         match self.peek().clone() {
             Token::IntLit(v) => {
                 self.advance();
-                Ok(Expr::IntLit(v))
+                Ok(SpannedExpr::new(Expr::IntLit(v), span))
             }
             Token::FloatLit(bits, has_f_suffix) => {
                 self.advance();
-                Ok(Expr::FloatLit(bits, has_f_suffix))
+                Ok(SpannedExpr::new(Expr::FloatLit(bits, has_f_suffix), span))
             }
             Token::StringLit(bytes) => {
                 self.advance();
-                Ok(Expr::StringLit(bytes))
+                Ok(SpannedExpr::new(Expr::StringLit(bytes), span))
             }
             Token::Ident(name) => {
                 self.advance();
@@ -932,14 +926,13 @@ impl Parser {
                         }
                     }
                     self.expect(Token::RParen)?;
-                    Ok(Expr::Call { name, args })
+                    Ok(SpannedExpr::new(Expr::Call { name, args }, span))
                 } else {
-                    Ok(Expr::Var(name))
+                    Ok(SpannedExpr::new(Expr::Var(name), span))
                 }
             }
             Token::LParen => {
                 // Disambiguate: `(type)expr` (cast) vs `(expr)` (grouping).
-                // Type keywords are distinct tokens so we can check pos+1.
                 let next_is_type = self.pos + 1 < self.tokens.len()
                     && matches!(
                         self.tokens[self.pos + 1].token,
@@ -958,10 +951,13 @@ impl Parser {
                     let ty = self.parse_type()?;
                     self.expect(Token::RParen)?;
                     let expr = self.parse_expr_bp(21)?; // unary-level
-                    Ok(Expr::Cast {
-                        ty,
-                        expr: Box::new(expr),
-                    })
+                    Ok(SpannedExpr::new(
+                        Expr::Cast {
+                            ty,
+                            expr: Box::new(expr),
+                        },
+                        span,
+                    ))
                 } else {
                     self.advance(); // consume '('
                     let e = self.parse_expr()?;

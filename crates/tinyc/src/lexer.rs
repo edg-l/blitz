@@ -70,7 +70,7 @@ pub enum Token {
     Eof,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Span {
     pub line: u32,
     pub col: u32,
@@ -80,6 +80,47 @@ pub struct Span {
 pub struct SpannedToken {
     pub token: Token,
     pub span: Span,
+}
+
+/// Parse the exponent, optional f/F suffix, and convert accumulated float string to a token.
+/// `start` is the index in `chars` where the float literal began (for building the string).
+/// `pos` and `col` are advanced past the exponent and suffix.
+fn finish_float_literal(
+    chars: &[char],
+    pos: &mut usize,
+    col: &mut u32,
+    start: usize,
+    line: u32,
+    start_col: u32,
+) -> Result<Token, TinyErr> {
+    // Optional exponent
+    if *pos < chars.len() && (chars[*pos] == 'e' || chars[*pos] == 'E') {
+        *pos += 1;
+        *col += 1;
+        if *pos < chars.len() && (chars[*pos] == '+' || chars[*pos] == '-') {
+            *pos += 1;
+            *col += 1;
+        }
+        while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+            *pos += 1;
+            *col += 1;
+        }
+    }
+    let s: String = chars[start..*pos].iter().collect();
+    // Optional f/F suffix
+    let has_f_suffix = if *pos < chars.len() && (chars[*pos] == 'f' || chars[*pos] == 'F') {
+        *pos += 1;
+        *col += 1;
+        true
+    } else {
+        false
+    };
+    let val: f64 = s.parse().map_err(|_| TinyErr {
+        line,
+        col: start_col,
+        msg: format!("invalid float literal '{s}'"),
+    })?;
+    Ok(Token::FloatLit(val.to_bits(), has_f_suffix))
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
@@ -197,35 +238,7 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                         pos += 1;
                         col += 1;
                     }
-                    // Optional exponent
-                    if pos < chars.len() && (chars[pos] == 'e' || chars[pos] == 'E') {
-                        pos += 1;
-                        col += 1;
-                        if pos < chars.len() && (chars[pos] == '+' || chars[pos] == '-') {
-                            pos += 1;
-                            col += 1;
-                        }
-                        while pos < chars.len() && chars[pos].is_ascii_digit() {
-                            pos += 1;
-                            col += 1;
-                        }
-                    }
-                    let s: String = chars[start..pos].iter().collect();
-                    // Optional f/F suffix
-                    let has_f_suffix =
-                        if pos < chars.len() && (chars[pos] == 'f' || chars[pos] == 'F') {
-                            pos += 1;
-                            col += 1;
-                            true
-                        } else {
-                            false
-                        };
-                    let val: f64 = s.parse().map_err(|_| TinyErr {
-                        line,
-                        col: span.col,
-                        msg: format!("invalid float literal '{s}'"),
-                    })?;
-                    Token::FloatLit(val.to_bits(), has_f_suffix)
+                    finish_float_literal(&chars, &mut pos, &mut col, start, line, span.col)?
                 } else {
                     pos += 1;
                     col += 1;
@@ -374,35 +387,7 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                                 col += 1;
                             }
                         }
-                        // Consume exponent
-                        if pos < chars.len() && (chars[pos] == 'e' || chars[pos] == 'E') {
-                            pos += 1;
-                            col += 1;
-                            if pos < chars.len() && (chars[pos] == '+' || chars[pos] == '-') {
-                                pos += 1;
-                                col += 1;
-                            }
-                            while pos < chars.len() && chars[pos].is_ascii_digit() {
-                                pos += 1;
-                                col += 1;
-                            }
-                        }
-                        let s: String = chars[start..pos].iter().collect();
-                        // Optional f/F suffix
-                        let has_f_suffix =
-                            if pos < chars.len() && (chars[pos] == 'f' || chars[pos] == 'F') {
-                                pos += 1;
-                                col += 1;
-                                true
-                            } else {
-                                false
-                            };
-                        let val: f64 = s.parse().map_err(|_| TinyErr {
-                            line,
-                            col: span.col,
-                            msg: format!("invalid float literal '{s}'"),
-                        })?;
-                        Token::FloatLit(val.to_bits(), has_f_suffix)
+                        finish_float_literal(&chars, &mut pos, &mut col, start, line, span.col)?
                     } else {
                         let s: String = chars[start..pos].iter().collect();
                         let val: i64 = s.parse().map_err(|_| TinyErr {

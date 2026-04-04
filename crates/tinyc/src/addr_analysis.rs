@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ast::{Expr, Stmt, UnaryOp};
+use crate::ast::{Expr, SpannedExpr, Stmt, UnaryOp};
 
 /// Recursively walk all expressions and statements to find variables whose
 /// address is taken via `&var_name`.
@@ -12,23 +12,23 @@ pub(crate) fn find_addressed_vars(stmts: &[Stmt]) -> HashSet<String> {
     set
 }
 
-fn walk_expr(expr: &Expr, set: &mut HashSet<String>) {
-    match expr {
+fn walk_expr(sexpr: &SpannedExpr, set: &mut HashSet<String>) {
+    match &sexpr.expr {
         Expr::UnaryOp {
             op: UnaryOp::AddrOf,
             expr: inner,
         } => {
-            match inner.as_ref() {
+            match &inner.expr {
                 Expr::Var(name) => {
                     set.insert(name.clone());
                 }
                 Expr::FieldAccess { expr, .. } => {
                     // &s.field: mark the root variable as addressed
                     let mut root = expr.as_ref();
-                    while let Expr::FieldAccess { expr: inner, .. } = root {
+                    while let Expr::FieldAccess { expr: inner, .. } = &root.expr {
                         root = inner.as_ref();
                     }
-                    if let Expr::Var(name) = root {
+                    if let Expr::Var(name) = &root.expr {
                         set.insert(name.clone());
                     }
                 }
@@ -77,20 +77,24 @@ fn walk_expr(expr: &Expr, set: &mut HashSet<String>) {
 
 fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
     match stmt {
-        Stmt::Return(Some(expr)) => walk_expr(expr, set),
-        Stmt::Return(None) => {}
-        Stmt::ExprStmt(expr) => walk_expr(expr, set),
+        Stmt::Return(Some(expr), _) => walk_expr(expr, set),
+        Stmt::Return(None, _) => {}
+        Stmt::ExprStmt(expr, _) => walk_expr(expr, set),
         Stmt::VarDecl { init, .. } => {
             if let Some(init) = init {
                 walk_expr(init, set);
             }
         }
         Stmt::Assign { expr, .. } => walk_expr(expr, set),
-        Stmt::DerefAssign { addr_expr, value } => {
+        Stmt::DerefAssign {
+            addr_expr, value, ..
+        } => {
             walk_expr(addr_expr, set);
             walk_expr(value, set);
         }
-        Stmt::IndexAssign { base, index, value } => {
+        Stmt::IndexAssign {
+            base, index, value, ..
+        } => {
             walk_expr(base, set);
             walk_expr(index, set);
             walk_expr(value, set);
@@ -103,6 +107,7 @@ fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
             cond,
             then_body,
             else_body,
+            ..
         } => {
             walk_expr(cond, set);
             for s in then_body {
@@ -114,13 +119,15 @@ fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
                 }
             }
         }
-        Stmt::While { cond, body } => {
+        Stmt::While { cond, body, .. } => {
             walk_expr(cond, set);
             for s in body {
                 walk_stmt(s, set);
             }
         }
-        Stmt::For { cond, update, body } => {
+        Stmt::For {
+            cond, update, body, ..
+        } => {
             walk_expr(cond, set);
             if let Some(update) = update {
                 walk_stmt(update, set);

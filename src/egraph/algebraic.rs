@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use smallvec::smallvec;
 
-use crate::egraph::egraph::{EGraph, snapshot_all};
+use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
@@ -58,25 +58,25 @@ fn mask_to_type(val: i64, ty: &Type) -> i64 {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn apply_algebraic_rules(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
     let mut changed = false;
-    changed |= apply_identity_rules(egraph);
-    changed |= apply_annihilation_rules(egraph);
-    changed |= apply_idempotence_rules(egraph);
-    changed |= apply_inverse_rules(egraph);
-    changed |= apply_double_negation_rules(egraph);
-    changed |= apply_constant_folding(egraph);
-    changed |= apply_commutativity_rules(egraph);
+    changed |= apply_identity_rules(egraph, &snaps);
+    changed |= apply_annihilation_rules(egraph, &snaps);
+    changed |= apply_idempotence_rules(egraph, &snaps);
+    changed |= apply_inverse_rules(egraph, &snaps);
+    changed |= apply_double_negation_rules(egraph, &snaps);
+    changed |= apply_constant_folding(egraph, &snaps);
+    changed |= apply_commutativity_rules(egraph, &snaps);
     changed
 }
 
 // ── Identity rules ────────────────────────────────────────────────────────────
 // Add(a, 0) = a, Mul(a, 1) = a, Or(a, 0) = a, And(a, all_ones) = a
 
-fn apply_identity_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         match &snap.op {
             Op::Add | Op::Or if snap.children.len() == 2 => {
@@ -148,11 +148,10 @@ fn apply_identity_rules(egraph: &mut EGraph) -> bool {
 // ── Annihilation rules ────────────────────────────────────────────────────────
 // Mul(a, 0) = 0, And(a, 0) = 0
 
-fn apply_annihilation_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_annihilation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         match &snap.op {
             Op::Mul | Op::And if snap.children.len() == 2 => {
@@ -183,11 +182,10 @@ fn apply_annihilation_rules(egraph: &mut EGraph) -> bool {
 // ── Idempotence rules ─────────────────────────────────────────────────────────
 // And(a, a) = a, Or(a, a) = a
 
-fn apply_idempotence_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_idempotence_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         match &snap.op {
             Op::And | Op::Or if snap.children.len() == 2 => {
@@ -210,11 +208,10 @@ fn apply_idempotence_rules(egraph: &mut EGraph) -> bool {
 // ── Inverse rules ─────────────────────────────────────────────────────────────
 // Sub(a, a) = 0, Xor(a, a) = 0
 
-fn apply_inverse_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_inverse_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         match &snap.op {
             Op::Sub | Op::Xor if snap.children.len() == 2 => {
@@ -244,11 +241,10 @@ fn apply_inverse_rules(egraph: &mut EGraph) -> bool {
 // ── Double negation ───────────────────────────────────────────────────────────
 // Sub(0, Sub(0, a)) = a
 
-fn apply_double_negation_rules(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+fn apply_double_negation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         // Outer Sub(0, ?)
         if snap.op != Op::Sub || snap.children.len() != 2 {
@@ -282,11 +278,10 @@ fn apply_double_negation_rules(egraph: &mut EGraph) -> bool {
 
 // ── Constant folding ──────────────────────────────────────────────────────────
 
-pub fn apply_constant_folding(egraph: &mut EGraph) -> bool {
-    let snaps = snapshot_all(egraph);
+pub fn apply_constant_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         let class_id = snap.class_id;
         if snap.children.len() != 2 {
             continue;
@@ -335,16 +330,15 @@ pub fn apply_constant_folding(egraph: &mut EGraph) -> bool {
 // Add(a,b) = Add(b,a), Mul(a,b) = Mul(b,a), And/Or/Xor similarly.
 // Only add swapped version if child[0].0 > child[1].0 to avoid infinite loops.
 
-fn apply_commutativity_rules(egraph: &mut EGraph) -> bool {
+fn apply_commutativity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     // Spike test note: this uses canonical-id ordering to ensure each pair is
     // added at most once, preventing combinatorial blowup.  A chain of 10+ Add
     // nodes with commutativity enabled stays well under 50k classes because each
     // Add(a,b) class gains at most one new node (the swapped one), and only when
     // the left child's canonical id is strictly greater than the right child's.
-    let snaps = snapshot_all(egraph);
     let mut changed = false;
 
-    for snap in &snaps {
+    for snap in snaps {
         if snap.children.len() != 2 {
             continue;
         }
@@ -571,7 +565,8 @@ mod tests {
                 children: smallvec![cur, c],
             });
         }
-        apply_commutativity_rules(&mut g);
+        let snaps = snapshot_all(&g);
+        apply_commutativity_rules(&mut g, &snaps);
         g.rebuild();
         let count = g.class_count();
         assert!(

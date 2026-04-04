@@ -1,3 +1,4 @@
+use crate::lexer::Span;
 use blitz::ir::types::Type;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,19 +220,21 @@ pub struct ExternDecl {
     pub name: String,
     pub return_type: CType,
     pub params: Vec<CType>,
+    pub span: Span,
 }
 
 pub struct GlobalVar {
     pub name: String,
     pub ty: CType,
     pub init: Option<i64>,
+    pub span: Span,
 }
 
 pub struct Program {
     pub functions: Vec<FnDef>,
     pub extern_decls: Vec<ExternDecl>,
-    pub struct_defs: Vec<(String, Vec<(String, CType)>)>,
-    pub global_vars: Option<Vec<GlobalVar>>,
+    pub struct_defs: Vec<(String, Vec<(String, CType)>, Span)>,
+    pub global_vars: Vec<GlobalVar>,
 }
 
 pub struct FnDef {
@@ -240,50 +243,70 @@ pub struct FnDef {
     pub params: Vec<(CType, String)>,
     pub body: Vec<Stmt>,
     pub noinline: bool,
+    pub span: Span,
 }
 
 pub enum Stmt {
-    Return(Option<Expr>),
+    Return(Option<SpannedExpr>, Span),
     If {
-        cond: Expr,
+        cond: SpannedExpr,
         then_body: Vec<Stmt>,
         else_body: Option<Vec<Stmt>>,
+        span: Span,
     },
     While {
-        cond: Expr,
+        cond: SpannedExpr,
         body: Vec<Stmt>,
+        span: Span,
     },
     For {
-        cond: Expr,
+        cond: SpannedExpr,
         update: Option<Box<Stmt>>,
         body: Vec<Stmt>,
+        span: Span,
     },
     VarDecl {
         ty: CType,
         name: String,
-        init: Option<Expr>,
+        init: Option<SpannedExpr>,
+        span: Span,
     },
     Assign {
         name: String,
-        expr: Expr,
+        expr: SpannedExpr,
+        span: Span,
     },
     DerefAssign {
-        addr_expr: Expr,
-        value: Expr,
+        addr_expr: SpannedExpr,
+        value: SpannedExpr,
+        span: Span,
     },
     IndexAssign {
-        base: Expr,
-        index: Expr,
-        value: Expr,
+        base: SpannedExpr,
+        index: SpannedExpr,
+        value: SpannedExpr,
+        span: Span,
     },
     FieldAssign {
-        expr: Expr,
+        expr: SpannedExpr,
         field: String,
-        value: Expr,
+        value: SpannedExpr,
+        span: Span,
     },
     Break,
     Continue,
-    ExprStmt(Expr),
+    ExprStmt(SpannedExpr, Span),
+}
+
+pub struct SpannedExpr {
+    pub expr: Expr,
+    pub span: Span,
+}
+
+impl SpannedExpr {
+    pub fn new(expr: Expr, span: Span) -> Self {
+        Self { expr, span }
+    }
 }
 
 pub enum Expr {
@@ -294,34 +317,34 @@ pub enum Expr {
     Var(String),
     BinOp {
         op: BinOp,
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: Box<SpannedExpr>,
+        rhs: Box<SpannedExpr>,
     },
     UnaryOp {
         op: UnaryOp,
-        expr: Box<Expr>,
+        expr: Box<SpannedExpr>,
     },
     Call {
         name: String,
-        args: Vec<Expr>,
+        args: Vec<SpannedExpr>,
     },
     Cast {
         ty: CType,
-        expr: Box<Expr>,
+        expr: Box<SpannedExpr>,
     },
     Sizeof(CType),
     Index {
-        base: Box<Expr>,
-        index: Box<Expr>,
+        base: Box<SpannedExpr>,
+        index: Box<SpannedExpr>,
     },
     FieldAccess {
-        expr: Box<Expr>,
+        expr: Box<SpannedExpr>,
         field: String,
     },
     Ternary {
-        cond: Box<Expr>,
-        then_expr: Box<Expr>,
-        else_expr: Box<Expr>,
+        cond: Box<SpannedExpr>,
+        then_expr: Box<SpannedExpr>,
+        else_expr: Box<SpannedExpr>,
     },
 }
 

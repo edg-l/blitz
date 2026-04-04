@@ -9,7 +9,7 @@ use crate::regalloc::spill::{
     is_spill_load, is_spill_store, is_xmm_spill_load, is_xmm_spill_store, spill_slot_of,
 };
 use crate::schedule::scheduler::ScheduledInst;
-use crate::x86::abi::{ArgLoc, FrameLayout, assign_args};
+use crate::x86::abi::{ArgLoc, FrameLayout};
 use crate::x86::addr::Addr;
 use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
@@ -98,41 +98,34 @@ fn lower_shift_cl(
     Ok(insts)
 }
 
+enum FpWidth {
+    F32,
+    F64,
+}
+
 fn lower_fp_binary(
     name: &str,
     dst_reg: Option<Reg>,
     operand_regs: &[Option<Reg>],
     mk: fn(Operand, Operand) -> MachInst,
+    width: FpWidth,
 ) -> Result<Vec<MachInst>, String> {
     let dst = get_dst(name, dst_reg)?;
     let src_a = get_op(name, operand_regs, 0)?;
     let src_b = get_op(name, operand_regs, 1)?;
     let mut insts = Vec::new();
     if dst != src_a {
-        insts.push(MachInst::MovsdRR {
-            dst: Operand::Reg(dst),
-            src: Operand::Reg(src_a),
-        });
-    }
-    insts.push(mk(Operand::Reg(dst), Operand::Reg(src_b)));
-    Ok(insts)
-}
-
-fn lower_fp_binary_ss(
-    name: &str,
-    dst_reg: Option<Reg>,
-    operand_regs: &[Option<Reg>],
-    mk: fn(Operand, Operand) -> MachInst,
-) -> Result<Vec<MachInst>, String> {
-    let dst = get_dst(name, dst_reg)?;
-    let src_a = get_op(name, operand_regs, 0)?;
-    let src_b = get_op(name, operand_regs, 1)?;
-    let mut insts = Vec::new();
-    if dst != src_a {
-        insts.push(MachInst::MovssRR {
-            dst: Operand::Reg(dst),
-            src: Operand::Reg(src_a),
-        });
+        let mov = match width {
+            FpWidth::F32 => MachInst::MovssRR {
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src_a),
+            },
+            FpWidth::F64 => MachInst::MovsdRR {
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src_a),
+            },
+        };
+        insts.push(mov);
     }
     insts.push(mk(Operand::Reg(dst), Operand::Reg(src_b)));
     Ok(insts)
@@ -619,18 +612,34 @@ fn lower_op(
         ),
 
         // ── x86 FP machine ops ────────────────────────────────────────────────
-        Op::X86Addsd => lower_fp_binary("X86Addsd", dst_reg, operand_regs, |dst, src| {
-            MachInst::AddsdRR { dst, src }
-        }),
-        Op::X86Subsd => lower_fp_binary("X86Subsd", dst_reg, operand_regs, |dst, src| {
-            MachInst::SubsdRR { dst, src }
-        }),
-        Op::X86Mulsd => lower_fp_binary("X86Mulsd", dst_reg, operand_regs, |dst, src| {
-            MachInst::MulsdRR { dst, src }
-        }),
-        Op::X86Divsd => lower_fp_binary("X86Divsd", dst_reg, operand_regs, |dst, src| {
-            MachInst::DivsdRR { dst, src }
-        }),
+        Op::X86Addsd => lower_fp_binary(
+            "X86Addsd",
+            dst_reg,
+            operand_regs,
+            |dst, src| MachInst::AddsdRR { dst, src },
+            FpWidth::F64,
+        ),
+        Op::X86Subsd => lower_fp_binary(
+            "X86Subsd",
+            dst_reg,
+            operand_regs,
+            |dst, src| MachInst::SubsdRR { dst, src },
+            FpWidth::F64,
+        ),
+        Op::X86Mulsd => lower_fp_binary(
+            "X86Mulsd",
+            dst_reg,
+            operand_regs,
+            |dst, src| MachInst::MulsdRR { dst, src },
+            FpWidth::F64,
+        ),
+        Op::X86Divsd => lower_fp_binary(
+            "X86Divsd",
+            dst_reg,
+            operand_regs,
+            |dst, src| MachInst::DivsdRR { dst, src },
+            FpWidth::F64,
+        ),
         Op::X86Sqrtsd => {
             let dst = get_dst("X86Sqrtsd", dst_reg)?;
             let src = get_op("X86Sqrtsd", operand_regs, 0)?;
@@ -641,18 +650,34 @@ fn lower_op(
         }
 
         // ── x86 F32 machine ops ───────────────────────────────────────────────
-        Op::X86Addss => lower_fp_binary_ss("X86Addss", dst_reg, operand_regs, |dst, src| {
-            MachInst::AddssRR { dst, src }
-        }),
-        Op::X86Subss => lower_fp_binary_ss("X86Subss", dst_reg, operand_regs, |dst, src| {
-            MachInst::SubssRR { dst, src }
-        }),
-        Op::X86Mulss => lower_fp_binary_ss("X86Mulss", dst_reg, operand_regs, |dst, src| {
-            MachInst::MulssRR { dst, src }
-        }),
-        Op::X86Divss => lower_fp_binary_ss("X86Divss", dst_reg, operand_regs, |dst, src| {
-            MachInst::DivssRR { dst, src }
-        }),
+        Op::X86Addss => lower_fp_binary(
+            "X86Addss",
+            dst_reg,
+            operand_regs,
+            |dst, src| MachInst::AddssRR { dst, src },
+            FpWidth::F32,
+        ),
+        Op::X86Subss => lower_fp_binary(
+            "X86Subss",
+            dst_reg,
+            operand_regs,
+            |dst, src| MachInst::SubssRR { dst, src },
+            FpWidth::F32,
+        ),
+        Op::X86Mulss => lower_fp_binary(
+            "X86Mulss",
+            dst_reg,
+            operand_regs,
+            |dst, src| MachInst::MulssRR { dst, src },
+            FpWidth::F32,
+        ),
+        Op::X86Divss => lower_fp_binary(
+            "X86Divss",
+            dst_reg,
+            operand_regs,
+            |dst, src| MachInst::DivssRR { dst, src },
+            FpWidth::F32,
+        ),
         Op::X86Sqrtss => {
             let dst = get_dst("X86Sqrtss", dst_reg)?;
             let src = get_op("X86Sqrtss", operand_regs, 0)?;
@@ -931,6 +956,7 @@ pub(super) fn lower_block_pure_ops(
     param_vreg_set: &BTreeSet<VReg>,
     frame_layout: &FrameLayout,
     vreg_types: &BTreeMap<VReg, Type>,
+    arg_locs: &[ArgLoc],
 ) -> Result<Vec<MachInst>, CompileError> {
     let mut result: Vec<MachInst> = Vec::new();
     let get_reg = |vreg: VReg| -> Option<Reg> { regalloc.vreg_to_reg.get(&vreg).copied() };
@@ -946,7 +972,6 @@ pub(super) fn lower_block_pure_ops(
         // Handle stack-passed function parameters (7th+ args in SysV ABI).
         if let Op::Param(param_idx, ty) = &inst.op {
             if !param_vreg_set.contains(&inst.dst) {
-                let arg_locs = assign_args(&func.param_types);
                 if let Some(dst_reg) = get_reg(inst.dst) {
                     match arg_locs.get(*param_idx as usize) {
                         Some(ArgLoc::Stack { offset }) => {
