@@ -7,7 +7,6 @@ use blitz::ir::types::Type;
 use crate::addr_analysis::find_addressed_vars;
 use crate::ast::{CType, Expr, FnDef, SpannedExpr, Stmt, UnaryOp};
 use crate::error::TinyErr;
-use crate::lexer::Span;
 
 use super::structs::{
     StructRegistry, emit_struct_copy, resolve_field, type_alignment, type_byte_size,
@@ -240,19 +239,19 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         } => {
             compile_for(ctx, cond, update.as_deref(), body)?;
         }
-        Stmt::Break => {
+        Stmt::Break(span) => {
             let lc = ctx
                 .loop_stack
                 .last()
-                .ok_or_else(|| err(Span::default(), "'break' outside of loop"))?;
+                .ok_or_else(|| err(*span, "'break' outside of loop"))?;
             let exit = lc.exit_block;
             ctx.builder.jump(exit, &[]);
         }
-        Stmt::Continue => {
+        Stmt::Continue(span) => {
             let lc = ctx
                 .loop_stack
                 .last()
-                .ok_or_else(|| err(Span::default(), "'continue' outside of loop"))?;
+                .ok_or_else(|| err(*span, "'continue' outside of loop"))?;
             let header = lc.header_block;
             ctx.builder.jump(header, &[]);
         }

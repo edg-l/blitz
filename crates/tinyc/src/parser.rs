@@ -551,14 +551,16 @@ impl Parser {
 
         match self.peek().clone() {
             Token::Break => {
+                let break_span = *self.span();
                 self.advance();
                 self.expect(Token::Semi)?;
-                Ok(Stmt::Break)
+                Ok(Stmt::Break(break_span))
             }
             Token::Continue => {
+                let continue_span = *self.span();
                 self.advance();
                 self.expect(Token::Semi)?;
-                Ok(Stmt::Continue)
+                Ok(Stmt::Continue(continue_span))
             }
             Token::Return => {
                 self.advance();

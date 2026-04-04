@@ -278,7 +278,7 @@ fn apply_double_negation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool 
 
 // ── Constant folding ──────────────────────────────────────────────────────────
 
-pub fn apply_constant_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+fn apply_constant_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
     for snap in snaps {

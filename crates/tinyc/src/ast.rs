@@ -293,8 +293,8 @@ pub enum Stmt {
         value: SpannedExpr,
         span: Span,
     },
-    Break,
-    Continue,
+    Break(Span),
+    Continue(Span),
     ExprStmt(SpannedExpr, Span),
 }
 

@@ -18,14 +18,13 @@ pub(super) fn assign_param_vregs_from_map(
     class_to_vreg: &BTreeMap<ClassId, VReg>,
     egraph: &EGraph,
     block_has_calls: bool,
+    arg_locs: &[ArgLoc],
 ) -> Vec<(VReg, Reg)> {
     use crate::x86::abi::CALLER_SAVED_GPR;
 
     if func.param_class_ids.is_empty() {
         return vec![];
     }
-
-    let arg_locs = assign_args(&func.param_types);
     let mut pairs: Vec<(VReg, Reg)> = Vec::new();
 
     for (param_idx, &class_id) in func.param_class_ids.iter().enumerate() {

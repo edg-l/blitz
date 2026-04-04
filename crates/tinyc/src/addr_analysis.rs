@@ -136,6 +136,6 @@ fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
                 walk_stmt(s, set);
             }
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break(_) | Stmt::Continue(_) => {}
     }
 }

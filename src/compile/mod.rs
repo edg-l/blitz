@@ -483,7 +483,14 @@ pub fn compile(
         .ops
         .iter()
         .any(|op| matches!(op, EffectfulOp::Call { .. }));
-    let param_vregs = assign_param_vregs_from_map(func, &class_to_vreg, &egraph, entry_has_calls);
+    let func_arg_locs = crate::x86::abi::assign_args(&func.param_types);
+    let param_vregs = assign_param_vregs_from_map(
+        func,
+        &class_to_vreg,
+        &egraph,
+        entry_has_calls,
+        &func_arg_locs,
+    );
 
     // Build phi copy pairs from block parameter passing for coalescing.
     let copy_pairs = compute_copy_pairs(
@@ -1343,7 +1350,7 @@ pub fn compile(
         // Emit movs for register params not precolored (live across a call
         // that clobbers their ABI register). Must be at the very start of
         // the function, before any barrier group / call arg setup.
-        let arg_locs = crate::x86::abi::assign_args(&func.param_types);
+        let arg_locs = &func_arg_locs;
         for inst in rewritten.iter() {
             if let Op::Param(param_idx, _) = &inst.op {
                 if !param_vreg_set.contains(&inst.dst) {
