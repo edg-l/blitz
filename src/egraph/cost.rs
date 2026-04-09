@@ -275,8 +275,8 @@ impl CostModel {
             | Op::FloatToInt(_)
             | Op::FloatExt
             | Op::FloatTrunc => f64::INFINITY,
-            // OrdEq/UnordNe Fcmp are lowered directly (not via isel); need finite cost.
-            // Regular Fcmp is lowered to X86Ucomisd/Ucomiss via isel.
+            // OrdEq/UnordNe Fcmp are lowered directly (skip isel); need finite cost.
+            // Regular Fcmp gets INFINITY (lowered to X86Ucomisd/Ucomiss via isel).
             Op::Fcmp(cc) => {
                 use crate::ir::condcode::CondCode;
                 if matches!(cc, CondCode::OrdEq | CondCode::UnordNe) {

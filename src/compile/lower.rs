@@ -53,14 +53,29 @@ fn lower_binary_alu(
     let src_a = get_op(name, operand_regs, 0)?;
     let src_b = get_op(name, operand_regs, 1)?;
     let mut insts = Vec::new();
-    if dst != src_a {
+    if dst == src_b && dst != src_a {
+        // mov dst,src_a would clobber src_b. Save src_b to R11 first.
+        insts.push(MachInst::MovRR {
+            size,
+            dst: Operand::Reg(Reg::R11),
+            src: Operand::Reg(src_b),
+        });
         insts.push(MachInst::MovRR {
             size,
             dst: Operand::Reg(dst),
             src: Operand::Reg(src_a),
         });
+        insts.push(mk(Operand::Reg(dst), Operand::Reg(Reg::R11)));
+    } else {
+        if dst != src_a {
+            insts.push(MachInst::MovRR {
+                size,
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src_a),
+            });
+        }
+        insts.push(mk(Operand::Reg(dst), Operand::Reg(src_b)));
     }
-    insts.push(mk(Operand::Reg(dst), Operand::Reg(src_b)));
     Ok(insts)
 }
 
@@ -403,104 +418,47 @@ fn lower_op(
             };
             match cc {
                 CondCode::OrdEq | CondCode::UnordNe => {
-                    // Compute NaN-aware 0/1 into R11, preserving true/false regs.
-                    // OrdEq: sete R11 + setnp dst_scratch + and R11, dst_scratch
-                    // UnordNe: setne R11 + setp dst_scratch + or R11, dst_scratch
-                    // We need a second scratch; use RCX-as-temp if it's not true/false.
-                    // Simplest: put both setccs into R11 using two temps.
-                    // Actually: movzx the first setcc to full reg, same for second,
-                    // combine in R11, test, then select. But we only have R11 as scratch.
-                    //
-                    // Approach: setcc1 into R11b, setcc2 into R11b after saving first.
-                    // Use push/pop? No, too heavyweight. Just use the stack or a mov.
-                    //
-                    // Simplest correct approach: use Setcc lowering (which uses R11),
-                    // but here we already ARE the lowering. Let me use a different strategy:
-                    // For OrdEq: start with false, cmovne->keep false, cmovnp->keep,
-                    //            cmove+cmovnp -> true only if both.
-                    // For UnordNe: start with true, cmove -> false, cmovp -> true again.
-                    //
-                    // OrdEq (ZF=1 AND PF=0):
-                    //   mov dst, false_reg
-                    //   cmove dst, true_reg    ; if ZF=1, dst = true (tentatively)
-                    //   cmovp dst, false_reg   ; if PF=1, dst = false (NaN override)
-                    //
-                    // UnordNe (ZF=0 OR PF=1):
-                    //   mov dst, true_reg
-                    //   cmove dst, false_reg   ; if ZF=1 (equal), dst = false
-                    //   cmovp dst, true_reg    ; if PF=1 (NaN), dst = true (override)
-                    //
-                    // Register aliasing: save one of true/false to R11 if needed.
+                    // Don't use true_reg/false_reg (they may be XMM due to regalloc
+                    // classifying the Fcmp flags VReg as XMM). Instead, compute the
+                    // result using setcc into dst directly, ignoring the Select operands.
+                    // The Select pattern was (flags, iconst(1), iconst(0)), so the result
+                    // is 0 or 1 which the setcc produces directly.
                     if *cc == CondCode::OrdEq {
-                        // Need false_reg alive for cmovp after cmove may clobber it.
-                        // If dst == false_reg, save false to R11 first.
-                        let safe_false = if dst == false_reg && dst != true_reg {
-                            insts.push(MachInst::MovRR {
-                                size,
-                                dst: Operand::Reg(Reg::R11),
-                                src: Operand::Reg(false_reg),
-                            });
-                            Reg::R11
-                        } else {
-                            false_reg
-                        };
-                        // mov dst, false_reg (default false)
-                        if dst != false_reg {
-                            insts.push(MachInst::MovRR {
-                                size,
-                                dst: Operand::Reg(dst),
-                                src: Operand::Reg(false_reg),
-                            });
-                        }
-                        // cmove dst, true_reg (if equal, set true)
-                        insts.push(MachInst::Cmov {
-                            size: cmov_size,
+                        // sete dst; setnp R11; and dst, R11
+                        insts.push(MachInst::Setcc {
                             cc: CondCode::Eq,
                             dst: Operand::Reg(dst),
-                            src: Operand::Reg(true_reg),
                         });
-                        // cmovp dst, false_reg (if NaN, reset to false)
-                        insts.push(MachInst::Cmov {
-                            size: cmov_size,
-                            cc: CondCode::Parity,
+                        insts.push(MachInst::Setcc {
+                            cc: CondCode::NotParity,
+                            dst: Operand::Reg(Reg::R11),
+                        });
+                        insts.push(MachInst::AndRR {
+                            size: OpSize::S8,
                             dst: Operand::Reg(dst),
-                            src: Operand::Reg(safe_false),
+                            src: Operand::Reg(Reg::R11),
                         });
                     } else {
-                        // UnordNe: need true_reg alive for cmovp after cmove.
-                        let safe_true = if dst == true_reg && dst != false_reg {
-                            insts.push(MachInst::MovRR {
-                                size,
-                                dst: Operand::Reg(Reg::R11),
-                                src: Operand::Reg(true_reg),
-                            });
-                            Reg::R11
-                        } else {
-                            true_reg
-                        };
-                        // mov dst, true_reg (default true)
-                        if dst != true_reg {
-                            insts.push(MachInst::MovRR {
-                                size,
-                                dst: Operand::Reg(dst),
-                                src: Operand::Reg(true_reg),
-                            });
-                        }
-                        // cmove dst, false_reg (if equal, set false)
-                        insts.push(MachInst::Cmov {
-                            size: cmov_size,
-                            cc: CondCode::Eq,
+                        // setne dst; setp R11; or dst, R11
+                        insts.push(MachInst::Setcc {
+                            cc: CondCode::Ne,
                             dst: Operand::Reg(dst),
-                            src: Operand::Reg(false_reg),
                         });
-                        // cmovp dst, true_reg (if NaN, set true)
-                        insts.push(MachInst::Cmov {
-                            size: cmov_size,
+                        insts.push(MachInst::Setcc {
                             cc: CondCode::Parity,
+                            dst: Operand::Reg(Reg::R11),
+                        });
+                        insts.push(MachInst::OrRR {
+                            size: OpSize::S8,
                             dst: Operand::Reg(dst),
-                            src: Operand::Reg(safe_true),
+                            src: Operand::Reg(Reg::R11),
                         });
                     }
+                    // Zero-extend to full register width (setcc only sets low byte).
+                    insts.push(MachInst::MovzxBR {
+                        dst: Operand::Reg(dst),
+                        src: Operand::Reg(dst),
+                    });
                 }
                 _ => {
                     // Standard: start with false in dst, cmov to true.
@@ -1266,44 +1224,28 @@ pub(super) fn lower_block_pure_ops(
             })
             .unwrap_or(OpSize::S64);
 
-        // Fcmp(OrdEq/UnordNe) skipped isel -- lower directly to ucomisd/ucomiss here.
+        // Fcmp(OrdEq/UnordNe) skipped isel -- lower directly to ucomisd/ucomiss.
         if let Op::Fcmp(cc @ (CondCode::OrdEq | CondCode::UnordNe)) = &inst.op {
-            if let Some(dst_reg) = dst_reg_opt {
-                let src1 = op_regs[0].ok_or_else(|| CompileError {
-                    phase: "lowering".into(),
-                    message: "Fcmp: no register for src1".into(),
-                    location: None,
-                })?;
-                let src2 = op_regs[1].ok_or_else(|| CompileError {
-                    phase: "lowering".into(),
-                    message: "Fcmp: no register for src2".into(),
-                    location: None,
-                })?;
-                // Determine F32 vs F64 from operand type
+            let src1 = op_regs.first().copied().flatten();
+            let src2 = op_regs.get(1).copied().flatten();
+            if let (Some(s1), Some(s2)) = (src1, src2) {
                 let is_f32 = inst
                     .operands
                     .first()
                     .and_then(|v| vreg_types.get(v))
                     .is_some_and(|t| matches!(t, Type::F32));
-                let cmp_inst = if is_f32 {
+                result.push(if is_f32 {
                     MachInst::UcomissRR {
-                        src1: Operand::Reg(src1),
-                        src2: Operand::Reg(src2),
+                        src1: Operand::Reg(s1),
+                        src2: Operand::Reg(s2),
                     }
                 } else {
                     MachInst::UcomisdRR {
-                        src1: Operand::Reg(src1),
-                        src2: Operand::Reg(src2),
+                        src1: Operand::Reg(s1),
+                        src2: Operand::Reg(s2),
                     }
-                };
-                result.push(cmp_inst);
-                // Emit multi-instruction setcc pattern for the composite CC.
-                // The flags are consumed by a later Cmov/Setcc which will use the CC.
-                // Since this is the "flags producer", the consumer (Select->Cmov isel)
-                // will find the CC from this Fcmp node.
-                // No additional instructions needed here -- the Cmov/Setcc lowering
-                // handles OrdEq/UnordNe expansion.
-                let _ = (cc, dst_reg);
+                });
+                let _ = cc;
             }
             continue;
         }

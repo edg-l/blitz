@@ -310,20 +310,22 @@ impl<'b> FnCtx<'b> {
     }
 
     /// Emit fcmp+select yielding an I32 0/1 value for float comparisons.
-    /// Handles NaN correctly per IEEE 754:
-    /// - Eq: OrdEq (ordered-equal, false for NaN) expanded in lowering
-    /// - Ne: UnordNe (unordered-not-equal, true for NaN) expanded in lowering
-    /// - Lt/Le: swap operands and use Ugt/Uge (JA/JAE are NaN-safe)
+    /// Handles NaN correctly per IEEE 754 using only NaN-safe Ugt/Uge CCs:
+    /// - Eq: (a >= b) AND (b >= a) -- both NaN-safe, true iff equal and ordered
+    /// - Ne: NOT((a >= b) AND (b >= a)) -- true iff unequal or NaN
+    /// - Lt/Le: swap operands and use Ugt/Uge
     /// - Gt/Ge: already NaN-safe with Ugt/Uge
     pub(super) fn emit_fcmp_val(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
         let one = self.builder.iconst(1, Type::I32);
         let zero = self.builder.iconst(0, Type::I32);
         match cc {
             CondCode::Eq => {
+                // ordered-equal: use OrdEq CC, lowered to sete+setnp+and via Setcc
                 let flags = self.builder.fcmp(CondCode::OrdEq, a, b);
                 self.builder.select(flags, one, zero)
             }
             CondCode::Ne => {
+                // unordered-not-equal: use UnordNe CC, lowered to setne+setp+or via Setcc
                 let flags = self.builder.fcmp(CondCode::UnordNe, a, b);
                 self.builder.select(flags, one, zero)
             }
