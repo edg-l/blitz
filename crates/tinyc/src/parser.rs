@@ -467,10 +467,75 @@ impl Parser {
         Ok(result)
     }
 
-    /// Parse an expression, then optionally an `= value` turning it into an assignment statement.
+    fn try_compound_assign_op(&mut self) -> Option<BinOp> {
+        let op = match self.peek() {
+            Token::PlusAssign => BinOp::Add,
+            Token::MinusAssign => BinOp::Sub,
+            Token::StarAssign => BinOp::Mul,
+            Token::SlashAssign => BinOp::Div,
+            Token::PercentAssign => BinOp::Mod,
+            Token::AmpAssign => BinOp::BitAnd,
+            Token::PipeAssign => BinOp::BitOr,
+            Token::CaretAssign => BinOp::BitXor,
+            Token::ShlAssign => BinOp::Shl,
+            Token::ShrAssign => BinOp::Shr,
+            _ => return None,
+        };
+        self.advance();
+        Some(op)
+    }
+
+    /// Parse an expression, then optionally an `= value` or `op= value` turning it into an assignment statement.
     fn parse_expr_or_assign(&mut self) -> Result<Stmt, TinyErr> {
         let lhs_span = *self.span();
         let sexpr = self.parse_expr()?;
+
+        // Check for compound assignment (+=, -=, etc.)
+        if let Some(bin_op) = self.try_compound_assign_op() {
+            let rhs = self.parse_expr()?;
+            // Desugar: lhs op= rhs -> lhs = lhs op rhs
+            let lhs_copy = SpannedExpr::new(sexpr.expr.clone(), sexpr.span);
+            let combined = SpannedExpr::new(
+                Expr::BinOp {
+                    op: bin_op,
+                    lhs: Box::new(lhs_copy),
+                    rhs: Box::new(rhs),
+                },
+                lhs_span,
+            );
+            return match sexpr.expr {
+                Expr::Var(name) => Ok(Stmt::Assign {
+                    name,
+                    expr: combined,
+                    span: lhs_span,
+                }),
+                Expr::Index { base, index } => Ok(Stmt::IndexAssign {
+                    base: *base,
+                    index: *index,
+                    value: combined,
+                    span: lhs_span,
+                }),
+                Expr::FieldAccess { expr: e, field } => Ok(Stmt::FieldAssign {
+                    expr: *e,
+                    field,
+                    value: combined,
+                    span: lhs_span,
+                }),
+                Expr::UnaryOp {
+                    op: UnaryOp::Deref, ..
+                } => Ok(Stmt::DerefAssign {
+                    addr_expr: sexpr,
+                    value: combined,
+                    span: lhs_span,
+                }),
+                _ => Err(TinyErr {
+                    line: lhs_span.line,
+                    col: lhs_span.col,
+                    msg: "invalid compound assignment target".into(),
+                }),
+            };
+        }
+
         if self.at(Token::Assign) {
             self.advance();
             let value = self.parse_expr()?;
@@ -604,61 +669,25 @@ impl Parser {
                     span: stmt_span,
                 })
             }
-            Token::Star => {
-                // Could be `*expr = value;` (deref assign) or `*expr;` (expr stmt).
-                let sexpr = self.parse_expr()?;
-                if self.at(Token::Assign) {
-                    self.advance();
-                    let value = self.parse_expr()?;
-                    self.expect(Token::Semi)?;
-                    Ok(Stmt::DerefAssign {
-                        addr_expr: sexpr,
-                        value,
-                        span: stmt_span,
-                    })
-                } else {
-                    self.expect(Token::Semi)?;
-                    Ok(Stmt::ExprStmt(sexpr, stmt_span))
-                }
+            Token::Do => {
+                self.advance();
+                let body = self.parse_block()?;
+                self.expect(Token::While)?;
+                self.expect(Token::LParen)?;
+                let cond = self.parse_expr()?;
+                self.expect(Token::RParen)?;
+                self.expect(Token::Semi)?;
+                Ok(Stmt::DoWhile {
+                    body,
+                    cond,
+                    span: stmt_span,
+                })
             }
-            Token::Ident(_) => {
-                // Parse LHS expression, then decide: assign, index assign, field assign, or expr stmt.
-                let lhs = self.parse_expr()?;
-                if self.at(Token::Assign) {
-                    self.advance();
-                    let value = self.parse_expr()?;
-                    self.expect(Token::Semi)?;
-                    match lhs.expr {
-                        Expr::Var(name) => Ok(Stmt::Assign {
-                            name,
-                            expr: value,
-                            span: stmt_span,
-                        }),
-                        Expr::Index { base, index } => Ok(Stmt::IndexAssign {
-                            base: *base,
-                            index: *index,
-                            value,
-                            span: stmt_span,
-                        }),
-                        Expr::FieldAccess { expr, field } => Ok(Stmt::FieldAssign {
-                            expr: *expr,
-                            field,
-                            value,
-                            span: stmt_span,
-                        }),
-                        _ => {
-                            let span = self.span().clone();
-                            Err(TinyErr {
-                                line: span.line,
-                                col: span.col,
-                                msg: "invalid assignment target".to_string(),
-                            })
-                        }
-                    }
-                } else {
-                    self.expect(Token::Semi)?;
-                    Ok(Stmt::ExprStmt(lhs, stmt_span))
-                }
+            Token::Star | Token::Ident(_) | Token::Increment | Token::Decrement => {
+                // Parse LHS expression, then decide: assign, compound assign, or expr stmt.
+                let stmt = self.parse_expr_or_assign()?;
+                self.expect(Token::Semi)?;
+                Ok(stmt)
             }
             _ => {
                 let e = self.parse_expr()?;
@@ -764,6 +793,24 @@ impl Parser {
                 continue;
             }
 
+            // Postfix `++` and `--`
+            if self.at(Token::Increment) {
+                if 25 <= min_bp {
+                    break;
+                }
+                self.advance();
+                lhs = SpannedExpr::new(Expr::PostIncrement(Box::new(lhs)), op_span);
+                continue;
+            }
+            if self.at(Token::Decrement) {
+                if 25 <= min_bp {
+                    break;
+                }
+                self.advance();
+                lhs = SpannedExpr::new(Expr::PostDecrement(Box::new(lhs)), op_span);
+                continue;
+            }
+
             // Ternary operator: cond ? then : else (right-associative, below ||)
             if self.at(Token::Question) {
                 if 1 <= min_bp {
@@ -832,6 +879,16 @@ impl Parser {
     fn parse_prefix(&mut self) -> Result<SpannedExpr, TinyErr> {
         let span = *self.span();
         match self.peek().clone() {
+            Token::Increment => {
+                self.advance();
+                let expr = self.parse_expr_bp(21)?;
+                return Ok(SpannedExpr::new(Expr::PreIncrement(Box::new(expr)), span));
+            }
+            Token::Decrement => {
+                self.advance();
+                let expr = self.parse_expr_bp(21)?;
+                return Ok(SpannedExpr::new(Expr::PreDecrement(Box::new(expr)), span));
+            }
             Token::Minus => {
                 self.advance();
                 let expr = self.parse_expr_bp(21)?;

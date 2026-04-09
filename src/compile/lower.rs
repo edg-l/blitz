@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
+use crate::ir::condcode::CondCode;
 use crate::ir::function::Function;
 use crate::ir::op::Op;
 use crate::ir::types::Type;
@@ -410,21 +411,98 @@ fn lower_op(
             } else {
                 size
             };
-            insts.push(MachInst::Cmov {
-                size: cmov_size,
-                cc: *cc,
-                dst: Operand::Reg(dst),
-                src: Operand::Reg(true_reg),
-            });
+            match cc {
+                CondCode::OrdEq => {
+                    // Ordered equal: cmove then cmovnp (AND semantics).
+                    // dst starts as false_val. cmove sets to true_val if ZF=1.
+                    // cmovp resets to false_val if PF=1 (NaN).
+                    insts.push(MachInst::Cmov {
+                        size: cmov_size,
+                        cc: CondCode::Eq,
+                        dst: Operand::Reg(dst),
+                        src: Operand::Reg(true_reg),
+                    });
+                    insts.push(MachInst::Cmov {
+                        size: cmov_size,
+                        cc: CondCode::Parity,
+                        dst: Operand::Reg(dst),
+                        src: Operand::Reg(false_reg),
+                    });
+                }
+                CondCode::UnordNe => {
+                    // Unordered not-equal: cmovne then cmovp (OR semantics).
+                    // dst starts as false_val. cmovne sets to true_val if ZF=0.
+                    // cmovp also sets to true_val if PF=1 (NaN).
+                    insts.push(MachInst::Cmov {
+                        size: cmov_size,
+                        cc: CondCode::Ne,
+                        dst: Operand::Reg(dst),
+                        src: Operand::Reg(true_reg),
+                    });
+                    insts.push(MachInst::Cmov {
+                        size: cmov_size,
+                        cc: CondCode::Parity,
+                        dst: Operand::Reg(dst),
+                        src: Operand::Reg(true_reg),
+                    });
+                }
+                _ => {
+                    insts.push(MachInst::Cmov {
+                        size: cmov_size,
+                        cc: *cc,
+                        dst: Operand::Reg(dst),
+                        src: Operand::Reg(true_reg),
+                    });
+                }
+            }
             Ok(insts)
         }
 
         Op::X86Setcc(cc) => {
             let dst = dst_reg.ok_or_else(|| "X86Setcc: no register for dst".to_string())?;
-            Ok(vec![MachInst::Setcc {
-                cc: *cc,
-                dst: Operand::Reg(dst),
-            }])
+            match cc {
+                CondCode::OrdEq => {
+                    // sete + setnp + and
+                    // Use R11 as scratch (caller-saved, not allocatable)
+                    Ok(vec![
+                        MachInst::Setcc {
+                            cc: CondCode::Eq,
+                            dst: Operand::Reg(dst),
+                        },
+                        MachInst::Setcc {
+                            cc: CondCode::NotParity,
+                            dst: Operand::Reg(Reg::R11),
+                        },
+                        MachInst::AndRR {
+                            size: OpSize::S8,
+                            dst: Operand::Reg(dst),
+                            src: Operand::Reg(Reg::R11),
+                        },
+                    ])
+                }
+                CondCode::UnordNe => {
+                    // setne + setp + or
+                    Ok(vec![
+                        MachInst::Setcc {
+                            cc: CondCode::Ne,
+                            dst: Operand::Reg(dst),
+                        },
+                        MachInst::Setcc {
+                            cc: CondCode::Parity,
+                            dst: Operand::Reg(Reg::R11),
+                        },
+                        MachInst::OrRR {
+                            size: OpSize::S8,
+                            dst: Operand::Reg(dst),
+                            src: Operand::Reg(Reg::R11),
+                        },
+                    ])
+                }
+                _ => Ok(vec![MachInst::Setcc {
+                    cc: *cc,
+                    dst: Operand::Reg(dst),
+                }]),
+            }
         }
 
         Op::X86Lea2 => {
@@ -1123,6 +1201,48 @@ pub(super) fn lower_block_pure_ops(
                 _ => OpSize::S64,
             })
             .unwrap_or(OpSize::S64);
+
+        // Fcmp(OrdEq/UnordNe) skipped isel -- lower directly to ucomisd/ucomiss here.
+        if let Op::Fcmp(cc @ (CondCode::OrdEq | CondCode::UnordNe)) = &inst.op {
+            if let Some(dst_reg) = dst_reg_opt {
+                let src1 = op_regs[0].ok_or_else(|| CompileError {
+                    phase: "lowering".into(),
+                    message: "Fcmp: no register for src1".into(),
+                    location: None,
+                })?;
+                let src2 = op_regs[1].ok_or_else(|| CompileError {
+                    phase: "lowering".into(),
+                    message: "Fcmp: no register for src2".into(),
+                    location: None,
+                })?;
+                // Determine F32 vs F64 from operand type
+                let is_f32 = inst
+                    .operands
+                    .first()
+                    .and_then(|v| vreg_types.get(v))
+                    .is_some_and(|t| matches!(t, Type::F32));
+                let cmp_inst = if is_f32 {
+                    MachInst::UcomissRR {
+                        src1: Operand::Reg(src1),
+                        src2: Operand::Reg(src2),
+                    }
+                } else {
+                    MachInst::UcomisdRR {
+                        src1: Operand::Reg(src1),
+                        src2: Operand::Reg(src2),
+                    }
+                };
+                result.push(cmp_inst);
+                // Emit multi-instruction setcc pattern for the composite CC.
+                // The flags are consumed by a later Cmov/Setcc which will use the CC.
+                // Since this is the "flags producer", the consumer (Select->Cmov isel)
+                // will find the CC from this Fcmp node.
+                // No additional instructions needed here -- the Cmov/Setcc lowering
+                // handles OrdEq/UnordNe expansion.
+                let _ = (cc, dst_reg);
+            }
+            continue;
+        }
 
         let machinsts = lower_op(
             &inst.op,

@@ -291,6 +291,11 @@ fn apply_fcmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             continue;
         }
         let Op::Fcmp(_cc) = &snap.op else { continue };
+        // OrdEq/UnordNe are composite CCs that need special multi-instruction lowering.
+        // Skip isel so they don't get merged (via Ucomisd hashcons) with regular Fcmp classes.
+        if matches!(_cc, CondCode::OrdEq | CondCode::UnordNe) {
+            continue;
+        }
 
         let a = snap.children[0];
         let b = snap.children[1];

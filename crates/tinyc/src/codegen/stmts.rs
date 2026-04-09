@@ -239,6 +239,9 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         } => {
             compile_for(ctx, cond, update.as_deref(), body)?;
         }
+        Stmt::DoWhile { body, cond, .. } => {
+            compile_do_while(ctx, body, cond)?;
+        }
         Stmt::Break(span) => {
             let lc = ctx
                 .loop_stack
@@ -456,6 +459,42 @@ fn compile_for(
         compile_stmt(ctx, upd)?;
     }
     ctx.builder.jump(header_block, &[]);
+
+    ctx.builder.seal_block(header_block);
+    ctx.builder.seal_block(exit_block);
+    ctx.builder.set_block(exit_block);
+    Ok(())
+}
+
+fn compile_do_while(ctx: &mut FnCtx, body: &[Stmt], cond: &SpannedExpr) -> Result<(), TinyErr> {
+    // Desugar do { body } while (cond) as:
+    //   while (1) { body; if (!cond) break; }
+    // This reuses the standard while-loop structure which handles SSA correctly.
+    let header_block = ctx.builder.create_block();
+    let body_block = ctx.builder.create_block();
+    let exit_block = ctx.builder.create_block();
+
+    // Header: unconditional jump to body (infinite loop condition).
+    ctx.builder.jump(header_block, &[]);
+    ctx.builder.set_block(header_block);
+    ctx.builder.jump(body_block, &[]);
+
+    // Body: execute statements, then check condition at the end.
+    ctx.builder.set_block(body_block);
+    ctx.builder.seal_block(body_block);
+    ctx.loop_stack.push(LoopContext {
+        header_block,
+        exit_block,
+    });
+    let body_result = compile_stmts(ctx, body);
+    ctx.loop_stack.pop();
+    body_result?;
+    if !ctx.is_terminated() {
+        // Evaluate condition: if true, loop back; if false, exit.
+        let flags = ctx.compile_cond(cond)?;
+        ctx.builder
+            .branch(flags, header_block, exit_block, &[], &[]);
+    }
 
     ctx.builder.seal_block(header_block);
     ctx.builder.seal_block(exit_block);

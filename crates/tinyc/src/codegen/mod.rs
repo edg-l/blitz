@@ -310,10 +310,38 @@ impl<'b> FnCtx<'b> {
     }
 
     /// Emit fcmp+select yielding an I32 0/1 value for float comparisons.
+    /// Handles NaN correctly per IEEE 754:
+    /// - Eq: OrdEq (ordered-equal, false for NaN) expanded in lowering
+    /// - Ne: UnordNe (unordered-not-equal, true for NaN) expanded in lowering
+    /// - Lt/Le: swap operands and use Ugt/Uge (JA/JAE are NaN-safe)
+    /// - Gt/Ge: already NaN-safe with Ugt/Uge
     pub(super) fn emit_fcmp_val(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
-        let flags = self.builder.fcmp(cc, a, b);
         let one = self.builder.iconst(1, Type::I32);
         let zero = self.builder.iconst(0, Type::I32);
-        self.builder.select(flags, one, zero)
+        match cc {
+            CondCode::Eq => {
+                let flags = self.builder.fcmp(CondCode::OrdEq, a, b);
+                self.builder.select(flags, one, zero)
+            }
+            CondCode::Ne => {
+                let flags = self.builder.fcmp(CondCode::UnordNe, a, b);
+                self.builder.select(flags, one, zero)
+            }
+            CondCode::Ult => {
+                // ordered-less-than: swap operands, use Ugt (JA is NaN-safe)
+                let flags = self.builder.fcmp(CondCode::Ugt, b, a);
+                self.builder.select(flags, one, zero)
+            }
+            CondCode::Ule => {
+                // ordered-less-or-equal: swap operands, use Uge (JAE is NaN-safe)
+                let flags = self.builder.fcmp(CondCode::Uge, b, a);
+                self.builder.select(flags, one, zero)
+            }
+            _ => {
+                // Ugt (JA) and Uge (JAE) are already NaN-safe
+                let flags = self.builder.fcmp(cc, a, b);
+                self.builder.select(flags, one, zero)
+            }
+        }
     }
 }

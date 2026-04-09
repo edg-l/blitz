@@ -72,6 +72,13 @@ fn walk_expr(sexpr: &SpannedExpr, set: &mut HashSet<String>) {
             walk_expr(then_expr, set);
             walk_expr(else_expr, set);
         }
+        Expr::PreIncrement(inner)
+        | Expr::PreDecrement(inner)
+        | Expr::PostIncrement(inner)
+        | Expr::PostDecrement(inner) => {
+            // ++x / --x / x++ / x-- may need address if x is addressed
+            walk_expr(inner, set);
+        }
     }
 }
 
@@ -135,6 +142,12 @@ fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
             for s in body {
                 walk_stmt(s, set);
             }
+        }
+        Stmt::DoWhile { body, cond, .. } => {
+            for s in body {
+                walk_stmt(s, set);
+            }
+            walk_expr(cond, set);
         }
         Stmt::Break(_) | Stmt::Continue(_) => {}
     }

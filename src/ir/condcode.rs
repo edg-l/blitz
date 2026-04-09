@@ -21,4 +21,14 @@ pub enum CondCode {
     Ugt,
     /// Unsigned greater-than-or-equal (CF=0)
     Uge,
+    /// Parity set (PF=1) -- used for NaN detection after ucomisd/ucomiss
+    Parity,
+    /// Parity clear (PF=0) -- used for "ordered" check after ucomisd/ucomiss
+    NotParity,
+    /// Ordered equal: ZF=1 AND PF=0. Used for IEEE float == after ucomisd/ucomiss.
+    /// Lowered to: sete + setnp + and (or cmove + cmovnp).
+    OrdEq,
+    /// Unordered not-equal: ZF=0 OR PF=1. Used for IEEE float != after ucomisd/ucomiss.
+    /// Lowered to: setne + setp + or (or cmovne + cmovp).
+    UnordNe,
 }

@@ -66,8 +66,12 @@ impl<'b> FnCtx<'b> {
             panic!("val_to_flags() called on struct type");
         }
         if ty.is_float() {
-            let zero = self.emit_float_zero(ty);
-            return self.builder.fcmp(CondCode::Ne, val, zero);
+            // Use emit_fcmp_val(Ne) for NaN-safe truthiness (NaN is truthy),
+            // then compare the int result to 0 for branch flags.
+            let zero_f = self.emit_float_zero(ty);
+            let int_val = self.emit_fcmp_val(CondCode::Ne, val, zero_f);
+            let zero_i = self.builder.iconst(0, Type::I32);
+            return self.builder.icmp(CondCode::Ne, int_val, zero_i);
         }
         let ir_ty = ty.to_ir_type().unwrap();
         let zero = self.builder.iconst(0, ir_ty);
@@ -92,17 +96,27 @@ impl<'b> FnCtx<'b> {
                     let (r, rt) = self.compile_expr(rhs)?;
                     let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
                     if common.is_float() {
-                        // Float comparisons use unsigned condition codes (ucomisd/ucomiss).
-                        let cc = match op {
-                            BinOp::Eq => CondCode::Eq,
-                            BinOp::Ne => CondCode::Ne,
-                            BinOp::Lt => CondCode::Ult,
-                            BinOp::Gt => CondCode::Ugt,
-                            BinOp::Le => CondCode::Ule,
-                            BinOp::Ge => CondCode::Uge,
+                        // NaN-aware float comparisons for branch conditions.
+                        // Eq/Ne: materialize to NaN-safe int, then branch on that.
+                        // Lt/Le: swap operands and use Ugt/Uge (JA/JAE are NaN-safe).
+                        // Gt/Ge: Ugt/Uge are already NaN-safe.
+                        match op {
+                            BinOp::Eq | BinOp::Ne => {
+                                let cc = if matches!(op, BinOp::Eq) {
+                                    CondCode::Eq
+                                } else {
+                                    CondCode::Ne
+                                };
+                                let val = self.emit_fcmp_val(cc, l, r);
+                                let zero = self.builder.iconst(0, Type::I32);
+                                return Ok(self.builder.icmp(CondCode::Ne, val, zero));
+                            }
+                            BinOp::Lt => return Ok(self.builder.fcmp(CondCode::Ugt, r, l)),
+                            BinOp::Le => return Ok(self.builder.fcmp(CondCode::Uge, r, l)),
+                            BinOp::Gt => return Ok(self.builder.fcmp(CondCode::Ugt, l, r)),
+                            BinOp::Ge => return Ok(self.builder.fcmp(CondCode::Uge, l, r)),
                             _ => unreachable!(),
-                        };
-                        return Ok(self.builder.fcmp(cc, l, r));
+                        }
                     }
                     // Pick signed/unsigned condition code.
                     let cc = match op {
@@ -293,8 +307,14 @@ impl<'b> FnCtx<'b> {
                 match op {
                     UnaryOp::Neg => {
                         if ty.is_float() {
-                            let zero = self.emit_float_zero(&ty);
-                            Ok((self.builder.fsub(zero, val), ty))
+                            // Use -0.0 (not +0.0) so fsub(-0.0, x) is IEEE-correct
+                            // for all cases including -(+0.0) = -0.0.
+                            let neg_zero = if ty == CType::Float {
+                                self.builder.fconst_f32(-0.0f32)
+                            } else {
+                                self.builder.fconst(-0.0f64)
+                            };
+                            Ok((self.builder.fsub(neg_zero, val), ty))
                         } else {
                             let (val, ty) = self.emit_promote(val, &ty);
                             Ok((self.builder.neg(val), ty))
@@ -345,6 +365,9 @@ impl<'b> FnCtx<'b> {
                 Ok((converted, ty.clone()))
             }
             Expr::Sizeof(ty) => {
+                if matches!(ty, CType::Void) {
+                    return Err(err(span, "sizeof(void) is not allowed"));
+                }
                 let size = if ty.is_array() {
                     type_byte_size(ty, self.struct_registry) as i64
                 } else if let CType::Struct(name) = ty {
@@ -414,6 +437,131 @@ impl<'b> FnCtx<'b> {
                     Ok((loaded, field_ty))
                 }
             }
+            Expr::PreIncrement(inner) | Expr::PreDecrement(inner) => {
+                let is_inc = matches!(&sexpr.expr, Expr::PreIncrement(_));
+                self.compile_inc_dec(inner, is_inc, true, span)
+            }
+            Expr::PostIncrement(inner) | Expr::PostDecrement(inner) => {
+                let is_inc = matches!(&sexpr.expr, Expr::PostIncrement(_));
+                self.compile_inc_dec(inner, is_inc, false, span)
+            }
+        }
+    }
+
+    /// Compile pre/post increment/decrement. `is_pre` = true means return new value.
+    fn compile_inc_dec(
+        &mut self,
+        inner: &SpannedExpr,
+        is_inc: bool,
+        is_pre: bool,
+        span: Span,
+    ) -> Result<(Value, CType), TinyErr> {
+        match &inner.expr {
+            Expr::Var(name) => {
+                let ty = self.local_type(name);
+                if ty.is_struct() || ty.is_array() {
+                    return Err(err(span, "cannot increment/decrement struct or array"));
+                }
+                // Read current value
+                let old_val = if self.is_global(name) {
+                    let addr = self.builder.global_addr(name);
+                    self.builder.load(addr, ty.to_ir_type().unwrap())
+                } else if let Some((slot, _)) = self.stack_slots.get(name) {
+                    let slot = *slot;
+                    let addr = self.builder.stack_addr(slot);
+                    self.builder.load(addr, ty.to_ir_type().unwrap())
+                } else {
+                    let var = *self
+                        .locals
+                        .get(name)
+                        .ok_or_else(|| err(span, format!("undefined variable '{name}'")))?;
+                    self.builder.use_var(var)
+                };
+                // Compute new value
+                let new_val = if ty.is_float() {
+                    let one = if ty == CType::Float {
+                        self.builder.fconst_f32(1.0f32)
+                    } else {
+                        self.builder.fconst(1.0f64)
+                    };
+                    if is_inc {
+                        self.builder.fadd(old_val, one)
+                    } else {
+                        self.builder.fsub(old_val, one)
+                    }
+                } else if ty.is_pointer() {
+                    // Pointer increment: advance by pointee size
+                    let pointee = ty.pointee();
+                    let elem_size = self.pointee_elem_size(pointee)?;
+                    let step = self.builder.iconst(elem_size, Type::I64);
+                    if is_inc {
+                        self.builder.add(old_val, step)
+                    } else {
+                        self.builder.sub(old_val, step)
+                    }
+                } else {
+                    let ir_ty = ty.to_ir_type().unwrap();
+                    let one = self.builder.iconst(1, ir_ty);
+                    if is_inc {
+                        self.builder.add(old_val, one)
+                    } else {
+                        self.builder.sub(old_val, one)
+                    }
+                };
+                // Write back
+                if self.is_global(name) {
+                    let addr = self.builder.global_addr(name);
+                    self.builder.store(addr, new_val);
+                } else if let Some((slot, _)) = self.stack_slots.get(name) {
+                    let slot = *slot;
+                    let addr = self.builder.stack_addr(slot);
+                    self.builder.store(addr, new_val);
+                } else {
+                    let var = *self.locals.get(name).unwrap();
+                    self.builder.def_var(var, new_val);
+                };
+                Ok(if is_pre { (new_val, ty) } else { (old_val, ty) })
+            }
+            Expr::UnaryOp {
+                op: UnaryOp::Deref,
+                expr: addr_expr,
+            } => {
+                let (addr, ptr_ty) = self.compile_expr(addr_expr)?;
+                let pointee = ptr_ty.pointee().clone();
+                let ir_ty = pointee
+                    .to_ir_type()
+                    .ok_or_else(|| err(span, "cannot increment/decrement void pointer deref"))?;
+                let old_val = self.builder.load(addr, ir_ty.clone());
+                let new_val = if pointee.is_float() {
+                    let one = if pointee == CType::Float {
+                        self.builder.fconst_f32(1.0f32)
+                    } else {
+                        self.builder.fconst(1.0f64)
+                    };
+                    if is_inc {
+                        self.builder.fadd(old_val, one)
+                    } else {
+                        self.builder.fsub(old_val, one)
+                    }
+                } else {
+                    let one = self.builder.iconst(1, ir_ty);
+                    if is_inc {
+                        self.builder.add(old_val, one)
+                    } else {
+                        self.builder.sub(old_val, one)
+                    }
+                };
+                self.builder.store(addr, new_val);
+                Ok(if is_pre {
+                    (new_val, pointee)
+                } else {
+                    (old_val, pointee)
+                })
+            }
+            _ => Err(err(
+                span,
+                "increment/decrement requires a variable or dereference",
+            )),
         }
     }
 

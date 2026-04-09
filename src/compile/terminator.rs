@@ -27,6 +27,10 @@ fn negate_cc(cc: CondCode) -> CondCode {
         CondCode::Ule => CondCode::Ugt,
         CondCode::Ugt => CondCode::Ule,
         CondCode::Uge => CondCode::Ult,
+        CondCode::Parity => CondCode::NotParity,
+        CondCode::NotParity => CondCode::Parity,
+        CondCode::OrdEq => CondCode::UnordNe,
+        CondCode::UnordNe => CondCode::OrdEq,
     }
 }
 

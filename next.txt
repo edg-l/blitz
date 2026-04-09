@@ -1,14 +1,12 @@
 ## Next steps for Blitz
 
 ### Language features (tinyc)
-- ++/-- (increment/decrement operators)
-- +=, -=, *=, etc. (compound assignment)
-- do { } while() loops
 - switch/case
 - enum support
 - Comma operator
+- Float globals and struct fields
 
-### Float support (f32/f64) -- NEXT PRIORITY
+### Float support (f32/f64) -- DONE (remaining items below)
 Full plan: .claude/plans/float-support.md (6 phases, ~30 tasks)
 
 What exists: XMM regs, RegClass::XMM, FP_ARG_REGS/FP_RETURN_REG, Fadd/Fsub/Fmul/Fdiv/Fsqrt
@@ -67,8 +65,8 @@ Phase 6 - Tests:
   - Full regression: cargo test + lit tests
 
 Known risks/limitations:
-  - NaN==NaN: ucomisd+sete incorrectly returns true (needs jp guard for IEEE compliance, defer)
-  - Float negation -(+0.0) gives +0.0 not -0.0 with fsub approach
+  - NaN comparisons: FIXED (OrdEq/UnordNe CCs with sete+setnp+and / setne+setp+or; </<= swap operands for Ugt/Uge)
+  - Float negation: FIXED (uses -0.0 instead of +0.0 in fsub for IEEE correctness)
   - R11 scratch in Fconst lowering (safe but undocumented assumption)
   - No float globals, struct fields, or modulo in v1
 
@@ -90,3 +88,13 @@ Known risks/limitations:
 - DWARF debug info (.debug_info, .debug_line for gdb/lldb)
 - Multi-file compilation / linking
 - .rodata string deduplication (minor optimization)
+
+### Known bugs
+- do-while with break/continue: e-graph merging issue causes incorrect code when
+  the body block has the condition-check branch at the end (instead of header).
+  The extra body_entry/body_main block split pattern exposes an e-graph class
+  merging bug where add(phi, 1) gets folded away. Simple do-while (no break/continue)
+  works correctly. Root cause: the block structure where body ends with a branch
+  (not just a jump to header) creates an exit_block predecessor from both body and
+  header, causing SSA variable merging to collapse classes incorrectly.
+- functions/ternary_in_printf.c: returns exit 192 instead of 0 (pre-existing)

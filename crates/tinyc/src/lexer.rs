@@ -16,6 +16,7 @@ pub enum Token {
     Else,
     While,
     For,
+    Do,
     Break,
     Continue,
     Return,
@@ -33,6 +34,19 @@ pub enum Token {
     Star,
     Slash,
     Percent,
+    Increment,
+    Decrement,
+    // Compound assignment
+    PlusAssign,
+    MinusAssign,
+    StarAssign,
+    SlashAssign,
+    PercentAssign,
+    AmpAssign,
+    PipeAssign,
+    CaretAssign,
+    ShlAssign,
+    ShrAssign,
     // Comparison operators
     Eq,
     Ne,
@@ -157,15 +171,33 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
 
         let tok = match ch {
             '+' => {
-                pos += 1;
-                col += 1;
-                Token::Plus
+                if pos + 1 < chars.len() && chars[pos + 1] == '+' {
+                    pos += 2;
+                    col += 2;
+                    Token::Increment
+                } else if pos + 1 < chars.len() && chars[pos + 1] == '=' {
+                    pos += 2;
+                    col += 2;
+                    Token::PlusAssign
+                } else {
+                    pos += 1;
+                    col += 1;
+                    Token::Plus
+                }
             }
             '-' => {
-                if pos + 1 < chars.len() && chars[pos + 1] == '>' {
+                if pos + 1 < chars.len() && chars[pos + 1] == '-' {
+                    pos += 2;
+                    col += 2;
+                    Token::Decrement
+                } else if pos + 1 < chars.len() && chars[pos + 1] == '>' {
                     pos += 2;
                     col += 2;
                     Token::Arrow
+                } else if pos + 1 < chars.len() && chars[pos + 1] == '=' {
+                    pos += 2;
+                    col += 2;
+                    Token::MinusAssign
                 } else {
                     pos += 1;
                     col += 1;
@@ -173,19 +205,37 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 }
             }
             '*' => {
-                pos += 1;
-                col += 1;
-                Token::Star
+                if pos + 1 < chars.len() && chars[pos + 1] == '=' {
+                    pos += 2;
+                    col += 2;
+                    Token::StarAssign
+                } else {
+                    pos += 1;
+                    col += 1;
+                    Token::Star
+                }
             }
             '/' => {
-                pos += 1;
-                col += 1;
-                Token::Slash
+                if pos + 1 < chars.len() && chars[pos + 1] == '=' {
+                    pos += 2;
+                    col += 2;
+                    Token::SlashAssign
+                } else {
+                    pos += 1;
+                    col += 1;
+                    Token::Slash
+                }
             }
             '%' => {
-                pos += 1;
-                col += 1;
-                Token::Percent
+                if pos + 1 < chars.len() && chars[pos + 1] == '=' {
+                    pos += 2;
+                    col += 2;
+                    Token::PercentAssign
+                } else {
+                    pos += 1;
+                    col += 1;
+                    Token::Percent
+                }
             }
             '(' => {
                 pos += 1;
@@ -278,14 +328,20 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 }
             }
             '<' => {
-                if pos + 1 < chars.len() && chars[pos + 1] == '=' {
+                if pos + 1 < chars.len() && chars[pos + 1] == '<' {
+                    if pos + 2 < chars.len() && chars[pos + 2] == '=' {
+                        pos += 3;
+                        col += 3;
+                        Token::ShlAssign
+                    } else {
+                        pos += 2;
+                        col += 2;
+                        Token::Shl
+                    }
+                } else if pos + 1 < chars.len() && chars[pos + 1] == '=' {
                     pos += 2;
                     col += 2;
                     Token::Le
-                } else if pos + 1 < chars.len() && chars[pos + 1] == '<' {
-                    pos += 2;
-                    col += 2;
-                    Token::Shl
                 } else {
                     pos += 1;
                     col += 1;
@@ -293,14 +349,20 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 }
             }
             '>' => {
-                if pos + 1 < chars.len() && chars[pos + 1] == '=' {
+                if pos + 1 < chars.len() && chars[pos + 1] == '>' {
+                    if pos + 2 < chars.len() && chars[pos + 2] == '=' {
+                        pos += 3;
+                        col += 3;
+                        Token::ShrAssign
+                    } else {
+                        pos += 2;
+                        col += 2;
+                        Token::Shr
+                    }
+                } else if pos + 1 < chars.len() && chars[pos + 1] == '=' {
                     pos += 2;
                     col += 2;
                     Token::Ge
-                } else if pos + 1 < chars.len() && chars[pos + 1] == '>' {
-                    pos += 2;
-                    col += 2;
-                    Token::Shr
                 } else {
                     pos += 1;
                     col += 1;
@@ -312,6 +374,10 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     pos += 2;
                     col += 2;
                     Token::And
+                } else if pos + 1 < chars.len() && chars[pos + 1] == '=' {
+                    pos += 2;
+                    col += 2;
+                    Token::AmpAssign
                 } else {
                     pos += 1;
                     col += 1;
@@ -323,6 +389,10 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     pos += 2;
                     col += 2;
                     Token::Or
+                } else if pos + 1 < chars.len() && chars[pos + 1] == '=' {
+                    pos += 2;
+                    col += 2;
+                    Token::PipeAssign
                 } else {
                     pos += 1;
                     col += 1;
@@ -330,9 +400,15 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 }
             }
             '^' => {
-                pos += 1;
-                col += 1;
-                Token::Caret
+                if pos + 1 < chars.len() && chars[pos + 1] == '=' {
+                    pos += 2;
+                    col += 2;
+                    Token::CaretAssign
+                } else {
+                    pos += 1;
+                    col += 1;
+                    Token::Caret
+                }
             }
             '~' => {
                 pos += 1;
@@ -419,6 +495,7 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                     "else" => Token::Else,
                     "while" => Token::While,
                     "for" => Token::For,
+                    "do" => Token::Do,
                     "break" => Token::Break,
                     "continue" => Token::Continue,
                     "return" => Token::Return,

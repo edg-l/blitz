@@ -265,6 +265,11 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    DoWhile {
+        body: Vec<Stmt>,
+        cond: SpannedExpr,
+        span: Span,
+    },
     VarDecl {
         ty: CType,
         name: String,
@@ -298,6 +303,7 @@ pub enum Stmt {
     ExprStmt(SpannedExpr, Span),
 }
 
+#[derive(Clone)]
 pub struct SpannedExpr {
     pub expr: Expr,
     pub span: Span,
@@ -309,6 +315,7 @@ impl SpannedExpr {
     }
 }
 
+#[derive(Clone)]
 pub enum Expr {
     IntLit(i64),
     /// Float literal: (bits as u64, has_f_suffix). If has_f_suffix, type is float; otherwise double.
@@ -346,6 +353,10 @@ pub enum Expr {
         then_expr: Box<SpannedExpr>,
         else_expr: Box<SpannedExpr>,
     },
+    PreIncrement(Box<SpannedExpr>),
+    PreDecrement(Box<SpannedExpr>),
+    PostIncrement(Box<SpannedExpr>),
+    PostDecrement(Box<SpannedExpr>),
 }
 
 #[derive(Debug, Clone, Copy)]

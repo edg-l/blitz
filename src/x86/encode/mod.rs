@@ -311,16 +311,21 @@ impl Encoder {
 
     pub(super) fn cc_byte(cc: CondCode) -> u8 {
         match cc {
-            CondCode::Eq => 0x4,  // JE/JZ
-            CondCode::Ne => 0x5,  // JNE/JNZ
-            CondCode::Ult => 0x2, // JB/JNAE/JC
-            CondCode::Uge => 0x3, // JAE/JNB/JNC
-            CondCode::Ule => 0x6, // JBE/JNA
-            CondCode::Ugt => 0x7, // JA/JNBE
-            CondCode::Slt => 0xC, // JL/JNGE
-            CondCode::Sge => 0xD, // JGE/JNL
-            CondCode::Sle => 0xE, // JLE/JNG
-            CondCode::Sgt => 0xF, // JG/JNLE
+            CondCode::Eq => 0x4,        // JE/JZ
+            CondCode::Ne => 0x5,        // JNE/JNZ
+            CondCode::Ult => 0x2,       // JB/JNAE/JC
+            CondCode::Uge => 0x3,       // JAE/JNB/JNC
+            CondCode::Ule => 0x6,       // JBE/JNA
+            CondCode::Ugt => 0x7,       // JA/JNBE
+            CondCode::Slt => 0xC,       // JL/JNGE
+            CondCode::Sge => 0xD,       // JGE/JNL
+            CondCode::Sle => 0xE,       // JLE/JNG
+            CondCode::Sgt => 0xF,       // JG/JNLE
+            CondCode::Parity => 0xA,    // JP/JPE
+            CondCode::NotParity => 0xB, // JNP/JPO
+            CondCode::OrdEq | CondCode::UnordNe => {
+                unreachable!("OrdEq/UnordNe must be expanded before encoding")
+            }
         }
     }
 
