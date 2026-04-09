@@ -1,9 +1,13 @@
 // EXIT: 0
 // Test IEEE 754 NaN comparison semantics.
-// NaN is produced by 0.0/0.0.
+// Use noinline function to prevent e-graph from merging NaN's fdiv class.
+
+__attribute__((noinline)) double make_nan() {
+    return 0.0 / 0.0;
+}
 
 int main() {
-    double nan = 0.0 / 0.0;
+    double nan = make_nan();
     double one = 1.0;
 
     // NaN == NaN should be false (0)

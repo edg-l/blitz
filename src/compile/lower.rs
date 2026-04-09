@@ -395,58 +395,122 @@ fn lower_op(
                 .ok_or_else(|| "X86Cmov: no register for false operand".to_string())?;
 
             let mut insts = Vec::new();
-            // Load the false value into dst first, then conditionally overwrite.
-            if dst != false_reg {
-                insts.push(MachInst::MovRR {
-                    size,
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(false_reg),
-                });
-            }
-            // x86 CMOV has no byte form; widen S8 to S32 (the low byte
-            // still holds the correct value, and the 32-bit cmov works on
-            // the full register without affecting the byte-width result).
+            // x86 CMOV has no byte form; widen S8 to S32.
             let cmov_size = if size == OpSize::S8 {
                 OpSize::S32
             } else {
                 size
             };
             match cc {
-                CondCode::OrdEq => {
-                    // Ordered equal: cmove then cmovnp (AND semantics).
-                    // dst starts as false_val. cmove sets to true_val if ZF=1.
-                    // cmovp resets to false_val if PF=1 (NaN).
-                    insts.push(MachInst::Cmov {
-                        size: cmov_size,
-                        cc: CondCode::Eq,
-                        dst: Operand::Reg(dst),
-                        src: Operand::Reg(true_reg),
-                    });
-                    insts.push(MachInst::Cmov {
-                        size: cmov_size,
-                        cc: CondCode::Parity,
-                        dst: Operand::Reg(dst),
-                        src: Operand::Reg(false_reg),
-                    });
-                }
-                CondCode::UnordNe => {
-                    // Unordered not-equal: cmovne then cmovp (OR semantics).
-                    // dst starts as false_val. cmovne sets to true_val if ZF=0.
-                    // cmovp also sets to true_val if PF=1 (NaN).
-                    insts.push(MachInst::Cmov {
-                        size: cmov_size,
-                        cc: CondCode::Ne,
-                        dst: Operand::Reg(dst),
-                        src: Operand::Reg(true_reg),
-                    });
-                    insts.push(MachInst::Cmov {
-                        size: cmov_size,
-                        cc: CondCode::Parity,
-                        dst: Operand::Reg(dst),
-                        src: Operand::Reg(true_reg),
-                    });
+                CondCode::OrdEq | CondCode::UnordNe => {
+                    // Compute NaN-aware 0/1 into R11, preserving true/false regs.
+                    // OrdEq: sete R11 + setnp dst_scratch + and R11, dst_scratch
+                    // UnordNe: setne R11 + setp dst_scratch + or R11, dst_scratch
+                    // We need a second scratch; use RCX-as-temp if it's not true/false.
+                    // Simplest: put both setccs into R11 using two temps.
+                    // Actually: movzx the first setcc to full reg, same for second,
+                    // combine in R11, test, then select. But we only have R11 as scratch.
+                    //
+                    // Approach: setcc1 into R11b, setcc2 into R11b after saving first.
+                    // Use push/pop? No, too heavyweight. Just use the stack or a mov.
+                    //
+                    // Simplest correct approach: use Setcc lowering (which uses R11),
+                    // but here we already ARE the lowering. Let me use a different strategy:
+                    // For OrdEq: start with false, cmovne->keep false, cmovnp->keep,
+                    //            cmove+cmovnp -> true only if both.
+                    // For UnordNe: start with true, cmove -> false, cmovp -> true again.
+                    //
+                    // OrdEq (ZF=1 AND PF=0):
+                    //   mov dst, false_reg
+                    //   cmove dst, true_reg    ; if ZF=1, dst = true (tentatively)
+                    //   cmovp dst, false_reg   ; if PF=1, dst = false (NaN override)
+                    //
+                    // UnordNe (ZF=0 OR PF=1):
+                    //   mov dst, true_reg
+                    //   cmove dst, false_reg   ; if ZF=1 (equal), dst = false
+                    //   cmovp dst, true_reg    ; if PF=1 (NaN), dst = true (override)
+                    //
+                    // Register aliasing: save one of true/false to R11 if needed.
+                    if *cc == CondCode::OrdEq {
+                        // Need false_reg alive for cmovp after cmove may clobber it.
+                        // If dst == false_reg, save false to R11 first.
+                        let safe_false = if dst == false_reg && dst != true_reg {
+                            insts.push(MachInst::MovRR {
+                                size,
+                                dst: Operand::Reg(Reg::R11),
+                                src: Operand::Reg(false_reg),
+                            });
+                            Reg::R11
+                        } else {
+                            false_reg
+                        };
+                        // mov dst, false_reg (default false)
+                        if dst != false_reg {
+                            insts.push(MachInst::MovRR {
+                                size,
+                                dst: Operand::Reg(dst),
+                                src: Operand::Reg(false_reg),
+                            });
+                        }
+                        // cmove dst, true_reg (if equal, set true)
+                        insts.push(MachInst::Cmov {
+                            size: cmov_size,
+                            cc: CondCode::Eq,
+                            dst: Operand::Reg(dst),
+                            src: Operand::Reg(true_reg),
+                        });
+                        // cmovp dst, false_reg (if NaN, reset to false)
+                        insts.push(MachInst::Cmov {
+                            size: cmov_size,
+                            cc: CondCode::Parity,
+                            dst: Operand::Reg(dst),
+                            src: Operand::Reg(safe_false),
+                        });
+                    } else {
+                        // UnordNe: need true_reg alive for cmovp after cmove.
+                        let safe_true = if dst == true_reg && dst != false_reg {
+                            insts.push(MachInst::MovRR {
+                                size,
+                                dst: Operand::Reg(Reg::R11),
+                                src: Operand::Reg(true_reg),
+                            });
+                            Reg::R11
+                        } else {
+                            true_reg
+                        };
+                        // mov dst, true_reg (default true)
+                        if dst != true_reg {
+                            insts.push(MachInst::MovRR {
+                                size,
+                                dst: Operand::Reg(dst),
+                                src: Operand::Reg(true_reg),
+                            });
+                        }
+                        // cmove dst, false_reg (if equal, set false)
+                        insts.push(MachInst::Cmov {
+                            size: cmov_size,
+                            cc: CondCode::Eq,
+                            dst: Operand::Reg(dst),
+                            src: Operand::Reg(false_reg),
+                        });
+                        // cmovp dst, true_reg (if NaN, set true)
+                        insts.push(MachInst::Cmov {
+                            size: cmov_size,
+                            cc: CondCode::Parity,
+                            dst: Operand::Reg(dst),
+                            src: Operand::Reg(safe_true),
+                        });
+                    }
                 }
                 _ => {
+                    // Standard: start with false in dst, cmov to true.
+                    if dst != false_reg {
+                        insts.push(MachInst::MovRR {
+                            size,
+                            dst: Operand::Reg(dst),
+                            src: Operand::Reg(false_reg),
+                        });
+                    }
                     insts.push(MachInst::Cmov {
                         size: cmov_size,
                         cc: *cc,
