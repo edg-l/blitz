@@ -538,12 +538,23 @@ fn add_clobber_interferences(
         };
 
         // Collect call-arg vregs if exclusion is enabled.
+        // Only exclude args that are NOT live after the call -- an arg that survives
+        // past its call must still interfere with caller-saved clobber phantoms.
         let call_arg_vregs: BTreeSet<usize> = if config.exclude_call_args {
             if let Some(insts) = config.insts {
                 if cp < insts.len() {
                     let inst = &insts[cp];
                     if matches!(inst.op, Op::CallResult(_, _) | Op::VoidCallBarrier) {
-                        inst.operands.iter().map(|v| v.0 as usize).collect()
+                        let live_after: &std::collections::BTreeSet<VReg> = if cp + 1 < n {
+                            &liveness.live_at[cp + 1]
+                        } else {
+                            &liveness.live_out
+                        };
+                        inst.operands
+                            .iter()
+                            .filter(|v| !live_after.contains(v))
+                            .map(|v| v.0 as usize)
+                            .collect()
                     } else {
                         BTreeSet::new()
                     }

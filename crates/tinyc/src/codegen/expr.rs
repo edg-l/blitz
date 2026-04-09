@@ -66,12 +66,9 @@ impl<'b> FnCtx<'b> {
             panic!("val_to_flags() called on struct type");
         }
         if ty.is_float() {
-            // Use emit_fcmp_val(Ne) for NaN-safe truthiness (NaN is truthy),
-            // then compare the int result to 0 for branch flags.
-            let zero_f = self.emit_float_zero(ty);
-            let int_val = self.emit_fcmp_val(CondCode::Ne, val, zero_f);
-            let zero_i = self.builder.iconst(0, Type::I32);
-            return self.builder.icmp(CondCode::Ne, int_val, zero_i);
+            // NaN is truthy, so use UnordNe: true if val!=0 or val is NaN.
+            let zero = self.emit_float_zero(ty);
+            return self.builder.fcmp(CondCode::UnordNe, val, zero);
         }
         let ir_ty = ty.to_ir_type().unwrap();
         let zero = self.builder.iconst(0, ir_ty);
@@ -97,26 +94,19 @@ impl<'b> FnCtx<'b> {
                     let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
                     if common.is_float() {
                         // NaN-aware float comparisons for branch conditions.
-                        // Eq/Ne: materialize to NaN-safe int, then branch on that.
+                        // Eq/Ne: OrdEq/UnordNe expanded to multi-instruction jumps in terminator.
                         // Lt/Le: swap operands and use Ugt/Uge (JA/JAE are NaN-safe).
                         // Gt/Ge: Ugt/Uge are already NaN-safe.
-                        match op {
-                            BinOp::Eq | BinOp::Ne => {
-                                let cc = if matches!(op, BinOp::Eq) {
-                                    CondCode::Eq
-                                } else {
-                                    CondCode::Ne
-                                };
-                                let val = self.emit_fcmp_val(cc, l, r);
-                                let zero = self.builder.iconst(0, Type::I32);
-                                return Ok(self.builder.icmp(CondCode::Ne, val, zero));
-                            }
+                        let cc = match op {
+                            BinOp::Eq => CondCode::OrdEq,
+                            BinOp::Ne => CondCode::UnordNe,
                             BinOp::Lt => return Ok(self.builder.fcmp(CondCode::Ugt, r, l)),
                             BinOp::Le => return Ok(self.builder.fcmp(CondCode::Uge, r, l)),
-                            BinOp::Gt => return Ok(self.builder.fcmp(CondCode::Ugt, l, r)),
-                            BinOp::Ge => return Ok(self.builder.fcmp(CondCode::Uge, l, r)),
+                            BinOp::Gt => CondCode::Ugt,
+                            BinOp::Ge => CondCode::Uge,
                             _ => unreachable!(),
-                        }
+                        };
+                        return Ok(self.builder.fcmp(cc, l, r));
                     }
                     // Pick signed/unsigned condition code.
                     let cc = match op {

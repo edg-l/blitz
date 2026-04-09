@@ -398,6 +398,21 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Float comparison that produces an I32 0/1 result via Setcc+Zext.
+    /// Avoids the Select/Cmov path which has register classification issues for OrdEq/UnordNe.
+    pub fn fcmp_to_int(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
+        let flags = self.fcmp(cc, a, b);
+        let setcc = self.add_node(ENode {
+            op: Op::X86Setcc(cc),
+            children: smallvec![flags.0],
+        });
+        let node = ENode {
+            op: Op::Zext(Type::I32),
+            children: smallvec![setcc.0],
+        };
+        self.add_node(node)
+    }
+
     pub fn int_to_float(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
             op: Op::IntToFloat(target),

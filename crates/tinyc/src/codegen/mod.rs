@@ -320,14 +320,12 @@ impl<'b> FnCtx<'b> {
         let zero = self.builder.iconst(0, Type::I32);
         match cc {
             CondCode::Eq => {
-                // ordered-equal: use OrdEq CC, lowered to sete+setnp+and via Setcc
-                let flags = self.builder.fcmp(CondCode::OrdEq, a, b);
-                self.builder.select(flags, one, zero)
+                // ordered-equal: use fcmp_to_int with OrdEq (Setcc path, no Cmov)
+                self.builder.fcmp_to_int(CondCode::OrdEq, a, b)
             }
             CondCode::Ne => {
-                // unordered-not-equal: use UnordNe CC, lowered to setne+setp+or via Setcc
-                let flags = self.builder.fcmp(CondCode::UnordNe, a, b);
-                self.builder.select(flags, one, zero)
+                // unordered-not-equal: use fcmp_to_int with UnordNe (Setcc path, no Cmov)
+                self.builder.fcmp_to_int(CondCode::UnordNe, a, b)
             }
             CondCode::Ult => {
                 // ordered-less-than: swap operands, use Ugt (JA is NaN-safe)

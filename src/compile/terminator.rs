@@ -14,6 +14,45 @@ use crate::x86::reg::Reg;
 
 use super::{BlockItem, CompileError};
 
+/// Emit a conditional jump, expanding OrdEq/UnordNe into multi-instruction sequences.
+/// Returns the items and updates `next_label` if an internal label was needed.
+fn emit_jcc(cc: CondCode, target: LabelId, next_label: &mut LabelId) -> Vec<BlockItem> {
+    match cc {
+        CondCode::OrdEq => {
+            // Jump to target if ZF=1 AND PF=0:
+            //   jp skip; je target; skip:
+            let skip = *next_label;
+            *next_label += 1;
+            vec![
+                BlockItem::Inst(MachInst::Jcc {
+                    cc: CondCode::Parity,
+                    target: skip,
+                }),
+                BlockItem::Inst(MachInst::Jcc {
+                    cc: CondCode::Eq,
+                    target,
+                }),
+                BlockItem::BindLabel(skip),
+            ]
+        }
+        CondCode::UnordNe => {
+            // Jump to target if ZF=0 OR PF=1:
+            //   jp target; jne target
+            vec![
+                BlockItem::Inst(MachInst::Jcc {
+                    cc: CondCode::Parity,
+                    target,
+                }),
+                BlockItem::Inst(MachInst::Jcc {
+                    cc: CondCode::Ne,
+                    target,
+                }),
+            ]
+        }
+        _ => vec![BlockItem::Inst(MachInst::Jcc { cc, target })],
+    }
+}
+
 /// Negate a CondCode.
 fn negate_cc(cc: CondCode) -> CondCode {
     match cc {
@@ -251,11 +290,7 @@ pub(super) fn lower_terminator(
             let mut items = Vec::new();
             if true_phi.is_empty() {
                 // jcc cc, true_block; [false_phi]; jmp false_block
-                // If false_block is the fallthrough, omit the final jmp.
-                items.push(BlockItem::Inst(MachInst::Jcc {
-                    cc,
-                    target: *bb_true as LabelId,
-                }));
+                items.extend(emit_jcc(cc, *bb_true as LabelId, next_label));
                 items.extend(false_phi.into_iter().map(BlockItem::Inst));
                 if !false_is_fallthrough {
                     items.push(BlockItem::Inst(MachInst::Jmp {
@@ -264,12 +299,7 @@ pub(super) fn lower_terminator(
                 }
             } else if false_phi.is_empty() {
                 // jcc !cc, false_block; [true_phi]; jmp true_block
-                // The Jcc is always needed (even if false is fallthrough) to skip
-                // the true_phi copies when the condition is false.
-                items.push(BlockItem::Inst(MachInst::Jcc {
-                    cc: negate_cc(cc),
-                    target: *bb_false as LabelId,
-                }));
+                items.extend(emit_jcc(negate_cc(cc), *bb_false as LabelId, next_label));
                 items.extend(true_phi.into_iter().map(BlockItem::Inst));
                 if !true_is_fallthrough {
                     items.push(BlockItem::Inst(MachInst::Jmp {
@@ -277,20 +307,11 @@ pub(super) fn lower_terminator(
                     }));
                 }
             } else {
-                // Both sides have copies. Use trampoline labels:
-                //   jcc !cc, L_false_copies
-                //   [true_phi]
-                //   jmp true_block         (omit if true_block is fallthrough)
-                //   L_false_copies:
-                //   [false_phi]
-                //   jmp false_block        (omit if false_block is fallthrough)
+                // Both sides have copies. Use trampoline labels.
                 let l_false = *next_label;
                 *next_label += 1;
 
-                items.push(BlockItem::Inst(MachInst::Jcc {
-                    cc: negate_cc(cc),
-                    target: l_false,
-                }));
+                items.extend(emit_jcc(negate_cc(cc), l_false, next_label));
                 items.extend(true_phi.into_iter().map(BlockItem::Inst));
                 if !true_is_fallthrough {
                     items.push(BlockItem::Inst(MachInst::Jmp {
