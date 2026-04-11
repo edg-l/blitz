@@ -40,6 +40,8 @@ run_check_test() {
 run_exit_test() {
     local file="$1"
     local expected="$2"
+    shift 2
+    local extras="$*"
     local name
     name="$(echo "$file" | sed "s|^$SCRIPT_DIR/||")"
     total=$((total + 1))
@@ -47,7 +49,7 @@ run_exit_test() {
     local tmpfile
     tmpfile="$(mktemp /tmp/blitztest_XXXXXX)"
 
-    if "$TINYC" "$file" -o "$tmpfile" 2>/dev/null; then
+    if "$TINYC" "$file" $extras -o "$tmpfile" 2>/dev/null; then
         local actual=0
         timeout 10 "$tmpfile" 2>/dev/null && actual=0 || actual=$?
         rm -f "$tmpfile"
@@ -72,6 +74,8 @@ run_exit_test() {
 
 run_output_test() {
     local file="$1"
+    shift
+    local extras="$*"
     local name
     name="$(echo "$file" | sed "s|^$SCRIPT_DIR/||")"
     total=$((total + 1))
@@ -86,7 +90,7 @@ run_output_test() {
     # Extract expected output lines from // OUTPUT: directives
     sed -n 's|.*// OUTPUT: \(.*\)|\1|p' "$file" > "$expectfile"
 
-    if "$TINYC" "$file" -o "$tmpfile" 2>/dev/null; then
+    if "$TINYC" "$file" $extras -o "$tmpfile" 2>/dev/null; then
         timeout 10 "$tmpfile" > "$outfile" 2>/dev/null
         local actual=$?
         if [ "$actual" -eq 124 ]; then
@@ -120,6 +124,9 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
     exit_code=0
     mode=""
 
+    extra_files=""
+    file_dir="$(dirname "$file")"
+
     while IFS= read -r line; do
         case "$line" in
             *"// CHECK:"*|*"// CHECK-"*)
@@ -138,6 +145,10 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
             *"// RUN:"*"--emit-asm"*)
                 mode="--emit-asm"
                 ;;
+            *"// EXTRA_FILE:"*)
+                ef="$(echo "$line" | sed 's/.*\/\/ EXTRA_FILE: *//')"
+                extra_files="$extra_files $file_dir/$ef"
+                ;;
         esac
     done < "$file"
 
@@ -145,10 +156,10 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
         run_check_test "$file" "$mode"
     fi
     if [ "$has_exit" = true ]; then
-        run_exit_test "$file" "$exit_code"
+        run_exit_test "$file" "$exit_code" $extra_files
     fi
     if [ "$has_output" = true ]; then
-        run_output_test "$file"
+        run_output_test "$file" $extra_files
     fi
 done
 

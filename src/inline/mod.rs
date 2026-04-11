@@ -14,7 +14,10 @@ use callgraph::{build_call_graph, is_recursive, should_inline};
 use transform::inline_call_site;
 
 /// Inline function calls across a module, then eliminate dead functions.
-pub fn inline_module(functions: &mut Vec<Function>, opts: &CompileOptions) {
+///
+/// When `is_executable` is true, only functions reachable from `main` are kept.
+/// When false (library/object-only compilation), all functions are kept.
+pub fn inline_module(functions: &mut Vec<Function>, opts: &CompileOptions, is_executable: bool) {
     if !opts.enable_inlining {
         return;
     }
@@ -77,8 +80,10 @@ pub fn inline_module(functions: &mut Vec<Function>, opts: &CompileOptions) {
         let _ = &caller_name; // suppress unused warning
     }
 
-    // Dead function elimination.
-    eliminate_dead_functions(functions);
+    // Dead function elimination: only for executable mode (has main).
+    if is_executable {
+        eliminate_dead_functions(functions);
+    }
 }
 
 /// Clone a Function (egraph and all).
@@ -102,12 +107,10 @@ fn eliminate_dead_functions(functions: &mut Vec<Function>) {
     let call_graph = build_call_graph(functions);
     let func_names: BTreeSet<String> = functions.iter().map(|f| f.name.clone()).collect();
 
-    // BFS from "main" (and any extern-visible entry points).
+    // BFS from "main".
     let mut reachable = BTreeSet::new();
     let mut worklist = vec!["main".to_string()];
 
-    // Also keep any function whose name suggests it's an entry point
-    // (for now, just "main").
     while let Some(name) = worklist.pop() {
         if !reachable.insert(name.clone()) {
             continue;

@@ -49,7 +49,7 @@ fn compile_and_run(src: &str) -> Option<i32> {
     }
 
     // Link (tries ld directly, falls back to cc)
-    super::link::link(&obj_path, &bin_path).expect("linking failed");
+    super::link::link(&[obj_path.clone()], &bin_path).expect("linking failed");
 
     // Run the binary and capture exit code
     let status = Command::new(&bin_path).status().expect("run binary failed");

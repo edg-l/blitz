@@ -275,7 +275,7 @@ mod tests {
 
         let mut functions = vec![main_fn, rec_fn];
         let opts = inline_opts();
-        inline_module(&mut functions, &opts);
+        inline_module(&mut functions, &opts, true);
 
         // rec should not have been inlined into main (it's recursive).
         let main = &functions[0];
@@ -296,7 +296,7 @@ mod tests {
 
         let mut functions = vec![caller, leaf];
         let opts = inline_opts();
-        inline_module(&mut functions, &opts);
+        inline_module(&mut functions, &opts, true);
 
         // After inlining leaf into main and dead function elimination,
         // leaf should be removed (no remaining call sites).
@@ -317,7 +317,7 @@ mod tests {
             max_inline_nodes: 0, // too small, nothing gets inlined
             ..Default::default()
         };
-        inline_module(&mut functions, &opts);
+        inline_module(&mut functions, &opts, true);
 
         // leaf should still be present since it wasn't inlined.
         let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();

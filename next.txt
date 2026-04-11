@@ -86,15 +86,8 @@ Known risks/limitations:
 - CI pipeline / benchmarks / compile-time tracking
 - Better error messages with source locations in tinyc
 - DWARF debug info (.debug_info, .debug_line for gdb/lldb)
-- Multi-file compilation / linking
+- Multi-file compilation / linking -- DONE (session 010)
 - .rodata string deduplication (minor optimization)
 
 ### Known bugs
-- do-while with break/continue: e-graph merging issue causes incorrect code when
-  the body block has the condition-check branch at the end (instead of header).
-  The extra body_entry/body_main block split pattern exposes an e-graph class
-  merging bug where add(phi, 1) gets folded away. Simple do-while (no break/continue)
-  works correctly. Root cause: the block structure where body ends with a branch
-  (not just a jump to header) creates an exit_block predecessor from both body and
-  header, causing SSA variable merging to collapse classes incorrectly.
-- functions/ternary_in_printf.c: returns exit 192 instead of 0 (pre-existing)
+(none currently)

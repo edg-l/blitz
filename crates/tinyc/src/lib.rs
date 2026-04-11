@@ -30,6 +30,7 @@ pub fn compile_source(src: &str) -> Result<Vec<u8>, TinyErr> {
         &default_opts(),
         cg.globals,
         cg.rodata,
+        cg.extern_globals,
     )?;
     Ok(obj.finalize())
 }
@@ -42,6 +43,7 @@ pub fn compile_to_object(src: &str) -> Result<blitz::emit::object::ObjectFile, T
         &default_opts(),
         cg.globals,
         cg.rodata,
+        cg.extern_globals,
     )?;
     Ok(obj)
 }

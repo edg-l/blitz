@@ -28,6 +28,7 @@ pub struct Codegen {
     pub functions: Vec<Function>,
     pub globals: Vec<blitz::emit::object::GlobalInfo>,
     pub rodata: Vec<blitz::emit::object::GlobalInfo>,
+    pub extern_globals: Vec<String>,
 }
 
 impl Codegen {
@@ -112,6 +113,21 @@ impl Codegen {
             global_types.insert(gvar.name.clone(), gvar.ty.clone());
         }
 
+        // Process extern global variable declarations.
+        // These are added to global_types (so codegen can reference them)
+        // but NOT to globals (no storage allocation -- defined in another file).
+        let mut extern_global_names = Vec::new();
+        for ext_gvar in &program.extern_globals {
+            if global_types.contains_key(&ext_gvar.name) {
+                return Err(err(
+                    ext_gvar.span,
+                    format!("duplicate global variable '{}'", ext_gvar.name),
+                ));
+            }
+            global_types.insert(ext_gvar.name.clone(), ext_gvar.ty.clone());
+            extern_global_names.push(ext_gvar.name.clone());
+        }
+
         for func in &program.functions {
             functions.push(compile_fn(
                 func,
@@ -126,6 +142,7 @@ impl Codegen {
             functions,
             globals,
             rodata,
+            extern_globals: extern_global_names,
         })
     }
 }

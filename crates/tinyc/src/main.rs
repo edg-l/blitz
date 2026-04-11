@@ -1,13 +1,20 @@
-// Usage: tinyc <input.c> [-o <output>] [--emit-ir] [--emit-asm]
-// Compiles a .c file to a native executable via Blitz backend + ld/cc linker.
+// Usage: tinyc <input.c> [input2.c ...] [-o <output>] [-c] [--emit-ir] [--emit-asm]
+// Compiles one or more .c files to a native executable via Blitz backend + ld/cc linker.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 
 enum Mode {
     Compile,
+    CompileOnly,
     EmitIr,
     EmitAsm,
+}
+
+fn usage() -> ! {
+    eprintln!("Usage: tinyc <input.c> [input2.c ...] [-o <output>] [-c] [--emit-ir] [--emit-asm]");
+    exit(1);
 }
 
 fn main() {
@@ -15,13 +22,13 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: tinyc <input.c> [-o <output>] [--emit-ir] [--emit-asm]");
-        exit(1);
+        usage();
     }
 
-    let mut input_path = None;
+    let mut input_paths: Vec<String> = Vec::new();
     let mut output_path = "a.out".to_string();
     let mut mode = Mode::Compile;
+    let mut compile_only = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -34,6 +41,10 @@ fn main() {
                 mode = Mode::EmitAsm;
                 i += 1;
             }
+            "-c" => {
+                compile_only = true;
+                i += 1;
+            }
             "-o" => {
                 if i + 1 < args.len() {
                     output_path = args[i + 1].clone();
@@ -44,36 +55,47 @@ fn main() {
                 }
             }
             _ => {
-                if input_path.is_none() {
-                    input_path = Some(args[i].clone());
-                }
+                input_paths.push(args[i].clone());
                 i += 1;
             }
         }
     }
 
-    let input_path = input_path.unwrap_or_else(|| {
-        eprintln!("Usage: tinyc <input.c> [-o <output>] [--emit-ir] [--emit-asm]");
-        exit(1);
-    });
+    if input_paths.is_empty() {
+        usage();
+    }
 
-    // Read source file
-    let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
-        eprintln!("tinyc: cannot read '{}': {}", input_path, e);
+    // Apply compile_only flag to mode
+    if compile_only {
+        mode = Mode::CompileOnly;
+    }
+
+    // Validate flag combinations
+    if matches!(mode, Mode::EmitIr | Mode::EmitAsm) && input_paths.len() > 1 {
+        eprintln!("tinyc: --emit-ir/--emit-asm only supported with a single input file");
         exit(1);
-    });
+    }
+
+    if compile_only && output_path != "a.out" && input_paths.len() > 1 {
+        eprintln!("tinyc: -o with -c and multiple input files is ambiguous");
+        exit(1);
+    }
 
     match mode {
         Mode::EmitIr => {
+            let input = &input_paths[0];
+            let src = read_source(input);
             let ir = tinyc::compile_to_ir(&src).unwrap_or_else(|e| {
-                eprintln!("tinyc: {}", e);
+                eprintln!("tinyc: {}: {}", input, e);
                 exit(1);
             });
             print!("{}", ir);
         }
         Mode::EmitAsm => {
+            let input = &input_paths[0];
+            let src = read_source(input);
             let obj = tinyc::compile_to_object(&src).unwrap_or_else(|e| {
-                eprintln!("tinyc: {}", e);
+                eprintln!("tinyc: {}: {}", input, e);
                 exit(1);
             });
             for fi in &obj.functions {
@@ -88,37 +110,92 @@ fn main() {
                 }
             }
         }
+        Mode::CompileOnly => {
+            for input in &input_paths {
+                let src = read_source(input);
+                let obj_bytes = tinyc::compile_source(&src).unwrap_or_else(|e| {
+                    eprintln!("tinyc: {}: {}", input, e);
+                    exit(1);
+                });
+                // Determine output path: use -o if given (single file), else derive from input
+                let dest = if output_path != "a.out" {
+                    PathBuf::from(&output_path)
+                } else {
+                    derive_obj_path(input)
+                };
+                write_file(&dest, &obj_bytes, input);
+            }
+        }
         Mode::Compile => {
-            // Compile to object bytes
-            let obj_bytes = tinyc::compile_source(&src).unwrap_or_else(|e| {
-                eprintln!("tinyc: {}", e);
-                exit(1);
-            });
-
             let pid = std::process::id();
             let tmp_dir = std::env::temp_dir();
-            let tmp_obj = tmp_dir.join(format!("tinyc_{pid}.o"));
+            let mut tmp_objs: Vec<PathBuf> = Vec::new();
 
-            {
-                let mut f = std::fs::File::create(&tmp_obj).unwrap_or_else(|e| {
-                    eprintln!("tinyc: cannot create temp object file: {}", e);
+            // Compile each input to a temp object file
+            for (idx, input) in input_paths.iter().enumerate() {
+                let src = read_source(input);
+                let obj_bytes = tinyc::compile_source(&src).unwrap_or_else(|e| {
+                    cleanup(&tmp_objs);
+                    eprintln!("tinyc: {}: {}", input, e);
                     exit(1);
                 });
-                f.write_all(&obj_bytes).unwrap_or_else(|e| {
-                    eprintln!("tinyc: cannot write object file: {}", e);
-                    exit(1);
-                });
+                let tmp_obj = tmp_dir.join(format!("tinyc_{pid}_{idx}.o"));
+                write_file(&tmp_obj, &obj_bytes, input);
+                tmp_objs.push(tmp_obj);
             }
 
-            // Link object file into executable
-            let output = std::path::Path::new(&output_path);
-            if let Err(e) = tinyc::link::link(&tmp_obj, output) {
-                let _ = std::fs::remove_file(&tmp_obj);
+            // Link all object files into the output executable
+            let output = Path::new(&output_path);
+            if let Err(e) = tinyc::link::link(&tmp_objs, output) {
+                cleanup(&tmp_objs);
                 eprintln!("tinyc: {}", e);
                 exit(1);
             }
 
-            let _ = std::fs::remove_file(&tmp_obj);
+            cleanup(&tmp_objs);
         }
+    }
+}
+
+fn read_source(path: &str) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("tinyc: cannot read '{}': {}", path, e);
+        exit(1);
+    })
+}
+
+/// Derive a .o output path from a .c input path: `foo.c` -> `foo.o`.
+fn derive_obj_path(input: &str) -> PathBuf {
+    let p = Path::new(input);
+    let stem = p.file_stem().unwrap_or_else(|| std::ffi::OsStr::new(input));
+    let mut out = p.with_file_name(stem);
+    out.set_extension("o");
+    out
+}
+
+fn write_file(dest: &Path, bytes: &[u8], input: &str) {
+    let mut f = std::fs::File::create(dest).unwrap_or_else(|e| {
+        eprintln!(
+            "tinyc: {}: cannot create output file '{}': {}",
+            input,
+            dest.display(),
+            e
+        );
+        exit(1);
+    });
+    f.write_all(bytes).unwrap_or_else(|e| {
+        eprintln!(
+            "tinyc: {}: cannot write output file '{}': {}",
+            input,
+            dest.display(),
+            e
+        );
+        exit(1);
+    });
+}
+
+fn cleanup(paths: &[PathBuf]) {
+    for p in paths {
+        let _ = std::fs::remove_file(p);
     }
 }

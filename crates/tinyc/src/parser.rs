@@ -1,5 +1,6 @@
 use crate::ast::{
-    BinOp, CType, Expr, ExternDecl, FnDef, GlobalVar, Program, SpannedExpr, Stmt, UnaryOp,
+    BinOp, CType, Expr, ExternDecl, ExternGlobalVar, FnDef, GlobalVar, Program, SpannedExpr, Stmt,
+    UnaryOp,
 };
 use crate::error::TinyErr;
 use crate::lexer::{Span, SpannedToken, Token};
@@ -7,6 +8,11 @@ use crate::lexer::{Span, SpannedToken, Token};
 enum FnOrForward {
     Fn(FnDef),
     Forward(ExternDecl),
+}
+
+enum ExternItem {
+    Func(ExternDecl),
+    Global(ExternGlobalVar),
 }
 
 pub struct Parser {
@@ -19,11 +25,15 @@ impl Parser {
         let mut p = Parser { tokens, pos: 0 };
         let mut functions = Vec::new();
         let mut extern_decls = Vec::new();
+        let mut extern_globals = Vec::new();
         let mut struct_defs = Vec::new();
         let mut global_vars = Vec::new();
         while !p.at(Token::Eof) {
             if p.at(Token::Extern) {
-                extern_decls.push(p.parse_extern_decl()?);
+                match p.parse_extern()? {
+                    ExternItem::Func(d) => extern_decls.push(d),
+                    ExternItem::Global(g) => extern_globals.push(g),
+                }
             } else if p.at(Token::Struct)
                 && p.pos + 2 < p.tokens.len()
                 && p.tokens[p.pos + 2].token == Token::LBrace
@@ -92,6 +102,7 @@ impl Parser {
         Ok(Program {
             functions,
             extern_decls,
+            extern_globals,
             struct_defs,
             global_vars,
         })
@@ -294,36 +305,50 @@ impl Parser {
         Ok((name, fields, struct_span))
     }
 
-    fn parse_extern_decl(&mut self) -> Result<ExternDecl, TinyErr> {
+    fn parse_extern(&mut self) -> Result<ExternItem, TinyErr> {
         let extern_span = *self.span();
         self.expect(Token::Extern)?;
-        let return_type = self.parse_type()?;
-        let name = self.expect_ident("function name")?;
-        self.expect(Token::LParen)?;
-        let mut params = Vec::new();
-        while !self.at(Token::RParen) {
-            let mut param_type = self.parse_type()?;
-            // Optional parameter name -- discard if present
-            if let Token::Ident(_) = self.peek() {
-                self.advance();
-                // Parse array dimensions and decay to pointer
-                param_type = self.parse_array_dims(param_type)?.decay();
+        let ty = self.parse_type()?;
+        let name = self.expect_ident("identifier")?;
+
+        if self.at(Token::LParen) {
+            // Extern function declaration: extern <type> <name>(<params>);
+            self.expect(Token::LParen)?;
+            let mut params = Vec::new();
+            while !self.at(Token::RParen) {
+                let mut param_type = self.parse_type()?;
+                // Optional parameter name -- discard if present
+                if let Token::Ident(_) = self.peek() {
+                    self.advance();
+                    // Parse array dimensions and decay to pointer
+                    param_type = self.parse_array_dims(param_type)?.decay();
+                }
+                params.push(param_type);
+                if self.at(Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
-            params.push(param_type);
-            if self.at(Token::Comma) {
-                self.advance();
-            } else {
-                break;
-            }
+            self.expect(Token::RParen)?;
+            self.expect(Token::Semi)?;
+            Ok(ExternItem::Func(ExternDecl {
+                name,
+                return_type: ty,
+                params,
+                span: extern_span,
+            }))
+        } else {
+            // Extern global variable declaration: extern <type> <name>;
+            // Parse optional array dimensions.
+            let ty = self.parse_array_dims(ty)?;
+            self.expect(Token::Semi)?;
+            Ok(ExternItem::Global(ExternGlobalVar {
+                name,
+                ty,
+                span: extern_span,
+            }))
         }
-        self.expect(Token::RParen)?;
-        self.expect(Token::Semi)?;
-        Ok(ExternDecl {
-            name,
-            return_type,
-            params,
-            span: extern_span,
-        })
     }
 
     /// Try to parse `__attribute__((noinline))`. Returns true if found.

@@ -10,7 +10,7 @@ pub fn compile_module(
     functions: Vec<Function>,
     opts: &CompileOptions,
 ) -> Result<ObjectFile, CompileError> {
-    compile_module_with_globals(functions, opts, vec![], vec![])
+    compile_module_with_globals(functions, opts, vec![], vec![], vec![])
 }
 
 /// Compile multiple functions into a single object file, with global variable definitions.
@@ -19,8 +19,10 @@ pub fn compile_module_with_globals(
     opts: &CompileOptions,
     globals: Vec<crate::emit::object::GlobalInfo>,
     rodata: Vec<crate::emit::object::GlobalInfo>,
+    extern_globals: Vec<String>,
 ) -> Result<ObjectFile, CompileError> {
-    crate::inline::inline_module(&mut functions, opts);
+    let has_main = functions.iter().any(|f| f.name == "main");
+    crate::inline::inline_module(&mut functions, opts, has_main);
 
     // Collect global and rodata names so we can filter them from externals.
     let global_names: std::collections::HashSet<String> = globals
@@ -57,6 +59,13 @@ pub fn compile_module_with_globals(
             if !combined_externals.contains(&ext) && !global_names.contains(&ext) {
                 combined_externals.push(ext);
             }
+        }
+    }
+
+    // Add extern globals as undefined symbols.
+    for name in extern_globals {
+        if !combined_externals.contains(&name) && !global_names.contains(&name) {
+            combined_externals.push(name);
         }
     }
 

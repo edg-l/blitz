@@ -185,7 +185,8 @@ pub fn compile_module_to_ir(
     mut functions: Vec<Function>,
     opts: &CompileOptions,
 ) -> Result<String, CompileError> {
-    crate::inline::inline_module(&mut functions, opts);
+    let has_main = functions.iter().any(|f| f.name == "main");
+    crate::inline::inline_module(&mut functions, opts, has_main);
     let mut results = Vec::new();
     for func in functions {
         results.push(compile_to_ir_string(func, opts)?);

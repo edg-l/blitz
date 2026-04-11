@@ -230,9 +230,16 @@ pub struct GlobalVar {
     pub span: Span,
 }
 
+pub struct ExternGlobalVar {
+    pub name: String,
+    pub ty: CType,
+    pub span: Span,
+}
+
 pub struct Program {
     pub functions: Vec<FnDef>,
     pub extern_decls: Vec<ExternDecl>,
+    pub extern_globals: Vec<ExternGlobalVar>,
     pub struct_defs: Vec<(String, Vec<(String, CType)>, Span)>,
     pub global_vars: Vec<GlobalVar>,
 }

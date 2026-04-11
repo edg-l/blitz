@@ -7,25 +7,23 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Link an object file into an executable.
+/// Link one or more object files into an executable.
 ///
 /// Tries direct `ld` first (finding CRT objects automatically).
 /// Falls back to `cc` if CRT objects are not found or `ld` fails.
-pub fn link(obj_path: &Path, output_path: &Path) -> Result<(), String> {
+pub fn link(obj_paths: &[PathBuf], output_path: &Path) -> Result<(), String> {
     if let Some(crt) = find_crt_paths() {
-        let status = Command::new("ld")
-            .arg("-dynamic-linker")
+        let mut cmd = Command::new("ld");
+        cmd.arg("-dynamic-linker")
             .arg(&crt.dynamic_linker)
             .arg(&crt.crt1)
-            .arg(&crt.crti)
-            .arg(obj_path)
-            .arg("-lc")
-            .arg(&crt.crtn)
-            .arg("-o")
-            .arg(output_path)
-            .status();
+            .arg(&crt.crti);
+        for obj in obj_paths {
+            cmd.arg(obj);
+        }
+        cmd.arg("-lc").arg(&crt.crtn).arg("-o").arg(output_path);
 
-        match status {
+        match cmd.status() {
             Ok(s) if s.success() => return Ok(()),
             Ok(s) => {
                 // ld found but failed; fall through to cc
@@ -40,16 +38,17 @@ pub fn link(obj_path: &Path, output_path: &Path) -> Result<(), String> {
         }
     }
 
-    link_with_cc(obj_path, output_path)
+    link_with_cc(obj_paths, output_path)
 }
 
-fn link_with_cc(obj_path: &Path, output_path: &Path) -> Result<(), String> {
-    let status = Command::new("cc")
-        .arg(obj_path)
-        .arg("-o")
-        .arg(output_path)
-        .status()
-        .map_err(|e| format!("cannot run cc: {e}"))?;
+fn link_with_cc(obj_paths: &[PathBuf], output_path: &Path) -> Result<(), String> {
+    let mut cmd = Command::new("cc");
+    for obj in obj_paths {
+        cmd.arg(obj);
+    }
+    cmd.arg("-o").arg(output_path);
+
+    let status = cmd.status().map_err(|e| format!("cannot run cc: {e}"))?;
 
     if status.success() {
         Ok(())
