@@ -309,6 +309,8 @@ fn is_fp_op(op: &Op) -> bool {
         Op::BlockParam(_, _, ty) => ty.is_float(),
         // Call results with float return types
         Op::CallResult(_, ty) => ty.is_float(),
+        // Load results with float types
+        Op::LoadResult(_, ty) => ty.is_float(),
         // Function parameters with float types
         Op::Param(_, ty) => ty.is_float(),
         Op::X86Bitcast { to, .. } => matches!(to, Type::F32 | Type::F64),
