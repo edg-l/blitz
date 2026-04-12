@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::egraph::extract::{ExtractionResult, VReg};
 use crate::egraph::unionfind::UnionFind;
+use crate::ir::Type;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
@@ -107,7 +108,7 @@ pub(super) fn lower_effectful_op(
 
     match op {
         EffectfulOp::Load { addr, result, ty } => {
-            let load_size = OpSize::from_type(ty);
+            let is_float = matches!(ty, Type::F32 | Type::F64);
             let canon_addr = uf.find_immutable(*addr);
             let addr_reg = get_reg(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
@@ -140,26 +141,41 @@ pub(super) fn lower_effectful_op(
                 None,
                 schedule,
             );
-            // S8/S16 loads must use zero-extending loads (MovzxBRM/MovzxWRM) to
-            // avoid partial register writes that leave upper bits unchanged.
-            let inst = match load_size {
-                OpSize::S8 => MachInst::MovzxBRM {
-                    dst: Operand::Reg(result_reg),
-                    addr,
-                },
-                OpSize::S16 => MachInst::MovzxWRM {
-                    dst: Operand::Reg(result_reg),
-                    addr,
-                },
-                _ => MachInst::MovRM {
-                    size: load_size,
-                    dst: Operand::Reg(result_reg),
-                    addr,
-                },
+            let inst = if is_float {
+                match ty {
+                    Type::F64 => MachInst::MovsdRM {
+                        dst: Operand::Reg(result_reg),
+                        addr,
+                    },
+                    _ => MachInst::MovssRM {
+                        dst: Operand::Reg(result_reg),
+                        addr,
+                    },
+                }
+            } else {
+                let load_size = OpSize::from_type(ty);
+                // S8/S16 loads must use zero-extending loads (MovzxBRM/MovzxWRM) to
+                // avoid partial register writes that leave upper bits unchanged.
+                match load_size {
+                    OpSize::S8 => MachInst::MovzxBRM {
+                        dst: Operand::Reg(result_reg),
+                        addr,
+                    },
+                    OpSize::S16 => MachInst::MovzxWRM {
+                        dst: Operand::Reg(result_reg),
+                        addr,
+                    },
+                    _ => MachInst::MovRM {
+                        size: load_size,
+                        dst: Operand::Reg(result_reg),
+                        addr,
+                    },
+                }
             };
             Ok(vec![inst])
         }
         EffectfulOp::Store { addr, val, ty } => {
+            let is_float = matches!(ty, Type::F32 | Type::F64);
             let canon_addr = uf.find_immutable(*addr);
             let addr_reg = get_reg(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
@@ -179,7 +195,6 @@ pub(super) fn lower_effectful_op(
                     inst: None,
                 }),
             })?;
-            let store_size = OpSize::from_type(ty);
             let addr = build_mem_addr(
                 canon_addr,
                 addr_reg,
@@ -189,11 +204,26 @@ pub(super) fn lower_effectful_op(
                 Some(val_reg),
                 schedule,
             );
-            Ok(vec![MachInst::MovMR {
-                size: store_size,
-                addr,
-                src: Operand::Reg(val_reg),
-            }])
+            let inst = if is_float {
+                match ty {
+                    Type::F64 => MachInst::MovsdMR {
+                        addr,
+                        src: Operand::Reg(val_reg),
+                    },
+                    _ => MachInst::MovssMR {
+                        addr,
+                        src: Operand::Reg(val_reg),
+                    },
+                }
+            } else {
+                let store_size = OpSize::from_type(ty);
+                MachInst::MovMR {
+                    size: store_size,
+                    addr,
+                    src: Operand::Reg(val_reg),
+                }
+            };
+            Ok(vec![inst])
         }
         EffectfulOp::Call {
             func: callee,
