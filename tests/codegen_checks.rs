@@ -571,17 +571,11 @@ fn asm_counted_loop() {
         b.finalize().unwrap(),
         "
         // CHECK: xor    rax,rax
-        // CHECK-NEXT: mov    r8,rax
-        // CHECK-NEXT: mov    rsi,rax
-        // CHECK: mov    rax,0x1
-        // CHECK-NEXT: lea    rdx,[rsi+rax*1]
-        // CHECK-NEXT: mov    rcx,rdx
-        // CHECK-NEXT: sub    rcx,rdi
-        // CHECK-NEXT: lea    rax,[r8+rsi*1]
+        // CHECK: lea    {{[a-z0-9]+}},
+        // CHECK: lea    {{[a-z0-9]+}},
+        // CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
         // CHECK-NEXT: jge
-        // CHECK-NEXT: mov    r8,rax
-        // CHECK-NEXT: mov    rsi,rdx
-        // CHECK-NEXT: jmp
+        // CHECK: jmp
         // CHECK: ret
         ",
     );

@@ -420,16 +420,51 @@ pub fn compile(
     // scheduler doesn't know about effectful ops, so we reorder the schedule
     // here so the regalloc sees correct liveness.
     for (block_idx, block) in func.blocks.iter().enumerate() {
-        if block.non_term_count() == 0 {
-            continue; // No effectful ops to constrain ordering.
+        let has_branch = block
+            .ops
+            .last()
+            .is_some_and(|op| matches!(op, EffectfulOp::Branch { .. }));
+
+        if block.non_term_count() == 0 && !has_branch {
+            continue; // No effectful ops and no branch to constrain ordering.
         }
 
-        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
-            build_barrier_context(block, &egraph, &class_to_vreg);
+        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) = if block.non_term_count() > 0 {
+            build_barrier_context(block, &egraph, &class_to_vreg)
+        } else {
+            (BTreeMap::new(), BTreeMap::new())
+        };
 
         let sched = &block_schedules[block_idx];
         let vreg_group =
             assign_barrier_groups(sched, &vreg_to_result_of_barrier, &vreg_to_arg_of_barrier);
+
+        // Identify the branch condition's flags-producing instruction so it
+        // sorts to the end of its barrier group. On x86, any ALU instruction
+        // clobbers EFLAGS, so the flags-producing instruction must be the
+        // last ALU op before the terminator. We only move the immediate
+        // flags chain (proj1 + its parent ALU op), not the full transitive
+        // operand tree, to avoid disrupting scheduling of shared operands.
+        let mut branch_cond_chain: BTreeSet<VReg> = BTreeSet::new();
+        if let Some(EffectfulOp::Branch { cond, .. }) = block.ops.last() {
+            let canon = egraph.unionfind.find_immutable(*cond);
+            if let Some(&vreg) = class_to_vreg.get(&canon) {
+                // Add the flags VReg (proj1).
+                branch_cond_chain.insert(vreg);
+                // Find the instruction that produces it and add its parent
+                // (the ALU op that sets EFLAGS, e.g. x86_sub).
+                for inst in sched {
+                    if inst.dst == vreg {
+                        if matches!(inst.op, Op::Proj1) {
+                            for &op in &inst.operands {
+                                branch_cond_chain.insert(op);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
 
         // Stable-sort by group to reorder while preserving within-group order.
         // Barrier results (LoadResult/CallResult) sort to the FRONT of their
@@ -437,12 +472,16 @@ pub fn compile(
         // boundary, so the register is occupied from the start of the group.
         // Placing them after pure ops would let the regalloc think the register
         // is free, causing incorrect reuse and clobbering.
+        // Branch condition chain sorts to the END of its group to prevent
+        // other ALU ops from clobbering EFLAGS between the flags-producing
+        // instruction and the branch terminator.
         let mut indexed: Vec<(usize, &ScheduledInst)> = sched.iter().enumerate().collect();
         indexed.sort_by_key(|(orig_idx, inst)| {
             let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
             let param_order: u8 = match inst.op {
                 Op::Param(_, _) => 0,
                 Op::LoadResult(_, _) | Op::CallResult(_, _) => 1,
+                _ if branch_cond_chain.contains(&inst.dst) => 3,
                 _ => 2,
             };
             (g, param_order, *orig_idx)
