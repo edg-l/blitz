@@ -24,9 +24,7 @@
 - .rodata string deduplication
 
 ### Tech debt
-- Unify is_fp_op() - two copies in allocator.rs and split.rs should be one shared function
 - Split compile/mod.rs (1600 lines)
-- Minor clippy: redundant closures in split.rs tests, map_or -> is_some_and in scheduler.rs:349
 
 ### Known bugs
 (none currently)
