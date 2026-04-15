@@ -4,6 +4,7 @@ use smallvec::smallvec;
 
 use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
+use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
@@ -57,6 +58,7 @@ pub fn apply_algebraic_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_absorption_rules(egraph, &snaps);
     changed |= apply_div_identity_rules(egraph, &snaps);
     changed |= apply_select_rules(egraph, &snaps);
+    changed |= apply_comparison_select_folding(egraph, &snaps);
     changed |= apply_extension_folding_rules(egraph, &snaps);
     changed |= apply_complement_rules(egraph, &snaps);
     changed |= apply_demorgan_rules(egraph, &snaps);
@@ -678,6 +680,101 @@ fn apply_select_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             if canon != t_canon {
                 egraph.merge(class_id, t);
                 changed = true;
+            }
+        }
+    }
+    changed
+}
+
+// ── Comparison-select folding ────────────────────────────────────────────────
+// Select(Icmp(cc, a, a), t, f) where cc is always-true  -> t
+// Select(Icmp(cc, a, a), t, f) where cc is always-false -> f
+// Select(Icmp(cc, c1, c2), t, f) where c1,c2 are constants -> t or f
+
+fn eval_icmp(cc: &CondCode, a: i64, b: i64) -> Option<bool> {
+    match cc {
+        CondCode::Eq => Some(a == b),
+        CondCode::Ne => Some(a != b),
+        CondCode::Slt => Some(a < b),
+        CondCode::Sle => Some(a <= b),
+        CondCode::Sgt => Some(a > b),
+        CondCode::Sge => Some(a >= b),
+        CondCode::Ult => Some((a as u64) < (b as u64)),
+        CondCode::Ule => Some((a as u64) <= (b as u64)),
+        CondCode::Ugt => Some((a as u64) > (b as u64)),
+        CondCode::Uge => Some((a as u64) >= (b as u64)),
+        // Float-specific conditions: can't evaluate for integers
+        CondCode::Parity | CondCode::NotParity | CondCode::OrdEq | CondCode::UnordNe => None,
+    }
+}
+
+fn apply_comparison_select_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        if snap.op != Op::Select || snap.children.len() != 3 {
+            continue;
+        }
+        let cond_class_id = snap.children[0];
+        let t = snap.children[1];
+        let f = snap.children[2];
+
+        let cond_canon = egraph.unionfind.find_immutable(cond_class_id);
+        let cond_nodes = egraph.class(cond_canon).nodes.clone();
+
+        for icmp_node in &cond_nodes {
+            let cc = match &icmp_node.op {
+                Op::Icmp(cc) => cc,
+                _ => continue,
+            };
+            if icmp_node.children.len() != 2 {
+                continue;
+            }
+
+            let a_canon = egraph.unionfind.find_immutable(icmp_node.children[0]);
+            let b_canon = egraph.unionfind.find_immutable(icmp_node.children[1]);
+
+            // Pattern A: same-operand comparison
+            let target = if a_canon == b_canon {
+                let always_true = matches!(
+                    cc,
+                    CondCode::Eq | CondCode::Sle | CondCode::Sge | CondCode::Ule | CondCode::Uge
+                );
+                let always_false = matches!(
+                    cc,
+                    CondCode::Ne | CondCode::Slt | CondCode::Sgt | CondCode::Ult | CondCode::Ugt
+                );
+                if always_true {
+                    Some(t)
+                } else if always_false {
+                    Some(f)
+                } else {
+                    None
+                }
+            } else {
+                // Pattern B: constant-constant comparison
+                let a_const = egraph.get_constant(icmp_node.children[0]);
+                let b_const = egraph.get_constant(icmp_node.children[1]);
+                if let (Some((val_a, _)), Some((val_b, _))) = (a_const, b_const) {
+                    match eval_icmp(cc, val_a, val_b) {
+                        Some(true) => Some(t),
+                        Some(false) => Some(f),
+                        None => None,
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(target) = target {
+                let select_canon = egraph.unionfind.find_immutable(class_id);
+                let target_canon = egraph.unionfind.find_immutable(target);
+                if select_canon != target_canon {
+                    egraph.merge(class_id, target);
+                    changed = true;
+                }
+                break;
             }
         }
     }
@@ -1344,6 +1441,152 @@ mod tests {
         apply_algebraic_rules(&mut g);
         g.rebuild();
         assert_eq!(g.find(sel), g.find(val));
+    }
+
+    // ── Comparison-select folding tests ─────────────────────────────────────
+
+    #[test]
+    fn icmp_eq_same_operand_folds_select() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 7, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Eq),
+            children: smallvec![a, a],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // Eq(a, a) is always true: Select folds to t
+        assert_eq!(g.find(sel), g.find(t));
+    }
+
+    #[test]
+    fn icmp_ne_same_operand_folds_select() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 7, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Ne),
+            children: smallvec![a, a],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // Ne(a, a) is always false: Select folds to f
+        assert_eq!(g.find(sel), g.find(f));
+    }
+
+    #[test]
+    fn icmp_slt_same_operand_folds_select() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 7, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Slt),
+            children: smallvec![a, a],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // Slt(a, a) is always false: Select folds to f
+        assert_eq!(g.find(sel), g.find(f));
+    }
+
+    #[test]
+    fn icmp_const_const_slt_true() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 3, Type::I64);
+        let b = iconst(&mut g, 5, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Slt),
+            children: smallvec![a, b],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // 3 < 5 is true
+        assert_eq!(g.find(sel), g.find(t));
+    }
+
+    #[test]
+    fn icmp_const_const_slt_false() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 5, Type::I64);
+        let b = iconst(&mut g, 3, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Slt),
+            children: smallvec![a, b],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // 5 < 3 is false
+        assert_eq!(g.find(sel), g.find(f));
+    }
+
+    #[test]
+    fn icmp_const_const_ult_unsigned() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, -1, Type::I64);
+        let b = iconst(&mut g, 1, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Ult),
+            children: smallvec![a, b],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // -1 as u64 is u64::MAX, which is not < 1, so this is false
+        assert_eq!(g.find(sel), g.find(f));
+    }
+
+    #[test]
+    fn icmp_const_const_eq_true() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 42, Type::I64);
+        let b = iconst(&mut g, 42, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Eq),
+            children: smallvec![a, b],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // 42 == 42 is true
+        assert_eq!(g.find(sel), g.find(t));
     }
 
     // ── Extension folding tests ──────────────────────────────────────────────
