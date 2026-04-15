@@ -9,9 +9,9 @@ use crate::ast::{CType, Expr, FnDef, SpannedExpr, Stmt, UnaryOp};
 use crate::error::TinyErr;
 
 use super::structs::{
-    StructRegistry, emit_struct_copy, resolve_field, type_alignment, type_byte_size,
+    emit_struct_copy, resolve_field, type_alignment, type_byte_size, StructRegistry,
 };
-use super::{FnCtx, LoopContext, err};
+use super::{err, FnCtx, LoopContext};
 
 pub(super) fn compile_fn(
     fn_def: &FnDef,
@@ -20,6 +20,7 @@ pub(super) fn compile_fn(
     global_types: &HashMap<String, CType>,
     rodata: &mut Vec<blitz::emit::object::GlobalInfo>,
     string_counter: &mut usize,
+    string_dedup: &mut HashMap<Vec<u8>, String>,
 ) -> Result<Function, TinyErr> {
     let param_ir_types: Vec<Type> = fn_def
         .params
@@ -51,6 +52,7 @@ pub(super) fn compile_fn(
         global_types,
         rodata,
         string_counter,
+        string_dedup,
     );
 
     for ((ty, name), val) in fn_def.params.iter().zip(param_vals.iter()) {

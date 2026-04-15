@@ -197,18 +197,28 @@ impl<'b> FnCtx<'b> {
                 }
             }
             Expr::StringLit(bytes) => {
-                let label = format!(".L.str.{}", self.string_counter);
-                *self.string_counter += 1;
-
+                // Build the null-terminated string data
                 let mut data: Vec<u8> = bytes.clone();
                 data.push(0u8);
 
-                self.rodata.push(blitz::emit::object::GlobalInfo {
-                    name: label.clone(),
-                    size: data.len(),
-                    align: 1,
-                    init: Some(data),
-                });
+                // Check if we've already emitted this string
+                let label = if let Some(existing) = self.string_dedup.get(&data) {
+                    existing.clone()
+                } else {
+                    // New string, emit it
+                    let label = format!(".L.str.{}", self.string_counter);
+                    *self.string_counter += 1;
+
+                    self.rodata.push(blitz::emit::object::GlobalInfo {
+                        name: label.clone(),
+                        size: data.len(),
+                        align: 1,
+                        init: Some(data.clone()),
+                    });
+
+                    self.string_dedup.insert(data, label.clone());
+                    label
+                };
 
                 let addr = self.builder.global_addr(&label);
                 Ok((addr, CType::Ptr(Box::new(CType::Char))))
