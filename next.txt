@@ -6,88 +6,27 @@
 - Comma operator
 - Float globals and struct fields
 
-### Float support (f32/f64) -- DONE (remaining items below)
-Full plan: .claude/plans/float-support.md (6 phases, ~30 tasks)
-
-What exists: XMM regs, RegClass::XMM, FP_ARG_REGS/FP_RETURN_REG, Fadd/Fsub/Fmul/Fdiv/Fsqrt
-and x86 sd/ss machine ops, isel rules, UcomisdRR/UcomissRR MachInst+encoding,
-MovsdRR/MovssRR, XMM spill ops, interference graph class-aware, map_colors_to_regs XMM path.
-
-What's missing (by phase):
-
-Phase 1 - IR infrastructure:
-  - Fconst(u64) -> Fconst(u64, Type) for F32 support (touches op.rs, builder, cost, isel, lower, is_fp_op x2)
-  - Add Op::Fcmp(CondCode) -> Type::Flags
-  - Add Op::IntToFloat(Type), FloatToInt(Type), FloatExt, FloatTrunc
-  - Add X86 machine ops: X86Ucomisd/X86Ucomiss (Op variants, MachInst already exists),
-    X86Cvtsi2sd/ss, X86Cvttsd2si/ss2si, X86Cvtsd2ss, X86Cvtss2sd
-  - Add MachInst variants + SSE2 encoding for 6 CVT instructions:
-    cvtsi2sd=F2 0F 2A, cvtsi2ss=F3 0F 2A, cvttsd2si=F2 0F 2C,
-    cvttss2si=F3 0F 2C, cvtsd2ss=F2 0F 5A, cvtss2sd=F3 0F 5A
-
-Phase 2 - Isel, lowering, regalloc fixes:
-  - Isel rules: Fcmp->Ucomisd/ss, IntToFloat->Cvtsi2sd/ss, FloatToInt->Cvttsd2si/ss2si,
-    FloatExt->Cvtss2sd, FloatTrunc->Cvtsd2ss
-  - Cost entries for all new ops
-  - Lowering for Ucomisd/Ucomiss (flags-only, no dst reg write) and all CVT ops
-  - FIX is_fp_op: add X86Addss/Subss/Mulss/Divss/Sqrtss + Cvtsi2sd/ss/Cvtsd2ss/Cvtss2sd
-    (both allocator.rs and split.rs copies)
-  - ADD XMM call clobber: CALLER_SAVED_XMM constant in abi.rs,
-    add_xmm_call_clobber_interferences (phantom XMM vregs at call points)
-  - ADD XMM pressure check: compute per-class chromatic numbers after coloring,
-    check GPR vs available_gpr_colors AND XMM vs AVAILABLE_XMM_COLORS,
-    two map_colors_to_regs calls (GPR + XMM), merge vreg_to_reg maps
-
-Phase 3 - Float ABI wiring:
-  - setup_call_args: emit MovsdRR for XMM copies instead of MovRR (split by reg class after sequentialize_copies)
-  - effectful.rs: call result uses FP_RETURN_REG + MovsdRR when ret type is float (avoid OpSize::from_type panic)
-  - terminator.rs: return uses FP_RETURN_REG + MovsdRR when ret type is float (same panic issue)
-  - precolor.rs: precolor call result to FP_RETURN_REG when float return type
-  - precolor.rs: add `reg.is_xmm()` check in param precoloring skip (all XMM caller-saved)
-
-Phase 4 - tinyc frontend:
-  - Lexer: Float/Double keyword tokens, FloatLit(f64) with `.`/`e`/`f` suffix support
-  - AST: CType::Float/Double (to_ir_type, bit_width, is_float), Expr::FloatLit(f64, bool)
-  - Parser: parse_type handles float/double, parse float literals
-  - usual_arithmetic_conversion: double > float > integer promotions
-  - addr_analysis: walk new AST nodes
-
-Phase 5 - tinyc codegen:
-  - FloatLit: fconst/fconst_f32 based on suffix
-  - emit_convert: int<->float, F32<->F64 conversions
-  - Arithmetic: Fadd/Fsub/Fmul/Fdiv when common type is float; % is compile error
-  - Comparisons: fcmp with unsigned condition codes (Ult/Ule/Ugt/Uge for ordered relational)
-  - Negation: fsub(0.0, x) for v1 (wrong for -(+0.0), acceptable; TODO xorps later)
-  - Skip integer promotion for float types in emit_promote
-
-Phase 6 - Tests:
-  - Lit tests: basic arithmetic, comparisons, conversions, function calls, edge cases
-  - Full regression: cargo test + lit tests
-
-Known risks/limitations:
-  - NaN comparisons: FIXED (OrdEq/UnordNe CCs with sete+setnp+and / setne+setp+or; </<= swap operands for Ugt/Uge)
-  - Float negation: FIXED (uses -0.0 instead of +0.0 in fsub for IEEE correctness)
-  - R11 scratch in Fconst lowering (safe but undocumented assumption)
-  - No float globals, struct fields, or modulo in v1
-
 ### Backend optimization
-- Param precoloring is conservative: skips ALL params when block has calls,
-  even params that die before the call. Could check per-param liveness at
-  each call point to allow precoloring for short-lived params.
-- E-graph equality saturation: more rewrite rules (strength reduction,
-  constant folding, algebraic simplifications)
+- Param precoloring optimization: currently skips ALL params when block has calls; could check per-param liveness at each call point
 - Loop optimizations (LICM, strength reduction, induction variables)
 - Better register coalescing across blocks
 - Better spill code: split live ranges at loop boundaries, register hints
 - Tail call optimization
 - Block param const propagation for multi-predecessor case
 
+### E-graph optimization (from docs/egraph-optimization-roadmap.md)
+- Medium impact: Distributivity/factoring (a*b + a*c = a*(b+c)), comparison folding, shift+mask optimization
+- High impact: Known-bits analysis (tracks provably-known 0/1 bits; enables redundant And removal, dead mask elimination)
+
 ### Infrastructure
 - CI pipeline / benchmarks / compile-time tracking
-- Better error messages with source locations in tinyc
 - DWARF debug info (.debug_info, .debug_line for gdb/lldb)
-- Multi-file compilation / linking -- DONE (session 010)
-- .rodata string deduplication (minor optimization)
+- .rodata string deduplication
+
+### Tech debt
+- Unify is_fp_op() - two copies in allocator.rs and split.rs should be one shared function
+- Split compile/mod.rs (1600 lines)
+- Minor clippy: redundant closures in split.rs tests, map_or -> is_some_and in scheduler.rs:349
 
 ### Known bugs
 (none currently)

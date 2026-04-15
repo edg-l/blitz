@@ -480,7 +480,7 @@ mod tests {
         );
         // No SpillStore either (v0 is not defined in block 1).
         assert!(
-            !block1_rewritten.iter().any(|i| is_spill_store(i)),
+            !block1_rewritten.iter().any(is_spill_store),
             "pass-through block should not spill v0"
         );
     }
@@ -541,7 +541,7 @@ mod tests {
 
         // No SpillLoad for v5 (it's a block param).
         assert!(
-            !block1_rewritten.iter().any(|i| is_spill_load(i)),
+            !block1_rewritten.iter().any(is_spill_load),
             "block param v5 should not be reloaded"
         );
     }

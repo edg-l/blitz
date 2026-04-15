@@ -346,7 +346,7 @@ mod tests {
         let mut peak = 0;
         for (i, inst) in scheduled.iter().enumerate() {
             // Kill VRegs whose last use was the previous instruction.
-            live.retain(|v| last_use.get(v).map_or(false, |&u| u >= i));
+            live.retain(|v| last_use.get(v).is_some_and(|&u| u >= i));
             live.insert(inst.dst);
             if live.len() > peak {
                 peak = live.len();
