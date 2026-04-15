@@ -131,22 +131,20 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
             Op::Shl if snap.children.len() == 2 => {
                 let a = egraph.get_known_bits(snap.children[0]);
                 if let Some((shift_amt, _)) = egraph.get_constant(snap.children[1]) {
-                    let n = shift_amt as u32;
                     let ty = &egraph
                         .class(egraph.unionfind.find_immutable(snap.class_id))
                         .ty;
-                    let mask = type_mask(ty);
-                    if n < 64 {
+                    let width = ty.bit_width();
+                    // Out-of-range shift: x86 uses CL mod 64; don't derive known bits
+                    if shift_amt < 0 || shift_amt >= width as i64 {
+                        None
+                    } else {
+                        let n = shift_amt as u32;
+                        let mask = type_mask(ty);
                         let low_mask = if n == 0 { 0 } else { (1u64 << n) - 1 };
                         Some(KnownBits {
                             known_ones: (a.known_ones << n) & mask,
                             known_zeros: ((a.known_zeros << n) | low_mask) & mask,
-                        })
-                    } else {
-                        // Shift by >= 64 is all zeros
-                        Some(KnownBits {
-                            known_ones: 0,
-                            known_zeros: mask,
                         })
                     }
                 } else {
@@ -157,22 +155,19 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
             Op::Shr if snap.children.len() == 2 => {
                 let a = egraph.get_known_bits(snap.children[0]);
                 if let Some((shift_amt, _)) = egraph.get_constant(snap.children[1]) {
-                    let n = shift_amt as u32;
                     let ty = &egraph
                         .class(egraph.unionfind.find_immutable(snap.class_id))
                         .ty;
-                    let mask = type_mask(ty);
                     let width = ty.bit_width();
-                    if n < width {
+                    if shift_amt < 0 || shift_amt >= width as i64 {
+                        None
+                    } else {
+                        let n = shift_amt as u32;
+                        let mask = type_mask(ty);
                         let high_mask = mask & !(mask >> n);
                         Some(KnownBits {
                             known_ones: (a.known_ones >> n) & mask,
                             known_zeros: ((a.known_zeros >> n) | high_mask) & mask,
-                        })
-                    } else {
-                        Some(KnownBits {
-                            known_ones: 0,
-                            known_zeros: mask,
                         })
                     }
                 } else {
@@ -183,13 +178,15 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
             Op::Sar if snap.children.len() == 2 => {
                 let a = egraph.get_known_bits(snap.children[0]);
                 if let Some((shift_amt, _)) = egraph.get_constant(snap.children[1]) {
-                    let n = shift_amt as u32;
                     let ty = &egraph
                         .class(egraph.unionfind.find_immutable(snap.class_id))
                         .ty;
-                    let mask = type_mask(ty);
                     let width = ty.bit_width();
-                    if n < width {
+                    if shift_amt < 0 || shift_amt >= width as i64 {
+                        None
+                    } else {
+                        let n = shift_amt as u32;
+                        let mask = type_mask(ty);
                         let sign_bit = 1u64 << (width - 1);
                         let high_mask = mask & !(mask >> n);
                         let mut ones = (a.known_ones >> n) & mask;
@@ -206,22 +203,6 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
                             known_ones: ones,
                             known_zeros: zeros,
                         })
-                    } else {
-                        // Shift by >= width: result is all sign bits
-                        let sign_bit = 1u64 << (width - 1);
-                        if a.known_ones & sign_bit != 0 {
-                            Some(KnownBits {
-                                known_ones: mask,
-                                known_zeros: 0,
-                            })
-                        } else if a.known_zeros & sign_bit != 0 {
-                            Some(KnownBits {
-                                known_ones: 0,
-                                known_zeros: mask,
-                            })
-                        } else {
-                            None
-                        }
                     }
                 } else {
                     None
@@ -856,5 +837,323 @@ mod tests {
             g.find(shl),
             "And(Shl(1,4), 0xFF) should equal Shl(1,4)"
         );
+    }
+
+    // ── Shift edge case tests ───────────────────────────────────────────────
+
+    #[test]
+    fn propagate_shl_by_zero() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        let val = g.add(ENode {
+            op: Op::Iconst(0xFF, Type::I64),
+            children: smallvec![],
+        });
+        let zero = g.add(ENode {
+            op: Op::Iconst(0, Type::I64),
+            children: smallvec![],
+        });
+        let shl = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![val, zero],
+        });
+        propagate_known_bits(&mut g);
+        let kb = g.get_known_bits(shl);
+        // Shl(0xFF, 0) = 0xFF
+        assert_eq!(kb.known_ones, 0xFF);
+    }
+
+    #[test]
+    fn propagate_shl_negative_amount_skipped() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        let val = g.add(ENode {
+            op: Op::Iconst(1, Type::I64),
+            children: smallvec![],
+        });
+        let neg = g.add(ENode {
+            op: Op::Iconst(-1, Type::I64),
+            children: smallvec![],
+        });
+        let shl = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![val, neg],
+        });
+        propagate_known_bits(&mut g);
+        let kb = g.get_known_bits(shl);
+        // Out-of-range shift: no bits should be derived
+        assert!(!kb.has_info());
+    }
+
+    #[test]
+    fn propagate_shl_overshift_skipped() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        let val = g.add(ENode {
+            op: Op::Iconst(1, Type::I64),
+            children: smallvec![],
+        });
+        let big = g.add(ENode {
+            op: Op::Iconst(64, Type::I64),
+            children: smallvec![],
+        });
+        let shl = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![val, big],
+        });
+        propagate_known_bits(&mut g);
+        let kb = g.get_known_bits(shl);
+        // Shift by width: out of range, no known bits
+        assert!(!kb.has_info());
+    }
+
+    #[test]
+    fn propagate_shr_negative_amount_skipped() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        let val = g.add(ENode {
+            op: Op::Iconst(0xFF, Type::I64),
+            children: smallvec![],
+        });
+        let neg = g.add(ENode {
+            op: Op::Iconst(-1, Type::I64),
+            children: smallvec![],
+        });
+        let shr = g.add(ENode {
+            op: Op::Shr,
+            children: smallvec![val, neg],
+        });
+        propagate_known_bits(&mut g);
+        let kb = g.get_known_bits(shr);
+        assert!(!kb.has_info());
+    }
+
+    // ── Sar propagation tests ───────────────────────────────────────────────
+
+    #[test]
+    fn propagate_sar_sign_bit_known_one() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        // 0xF000 in I16: sign bit (bit 15) is 1
+        let val = g.add(ENode {
+            op: Op::Iconst(0xF000u16 as i64, Type::I16),
+            children: smallvec![],
+        });
+        let shift = g.add(ENode {
+            op: Op::Iconst(4, Type::I16),
+            children: smallvec![],
+        });
+        let sar = g.add(ENode {
+            op: Op::Sar,
+            children: smallvec![val, shift],
+        });
+        propagate_known_bits(&mut g);
+        let kb = g.get_known_bits(sar);
+        // Sar(0xF000, 4) in I16 = 0xFF00 (sign bit replicates into high 4 bits)
+        let expected = 0xFF00u64 & 0xFFFF;
+        assert_eq!(kb.known_ones & 0xFFFF, expected);
+    }
+
+    #[test]
+    fn propagate_sar_sign_bit_known_zero() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        // 0x0F00 in I16: sign bit (bit 15) is 0
+        let val = g.add(ENode {
+            op: Op::Iconst(0x0F00, Type::I16),
+            children: smallvec![],
+        });
+        let shift = g.add(ENode {
+            op: Op::Iconst(4, Type::I16),
+            children: smallvec![],
+        });
+        let sar = g.add(ENode {
+            op: Op::Sar,
+            children: smallvec![val, shift],
+        });
+        propagate_known_bits(&mut g);
+        let kb = g.get_known_bits(sar);
+        // Sar(0x0F00, 4) in I16 = 0x00F0 (zero-extend since sign bit is 0)
+        assert_eq!(kb.known_ones & 0xFFFF, 0x00F0);
+        // Upper 8 bits should be known-zero
+        assert_eq!(kb.known_zeros & 0xFF00, 0xFF00);
+    }
+
+    #[test]
+    fn propagate_sar_negative_amount_skipped() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        let val = g.add(ENode {
+            op: Op::Iconst(0xFF, Type::I64),
+            children: smallvec![],
+        });
+        let neg = g.add(ENode {
+            op: Op::Iconst(-1, Type::I64),
+            children: smallvec![],
+        });
+        let sar = g.add(ENode {
+            op: Op::Sar,
+            children: smallvec![val, neg],
+        });
+        propagate_known_bits(&mut g);
+        let kb = g.get_known_bits(sar);
+        assert!(!kb.has_info());
+    }
+
+    // ── I32/I8 width tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn propagate_and_i32() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        let param = g.add(ENode {
+            op: Op::Param(0, Type::I32),
+            children: smallvec![],
+        });
+        let mask = g.add(ENode {
+            op: Op::Iconst(0xF, Type::I32),
+            children: smallvec![],
+        });
+        let and = g.add(ENode {
+            op: Op::And,
+            children: smallvec![param, mask],
+        });
+        propagate_known_bits(&mut g);
+        let kb = g.get_known_bits(and);
+        // Upper 28 bits should be known-zero (I32 mask 0xF)
+        assert_eq!(kb.known_zeros & 0xFFFF_FFF0, 0xFFFF_FFF0);
+    }
+
+    #[test]
+    fn propagate_shl_i8() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        let val = g.add(ENode {
+            op: Op::Iconst(1, Type::I8),
+            children: smallvec![],
+        });
+        let shift = g.add(ENode {
+            op: Op::Iconst(4, Type::I8),
+            children: smallvec![],
+        });
+        let shl = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![val, shift],
+        });
+        propagate_known_bits(&mut g);
+        let kb = g.get_known_bits(shl);
+        // 1 << 4 in I8 = 0x10
+        assert_eq!(kb.known_ones, 0x10);
+        // Lower 4 bits and bits 5-7 (except bit 4) should be known-zero
+        assert_eq!(kb.known_zeros & 0xFF, 0xEF);
+    }
+
+    // ── Chained propagation tests ───────────────────────────────────────────
+
+    #[test]
+    fn propagate_chain_zext_then_and() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::egraph::phases::{CompileOptions, run_phases};
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        let param = g.add(ENode {
+            op: Op::Param(0, Type::I8),
+            children: smallvec![],
+        });
+        let zext = g.add(ENode {
+            op: Op::Zext(Type::I32),
+            children: smallvec![param],
+        });
+        let mask = g.add(ENode {
+            op: Op::Iconst(0xFFFF, Type::I32),
+            children: smallvec![],
+        });
+        let and = g.add(ENode {
+            op: Op::And,
+            children: smallvec![zext, mask],
+        });
+
+        let opts = CompileOptions::default();
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // Zext(I32, param_i8) has bits 8-31 known-zero.
+        // And(zext, 0xFFFF) clears bits 16-31 which are already zero.
+        // So And is redundant.
+        assert_eq!(g.find(and), g.find(zext));
+    }
+
+    // ── Known-constant promotion edge cases ─────────────────────────────────
+
+    #[test]
+    fn constant_promotion_i8() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::egraph::phases::{CompileOptions, run_phases};
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        // And(0xFF, 0x0F) in I8 = 0x0F
+        let a = g.add(ENode {
+            op: Op::Iconst(-1, Type::I8),
+            children: smallvec![],
+        });
+        let b = g.add(ENode {
+            op: Op::Iconst(0x0F, Type::I8),
+            children: smallvec![],
+        });
+        let and = g.add(ENode {
+            op: Op::And,
+            children: smallvec![a, b],
+        });
+
+        let opts = CompileOptions::default();
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // Should fold to Iconst(0x0F, I8)
+        let expected = g.add(ENode {
+            op: Op::Iconst(0x0F, Type::I8),
+            children: smallvec![],
+        });
+        assert_eq!(g.find(and), g.find(expected));
     }
 }

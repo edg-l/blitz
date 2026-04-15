@@ -12,7 +12,7 @@ use crate::ir::op::{ClassId, Op};
 /// A blowup guard skips this pass if the e-graph is already 3/4 full.
 pub fn apply_distributive_rules(egraph: &mut EGraph, max_classes: usize) -> bool {
     // Blowup guard: skip if e-graph is near capacity
-    if egraph.classes.len() > max_classes * 3 / 4 {
+    if egraph.class_count() > max_classes * 3 / 4 {
         return false;
     }
 
@@ -300,6 +300,88 @@ mod tests {
         assert!(
             !changed,
             "no factoring should occur when all factors are distinct"
+        );
+    }
+
+    // Cross-pairing: Add(Mul(a, b), Mul(c, a)) — factor on left-left and right-right
+    #[test]
+    fn factor_add_cross_pairing() {
+        let mut g = EGraph::new();
+        let a = param(&mut g, 0);
+        let b = param(&mut g, 1);
+        let c = param(&mut g, 2);
+
+        let mul_ab = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![a, b],
+        });
+        let mul_ca = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![c, a],
+        });
+        let add = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![mul_ab, mul_ca],
+        });
+
+        let changed = apply_distributive_rules(&mut g, 500_000);
+        g.rebuild();
+
+        assert!(changed, "factoring should fire for cross-pairing");
+
+        let inner = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![b, c],
+        });
+        let factored = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![a, inner],
+        });
+        assert_eq!(
+            g.find(add),
+            g.find(factored),
+            "Add(Mul(a,b), Mul(c,a)) should equal Mul(a, Add(b,c))"
+        );
+    }
+
+    // Same factor: Add(Mul(a, a), Mul(a, b)) — a appears in both positions of left Mul
+    #[test]
+    fn factor_add_same_factor_squared() {
+        let mut g = EGraph::new();
+        let a = param(&mut g, 0);
+        let b = param(&mut g, 1);
+
+        let mul_aa = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![a, a],
+        });
+        let mul_ab = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![a, b],
+        });
+        let add = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![mul_aa, mul_ab],
+        });
+
+        let changed = apply_distributive_rules(&mut g, 500_000);
+        g.rebuild();
+
+        assert!(changed, "factoring should fire for squared factor");
+
+        // a*a + a*b = a*(a+b)
+        let inner = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![a, b],
+        });
+        let factored = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![a, inner],
+        });
+        assert_eq!(
+            g.find(add),
+            g.find(factored),
+            "Add(Mul(a,a), Mul(a,b)) should equal Mul(a, Add(a,b))"
         );
     }
 

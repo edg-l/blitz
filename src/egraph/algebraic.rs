@@ -1589,6 +1589,129 @@ mod tests {
         assert_eq!(g.find(sel), g.find(t));
     }
 
+    #[test]
+    fn icmp_sle_same_operand_folds_select() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 7, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Sle),
+            children: smallvec![a, a],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // Sle(a, a) is always true
+        assert_eq!(g.find(sel), g.find(t));
+    }
+
+    #[test]
+    fn icmp_uge_same_operand_folds_select() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 7, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Uge),
+            children: smallvec![a, a],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // Uge(a, a) is always true
+        assert_eq!(g.find(sel), g.find(t));
+    }
+
+    #[test]
+    fn icmp_ugt_same_operand_folds_select() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 7, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Ugt),
+            children: smallvec![a, a],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // Ugt(a, a) is always false
+        assert_eq!(g.find(sel), g.find(f));
+    }
+
+    #[test]
+    fn icmp_const_const_sge() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 5, Type::I64);
+        let b = iconst(&mut g, 3, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Sge),
+            children: smallvec![a, b],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // 5 >= 3 is true
+        assert_eq!(g.find(sel), g.find(t));
+    }
+
+    #[test]
+    fn icmp_const_const_ne_false() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 7, Type::I64);
+        let b = iconst(&mut g, 7, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Ne),
+            children: smallvec![a, b],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // 7 != 7 is false
+        assert_eq!(g.find(sel), g.find(f));
+    }
+
+    #[test]
+    fn icmp_const_const_ule() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 3, Type::I64);
+        let b = iconst(&mut g, 3, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Ule),
+            children: smallvec![a, b],
+        });
+        let t = iconst(&mut g, 1, Type::I64);
+        let f = iconst(&mut g, 0, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, t, f],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // 3 <= 3 (unsigned) is true
+        assert_eq!(g.find(sel), g.find(t));
+    }
+
     // ── Extension folding tests ──────────────────────────────────────────────
 
     #[test]
