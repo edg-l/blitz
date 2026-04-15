@@ -364,6 +364,9 @@ pub enum Expr {
     PreDecrement(Box<SpannedExpr>),
     PostIncrement(Box<SpannedExpr>),
     PostDecrement(Box<SpannedExpr>),
+    /// Comma operator: evaluates left operand (discarding result), then right operand.
+    /// Returns the value of the right operand. Left-to-right associativity.
+    /// Example: `(a = 1, b = 2, a + b)` returns `a + b` after both assignments.
     Comma(Box<SpannedExpr>, Box<SpannedExpr>),
 }
 
