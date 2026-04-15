@@ -20,7 +20,6 @@
 ### Infrastructure
 - CI pipeline / benchmarks / compile-time tracking
 - DWARF debug info (.debug_info, .debug_line for gdb/lldb)
-- .rodata string deduplication
 
 ### Tech debt
 - Split compile/mod.rs (1600 lines)
