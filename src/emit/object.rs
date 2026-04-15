@@ -9,6 +9,15 @@ use super::elf::{
     SymbolTable,
 };
 
+fn reloc_kind_to_elf(kind: &RelocKind) -> u32 {
+    match kind {
+        RelocKind::PLT32 => R_X86_64_PLT32,
+        RelocKind::PC32 => R_X86_64_PC32,
+        RelocKind::Abs64 => R_X86_64_64,
+        RelocKind::Abs32S => R_X86_64_32S,
+    }
+}
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 pub struct FunctionInfo {
@@ -39,6 +48,8 @@ pub struct ObjectFile {
     pub rodata: Vec<GlobalInfo>,
 }
 
+const ELF64_EHDR_SIZE: usize = 64;
+
 // ── Alignment helpers ─────────────────────────────────────────────────────────
 
 fn align_up(value: usize, align: usize) -> usize {
@@ -58,8 +69,6 @@ struct SectionLayout {
     sec_rodata: Option<u16>,
     sec_data: Option<u16>,
     sec_bss: Option<u16>,
-    #[allow(dead_code)]
-    sec_rela_text: u16,
     sec_symtab: u16,
     sec_strtab: u16,
     sec_shstrtab: u16,
@@ -94,7 +103,6 @@ impl SectionLayout {
         } else {
             None
         };
-        let sec_rela_text = next;
         next += 1;
         let sec_symtab = next;
         next += 1;
@@ -109,7 +117,6 @@ impl SectionLayout {
             sec_rodata,
             sec_data,
             sec_bss,
-            sec_rela_text,
             sec_symtab,
             sec_strtab,
             sec_shstrtab,
@@ -120,10 +127,49 @@ impl SectionLayout {
 
 // ── ObjectFile impl ───────────────────────────────────────────────────────────
 
+struct ShstrtabNames {
+    name_text: u32,
+    name_rodata: Option<u32>,
+    name_data: Option<u32>,
+    name_bss: Option<u32>,
+    name_rela_text: u32,
+    name_symtab: u32,
+    name_strtab: u32,
+    name_shstrtab: u32,
+    name_note_gnu_stack: u32,
+}
+
+struct StrtabOffsets {
+    ext_strtab: HashMap<String, u32>,
+    func_strtab: Vec<u32>,
+    global_strtab: Vec<u32>,
+    rodata_strtab: Vec<u32>,
+}
+
+struct SectionOffsets {
+    off_text: usize,
+    off_rodata: usize,
+    off_data: usize,
+    off_rela: usize,
+    off_symtab: usize,
+    off_strtab: usize,
+    off_shstrtab: usize,
+    text_len: usize,
+    rodata_len: usize,
+    data_len: usize,
+    rela_len: usize,
+    symtab_len: usize,
+    strtab_len: usize,
+    shstrtab_len: usize,
+    bss_size: usize,
+    symtab_sh_info: u32,
+    has_rodata: bool,
+    has_data: bool,
+    has_bss: bool,
+}
+
 impl ObjectFile {
-    /// Assemble all sections into a complete ELF64 relocatable object file.
     pub fn finalize(&self) -> Vec<u8> {
-        // ── Partition globals into .data and .bss ────────────────────────────
         let data_globals: Vec<&GlobalInfo> =
             self.globals.iter().filter(|g| g.init.is_some()).collect();
         let bss_globals: Vec<&GlobalInfo> =
@@ -134,62 +180,146 @@ impl ObjectFile {
         let has_bss = !bss_globals.is_empty();
         let layout = SectionLayout::compute(has_rodata, has_data, has_bss);
 
-        // ── Build .rodata section content ────────────────────────────────────
-        let mut rodata_content: Vec<u8> = Vec::new();
-        // Map: symbol name -> (section index, offset within section, size)
-        let mut rodata_section_info: HashMap<String, (u16, u64, u64)> = HashMap::new();
+        let (rodata_content, rodata_section_info) = self.build_rodata_section(&layout);
+        let (data_content, mut global_section_info) =
+            self.build_data_section(&layout, &data_globals);
+        let (bss_size, bss_info) = self.build_bss_layout(&layout, &bss_globals);
+        global_section_info.extend(bss_info);
 
+        let (shstrtab, shstrtab_names, strtab, strtab_offsets) =
+            self.build_string_tables(has_rodata, has_data, has_bss);
+
+        let (symtab, global_sym_idx, ext_sym_idx) = self.build_symbol_table(
+            &layout,
+            &rodata_section_info,
+            &global_section_info,
+            &strtab_offsets,
+        );
+
+        let rela = self.build_relocations(&global_sym_idx, &ext_sym_idx);
+
+        let text_bytes = &self.code;
+        let rela_bytes = rela.to_bytes();
+        let symtab_bytes = symtab.to_bytes();
+        let strtab_bytes = strtab.to_bytes();
+        let shstrtab_bytes = shstrtab.to_bytes();
+
+        let mut buf: Vec<u8> = vec![0; ELF64_EHDR_SIZE];
+        let off_text = self.emit_text_section(&mut buf, text_bytes);
+        let off_rodata = self.emit_rodata_section(&mut buf, &rodata_content, has_rodata);
+        let off_data = self.emit_data_section(&mut buf, &data_content, has_data);
+        let (off_rela, off_symtab, off_strtab, off_shstrtab, shoff) = self.emit_meta_sections(
+            &mut buf,
+            &rela_bytes,
+            &symtab_bytes,
+            &strtab_bytes,
+            &shstrtab_bytes,
+        );
+        self.write_section_headers(
+            &mut buf,
+            &shstrtab_names,
+            &layout,
+            &SectionOffsets {
+                off_text,
+                off_rodata,
+                off_data,
+                off_rela,
+                off_symtab,
+                off_strtab,
+                off_shstrtab,
+                text_len: text_bytes.len(),
+                rodata_len: rodata_content.len(),
+                data_len: data_content.len(),
+                rela_len: rela_bytes.len(),
+                symtab_len: symtab_bytes.len(),
+                strtab_len: strtab_bytes.len(),
+                shstrtab_len: shstrtab_bytes.len(),
+                bss_size,
+                symtab_sh_info: symtab.sh_info(),
+                has_rodata,
+                has_data,
+                has_bss,
+            },
+        );
+        self.write_elf_header(&mut buf, shoff as u64, &layout);
+
+        buf
+    }
+
+    fn build_rodata_section(
+        &self,
+        layout: &SectionLayout,
+    ) -> (Vec<u8>, HashMap<String, (u16, u64, u64)>) {
+        let mut content: Vec<u8> = Vec::new();
+        let mut section_info: HashMap<String, (u16, u64, u64)> = HashMap::new();
         for g in &self.rodata {
             let align = g.align.max(1);
-            let padded_offset = align_up(rodata_content.len(), align);
-            rodata_content.resize(padded_offset, 0);
-            let offset = rodata_content.len();
+            let padded_offset = align_up(content.len(), align);
+            content.resize(padded_offset, 0);
+            let offset = content.len();
             let init = g.init.as_ref().expect("rodata entries must have init data");
-            rodata_content.extend_from_slice(init);
+            content.extend_from_slice(init);
             if init.len() < g.size {
-                rodata_content.resize(offset + g.size, 0);
+                content.resize(offset + g.size, 0);
             }
-            rodata_section_info.insert(
+            section_info.insert(
                 g.name.clone(),
                 (layout.sec_rodata.unwrap(), offset as u64, g.size as u64),
             );
         }
+        (content, section_info)
+    }
 
-        // ── Build .data section content ──────────────────────────────────────
-        let mut data_content: Vec<u8> = Vec::new();
-        // Map: global name -> (section index, offset within section)
-        let mut global_section_info: HashMap<String, (u16, u64, u64)> = HashMap::new();
-
-        for g in &data_globals {
+    fn build_data_section(
+        &self,
+        layout: &SectionLayout,
+        data_globals: &[&GlobalInfo],
+    ) -> (Vec<u8>, HashMap<String, (u16, u64, u64)>) {
+        let mut content: Vec<u8> = Vec::new();
+        let mut section_info: HashMap<String, (u16, u64, u64)> = HashMap::new();
+        for g in data_globals {
             let align = g.align.max(1);
-            let padded_offset = align_up(data_content.len(), align);
-            data_content.resize(padded_offset, 0);
-            let offset = data_content.len();
-            data_content.extend_from_slice(g.init.as_ref().unwrap());
-            // Pad to size if init bytes are shorter
+            let padded_offset = align_up(content.len(), align);
+            content.resize(padded_offset, 0);
+            let offset = content.len();
+            content.extend_from_slice(g.init.as_ref().unwrap());
             if g.init.as_ref().unwrap().len() < g.size {
-                data_content.resize(offset + g.size, 0);
+                content.resize(offset + g.size, 0);
             }
-            global_section_info.insert(
+            section_info.insert(
                 g.name.clone(),
                 (layout.sec_data.unwrap(), offset as u64, g.size as u64),
             );
         }
+        (content, section_info)
+    }
 
-        // ── Compute .bss virtual size and offsets ────────────────────────────
-        let mut bss_size: usize = 0;
-        for g in &bss_globals {
+    fn build_bss_layout(
+        &self,
+        layout: &SectionLayout,
+        bss_globals: &[&GlobalInfo],
+    ) -> (usize, HashMap<String, (u16, u64, u64)>) {
+        let mut size: usize = 0;
+        let mut section_info: HashMap<String, (u16, u64, u64)> = HashMap::new();
+        for g in bss_globals {
             let align = g.align.max(1);
-            bss_size = align_up(bss_size, align);
-            let offset = bss_size;
-            bss_size += g.size;
-            global_section_info.insert(
+            size = align_up(size, align);
+            let offset = size;
+            size += g.size;
+            section_info.insert(
                 g.name.clone(),
                 (layout.sec_bss.unwrap(), offset as u64, g.size as u64),
             );
         }
+        (size, section_info)
+    }
 
-        // ── Build .shstrtab ───────────────────────────────────────────────────
+    fn build_string_tables(
+        &self,
+        has_rodata: bool,
+        has_data: bool,
+        has_bss: bool,
+    ) -> (StringTable, ShstrtabNames, StringTable, StrtabOffsets) {
         let mut shstrtab = StringTable::new();
         let name_text = shstrtab.add(".text");
         let name_rodata = if has_rodata {
@@ -213,25 +343,47 @@ impl ObjectFile {
         let name_shstrtab = shstrtab.add(".shstrtab");
         let name_note_gnu_stack = shstrtab.add(".note.GNU-stack");
 
-        // ── Build .strtab and collect symbol names ───────────────────────────
         let mut strtab = StringTable::new();
-
-        // External symbol strtab offsets
         let mut ext_strtab: HashMap<String, u32> = HashMap::new();
         for ext in &self.externals {
             let off = strtab.add(ext);
             ext_strtab.insert(ext.clone(), off);
         }
-        // Function name strtab offsets
         let func_strtab: Vec<u32> = self.functions.iter().map(|f| strtab.add(&f.name)).collect();
-        // Global name strtab offsets
         let global_strtab: Vec<u32> = self.globals.iter().map(|g| strtab.add(&g.name)).collect();
-        // Rodata name strtab offsets
         let rodata_strtab: Vec<u32> = self.rodata.iter().map(|g| strtab.add(&g.name)).collect();
 
-        // ── Build .symtab ─────────────────────────────────────────────────────
+        (
+            shstrtab,
+            ShstrtabNames {
+                name_text,
+                name_rodata,
+                name_data,
+                name_bss,
+                name_rela_text,
+                name_symtab,
+                name_strtab,
+                name_shstrtab,
+                name_note_gnu_stack,
+            },
+            strtab,
+            StrtabOffsets {
+                ext_strtab,
+                func_strtab,
+                global_strtab,
+                rodata_strtab,
+            },
+        )
+    }
+
+    fn build_symbol_table(
+        &self,
+        layout: &SectionLayout,
+        rodata_section_info: &HashMap<String, (u16, u64, u64)>,
+        global_section_info: &HashMap<String, (u16, u64, u64)>,
+        strtab_offsets: &StrtabOffsets,
+    ) -> (SymbolTable, HashMap<String, u32>, HashMap<String, u32>) {
         let mut symtab = SymbolTable::new();
-        // Local section symbols
         symtab.add_section(layout.sec_text);
         if let Some(sec) = layout.sec_rodata {
             symtab.add_section(sec);
@@ -242,132 +394,127 @@ impl ObjectFile {
         if let Some(sec) = layout.sec_bss {
             symtab.add_section(sec);
         }
-        // Local rodata symbols (must be added before globals)
+
         let mut global_sym_idx: HashMap<String, u32> = HashMap::new();
         for (i, g) in self.rodata.iter().enumerate() {
             let (section, offset, size) = rodata_section_info[&g.name];
-            let idx = symtab.add_local_object(rodata_strtab[i], section, offset, size);
+            let idx =
+                symtab.add_local_object(strtab_offsets.rodata_strtab[i], section, offset, size);
             global_sym_idx.insert(g.name.clone(), idx);
         }
-        // Global function symbols
         for (i, func) in self.functions.iter().enumerate() {
             symtab.add_function(
-                func_strtab[i],
+                strtab_offsets.func_strtab[i],
                 layout.sec_text,
                 func.offset as u64,
                 func.size as u64,
             );
         }
-        // Global data symbols
         for (i, g) in self.globals.iter().enumerate() {
             let idx = symtab.len() as u32;
             let (section, offset, size) = global_section_info[&g.name];
-            symtab.add_object(global_strtab[i], section, offset, size);
+            symtab.add_object(strtab_offsets.global_strtab[i], section, offset, size);
             global_sym_idx.insert(g.name.clone(), idx);
         }
-        // Global external (undefined) symbols
         let mut ext_sym_idx: HashMap<String, u32> = HashMap::new();
         for ext in &self.externals {
             let idx = symtab.len() as u32;
-            symtab.add_external(*ext_strtab.get(ext).unwrap());
+            symtab.add_external(*strtab_offsets.ext_strtab.get(ext).unwrap());
             ext_sym_idx.insert(ext.clone(), idx);
         }
+        (symtab, global_sym_idx, ext_sym_idx)
+    }
 
-        // ── Build .rela.text ──────────────────────────────────────────────────
-        // Section sym for .text is always index 1 (first section sym added).
+    fn build_relocations(
+        &self,
+        global_sym_idx: &HashMap<String, u32>,
+        ext_sym_idx: &HashMap<String, u32>,
+    ) -> RelocationTable {
         let text_sec_sym: u32 = 1;
         let mut rela = RelocationTable::new();
         for reloc in &self.relocations {
+            let r_type = reloc_kind_to_elf(&reloc.kind);
             let (sym_idx, r_type) = if let Some(&idx) = global_sym_idx.get(&reloc.symbol) {
-                // Reference to a global/rodata variable
-                let r_type = match reloc.kind {
-                    RelocKind::PLT32 => R_X86_64_PLT32,
-                    RelocKind::PC32 => R_X86_64_PC32,
-                    RelocKind::Abs64 => R_X86_64_64,
-                    RelocKind::Abs32S => R_X86_64_32S,
-                };
                 (idx, r_type)
             } else if let Some(&idx) = ext_sym_idx.get(&reloc.symbol) {
-                let r_type = match reloc.kind {
-                    RelocKind::PLT32 => R_X86_64_PLT32,
-                    RelocKind::PC32 => R_X86_64_PC32,
-                    RelocKind::Abs64 => R_X86_64_64,
-                    RelocKind::Abs32S => R_X86_64_32S,
-                };
                 (idx, r_type)
             } else {
-                // Reference to a local function - use section symbol + addend
-                let r_type = match reloc.kind {
-                    RelocKind::PLT32 => R_X86_64_PLT32,
-                    RelocKind::PC32 => R_X86_64_PC32,
-                    RelocKind::Abs64 => R_X86_64_64,
-                    RelocKind::Abs32S => R_X86_64_32S,
-                };
                 (text_sec_sym, r_type)
             };
             rela.add(reloc.offset as u64, sym_idx, r_type, reloc.addend);
         }
+        rela
+    }
 
-        // ── Compute section byte content ─────────────────────────────────────
-        let text_bytes = &self.code;
-        let rela_bytes = rela.to_bytes();
-        let symtab_bytes = symtab.to_bytes();
-        let strtab_bytes = strtab.to_bytes();
-        let shstrtab_bytes = shstrtab.to_bytes();
-
-        // ── Lay out the file ──────────────────────────────────────────────────
-        let mut buf: Vec<u8> = vec![0; 64]; // ELF header
-
-        // .text
-        pad_to(&mut buf, 16);
-        let off_text = buf.len();
+    fn emit_text_section(&self, buf: &mut Vec<u8>, text_bytes: &[u8]) -> usize {
+        pad_to(buf, 16);
+        let off = buf.len();
         buf.extend_from_slice(text_bytes);
+        off
+    }
 
-        // .rodata (if any)
-        let off_rodata = if has_rodata {
-            pad_to(&mut buf, 1);
+    fn emit_rodata_section(
+        &self,
+        buf: &mut Vec<u8>,
+        rodata_content: &[u8],
+        has_rodata: bool,
+    ) -> usize {
+        if has_rodata {
+            pad_to(buf, 1);
             let off = buf.len();
-            buf.extend_from_slice(&rodata_content);
+            buf.extend_from_slice(rodata_content);
             off
         } else {
             0
-        };
+        }
+    }
 
-        // .data (if any)
-        let off_data = if has_data {
-            pad_to(&mut buf, 8);
+    fn emit_data_section(&self, buf: &mut Vec<u8>, data_content: &[u8], has_data: bool) -> usize {
+        if has_data {
+            pad_to(buf, 8);
             let off = buf.len();
-            buf.extend_from_slice(&data_content);
+            buf.extend_from_slice(data_content);
             off
         } else {
             0
-        };
+        }
+    }
 
-        // .bss has no file content (SHT_NOBITS), so no bytes emitted
-
-        // .rela.text
-        pad_to(&mut buf, 8);
+    fn emit_meta_sections(
+        &self,
+        buf: &mut Vec<u8>,
+        rela_bytes: &[u8],
+        symtab_bytes: &[u8],
+        strtab_bytes: &[u8],
+        shstrtab_bytes: &[u8],
+    ) -> (usize, usize, usize, usize, usize) {
+        pad_to(buf, 8);
         let off_rela = buf.len();
-        buf.extend_from_slice(&rela_bytes);
+        buf.extend_from_slice(rela_bytes);
 
-        // .symtab
-        pad_to(&mut buf, 8);
+        pad_to(buf, 8);
         let off_symtab = buf.len();
-        buf.extend_from_slice(&symtab_bytes);
+        buf.extend_from_slice(symtab_bytes);
 
-        // .strtab
         let off_strtab = buf.len();
         buf.extend_from_slice(strtab_bytes);
 
-        // .shstrtab
         let off_shstrtab = buf.len();
         buf.extend_from_slice(shstrtab_bytes);
 
-        // Section headers (align 8)
-        pad_to(&mut buf, 8);
+        pad_to(buf, 8);
         let shoff = buf.len();
 
-        // null section header (index 0)
+        (off_rela, off_symtab, off_strtab, off_shstrtab, shoff)
+    }
+
+    fn write_section_headers(
+        &self,
+        buf: &mut Vec<u8>,
+        names: &ShstrtabNames,
+        layout: &SectionLayout,
+        offsets: &SectionOffsets,
+    ) {
         buf.extend_from_slice(
             &Elf64Shdr {
                 sh_name: 0,
@@ -384,15 +531,14 @@ impl ObjectFile {
             .to_bytes(),
         );
 
-        // .text section header
         buf.extend_from_slice(
             &Elf64Shdr {
-                sh_name: name_text,
+                sh_name: names.name_text,
                 sh_type: SHT_PROGBITS,
                 sh_flags: SHF_ALLOC | SHF_EXECINSTR,
                 sh_addr: 0,
-                sh_offset: off_text as u64,
-                sh_size: text_bytes.len() as u64,
+                sh_offset: offsets.off_text as u64,
+                sh_size: offsets.text_len as u64,
                 sh_link: 0,
                 sh_info: 0,
                 sh_addralign: 16,
@@ -401,16 +547,15 @@ impl ObjectFile {
             .to_bytes(),
         );
 
-        // .rodata section header (if any)
-        if has_rodata {
+        if offsets.has_rodata {
             buf.extend_from_slice(
                 &Elf64Shdr {
-                    sh_name: name_rodata.unwrap(),
+                    sh_name: names.name_rodata.unwrap(),
                     sh_type: SHT_PROGBITS,
                     sh_flags: SHF_ALLOC,
                     sh_addr: 0,
-                    sh_offset: off_rodata as u64,
-                    sh_size: rodata_content.len() as u64,
+                    sh_offset: offsets.off_rodata as u64,
+                    sh_size: offsets.rodata_len as u64,
                     sh_link: 0,
                     sh_info: 0,
                     sh_addralign: 1,
@@ -420,16 +565,15 @@ impl ObjectFile {
             );
         }
 
-        // .data section header (if any)
-        if has_data {
+        if offsets.has_data {
             buf.extend_from_slice(
                 &Elf64Shdr {
-                    sh_name: name_data.unwrap(),
+                    sh_name: names.name_data.unwrap(),
                     sh_type: SHT_PROGBITS,
                     sh_flags: SHF_ALLOC | SHF_WRITE,
                     sh_addr: 0,
-                    sh_offset: off_data as u64,
-                    sh_size: data_content.len() as u64,
+                    sh_offset: offsets.off_data as u64,
+                    sh_size: offsets.data_len as u64,
                     sh_link: 0,
                     sh_info: 0,
                     sh_addralign: 8,
@@ -439,16 +583,15 @@ impl ObjectFile {
             );
         }
 
-        // .bss section header (if any)
-        if has_bss {
+        if offsets.has_bss {
             buf.extend_from_slice(
                 &Elf64Shdr {
-                    sh_name: name_bss.unwrap(),
+                    sh_name: names.name_bss.unwrap(),
                     sh_type: SHT_NOBITS,
                     sh_flags: SHF_ALLOC | SHF_WRITE,
                     sh_addr: 0,
-                    sh_offset: 0, // SHT_NOBITS has no file offset
-                    sh_size: bss_size as u64,
+                    sh_offset: 0,
+                    sh_size: offsets.bss_size as u64,
                     sh_link: 0,
                     sh_info: 0,
                     sh_addralign: 8,
@@ -458,15 +601,14 @@ impl ObjectFile {
             );
         }
 
-        // .rela.text section header
         buf.extend_from_slice(
             &Elf64Shdr {
-                sh_name: name_rela_text,
+                sh_name: names.name_rela_text,
                 sh_type: SHT_RELA,
                 sh_flags: 0,
                 sh_addr: 0,
-                sh_offset: off_rela as u64,
-                sh_size: rela_bytes.len() as u64,
+                sh_offset: offsets.off_rela as u64,
+                sh_size: offsets.rela_len as u64,
                 sh_link: layout.sec_symtab as u32,
                 sh_info: layout.sec_text as u32,
                 sh_addralign: 8,
@@ -475,32 +617,30 @@ impl ObjectFile {
             .to_bytes(),
         );
 
-        // .symtab section header
         buf.extend_from_slice(
             &Elf64Shdr {
-                sh_name: name_symtab,
+                sh_name: names.name_symtab,
                 sh_type: SHT_SYMTAB,
                 sh_flags: 0,
                 sh_addr: 0,
-                sh_offset: off_symtab as u64,
-                sh_size: symtab_bytes.len() as u64,
+                sh_offset: offsets.off_symtab as u64,
+                sh_size: offsets.symtab_len as u64,
                 sh_link: layout.sec_strtab as u32,
-                sh_info: symtab.sh_info(),
+                sh_info: offsets.symtab_sh_info,
                 sh_addralign: 8,
                 sh_entsize: 24,
             }
             .to_bytes(),
         );
 
-        // .strtab section header
         buf.extend_from_slice(
             &Elf64Shdr {
-                sh_name: name_strtab,
+                sh_name: names.name_strtab,
                 sh_type: SHT_STRTAB,
                 sh_flags: 0,
                 sh_addr: 0,
-                sh_offset: off_strtab as u64,
-                sh_size: strtab_bytes.len() as u64,
+                sh_offset: offsets.off_strtab as u64,
+                sh_size: offsets.strtab_len as u64,
                 sh_link: 0,
                 sh_info: 0,
                 sh_addralign: 1,
@@ -509,15 +649,14 @@ impl ObjectFile {
             .to_bytes(),
         );
 
-        // .shstrtab section header
         buf.extend_from_slice(
             &Elf64Shdr {
-                sh_name: name_shstrtab,
+                sh_name: names.name_shstrtab,
                 sh_type: SHT_STRTAB,
                 sh_flags: 0,
                 sh_addr: 0,
-                sh_offset: off_shstrtab as u64,
-                sh_size: shstrtab_bytes.len() as u64,
+                sh_offset: offsets.off_shstrtab as u64,
+                sh_size: offsets.shstrtab_len as u64,
                 sh_link: 0,
                 sh_info: 0,
                 sh_addralign: 1,
@@ -526,10 +665,9 @@ impl ObjectFile {
             .to_bytes(),
         );
 
-        // .note.GNU-stack section header (empty, flags=0 -> non-executable stack)
         buf.extend_from_slice(
             &Elf64Shdr {
-                sh_name: name_note_gnu_stack,
+                sh_name: names.name_note_gnu_stack,
                 sh_type: SHT_PROGBITS,
                 sh_flags: 0,
                 sh_addr: 0,
@@ -542,8 +680,9 @@ impl ObjectFile {
             }
             .to_bytes(),
         );
+    }
 
-        // ── Write ELF header ──────────────────────────────────────────────────
+    fn write_elf_header(&self, buf: &mut Vec<u8>, shoff: u64, layout: &SectionLayout) {
         let mut e_ident = [0u8; 16];
         e_ident[0] = 0x7f;
         e_ident[1] = b'E';
@@ -560,20 +699,17 @@ impl ObjectFile {
             e_version: EV_CURRENT,
             e_entry: 0,
             e_phoff: 0,
-            e_shoff: shoff as u64,
+            e_shoff: shoff,
             e_flags: 0,
-            e_ehsize: 64,
+            e_ehsize: ELF64_EHDR_SIZE as u16,
             e_phentsize: 0,
             e_phnum: 0,
             e_shentsize: 64,
             e_shnum: layout.num_sections,
             e_shstrndx: layout.sec_shstrtab,
         };
-
         let ehdr_bytes = ehdr.to_bytes();
-        buf[..64].copy_from_slice(&ehdr_bytes);
-
-        buf
+        buf[..ELF64_EHDR_SIZE].copy_from_slice(&ehdr_bytes);
     }
 
     pub fn write_to(&self, path: &std::path::Path) -> std::io::Result<()> {

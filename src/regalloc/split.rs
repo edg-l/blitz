@@ -6,6 +6,8 @@ use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::reg::RegClass;
 
 use super::global_liveness::GlobalLiveness;
+use super::spill::is_rematerializable;
+use super::{build_vreg_classes_from_insts, is_xmm_vreg};
 
 /// Maps cross-block VRegs to dedicated spill slots.
 pub struct CrossBlockSpillMap {
@@ -60,7 +62,7 @@ pub fn assign_cross_block_slots(
 
     for v in &cross_block_vregs {
         if let Some(inst) = def_inst.get(v) {
-            if is_rematerializable_inst(inst) {
+            if is_rematerializable(inst) {
                 remat_vregs.insert(*v);
             } else {
                 let slot = num_slots;
@@ -79,11 +81,6 @@ pub fn assign_cross_block_slots(
         remat_vregs,
         num_slots,
     }
-}
-
-/// Returns true if the instruction is rematerializable (can be cheaply re-emitted).
-fn is_rematerializable_inst(inst: &ScheduledInst) -> bool {
-    inst.op.is_rematerializable()
 }
 
 /// Rewrite a single block's schedule to insert cross-block spill/reload code.
@@ -163,11 +160,7 @@ pub fn rewrite_block_for_splitting(
             // Non-rematerializable: insert a SpillLoad from the cross-block slot.
             let new_vreg = VReg(*next_vreg);
             *next_vreg += 1;
-            let is_xmm = vreg_classes
-                .get(&v)
-                .copied()
-                .map(|c| c == RegClass::XMM)
-                .unwrap_or(false);
+            let is_xmm = is_xmm_vreg(v, vreg_classes);
             let load_op = if is_xmm {
                 Op::XmmSpillLoad(slot as i64)
             } else {
@@ -213,11 +206,7 @@ pub fn rewrite_block_for_splitting(
             continue;
         }
         if let Some(&slot) = spill_map.vreg_to_slot.get(&v) {
-            let is_xmm = vreg_classes
-                .get(&v)
-                .copied()
-                .map(|c| c == RegClass::XMM)
-                .unwrap_or(false);
+            let is_xmm = is_xmm_vreg(v, vreg_classes);
             let store_op = if is_xmm {
                 Op::XmmSpillStore(slot as i64)
             } else {
@@ -249,34 +238,8 @@ pub fn compute_block_defs(block_schedules: &[Vec<ScheduledInst>]) -> Vec<BTreeSe
 pub fn build_vreg_classes_from_schedules(
     block_schedules: &[Vec<ScheduledInst>],
 ) -> BTreeMap<VReg, RegClass> {
-    let mut map: BTreeMap<VReg, RegClass> = BTreeMap::new();
-
-    for sched in block_schedules {
-        for inst in sched {
-            let class = if inst.op.is_fp_op() {
-                RegClass::XMM
-            } else {
-                RegClass::GPR
-            };
-            map.insert(inst.dst, class);
-            for &op in &inst.operands {
-                map.entry(op).or_insert(RegClass::GPR);
-            }
-        }
-    }
-
-    // Propagate XMM class: if an instruction is FP, its operands are also XMM.
-    for sched in block_schedules {
-        for inst in sched {
-            if inst.op.is_fp_op() {
-                for &op in &inst.operands {
-                    map.insert(op, RegClass::XMM);
-                }
-            }
-        }
-    }
-
-    map
+    let all_insts: Vec<ScheduledInst> = block_schedules.iter().flatten().cloned().collect();
+    build_vreg_classes_from_insts(&all_insts)
 }
 
 #[cfg(test)]
@@ -299,15 +262,6 @@ mod tests {
             op: Op::Proj0,
             dst: VReg(dst),
             operands: vec![VReg(src)],
-        }
-    }
-
-    #[allow(dead_code)]
-    fn add_inst(dst: u32, a: u32, b: u32) -> ScheduledInst {
-        ScheduledInst {
-            op: Op::X86Add,
-            dst: VReg(dst),
-            operands: vec![VReg(a), VReg(b)],
         }
     }
 

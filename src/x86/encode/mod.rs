@@ -39,7 +39,6 @@ pub struct Reloc {
 // ── Label fixups ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 enum FixupKind {
     Rel8,
     Rel32,
@@ -158,6 +157,18 @@ impl Encoder {
     /// operations to access SPL/BPL/SIL/DIL (instead of AH/CH/DH/BH).
     pub(super) fn needs_byte_rex(reg: u8) -> bool {
         (4..=7).contains(&reg)
+    }
+
+    /// Emit operand-size prefix (0x66 for S16) followed by the appropriate
+    /// REX prefix for `size`. This is the common preamble for nearly all
+    /// general-purpose instruction encoders.
+    pub(super) fn emit_prefix_and_rex(&mut self, size: OpSize, reg: u8, index: u8, base: u8) {
+        self.emit_size_prefix(size);
+        match size {
+            OpSize::S64 => self.emit_rex(true, reg, index, base),
+            OpSize::S32 | OpSize::S16 => self.maybe_emit_rex(false, reg, index, base),
+            OpSize::S8 => self.emit_rex_for_size(size, reg, index, base),
+        }
     }
 
     // ── ModRM / SIB ───────────────────────────────────────────────────────

@@ -133,49 +133,35 @@ impl Encoder {
         self.emit_modrm(0b11, s, d);
     }
 
-    /// cvtsi2sd: F2 0F 2A /r (GPR -> XMM, int -> f64)
-    pub fn encode_cvtsi2sd_rr(&mut self, dst: Reg, src: Reg) {
-        // Need REX.W for 64-bit source
+    /// Emit SSE conversion with REX.W prefix: mandatory_prefix + REX.W + 0F + opcode + ModRM.
+    fn encode_sse_rr_w(&mut self, prefix: u8, opcode: u8, dst: Reg, src: Reg) {
         let d = dst.hw_enc();
         let s = src.hw_enc();
-        self.emit_byte(0xF2);
+        self.emit_byte(prefix);
         self.emit_rex(true, d, 0, s);
         self.emit_byte(0x0F);
-        self.emit_byte(0x2A);
+        self.emit_byte(opcode);
         self.emit_modrm(0b11, d, s);
+    }
+
+    /// cvtsi2sd: F2 0F 2A /r (GPR -> XMM, int -> f64)
+    pub fn encode_cvtsi2sd_rr(&mut self, dst: Reg, src: Reg) {
+        self.encode_sse_rr_w(0xF2, 0x2A, dst, src);
     }
 
     /// cvtsi2ss: F3 0F 2A /r (GPR -> XMM, int -> f32)
     pub fn encode_cvtsi2ss_rr(&mut self, dst: Reg, src: Reg) {
-        let d = dst.hw_enc();
-        let s = src.hw_enc();
-        self.emit_byte(0xF3);
-        self.emit_rex(true, d, 0, s);
-        self.emit_byte(0x0F);
-        self.emit_byte(0x2A);
-        self.emit_modrm(0b11, d, s);
+        self.encode_sse_rr_w(0xF3, 0x2A, dst, src);
     }
 
     /// cvttsd2si: F2 0F 2C /r (XMM -> GPR, f64 -> int truncation)
     pub fn encode_cvttsd2si_rr(&mut self, dst: Reg, src: Reg) {
-        let d = dst.hw_enc();
-        let s = src.hw_enc();
-        self.emit_byte(0xF2);
-        self.emit_rex(true, d, 0, s);
-        self.emit_byte(0x0F);
-        self.emit_byte(0x2C);
-        self.emit_modrm(0b11, d, s);
+        self.encode_sse_rr_w(0xF2, 0x2C, dst, src);
     }
 
     /// cvttss2si: F3 0F 2C /r (XMM -> GPR, f32 -> int truncation)
     pub fn encode_cvttss2si_rr(&mut self, dst: Reg, src: Reg) {
-        let d = dst.hw_enc();
-        let s = src.hw_enc();
-        self.emit_byte(0xF3);
-        self.emit_rex(true, d, 0, s);
-        self.emit_byte(0x0F);
-        self.emit_byte(0x2C);
-        self.emit_modrm(0b11, d, s);
+        self.encode_sse_rr_w(0xF3, 0x2C, dst, src);
     }
 
     /// cvtsd2ss: F2 0F 5A /r (XMM -> XMM, f64 -> f32)

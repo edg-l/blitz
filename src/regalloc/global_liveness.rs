@@ -88,7 +88,7 @@ pub fn compute_global_liveness(
             }
 
             if new_out != live_out[b] {
-                live_out[b] = new_out.clone();
+                live_out[b] = new_out;
                 changed = true;
             }
 

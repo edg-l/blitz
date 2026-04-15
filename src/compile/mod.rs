@@ -25,7 +25,6 @@ use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 use crate::regalloc::allocator::{RegAllocResult, allocate};
-use crate::regalloc::rewrite::rewrite_vregs;
 use crate::schedule::scheduler::{ScheduleDag, ScheduledInst, schedule};
 use crate::x86::abi::{compute_frame_layout, emit_epilogue, emit_prologue};
 use crate::x86::encode::{Encoder, inst_size};
@@ -624,7 +623,16 @@ pub fn compile(
             }),
         })?;
 
-        let rewritten = vec![rewrite_vregs(&result.insts, &result.vreg_to_reg)];
+        for inst in &result.insts {
+            for &op in &inst.operands {
+                debug_assert!(
+                    result.vreg_to_reg.contains_key(&op),
+                    "operand VReg {:?} has no register assignment",
+                    op
+                );
+            }
+        }
+        let rewritten = vec![result.insts.clone()];
         let rename_maps: Vec<BTreeMap<VReg, VReg>> = vec![BTreeMap::new()];
         (result, rewritten, rename_maps)
     } else {
@@ -1219,9 +1227,16 @@ pub fn compile(
                     block_result.insts.clone()
                 };
 
-            // Rewrite with physical registers. Use the allocator's final
-            // instruction list which includes intra-block spill/reload code.
-            let rewritten_insts = rewrite_vregs(&block_result_insts, &block_result.vreg_to_reg);
+            for inst in &block_result_insts {
+                for &op in &inst.operands {
+                    debug_assert!(
+                        block_result.vreg_to_reg.contains_key(&op),
+                        "operand VReg {:?} has no register assignment",
+                        op
+                    );
+                }
+            }
+            let rewritten_insts = block_result_insts;
             // Note: rewritten_insts are ScheduledInsts, lowered to MachInst later.
             spill_slot_counter += block_result.spill_slots;
             block_rewritten_storage[block_idx] = rewritten_insts;

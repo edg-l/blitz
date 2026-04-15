@@ -272,8 +272,15 @@ pub fn allocatable_gpr_order(uses_frame_pointer: bool) -> Vec<Reg> {
 
 /// Number of usable GPR colors when the frame pointer is used (RBP reserved): 14.
 /// Number of usable GPR colors when the frame pointer is omitted (RBP allocatable): 15.
+const GPR_COLORS_WITH_FP: u32 = 14;
+const GPR_COLORS_NO_FP: u32 = 15;
+
 pub fn available_gpr_colors(uses_frame_pointer: bool) -> u32 {
-    if uses_frame_pointer { 14 } else { 15 }
+    if uses_frame_pointer {
+        GPR_COLORS_WITH_FP
+    } else {
+        GPR_COLORS_NO_FP
+    }
 }
 
 /// Number of usable XMM colors (16 XMM registers).

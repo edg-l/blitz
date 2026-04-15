@@ -5,6 +5,10 @@ use crate::x86::encode::Encoder;
 use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
+fn align_up(value: u32, alignment: u32) -> u32 {
+    (value + alignment - 1) & !(alignment - 1)
+}
+
 // ── 8.1 Calling convention data ───────────────────────────────────────────────
 
 pub const GPR_ARG_REGS: [Reg; 6] = [Reg::RDI, Reg::RSI, Reg::RDX, Reg::RCX, Reg::R8, Reg::R9];
@@ -192,12 +196,7 @@ pub fn compute_frame_layout(
         // We need (callee_push_bytes + frame_size) % 16 == 0.
         let raw = total_slots * 8 + outgoing_arg_space;
         let callee_push_bytes = n_callee * 8;
-        let misalign = (callee_push_bytes + raw) % 16;
-        let fs = if misalign == 0 {
-            raw
-        } else {
-            raw + (16 - misalign)
-        };
+        let fs = align_up(callee_push_bytes + raw, 16) - callee_push_bytes;
         // Spills are addressed as [RBP - (n_callee*8 + total_slots*8)].
         let so = -((n_callee as i32 + total_slots as i32) * 8);
         (fs, so)
@@ -207,12 +206,7 @@ pub fn compute_frame_layout(
         // We need (8 + n_callee*8 + frame_size) % 16 == 0.
         let raw = total_slots * 8 + outgoing_arg_space;
         let total_pushed_before_sub = 8 + n_callee * 8;
-        let misalign = (total_pushed_before_sub + raw) % 16;
-        let fs = if misalign == 0 {
-            raw
-        } else {
-            raw + (16 - misalign)
-        };
+        let fs = align_up(total_pushed_before_sub + raw, 16) - total_pushed_before_sub;
         // Spills are at [RSP + outgoing_arg_space] after `sub rsp, frame_size`.
         let so = outgoing_arg_space as i32;
         (fs, so)
@@ -488,27 +482,11 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
 ///
 /// All XMM registers are caller-saved in the SystemV AMD64 ABI.
 pub fn caller_saved_clobbers() -> Vec<Reg> {
-    let mut regs: Vec<Reg> = CALLER_SAVED_GPR.to_vec();
-    // All XMM0-XMM15 are caller-saved.
-    regs.extend_from_slice(&[
-        Reg::XMM0,
-        Reg::XMM1,
-        Reg::XMM2,
-        Reg::XMM3,
-        Reg::XMM4,
-        Reg::XMM5,
-        Reg::XMM6,
-        Reg::XMM7,
-        Reg::XMM8,
-        Reg::XMM9,
-        Reg::XMM10,
-        Reg::XMM11,
-        Reg::XMM12,
-        Reg::XMM13,
-        Reg::XMM14,
-        Reg::XMM15,
-    ]);
-    regs
+    CALLER_SAVED_GPR
+        .iter()
+        .chain(CALLER_SAVED_XMM.iter())
+        .copied()
+        .collect()
 }
 
 // ── 8.8 Tests ─────────────────────────────────────────────────────────────────

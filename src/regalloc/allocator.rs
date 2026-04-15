@@ -6,15 +6,19 @@ use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::{CALLEE_SAVED, CALLER_SAVED_GPR, CALLER_SAVED_XMM};
 use crate::x86::reg::{Reg, RegClass};
 
+use super::build_vreg_classes_from_insts;
 use super::coalesce::coalesce;
 use super::coloring::{
     AVAILABLE_XMM_COLORS, allocatable_gpr_order, allocatable_xmm_order, available_gpr_colors,
     greedy_color, interval_color, map_colors_to_regs, mcs_ordering,
 };
-use super::interference::build_interference;
-use super::liveness::compute_liveness;
+use super::interference::{InterferenceGraph, build_interference};
+use super::liveness::{LivenessInfo, compute_liveness};
 use super::rewrite::apply_coalescing;
 use super::spill::{insert_spills, select_spill, select_spill_for_class};
+
+const MAX_SPILL_ROUNDS: usize = 10;
+const MAX_SPILLS_PER_ROUND: usize = 4;
 
 /// Result of register allocation for a single basic block.
 pub struct RegAllocResult {
@@ -82,8 +86,6 @@ pub fn allocate(
         param_vreg_to_reg.insert(vreg, reg);
     }
 
-    const MAX_SPILL_ROUNDS: usize = 10;
-
     for round in 0..=MAX_SPILL_ROUNDS {
         // Recompute call and div points from current instruction list.
         // After spill insertion, instruction indices shift, so static
@@ -113,8 +115,15 @@ pub fn allocate(
         let call_points = &call_points[..];
         let div_points = &div_points[..];
 
-        // Step 1: Compute liveness.
-        let liveness = compute_liveness(&insts, &block_live_out);
+        // Steps 1-3: Compute liveness, build interference graph, add clobber interferences.
+        let (graph, _, _, _, liveness, _) = build_interference_with_clobbers(
+            &insts,
+            &block_live_out,
+            call_points,
+            div_points,
+            uses_frame_pointer,
+            &mut next_vreg,
+        );
 
         if round == 0 && crate::trace::is_enabled("liveness") && crate::trace::fn_matches(func_name)
         {
@@ -124,59 +133,6 @@ pub fn allocate(
                 crate::trace::format_liveness(&insts, &liveness.live_at, &block_live_out),
             );
         }
-
-        // Step 2: Build VReg class map (all GPR for now; XMM support in 10.13a).
-        let vreg_classes = build_vreg_classes(&insts, &liveness);
-
-        // Step 3: Build interference graph.
-        let gpr_clobbers: Vec<Reg> = CALLER_SAVED_GPR
-            .iter()
-            .copied()
-            .filter(|&r| r != Reg::RSP)
-            .collect();
-        let graph = build_interference(&liveness, &insts, &vreg_classes);
-        let (graph, _) = add_clobber_interferences(
-            graph,
-            &liveness,
-            &ClobberConfig {
-                points: call_points,
-                clobbered_regs: &gpr_clobbers,
-                reg_class: RegClass::GPR,
-                ordered_regs: allocatable_gpr_order(uses_frame_pointer),
-                exclude_call_args: true,
-                skip_if_no_live: false,
-                insts: Some(&insts),
-            },
-            &mut next_vreg,
-        );
-        let (graph, _) = add_clobber_interferences(
-            graph,
-            &liveness,
-            &ClobberConfig {
-                points: call_points,
-                clobbered_regs: &CALLER_SAVED_XMM,
-                reg_class: RegClass::XMM,
-                ordered_regs: allocatable_xmm_order(),
-                exclude_call_args: true,
-                skip_if_no_live: true,
-                insts: Some(&insts),
-            },
-            &mut next_vreg,
-        );
-        let (graph, _) = add_clobber_interferences(
-            graph,
-            &liveness,
-            &ClobberConfig {
-                points: div_points,
-                clobbered_regs: &[Reg::RAX, Reg::RDX],
-                reg_class: RegClass::GPR,
-                ordered_regs: allocatable_gpr_order(uses_frame_pointer),
-                exclude_call_args: false,
-                skip_if_no_live: false,
-                insts: None,
-            },
-            &mut next_vreg,
-        );
 
         // Step 4 (first round only): coalesce copy pairs on original SSA graph.
         // Per spec: coalescing must NOT be re-run after spill insertion.
@@ -202,80 +158,31 @@ pub fn allocate(
 
         // Step 5: MCS ordering + greedy coloring.
         // Recompute liveness/graph on coalesced insts for accuracy.
-        let liveness2 = compute_liveness(&insts_coalesced, &block_live_out);
-        let vreg_classes2 = build_vreg_classes(&insts_coalesced, &liveness2);
-        let graph2 = build_interference(&liveness2, &insts_coalesced, &vreg_classes2);
-        let (graph2, phantom_precolors) = add_clobber_interferences(
+        let (
             graph2,
-            &liveness2,
-            &ClobberConfig {
-                points: call_points,
-                clobbered_regs: &gpr_clobbers,
-                reg_class: RegClass::GPR,
-                ordered_regs: allocatable_gpr_order(uses_frame_pointer),
-                exclude_call_args: true,
-                skip_if_no_live: false,
-                insts: Some(&insts_coalesced),
-            },
-            &mut next_vreg,
-        );
-        let (graph2, div_phantom_precolors) = add_clobber_interferences(
-            graph2,
-            &liveness2,
-            &ClobberConfig {
-                points: div_points,
-                clobbered_regs: &[Reg::RAX, Reg::RDX],
-                reg_class: RegClass::GPR,
-                ordered_regs: allocatable_gpr_order(uses_frame_pointer),
-                exclude_call_args: false,
-                skip_if_no_live: false,
-                insts: None,
-            },
-            &mut next_vreg,
-        );
-        let (graph2, xmm_phantom_precolors) = add_clobber_interferences(
-            graph2,
-            &liveness2,
-            &ClobberConfig {
-                points: call_points,
-                clobbered_regs: &CALLER_SAVED_XMM,
-                reg_class: RegClass::XMM,
-                ordered_regs: allocatable_xmm_order(),
-                exclude_call_args: true,
-                skip_if_no_live: true,
-                insts: Some(&insts_coalesced),
-            },
+            phantom_precolors,
+            div_phantom_precolors,
+            xmm_phantom_precolors,
+            liveness2,
+            vreg_classes2,
+        ) = build_interference_with_clobbers(
+            &insts_coalesced,
+            &block_live_out,
+            call_points,
+            div_points,
+            uses_frame_pointer,
             &mut next_vreg,
         );
 
-        // Merge phantom pre-colorings with param pre-colorings. Phantoms
-        // represent hardware constraints (call clobbers, div clobbers) that
-        // cannot be changed. If a param precoloring conflicts with a phantom
-        // (same color + interference edge), remove the param precoloring --
-        // the param will get a free register from the coloring instead.
-        let mut pre_coloring_colors2 = pre_coloring_colors.clone();
-        for (&phantom_vreg, &phantom_color) in &phantom_precolors {
-            // Find and remove any param precoloring that conflicts.
-            let conflicting: Vec<usize> = pre_coloring_colors2
-                .iter()
-                .filter(|(pv, pc)| {
-                    let (pv, pc) = (**pv, **pc);
-                    pc == phantom_color
-                        && param_vreg_indices.contains(&pv)
-                        && phantom_vreg < graph2.num_vregs
-                        && pv < graph2.num_vregs
-                        && graph2.adj[phantom_vreg].contains(&pv)
-                })
-                .map(|(pv, _)| *pv)
-                .collect();
-            for pv in conflicting {
-                pre_coloring_colors2.remove(&pv);
-                param_vreg_to_reg.remove(&VReg(pv as u32));
-            }
-        }
-        pre_coloring_colors2.extend(phantom_precolors);
-        pre_coloring_colors2.extend(div_phantom_precolors);
-        pre_coloring_colors2.extend(xmm_phantom_precolors);
+        let pre_coloring_colors2 = merge_precolorings(
+            &pre_coloring_colors,
+            &phantom_precolors,
+            &div_phantom_precolors,
+            &xmm_phantom_precolors,
+            &param_vreg_indices,
+            &graph2,
+            &mut param_vreg_to_reg,
+        );
 
         let ordering = mcs_ordering(&graph2);
         let mut coloring = greedy_color(&graph2, &ordering, &pre_coloring_colors2);
@@ -403,60 +310,21 @@ pub fn allocate(
             ));
         }
 
-        // Select VRegs to spill. When the gap between chromatic number and
-        // available registers is large, spill multiple VRegs per round to
-        // converge faster.
         let gpr_overshoot = gpr_colors_needed.saturating_sub(avail) as usize;
         let xmm_overshoot = xmm_colors_needed.saturating_sub(AVAILABLE_XMM_COLORS) as usize;
-        let overshoot = gpr_overshoot.max(xmm_overshoot);
-        let spill_count = overshoot.clamp(1, 4); // spill 1-4 per round
-
         let excluded: BTreeSet<usize> = pre_coloring_colors2.keys().copied().collect();
-        let mut spilled = BTreeSet::new();
-        for _ in 0..spill_count {
-            // When XMM is the bottleneck, target XMM vregs specifically.
-            let candidate = if xmm_overshoot > 0 {
-                select_spill_for_class(
-                    &graph2,
-                    &liveness2,
-                    &insts_coalesced,
-                    AVAILABLE_XMM_COLORS,
-                    loop_depths,
-                    &excluded,
-                    RegClass::XMM,
-                )
-            } else {
-                select_spill(
-                    &graph2,
-                    &liveness2,
-                    &insts_coalesced,
-                    avail,
-                    loop_depths,
-                    &excluded,
-                )
-            };
-            let Some(idx) = candidate else { break };
-            if spilled.contains(&idx) {
-                break; // same candidate selected twice, no progress
-            }
-            if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
-                let class = if idx < graph2.num_vregs {
-                    graph2.reg_class[idx]
-                } else {
-                    RegClass::GPR
-                };
-                let op_str = insts_coalesced
-                    .iter()
-                    .find(|i| i.dst.0 as usize == idx)
-                    .map(|i| format!("{:?}", i.op))
-                    .unwrap_or_default();
-                tracing::debug!(
-                    target: "blitz::regalloc",
-                    "[{func_name}] round {round}: spilling v{idx} (class={class:?}, op={op_str})",
-                );
-            }
-            spilled.insert(idx);
-        }
+        let spilled = select_spill_candidates(
+            &graph2,
+            &liveness2,
+            &insts_coalesced,
+            avail,
+            loop_depths,
+            &excluded,
+            gpr_overshoot,
+            xmm_overshoot,
+            func_name,
+            round,
+        );
 
         if spilled.is_empty() {
             return Err(format!(
@@ -511,11 +379,11 @@ struct ClobberConfig<'a> {
 /// pre-colored to each clobbered register with interference edges to every live
 /// VReg of the matching class.
 fn add_clobber_interferences(
-    mut graph: super::interference::InterferenceGraph,
-    liveness: &super::liveness::LivenessInfo,
+    mut graph: InterferenceGraph,
+    liveness: &LivenessInfo,
     config: &ClobberConfig,
     next_vreg: &mut u32,
-) -> (super::interference::InterferenceGraph, BTreeMap<usize, u32>) {
+) -> (InterferenceGraph, BTreeMap<usize, u32>) {
     if config.points.is_empty() {
         return (graph, BTreeMap::new());
     }
@@ -618,38 +486,9 @@ fn add_clobber_interferences(
 /// FP ops (X86Addsd etc.) use XMM; everything else uses GPR.
 fn build_vreg_classes(
     insts: &[ScheduledInst],
-    liveness: &super::liveness::LivenessInfo,
+    liveness: &LivenessInfo,
 ) -> BTreeMap<VReg, RegClass> {
-    let mut map = BTreeMap::new();
-    for inst in insts {
-        let class = if inst.op.is_fp_op() {
-            RegClass::XMM
-        } else {
-            RegClass::GPR
-        };
-        map.insert(inst.dst, class);
-        for &op in &inst.operands {
-            // Operand class is inferred from the defining instruction's class.
-            // Default to GPR; will be overridden if the defining inst is FP.
-            map.entry(op).or_insert(RegClass::GPR);
-        }
-    }
-    // Propagate XMM class: if an instruction is FP, its operands are also XMM.
-    // Skip barrier instructions (CallResult, VoidCallBarrier, StoreBarrier)
-    // because their operands are call/store args of mixed types -- the operands'
-    // classes should come from their defining instructions, not the barrier.
-    for inst in insts {
-        if inst.op.is_fp_op()
-            && !matches!(
-                &inst.op,
-                Op::CallResult(_, _) | Op::VoidCallBarrier | Op::StoreBarrier
-            )
-        {
-            for &op in &inst.operands {
-                map.insert(op, RegClass::XMM);
-            }
-        }
-    }
+    let mut map = build_vreg_classes_from_insts(insts);
     for live_set in &liveness.live_at {
         for &v in live_set {
             map.entry(v).or_insert(RegClass::GPR);
@@ -701,6 +540,180 @@ fn build_pre_coloring_regs(
         }
     }
     pre
+}
+
+fn build_interference_with_clobbers(
+    insts: &[ScheduledInst],
+    block_live_out: &BTreeSet<VReg>,
+    call_points: &[usize],
+    div_points: &[usize],
+    uses_frame_pointer: bool,
+    next_vreg: &mut u32,
+) -> (
+    InterferenceGraph,
+    BTreeMap<usize, u32>,
+    BTreeMap<usize, u32>,
+    BTreeMap<usize, u32>,
+    LivenessInfo,
+    BTreeMap<VReg, RegClass>,
+) {
+    let liveness = compute_liveness(insts, block_live_out);
+    let vreg_classes = build_vreg_classes(insts, &liveness);
+    let gpr_clobbers: Vec<Reg> = CALLER_SAVED_GPR
+        .iter()
+        .copied()
+        .filter(|&r| r != Reg::RSP)
+        .collect();
+    let graph = build_interference(&liveness, insts, &vreg_classes);
+    let (graph, gpr_call_phantoms) = add_clobber_interferences(
+        graph,
+        &liveness,
+        &ClobberConfig {
+            points: call_points,
+            clobbered_regs: &gpr_clobbers,
+            reg_class: RegClass::GPR,
+            ordered_regs: allocatable_gpr_order(uses_frame_pointer),
+            exclude_call_args: true,
+            skip_if_no_live: false,
+            insts: Some(insts),
+        },
+        next_vreg,
+    );
+    let (graph, xmm_call_phantoms) = add_clobber_interferences(
+        graph,
+        &liveness,
+        &ClobberConfig {
+            points: call_points,
+            clobbered_regs: &CALLER_SAVED_XMM,
+            reg_class: RegClass::XMM,
+            ordered_regs: allocatable_xmm_order(),
+            exclude_call_args: true,
+            skip_if_no_live: true,
+            insts: Some(insts),
+        },
+        next_vreg,
+    );
+    let (graph, div_phantoms) = add_clobber_interferences(
+        graph,
+        &liveness,
+        &ClobberConfig {
+            points: div_points,
+            clobbered_regs: &[Reg::RAX, Reg::RDX],
+            reg_class: RegClass::GPR,
+            ordered_regs: allocatable_gpr_order(uses_frame_pointer),
+            exclude_call_args: false,
+            skip_if_no_live: false,
+            insts: None,
+        },
+        next_vreg,
+    );
+    (
+        graph,
+        gpr_call_phantoms,
+        div_phantoms,
+        xmm_call_phantoms,
+        liveness,
+        vreg_classes,
+    )
+}
+
+fn merge_precolorings(
+    pre_coloring_colors: &BTreeMap<usize, u32>,
+    phantom_precolors: &BTreeMap<usize, u32>,
+    div_phantom: &BTreeMap<usize, u32>,
+    xmm_phantom: &BTreeMap<usize, u32>,
+    param_vreg_indices: &BTreeSet<usize>,
+    graph: &InterferenceGraph,
+    param_vreg_to_reg: &mut BTreeMap<VReg, Reg>,
+) -> BTreeMap<usize, u32> {
+    // Merge phantom pre-colorings with param pre-colorings. Phantoms
+    // represent hardware constraints (call clobbers, div clobbers) that
+    // cannot be changed. If a param precoloring conflicts with a phantom
+    // (same color + interference edge), remove the param precoloring --
+    // the param will get a free register from the coloring instead.
+    let mut merged = pre_coloring_colors.clone();
+    for (&phantom_vreg, &phantom_color) in phantom_precolors {
+        // Find and remove any param precoloring that conflicts.
+        let conflicting: Vec<usize> = merged
+            .iter()
+            .filter(|(pv, pc)| {
+                let (pv, pc) = (**pv, **pc);
+                pc == phantom_color
+                    && param_vreg_indices.contains(&pv)
+                    && phantom_vreg < graph.num_vregs
+                    && pv < graph.num_vregs
+                    && graph.adj[phantom_vreg].contains(&pv)
+            })
+            .map(|(pv, _)| *pv)
+            .collect();
+        for pv in conflicting {
+            merged.remove(&pv);
+            param_vreg_to_reg.remove(&VReg(pv as u32));
+        }
+    }
+    merged.extend(phantom_precolors);
+    merged.extend(div_phantom);
+    merged.extend(xmm_phantom);
+    merged
+}
+
+fn select_spill_candidates(
+    graph: &InterferenceGraph,
+    liveness: &LivenessInfo,
+    insts: &[ScheduledInst],
+    avail: u32,
+    loop_depths: &BTreeMap<VReg, u32>,
+    excluded: &BTreeSet<usize>,
+    gpr_overshoot: usize,
+    xmm_overshoot: usize,
+    func_name: &str,
+    round: usize,
+) -> BTreeSet<usize> {
+    // Select VRegs to spill. When the gap between chromatic number and
+    // available registers is large, spill multiple VRegs per round to
+    // converge faster.
+    let overshoot = gpr_overshoot.max(xmm_overshoot);
+    let spill_count = overshoot.clamp(1, MAX_SPILLS_PER_ROUND);
+
+    let mut spilled = BTreeSet::new();
+    for _ in 0..spill_count {
+        // When XMM is the bottleneck, target XMM vregs specifically.
+        let candidate = if xmm_overshoot > 0 {
+            select_spill_for_class(
+                graph,
+                liveness,
+                insts,
+                AVAILABLE_XMM_COLORS,
+                loop_depths,
+                excluded,
+                RegClass::XMM,
+            )
+        } else {
+            select_spill(graph, liveness, insts, avail, loop_depths, excluded)
+        };
+        let Some(idx) = candidate else { break };
+        if spilled.contains(&idx) {
+            break; // same candidate selected twice, no progress
+        }
+        if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+            let class = if idx < graph.num_vregs {
+                graph.reg_class[idx]
+            } else {
+                RegClass::GPR
+            };
+            let op_str = insts
+                .iter()
+                .find(|i| i.dst.0 as usize == idx)
+                .map(|i| format!("{:?}", i.op))
+                .unwrap_or_default();
+            tracing::debug!(
+                target: "blitz::regalloc",
+                "[{func_name}] round {round}: spilling v{idx} (class={class:?}, op={op_str})",
+            );
+        }
+        spilled.insert(idx);
+    }
+    spilled
 }
 
 #[cfg(test)]

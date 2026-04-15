@@ -7,6 +7,8 @@ use crate::schedule::scheduler::ScheduledInst;
 use super::interference::InterferenceGraph;
 use super::liveness::LivenessInfo;
 
+const LOOP_DEPTH_PENALTY_BASE: u64 = 10;
+
 // ── Spill/reload pseudo-op markers ───────────────────────────────────────────
 //
 // Spills and reloads are encoded as dedicated Op variants:
@@ -89,7 +91,7 @@ fn spill_score(
 ) -> (u64, u64, usize) {
     let next = next_use.get(&idx).copied().unwrap_or(usize::MAX) as u64;
     let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
-    let penalty = 10u64.saturating_pow(depth).max(1);
+    let penalty = LOOP_DEPTH_PENALTY_BASE.saturating_pow(depth).max(1);
     let degree = graph.adj[idx].len() as u64;
     let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
     let tiebreaker = (degree * range_len) / penalty;
@@ -108,7 +110,7 @@ fn spill_fallback_score(
     let degree = graph.adj[idx].len() as u64;
     let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
     let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
-    let penalty = 10u64.saturating_pow(depth).max(1);
+    let penalty = LOOP_DEPTH_PENALTY_BASE.saturating_pow(depth).max(1);
     ((degree * range_len) / penalty, idx)
 }
 
@@ -341,10 +343,6 @@ pub fn insert_spills(
     let old_insts = std::mem::take(insts);
     let mut new_insts: Vec<ScheduledInst> = Vec::with_capacity(old_insts.len() * 2);
 
-    // Track current reload VRegs for each spilled VReg.
-    // Maps original VReg index -> current reload VReg (if a reload was just inserted).
-    let mut current_reload: BTreeMap<usize, VReg> = BTreeMap::new();
-
     for mut inst in old_insts {
         // Before this instruction, insert reloads for any spilled operands.
         let mut new_operands = Vec::with_capacity(inst.operands.len());
@@ -390,7 +388,6 @@ pub fn insert_spills(
                     };
                     new_insts.push(load_inst);
                     reload_map.entry(op).or_default().push(new_vreg);
-                    current_reload.insert(op_idx, new_vreg);
                     new_vreg
                 } else {
                     // Should not happen: spilled but no slot and not remat.

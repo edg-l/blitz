@@ -43,7 +43,8 @@ pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &BTreeSet<VReg>
         }
 
         // live_at[i] = set of VRegs live before instruction i.
-        live_at[i] = live.clone();
+        live_at[i] = std::mem::take(&mut live);
+        live = live_at[i].clone();
     }
 
     let live_in = live.clone();

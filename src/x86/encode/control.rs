@@ -4,18 +4,11 @@ impl Encoder {
     // ── LEA ───────────────────────────────────────────────────────────────
 
     pub fn encode_lea(&mut self, size: OpSize, dst: Reg, addr: &Addr) {
-        // LEA does not have a byte form; S8 makes no sense for LEA (addresses are >= 16-bit).
-        // S16 is valid but rarely useful; we support it for completeness.
         assert!(size != OpSize::S8, "LEA has no byte form");
         let d = dst.hw_enc();
         let idx = addr.index.map_or(0u8, |r| r.hw_enc());
         let base = addr.base.map_or(0u8, |r| r.hw_enc());
-        self.emit_size_prefix(size);
-        match size {
-            OpSize::S64 => self.emit_rex(true, d, idx, base),
-            OpSize::S32 | OpSize::S16 => self.maybe_emit_rex(false, d, idx, base),
-            OpSize::S8 => unreachable!(),
-        }
+        self.emit_prefix_and_rex(size, d, idx, base);
         self.emit_byte(0x8D);
         self.emit_addr(d, addr);
     }
@@ -48,18 +41,13 @@ impl Encoder {
 
     pub fn encode_push(&mut self, src: Reg) {
         let s = src.hw_enc();
-        if s > 7 {
-            // REX.B required for R8-R15
-            self.emit_byte(0x41);
-        }
+        self.maybe_emit_rex(false, 0, 0, s);
         self.emit_byte(0x50 | (s & 7));
     }
 
     pub fn encode_pop(&mut self, dst: Reg) {
         let d = dst.hw_enc();
-        if d > 7 {
-            self.emit_byte(0x41);
-        }
+        self.maybe_emit_rex(false, 0, 0, d);
         self.emit_byte(0x58 | (d & 7));
     }
 
@@ -152,12 +140,7 @@ impl Encoder {
     pub fn encode_setcc(&mut self, cc: CondCode, dst: Reg) {
         let tttn = Self::cc_byte(cc);
         let d = dst.hw_enc();
-        if d > 7 {
-            self.emit_byte(0x41); // REX.B for R8-R15
-        } else if d >= 4 {
-            self.emit_byte(0x40); // bare REX for SPL/BPL/SIL/DIL (hw_enc 4-7)
-            // Without REX, hw_enc 4-7 address AH/CH/DH/BH.
-        }
+        self.emit_rex_for_size(OpSize::S8, 0, 0, d);
         self.emit_byte(0x0F);
         self.emit_byte(0x90 | tttn);
         self.emit_modrm(0b11, 0, d);
@@ -168,12 +151,7 @@ impl Encoder {
         let tttn = Self::cc_byte(cc);
         let d = dst.hw_enc();
         let s = src.hw_enc();
-        self.emit_size_prefix(size);
-        match size {
-            OpSize::S64 => self.emit_rex(true, d, 0, s),
-            OpSize::S32 | OpSize::S16 => self.maybe_emit_rex(false, d, 0, s),
-            OpSize::S8 => unreachable!(),
-        }
+        self.emit_prefix_and_rex(size, d, 0, s);
         self.emit_byte(0x0F);
         self.emit_byte(0x40 | tttn);
         self.emit_modrm(0b11, d, s);
