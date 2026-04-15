@@ -20,7 +20,7 @@ pub(super) fn compile_fn(
     global_types: &HashMap<String, CType>,
     rodata: &mut Vec<blitz::emit::object::GlobalInfo>,
     string_counter: &mut usize,
-    string_dedup: &mut HashMap<Vec<u8>, String>,
+    string_dedup: &mut HashMap<String, String>,
 ) -> Result<Function, TinyErr> {
     let param_ir_types: Vec<Type> = fn_def
         .params

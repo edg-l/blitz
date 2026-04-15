@@ -74,7 +74,8 @@ impl Codegen {
         let mut globals = Vec::new();
         let mut rodata = Vec::new();
         let mut string_counter: usize = 0;
-        let mut string_dedup: HashMap<Vec<u8>, String> = HashMap::new();
+        // Deduplicate strings by their null-terminated content
+        let mut string_dedup: HashMap<String, String> = HashMap::new();
         let mut global_types: HashMap<String, CType> = HashMap::new();
 
         // Process global variable declarations.
@@ -167,7 +168,7 @@ pub(super) struct FnCtx<'b> {
     pub(super) loop_stack: Vec<LoopContext>,
     pub(super) rodata: &'b mut Vec<blitz::emit::object::GlobalInfo>,
     pub(super) string_counter: &'b mut usize,
-    pub(super) string_dedup: &'b mut HashMap<Vec<u8>, String>,
+    pub(super) string_dedup: &'b mut HashMap<String, String>,
 }
 
 impl<'b> FnCtx<'b> {
@@ -180,7 +181,7 @@ impl<'b> FnCtx<'b> {
         global_types: &'b HashMap<String, CType>,
         rodata: &'b mut Vec<blitz::emit::object::GlobalInfo>,
         string_counter: &'b mut usize,
-        string_dedup: &'b mut HashMap<Vec<u8>, String>,
+        string_dedup: &'b mut HashMap<String, String>,
     ) -> Self {
         FnCtx {
             builder,

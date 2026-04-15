@@ -197,12 +197,14 @@ impl<'b> FnCtx<'b> {
                 }
             }
             Expr::StringLit(bytes) => {
-                // Build the null-terminated string data
+                // Build the null-terminated string as String for dedup key
                 let mut data: Vec<u8> = bytes.clone();
                 data.push(0u8);
+                // Safe: string literals are ASCII/UTF-8 in C
+                let key = String::from_utf8_lossy(&data).into_owned();
 
                 // Check if we've already emitted this string
-                let label = if let Some(existing) = self.string_dedup.get(&data) {
+                let label = if let Some(existing) = self.string_dedup.get(&key) {
                     existing.clone()
                 } else {
                     // New string, emit it
@@ -213,10 +215,10 @@ impl<'b> FnCtx<'b> {
                         name: label.clone(),
                         size: data.len(),
                         align: 1,
-                        init: Some(data.clone()),
+                        init: Some(data),
                     });
 
-                    self.string_dedup.insert(data, label.clone());
+                    self.string_dedup.insert(key, label.clone());
                     label
                 };
 
