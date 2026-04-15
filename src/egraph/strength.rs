@@ -1,6 +1,5 @@
 use smallvec::smallvec;
 
-use crate::egraph::algebraic::find_iconst;
 use crate::egraph::egraph::EGraph;
 use crate::egraph::enode::ENode;
 use crate::ir::op::{ClassId, Op};
@@ -32,9 +31,9 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                 let a = children[0];
                 let b = children[1];
                 // Check both orderings for the constant
-                let (val_opt, non_const) = if let Some((v, _ty)) = find_iconst(egraph, b) {
+                let (val_opt, non_const) = if let Some((v, _ty)) = egraph.get_constant(b) {
                     (Some(v), a)
-                } else if let Some((v, _ty)) = find_iconst(egraph, a) {
+                } else if let Some((v, _ty)) = egraph.get_constant(a) {
                     (Some(v), b)
                 } else {
                     (None, a)
@@ -99,7 +98,7 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
             Op::UDiv if children.len() == 2 => {
                 let a = children[0];
                 let b = children[1];
-                let Some((val, _ty)) = find_iconst(egraph, b) else {
+                let Some((val, _ty)) = egraph.get_constant(b) else {
                     continue;
                 };
                 // UDiv(a, 2^n) = Shr(a, n)
@@ -128,7 +127,7 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
             Op::URem if children.len() == 2 => {
                 let a = children[0];
                 let b = children[1];
-                let Some((val, _ty)) = find_iconst(egraph, b) else {
+                let Some((val, _ty)) = egraph.get_constant(b) else {
                     continue;
                 };
                 // URem(a, 2^n) = And(a, 2^n - 1)
@@ -157,7 +156,7 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
             Op::SDiv if children.len() == 2 => {
                 let a = children[0];
                 let b = children[1];
-                let Some((val, ty)) = find_iconst(egraph, b) else {
+                let Some((val, ty)) = egraph.get_constant(b) else {
                     continue;
                 };
                 // SDiv(a, 2^n) for I64: Sar(Add(a, Shr(Sar(a, 63), 64-n)), n)

@@ -1,6 +1,5 @@
 use smallvec::smallvec;
 
-use crate::egraph::algebraic::find_iconst;
 use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::op::{ClassId, Op};
@@ -44,7 +43,7 @@ fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
         // Pattern 1: Add(base, Iconst(d)) -> Addr{scale:1, disp:d}(base, NONE)
         //   where d fits i32
-        if let Some((d, _)) = find_iconst(egraph, rhs)
+        if let Some((d, _)) = egraph.get_constant(rhs)
             && d >= i32::MIN as i64
             && d <= i32::MAX as i64
         {
@@ -72,7 +71,7 @@ fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                 if rhs_node.op == Op::Shl && rhs_node.children.len() == 2 {
                     let idx = rhs_node.children[0];
                     let shift = rhs_node.children[1];
-                    if let Some((n, _)) = find_iconst(egraph, shift)
+                    if let Some((n, _)) = egraph.get_constant(shift)
                         && matches!(n, 1..=3)
                     {
                         let scale = 1u8 << n;
@@ -91,13 +90,13 @@ fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                 //   for s in {2,4,8}
                 if rhs_node.op == Op::Mul && rhs_node.children.len() == 2 {
                     let [mc0, mc1] = [rhs_node.children[0], rhs_node.children[1]];
-                    let (scale_opt, idx) = if let Some((s, _)) = find_iconst(egraph, mc1) {
+                    let (scale_opt, idx) = if let Some((s, _)) = egraph.get_constant(mc1) {
                         if s > 0 && s <= 8 {
                             (Some(s as u8), mc0)
                         } else {
                             (None, mc0)
                         }
-                    } else if let Some((s, _)) = find_iconst(egraph, mc0) {
+                    } else if let Some((s, _)) = egraph.get_constant(mc0) {
                         if s > 0 && s <= 8 {
                             (Some(s as u8), mc1)
                         } else {
@@ -175,7 +174,7 @@ fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                     if rhs_node.op == Op::Shl && rhs_node.children.len() == 2 {
                         let idx = rhs_node.children[0];
                         let shift = rhs_node.children[1];
-                        if let Some((n, _)) = find_iconst(egraph, shift)
+                        if let Some((n, _)) = egraph.get_constant(shift)
                             && matches!(n, 1..=3)
                         {
                             let scale = 1u8 << n;
@@ -199,7 +198,7 @@ fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                 }
 
                 // Add(a, Iconst(d)) -> X86Lea4(a, NONE, 1, d)
-                if let Some((d, _)) = find_iconst(egraph, b)
+                if let Some((d, _)) = egraph.get_constant(b)
                     && d >= i32::MIN as i64
                     && d <= i32::MAX as i64
                     && matches!(a_ty, Type::I32 | Type::I64)
@@ -225,9 +224,9 @@ fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             Op::Mul if snap.children.len() == 2 => {
                 let a = snap.children[0];
                 let b = snap.children[1];
-                let (val_opt, base) = if let Some((v, _)) = find_iconst(egraph, b) {
+                let (val_opt, base) = if let Some((v, _)) = egraph.get_constant(b) {
                     (Some(v), a)
-                } else if let Some((v, _)) = find_iconst(egraph, a) {
+                } else if let Some((v, _)) = egraph.get_constant(a) {
                     (Some(v), b)
                 } else {
                     (None, a)
@@ -284,9 +283,9 @@ fn apply_three_component_lea(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let outer_rhs = snap.children[1];
 
         // Outer must have a constant displacement on one side
-        let (disp_opt, inner_class) = if let Some((d, _)) = find_iconst(egraph, outer_rhs) {
+        let (disp_opt, inner_class) = if let Some((d, _)) = egraph.get_constant(outer_rhs) {
             (Some(d), outer_lhs)
-        } else if let Some((d, _)) = find_iconst(egraph, outer_lhs) {
+        } else if let Some((d, _)) = egraph.get_constant(outer_lhs) {
             (Some(d), outer_rhs)
         } else {
             (None, outer_lhs)
@@ -324,7 +323,7 @@ fn apply_three_component_lea(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                 }
                 let idx = shl_node.children[0];
                 let shift = shl_node.children[1];
-                let Some((n, _)) = find_iconst(egraph, shift) else {
+                let Some((n, _)) = egraph.get_constant(shift) else {
                     continue;
                 };
                 if !matches!(n, 1..=3) {

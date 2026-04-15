@@ -6,6 +6,7 @@ use crate::egraph::eclass::EClass;
 use crate::egraph::enode::ENode;
 use crate::egraph::unionfind::UnionFind;
 use crate::ir::op::{ClassId, Op};
+use crate::ir::types::Type;
 
 /// Snapshot of an e-node for safe iteration during mutation.
 #[derive(Clone)]
@@ -103,12 +104,18 @@ impl EGraph {
             self.classes.len(),
             "ClassId must match classes index"
         );
+        let constant_value = if let Op::Iconst(v, ref iconst_ty) = enode.op {
+            Some((v, iconst_ty.clone()))
+        } else {
+            None
+        };
         let eclass = EClass {
             id: new_id,
             nodes: vec![enode.clone()],
             ty,
             best_cost: f64::INFINITY,
             best_node: None,
+            constant_value,
         };
         self.classes.push(eclass);
         self.memo.insert(enode, new_id);
@@ -138,11 +145,28 @@ impl EGraph {
         let canonical = self.unionfind.union(a, b);
         let non_canonical = if canonical == a { b } else { a };
 
+        // Read constant values before mem::take moves nodes out of non-canonical
+        let cv_a = self.classes[a.0 as usize].constant_value.clone();
+        let cv_b = self.classes[b.0 as usize].constant_value.clone();
+        let joined_cv = match (cv_a, cv_b) {
+            (Some((va, ta)), Some((vb, _))) => {
+                if va == vb {
+                    Some((va, ta))
+                } else {
+                    // Different constants merged -- analysis result is unknown.
+                    None
+                }
+            }
+            (Some(cv), None) | (None, Some(cv)) => Some(cv),
+            (None, None) => None,
+        };
+
         // Move nodes from non-canonical into canonical
         // We need to split the borrow: collect the nodes first
         let moved_nodes: Vec<ENode> =
             std::mem::take(&mut self.classes[non_canonical.0 as usize].nodes);
         self.classes[canonical.0 as usize].nodes.extend(moved_nodes);
+        self.classes[canonical.0 as usize].constant_value = joined_cv;
 
         // Merge best_cost: keep the lower cost
         let non_cost = self.classes[non_canonical.0 as usize].best_cost;
@@ -227,6 +251,16 @@ impl EGraph {
     /// Find the canonical representative of an e-class.
     pub fn find(&mut self, id: ClassId) -> ClassId {
         self.unionfind.find(id)
+    }
+
+    /// Get the constant value for an e-class, if known.
+    /// Uses the e-class analysis rather than scanning nodes.
+    pub fn get_constant(&self, class_id: ClassId) -> Option<(i64, Type)> {
+        if class_id == ClassId::NONE {
+            return None;
+        }
+        let canon = self.unionfind.find_immutable(class_id);
+        self.classes[canon.0 as usize].constant_value.clone()
     }
 
     /// Look up an e-class by its canonical id.
@@ -373,5 +407,64 @@ mod tests {
             "memo has {} entries with non-canonical children",
             bad
         );
+    }
+
+    // Constant analysis tests
+
+    #[test]
+    fn constant_analysis_iconst_sets_value() {
+        let mut g = EGraph::new();
+        let c = make_iconst(&mut g, 42, Type::I64);
+        assert_eq!(g.get_constant(c), Some((42, Type::I64)));
+    }
+
+    #[test]
+    fn constant_analysis_non_const_is_none() {
+        let mut g = EGraph::new();
+        let a = make_iconst(&mut g, 1, Type::I64);
+        let b = make_iconst(&mut g, 2, Type::I64);
+        let add = make_add(&mut g, a, b);
+        assert_eq!(g.get_constant(add), None);
+    }
+
+    #[test]
+    fn constant_analysis_merge_same_preserves() {
+        let mut g = EGraph::new();
+        let a = make_iconst(&mut g, 42, Type::I64);
+        let b = make_iconst(&mut g, 42, Type::I64);
+        // a and b are already the same class via hash-consing
+        assert_eq!(g.find(a), g.find(b));
+        assert_eq!(g.get_constant(a), Some((42, Type::I64)));
+    }
+
+    #[test]
+    fn constant_analysis_merge_const_with_non_const() {
+        let mut g = EGraph::new();
+        let c = make_iconst(&mut g, 42, Type::I64);
+        let a = make_iconst(&mut g, 1, Type::I64);
+        let b = make_iconst(&mut g, 2, Type::I64);
+        let add = make_add(&mut g, a, b);
+        // add has no constant; merge with c
+        g.merge(add, c);
+        let canon = g.find(add);
+        assert_eq!(g.get_constant(canon), Some((42, Type::I64)));
+    }
+
+    #[test]
+    fn constant_analysis_merge_different_consts_is_none() {
+        let mut g = EGraph::new();
+        let a = make_iconst(&mut g, 10, Type::I64);
+        let b = make_iconst(&mut g, 20, Type::I64);
+        g.merge(a, b);
+        let canon = g.find(a);
+        assert_eq!(g.get_constant(canon), None);
+    }
+
+    #[test]
+    fn constant_analysis_survives_rebuild() {
+        let mut g = EGraph::new();
+        let c = make_iconst(&mut g, 99, Type::I64);
+        g.rebuild();
+        assert_eq!(g.get_constant(c), Some((99, Type::I64)));
     }
 }

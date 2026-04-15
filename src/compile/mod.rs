@@ -59,9 +59,7 @@ use terminator::{lower_terminator, thread_branches};
 #[derive(Debug, Clone)]
 pub struct CompileOptions {
     pub opt_goal: OptGoal,
-    pub phase1_limit: u32,
-    pub phase2_limit: u32,
-    pub phase3_limit: u32,
+    pub saturation_limit: u32,
     pub enable_peephole: bool,
     pub enable_nop_alignment: bool,
     pub verbosity: Verbosity,
@@ -89,9 +87,7 @@ impl Default for CompileOptions {
     fn default() -> Self {
         CompileOptions {
             opt_goal: OptGoal::Balanced,
-            phase1_limit: 10,
-            phase2_limit: 5,
-            phase3_limit: 5,
+            saturation_limit: 16,
             enable_peephole: true,
             enable_nop_alignment: false,
             verbosity: Verbosity::Silent,
@@ -162,9 +158,7 @@ pub(super) fn run_egraph_and_extract(
     opts: &CompileOptions,
 ) -> Result<(BTreeMap<(BlockId, u32), ClassId>, ExtractionResult), CompileError> {
     let egraph_opts = EGraphOptions {
-        phase1_limit: opts.phase1_limit,
-        phase2_limit: opts.phase2_limit,
-        phase3_limit: opts.phase3_limit,
+        iteration_limit: opts.saturation_limit,
         max_classes: 500_000,
     };
     crate::egraph::algebraic::propagate_block_params(func, egraph);

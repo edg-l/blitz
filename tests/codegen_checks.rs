@@ -783,3 +783,758 @@ fn asm_combined_sr_addr() {
         ",
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// New algebraic rule tests: verify new egraph optimizations via IR/asm output
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Division/remainder identity rules ────────────────────────────────────────
+
+/// sdiv(x, 1) should be eliminated — just returns x
+#[test]
+fn ir_sdiv_by_one() {
+    let mut b = FunctionBuilder::new("sdiv1", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let one = b.iconst(1, Type::I64);
+    let r = b.sdiv(x, one);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function sdiv1
+        // CHECK: v0 = param(0, I64)
+        // CHECK-NOT: x86_idiv
+        // CHECK: ret v0
+        ",
+    );
+}
+
+/// udiv(x, 1) should be eliminated — just returns x
+#[test]
+fn ir_udiv_by_one() {
+    let mut b = FunctionBuilder::new("udiv1", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let one = b.iconst(1, Type::I64);
+    let r = b.udiv(x, one);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function udiv1
+        // CHECK: v0 = param(0, I64)
+        // CHECK-NOT: x86_div
+        // CHECK: ret v0
+        ",
+    );
+}
+
+/// srem(x, 1) should fold to constant 0
+#[test]
+fn ir_srem_by_one() {
+    let mut b = FunctionBuilder::new("srem1", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let one = b.iconst(1, Type::I64);
+    let r = b.srem(x, one);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function srem1
+        // CHECK: iconst(0, I64)
+        // CHECK-NOT: x86_idiv
+        ",
+    );
+}
+
+/// urem(x, 1) should fold to constant 0
+#[test]
+fn ir_urem_by_one() {
+    let mut b = FunctionBuilder::new("urem1", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let one = b.iconst(1, Type::I64);
+    let r = b.urem(x, one);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function urem1
+        // CHECK: iconst(0, I64)
+        // CHECK-NOT: x86_div
+        ",
+    );
+}
+
+/// sdiv(x, -1) should become negation (sub 0, x)
+#[test]
+fn ir_sdiv_by_neg_one() {
+    let mut b = FunctionBuilder::new("sdiv_neg1", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let neg1 = b.iconst(-1, Type::I64);
+    let r = b.sdiv(x, neg1);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function sdiv_neg1
+        // CHECK-NOT: x86_idiv
+        ",
+    );
+}
+
+// ── Select simplification ────────────────────────────────────────────────────
+
+/// select(cond, a, a) should collapse to just a
+#[test]
+fn ir_select_same_arms() {
+    let mut b = FunctionBuilder::new("sel_same", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = b.params().to_vec();
+    let flags = b.icmp(CondCode::Slt, params[0], params[1]);
+    let r = b.select(flags, params[0], params[0]);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function sel_same
+        // CHECK: v0 = param(0, I64)
+        // CHECK-NOT: x86_cmov
+        // CHECK: ret v0
+        ",
+    );
+}
+
+// ── Extension folding ────────────────────────────────────────────────────────
+
+/// sext(i32->i64, sext(i8->i32, x)) should become sext(i8->i64, x)
+#[test]
+fn ir_sext_chain_folds() {
+    let mut b = FunctionBuilder::new("sext_chain", &[Type::I8], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let s32 = b.sext(x, Type::I32);
+    let s64 = b.sext(s32, Type::I64);
+    b.ret(Some(s64));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function sext_chain
+        // CHECK: v0 = param(0, I8)
+        // CHECK: x86_movsx(I8 -> I64)(v0)
+        // CHECK-NOT: x86_movsx(I32 -> I64)
+        ",
+    );
+}
+
+/// zext(i32->i64, zext(i8->i32, x)) should become zext(i8->i64, x)
+#[test]
+fn ir_zext_chain_folds() {
+    let mut b = FunctionBuilder::new("zext_chain", &[Type::I8], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let z32 = b.zext(x, Type::I32);
+    let z64 = b.zext(z32, Type::I64);
+    b.ret(Some(z64));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function zext_chain
+        // CHECK: v0 = param(0, I8)
+        // CHECK: x86_movzx(I8 -> I64)(v0)
+        // CHECK-NOT: x86_movzx(I32 -> I64)
+        ",
+    );
+}
+
+// ── Bitwise complement ───────────────────────────────────────────────────────
+
+/// x & ~x should fold to 0
+#[test]
+fn ir_and_complement_is_zero() {
+    let mut b = FunctionBuilder::new("and_comp", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let neg1 = b.iconst(-1, Type::I64);
+    let not_x = b.xor(x, neg1);
+    let r = b.and(x, not_x);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function and_comp
+        // CHECK: iconst(0, I64)
+        // CHECK-NOT: x86_and
+        ",
+    );
+}
+
+/// x | ~x should fold to -1
+#[test]
+fn ir_or_complement_is_all_ones() {
+    let mut b = FunctionBuilder::new("or_comp", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let neg1 = b.iconst(-1, Type::I64);
+    let not_x = b.xor(x, neg1);
+    let r = b.or(x, not_x);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function or_comp
+        // CHECK: iconst(-1, I64)
+        // CHECK-NOT: x86_or
+        ",
+    );
+}
+
+// ── Or annihilation ──────────────────────────────────────────────────────────
+
+/// x | -1 should fold to -1
+#[test]
+fn ir_or_all_ones() {
+    let mut b = FunctionBuilder::new("or_neg1", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let neg1 = b.iconst(-1, Type::I64);
+    let r = b.or(x, neg1);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function or_neg1
+        // CHECK: iconst(-1, I64)
+        // CHECK-NOT: x86_or
+        ",
+    );
+}
+
+// ── Negation distribution ────────────────────────────────────────────────────
+
+/// -(a + b) with constant a, b should fold completely
+/// -(3 + 5) = -(8) = -8 via distribution + constant folding
+#[test]
+fn ir_neg_add_constants_fold() {
+    let mut b = FunctionBuilder::new("neg_add", &[], &[Type::I64]);
+    let c3 = b.iconst(3, Type::I64);
+    let c5 = b.iconst(5, Type::I64);
+    let sum = b.add(c3, c5);
+    let r = b.neg(sum);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function neg_add
+        // CHECK: iconst(-8, I64)
+        // CHECK-NOT: x86_sub
+        // CHECK-NOT: x86_add
+        ",
+    );
+}
+
+// ── Unified saturation: strength -> shift combining (cross-category) ─────────
+
+/// Shl(Mul(x, 2), 3) should become Shl(x, 4) via unified saturation:
+/// strength reduces Mul(x,2)->Shl(x,1), then shift combining merges Shl(Shl(x,1),3)->Shl(x,4).
+/// This is impossible with phased execution (algebraic finishes before strength fires).
+#[test]
+fn ir_unified_strength_shift_combine() {
+    let mut b = FunctionBuilder::new("unified_sc", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let c2 = b.iconst(2, Type::I64);
+    let c3 = b.iconst(3, Type::I64);
+    let mul2 = b.mul(x, c2);
+    let r = b.shl(mul2, c3);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function unified_sc
+        // CHECK: v0 = param(0, I64)
+        // CHECK: x86_shl_imm(4)(v0)
+        ",
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Complex multi-rule chain tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Realistic array access: base + (idx % 1) * 8
+/// Chain: urem(idx, 1) -> 0 (identity), mul(0, 8) -> 0 (annihilation),
+/// add(base, 0) -> base (identity). Entire index computation evaporates.
+#[test]
+fn ir_chain_rem1_kills_index() {
+    let mut b = FunctionBuilder::new("rem1_idx", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = b.params().to_vec();
+    let base = params[0];
+    let idx = params[1];
+    let one = b.iconst(1, Type::I64);
+    let c8 = b.iconst(8, Type::I64);
+    let rem = b.urem(idx, one); // -> 0
+    let offset = b.mul(rem, c8); // -> mul(0, 8) -> 0
+    let r = b.add(base, offset); // -> add(base, 0) -> base
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function rem1_idx
+        // CHECK: v0 = param(0, I64)
+        // CHECK-NOT: x86_div
+        // CHECK-NOT: x86_imul
+        // CHECK: ret v0
+        ",
+    );
+}
+
+/// Complement chain: (a & ~a) | (b & ~b) should fold to 0.
+/// Each And(x, ~x) folds to 0, then Or(0, 0) folds to 0.
+#[test]
+fn ir_chain_double_complement_or() {
+    let mut b = FunctionBuilder::new("dbl_comp", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = b.params().to_vec();
+    let neg1 = b.iconst(-1, Type::I64);
+    let not_a = b.xor(params[0], neg1);
+    let lhs = b.and(params[0], not_a); // -> 0
+    let not_b = b.xor(params[1], neg1);
+    let rhs = b.and(params[1], not_b); // -> 0
+    let r = b.or(lhs, rhs); // -> or(0, 0) -> 0
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function dbl_comp
+        // CHECK: iconst(0, I64)
+        // CHECK-NOT: x86_and
+        // CHECK-NOT: x86_or
+        // CHECK-NOT: x86_xor
+        ",
+    );
+}
+
+/// Strength + reassociation + constant folding chain:
+/// (x * 4 + 3) + 5 should produce addr(x, 8) via:
+///   - reassociation: (x*4 + 3) + 5 -> x*4 + (3+5) -> x*4 + 8
+///   - strength: x*4 -> shl(x, 2)
+///   - addr_mode: add(shl(x,2), 8) -> addr or lea with disp
+#[test]
+fn ir_chain_strength_reassoc_addr() {
+    let mut b = FunctionBuilder::new("sr_reassoc", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let c4 = b.iconst(4, Type::I64);
+    let c3 = b.iconst(3, Type::I64);
+    let c5 = b.iconst(5, Type::I64);
+    let mul4 = b.mul(x, c4);
+    let inner = b.add(mul4, c3);
+    let r = b.add(inner, c5);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function sr_reassoc
+        // CHECK: param(0, I64)
+        // CHECK-NOT: x86_imul
+        // CHECK: addr(scale=4
+        ",
+    );
+}
+
+/// Verify strength+shift combining in asm: Shl(Mul(x, 2), 3) -> single shl by 4.
+/// The asm should have a single shl instruction with immediate 4, no imul.
+#[test]
+fn asm_unified_strength_shift_combine() {
+    let mut b = FunctionBuilder::new("unified_asm", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let c2 = b.iconst(2, Type::I64);
+    let c3 = b.iconst(3, Type::I64);
+    let mul2 = b.mul(x, c2);
+    let r = b.shl(mul2, c3);
+    b.ret(Some(r));
+
+    check_asm(
+        b.finalize().unwrap(),
+        "
+        // CHECK-NOT: imul
+        // CHECK: shl    {{[a-z0-9]+}},0x4
+        // CHECK: ret
+        ",
+    );
+}
+
+/// Division identity in asm: sdiv(x, 1) should produce no idiv instruction.
+/// The function should just move the param to rax and return.
+#[test]
+fn asm_sdiv_by_one_no_idiv() {
+    let mut b = FunctionBuilder::new("sdiv1_asm", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let one = b.iconst(1, Type::I64);
+    let r = b.sdiv(x, one);
+    b.ret(Some(r));
+
+    check_asm(
+        b.finalize().unwrap(),
+        "
+        // CHECK-NOT: idiv
+        // CHECK-NOT: cqo
+        // CHECK: ret
+        ",
+    );
+}
+
+/// Complement in asm: x & ~x should produce xor (zeroing), no and instruction.
+#[test]
+fn asm_and_complement_to_xor_zero() {
+    let mut b = FunctionBuilder::new("and_comp_asm", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let neg1 = b.iconst(-1, Type::I64);
+    let not_x = b.xor(x, neg1);
+    let r = b.and(x, not_x);
+    b.ret(Some(r));
+
+    check_asm(
+        b.finalize().unwrap(),
+        "
+        // CHECK: xor    {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // CHECK-NOT: and
+        // CHECK: ret
+        ",
+    );
+}
+
+/// Multi-op constant folding chain:
+/// ((10 / 1) % 1) | -1 should fold entirely to -1.
+/// div identity -> rem identity -> or annihilation, all constant.
+#[test]
+fn ir_chain_div_rem_or_fold() {
+    let mut b = FunctionBuilder::new("fold_chain", &[], &[Type::I64]);
+    let c10 = b.iconst(10, Type::I64);
+    let c1 = b.iconst(1, Type::I64);
+    let neg1 = b.iconst(-1, Type::I64);
+    let d = b.sdiv(c10, c1); // -> 10
+    let r = b.srem(d, c1); // -> 0
+    let result = b.or(r, neg1); // -> -1
+    b.ret(Some(result));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function fold_chain
+        // CHECK: iconst(-1, I64)
+        // CHECK-NOT: x86_idiv
+        // CHECK-NOT: x86_or
+        ",
+    );
+}
+
+/// Extension folding + strength reduction chain:
+/// zext(i8->i32, zext(i8->i8... wait, need valid chain))
+/// sext(i8->i64, x) then mul by 4 -> sext + shl(2)
+/// Tests that extension folding composes with downstream strength reduction.
+#[test]
+fn ir_chain_zext_fold_then_shift() {
+    let mut b = FunctionBuilder::new("zext_shift", &[Type::I8], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let z32 = b.zext(x, Type::I32);
+    let z64 = b.zext(z32, Type::I64);
+    // Now multiply the extended value by 8 -> should become shl by 3
+    let c8 = b.iconst(8, Type::I64);
+    let r = b.mul(z64, c8);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function zext_shift
+        // CHECK: v0 = param(0, I8)
+        // CHECK: x86_movzx(I8 -> I64)(v0)
+        // CHECK-NOT: x86_movzx(I32 -> I64)
+        // CHECK-NOT: x86_imul
+        // CHECK: x86_shl_imm(3)
+        ",
+    );
+}
+
+/// Realistic "clear then set" pattern: (x & 0) | y should fold to y.
+/// annihilation: x & 0 -> 0, then identity: 0 | y -> y.
+#[test]
+fn ir_chain_mask_clear_then_or() {
+    let mut b = FunctionBuilder::new("clear_set", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = b.params().to_vec();
+    let zero = b.iconst(0, Type::I64);
+    let cleared = b.and(params[0], zero); // -> 0
+    let r = b.or(cleared, params[1]); // -> or(0, y) -> y
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function clear_set
+        // CHECK-NOT: x86_and
+        // CHECK-NOT: x86_or
+        // CHECK: param(1, I64)
+        // CHECK: ret
+        ",
+    );
+}
+
+/// Negation of negation via double Sub(0, _):
+/// Sub(0, Sub(0, x)) should fold to x (double negation rule).
+#[test]
+fn ir_double_negation() {
+    let mut b = FunctionBuilder::new("dbl_neg", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let neg1 = b.neg(x);
+    let r = b.neg(neg1);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function dbl_neg
+        // CHECK: v0 = param(0, I64)
+        // CHECK-NOT: x86_sub
+        // CHECK: ret v0
+        ",
+    );
+}
+
+/// Four-way chain: identity + annihilation + complement + strength.
+/// ((x + 0) * (y & ~y)) + (z * 8)
+///   x+0 -> x (identity), y & ~y -> 0 (complement), x * 0 -> 0 (annihilation),
+///   0 + z*8 -> z*8 (identity), z*8 -> shl(z, 3) (strength)
+/// Result: just shl(z, 3)
+#[test]
+fn ir_four_rule_chain() {
+    let mut b = FunctionBuilder::new(
+        "four_chain",
+        &[Type::I64, Type::I64, Type::I64],
+        &[Type::I64],
+    );
+    let params = b.params().to_vec();
+    let x = params[0];
+    let y = params[1];
+    let z = params[2];
+    let zero = b.iconst(0, Type::I64);
+    let c8 = b.iconst(8, Type::I64);
+    let neg1 = b.iconst(-1, Type::I64);
+
+    let x_plus_0 = b.add(x, zero); // -> x
+    let not_y = b.xor(y, neg1);
+    let y_and_not_y = b.and(y, not_y); // -> 0
+    let lhs = b.mul(x_plus_0, y_and_not_y); // -> x * 0 -> 0
+    let rhs = b.mul(z, c8); // -> shl(z, 3)
+    let r = b.add(lhs, rhs); // -> 0 + shl(z,3) -> shl(z,3)
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function four_chain
+        // CHECK-NOT: x86_imul
+        // CHECK-NOT: x86_and
+        // CHECK-NOT: x86_xor
+        // CHECK: addr(scale=8
+        ",
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Multi-rule combination tests: chains of 3+ rules cooperating
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// sdiv(neg(x), -1) -> x via 2-rule chain:
+/// sdiv_neg1: sdiv(sub(0,x), -1) = sub(0, sub(0,x))
+/// double_neg: sub(0, sub(0, x)) = x
+#[test]
+fn ir_combo_sdiv_neg1_double_neg() {
+    let mut b = FunctionBuilder::new("sdiv_dblneg", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let neg_x = b.neg(x);
+    let neg1 = b.iconst(-1, Type::I64);
+    let r = b.sdiv(neg_x, neg1);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function sdiv_dblneg
+        // CHECK: v0 = param(0, I64)
+        // CHECK-NOT: x86_idiv
+        // CHECK-NOT: x86_sub
+        // CHECK: ret v0
+        ",
+    );
+}
+
+/// 5-rule chain across 3 categories: urem(y,1)->0, mul(0,4)->0, add(x,0)->x,
+/// mul(x,2)->shl(x,1) [strength], shl(shl(x,1),3)->shl(x,4) [shift combine].
+/// The entire computation collapses to a single shift.
+#[test]
+fn ir_combo_5rule_rem_annihil_strength_shift() {
+    let mut b = FunctionBuilder::new("big5", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = b.params().to_vec();
+    let (x, y) = (params[0], params[1]);
+    let c1 = b.iconst(1, Type::I64);
+    let c2 = b.iconst(2, Type::I64);
+    let c3 = b.iconst(3, Type::I64);
+    let c4 = b.iconst(4, Type::I64);
+    let rem = b.urem(y, c1); // -> 0
+    let scaled = b.mul(rem, c4); // -> 0*4 -> 0
+    let base = b.add(x, scaled); // -> x+0 -> x
+    let doubled = b.mul(base, c2); // -> x*2 -> shl(x,1) [strength]
+    let r = b.shl(doubled, c3); // -> shl(shl(x,1),3) -> shl(x,4) [unified]
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function big5
+        // CHECK: param(0, I64)
+        // CHECK-NOT: x86_div
+        // CHECK-NOT: x86_imul
+        // CHECK: x86_shl_imm(4)
+        ",
+    );
+}
+
+/// complement + identity chain: (a & ~a) + b -> 0 + b -> b.
+/// complement: and(a, xor(a,-1)) = 0
+/// identity: add(0, b) = b
+/// Two params in, one is dead (a), output is just b.
+#[test]
+fn ir_combo_complement_identity() {
+    let mut b = FunctionBuilder::new("comp_id", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = b.params().to_vec();
+    let neg1 = b.iconst(-1, Type::I64);
+    let not_a = b.xor(params[0], neg1);
+    let dead = b.and(params[0], not_a); // -> 0
+    let r = b.add(dead, params[1]); // -> 0 + b -> b
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function comp_id
+        // CHECK-NOT: x86_and
+        // CHECK-NOT: x86_xor
+        // CHECK-NOT: x86_add
+        // CHECK: param(1, I64)
+        // CHECK: ret
+        ",
+    );
+}
+
+/// Extension fold + complement: zext(zext(x)) & ~(zext(zext(x))) -> 0.
+/// ext_fold: zext(i32, zext(i8, x)) = zext(i64, x)
+/// complement: val & ~val = 0
+#[test]
+fn ir_combo_ext_fold_complement() {
+    let mut b = FunctionBuilder::new("ext_comp", &[Type::I8], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let z32 = b.zext(x, Type::I32);
+    let z64 = b.zext(z32, Type::I64);
+    let neg1 = b.iconst(-1, Type::I64);
+    let not_z = b.xor(z64, neg1);
+    let r = b.and(z64, not_z);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function ext_comp
+        // CHECK: iconst(0, I64)
+        // CHECK-NOT: x86_and
+        // CHECK-NOT: x86_movzx
+        ",
+    );
+}
+
+/// 4-rule chain: or_annihil + div_id + rem_id + constant_fold.
+/// (x | -1) / 1 + (y % 1) -> -1 / 1 + 0 -> -1 + 0 -> -1.
+/// Both params become dead; output is a single constant.
+#[test]
+fn ir_combo_annihil_div_rem_fold() {
+    let mut b = FunctionBuilder::new("ann_div_rem", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = b.params().to_vec();
+    let neg1 = b.iconst(-1, Type::I64);
+    let c1 = b.iconst(1, Type::I64);
+    let or_neg1 = b.or(params[0], neg1); // -> -1
+    let div1 = b.sdiv(or_neg1, c1); // -> -1 / 1 -> -1
+    let rem1 = b.urem(params[1], c1); // -> 0
+    let r = b.add(div1, rem1); // -> -1 + 0 -> -1
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function ann_div_rem
+        // CHECK: iconst(-1, I64)
+        // CHECK-NOT: x86_or
+        // CHECK-NOT: x86_idiv
+        // CHECK-NOT: x86_div
+        // CHECK-NOT: x86_add
+        ",
+    );
+}
+
+/// select_same + double_neg: select(c, -(-x), -(-x)) -> x.
+/// double_neg: sub(0, sub(0, x)) = x
+/// select_same: select(c, a, a) = a
+#[test]
+fn ir_combo_select_double_neg() {
+    let mut b = FunctionBuilder::new("sel_dblneg", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = b.params().to_vec();
+    let zero = b.iconst(0, Type::I64);
+    let neg_x = b.neg(params[0]);
+    let dbl_neg = b.neg(neg_x);
+    let cond = b.icmp(CondCode::Slt, params[1], zero);
+    let r = b.select(cond, dbl_neg, dbl_neg);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function sel_dblneg
+        // CHECK: v0 = param(0, I64)
+        // CHECK-NOT: x86_sub
+        // CHECK-NOT: x86_cmov
+        // CHECK: ret v0
+        ",
+    );
+}
+
+/// double_neg + reassociation + addr_mode: -(-(p + 3)) + 5.
+/// double_neg removes the two negations -> p + 3.
+/// Then (p + 3) + 5: reassociation + constant fold -> p + 8.
+/// Addr mode captures the add with constant.
+#[test]
+fn ir_combo_dblneg_reassoc_addr() {
+    let mut b = FunctionBuilder::new("dn_reassoc", &[Type::I64], &[Type::I64]);
+    let p = b.params().to_vec()[0];
+    let c3 = b.iconst(3, Type::I64);
+    let c5 = b.iconst(5, Type::I64);
+    let sum = b.add(p, c3);
+    let neg1 = b.neg(sum);
+    let neg2 = b.neg(neg1);
+    let r = b.add(neg2, c5);
+    b.ret(Some(r));
+
+    check_ir(
+        b.finalize().unwrap(),
+        "
+        // CHECK-LABEL: function dn_reassoc
+        // CHECK: param(0, I64)
+        // CHECK-NOT: x86_sub
+        // CHECK-NOT: x86_imul
+        ",
+    );
+}

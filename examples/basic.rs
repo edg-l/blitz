@@ -63,11 +63,50 @@ fn build_sum_to() -> blitz::ir::function::Function {
     b.finalize().expect("sum_to")
 }
 
+/// Build: fn optimized(x: i64) -> i64 { (x / 1) | -1 }
+/// Demonstrates egraph algebraic optimizations:
+///   - sdiv(x, 1) is eliminated (identity)
+///   - or(x, -1) folds to -1 (annihilation)
+///   - The whole function becomes: return -1
+fn build_optimized() -> blitz::ir::function::Function {
+    let mut b = FunctionBuilder::new("optimized", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let one = b.iconst(1, Type::I64);
+    let neg1 = b.iconst(-1, Type::I64);
+    let div = b.sdiv(x, one); // sdiv(x, 1) = x
+    let result = b.or(div, neg1); // or(x, -1) = -1
+    b.ret(Some(result));
+    b.finalize().expect("optimized")
+}
+
+/// Build: fn array_idx(base: i64, i: i64) -> i64 { base + i * 8 + 16 }
+/// Demonstrates cross-category egraph optimization:
+///   - strength reduction: mul(i, 8) -> shl(i, 3)
+///   - addr mode fusion: add(base, shl(i, 3)) -> addr(scale=8)(base, i)
+///   - LEA formation: add(addr, 16) -> x86_lea4(scale=8, disp=16)(base, i)
+fn build_array_idx() -> blitz::ir::function::Function {
+    let mut b = FunctionBuilder::new("array_idx", &[Type::I64, Type::I64], &[Type::I64]);
+    let p = b.params().to_vec();
+    let c8 = b.iconst(8, Type::I64);
+    let c16 = b.iconst(16, Type::I64);
+    let offset = b.mul(p[1], c8); // strength -> shl(i, 3)
+    let addr = b.add(p[0], offset); // addr_mode -> scaled addressing
+    let result = b.add(addr, c16); // lea4 fusion
+    b.ret(Some(result));
+    b.finalize().expect("array_idx")
+}
+
 fn main() {
     let opts = CompileOptions::default();
 
-    // Compile all three functions into one .o file
-    let functions = vec![build_add(), build_max(), build_sum_to()];
+    // Compile all functions into one .o file
+    let functions = vec![
+        build_add(),
+        build_max(),
+        build_sum_to(),
+        build_optimized(),
+        build_array_idx(),
+    ];
     let obj = compile_module(functions, &opts).expect("compilation failed");
 
     let path = std::path::Path::new("output.o");

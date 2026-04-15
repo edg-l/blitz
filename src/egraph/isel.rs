@@ -122,21 +122,6 @@ fn apply_alu_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     changed
 }
 
-/// Search a class for an Iconst node and return its value, if any.
-fn find_iconst_in_class(egraph: &EGraph, class_id: ClassId) -> Option<i64> {
-    let canon = egraph.unionfind.find_immutable(class_id);
-    if canon == ClassId::NONE {
-        return None;
-    }
-    let class = egraph.class(canon);
-    for node in &class.nodes {
-        if let Op::Iconst(val, _) = &node.op {
-            return Some(*val);
-        }
-    }
-    None
-}
-
 /// Shl/Sar/Shr -> X86Shl/X86Sar/X86Shr (as Proj0)
 fn apply_shift_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
@@ -214,7 +199,7 @@ fn apply_shift_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let b = shift_node.children[1];
 
         // Check if b is a constant that fits in shift count range 0..=63.
-        let Some(val) = find_iconst_in_class(egraph, b) else {
+        let Some(val) = egraph.get_constant(b).map(|(v, _)| v) else {
             continue;
         };
         if !(0..=63).contains(&val) {

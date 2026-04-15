@@ -11,21 +11,6 @@ use crate::ir::types::Type;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// If `class_id` contains an Iconst node, return its value and type.
-pub(crate) fn find_iconst(egraph: &EGraph, class_id: ClassId) -> Option<(i64, Type)> {
-    if class_id == ClassId::NONE {
-        return None;
-    }
-    let canon = egraph.unionfind.find_immutable(class_id);
-    let class = egraph.class(canon);
-    for node in &class.nodes {
-        if let Op::Iconst(v, ref ty) = node.op {
-            return Some((v, ty.clone()));
-        }
-    }
-    None
-}
-
 fn make_iconst(egraph: &mut EGraph, val: i64, ty: Type) -> ClassId {
     egraph.add(ENode {
         op: Op::Iconst(val, ty),
@@ -67,6 +52,15 @@ pub fn apply_algebraic_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_double_negation_rules(egraph, &snaps);
     changed |= apply_constant_folding(egraph, &snaps);
     changed |= apply_commutativity_rules(egraph, &snaps);
+    changed |= apply_reassociation_rules(egraph, &snaps);
+    changed |= apply_shift_combining_rules(egraph, &snaps);
+    changed |= apply_absorption_rules(egraph, &snaps);
+    changed |= apply_div_identity_rules(egraph, &snaps);
+    changed |= apply_select_rules(egraph, &snaps);
+    changed |= apply_extension_folding_rules(egraph, &snaps);
+    changed |= apply_complement_rules(egraph, &snaps);
+    changed |= apply_demorgan_rules(egraph, &snaps);
+    changed |= apply_negation_distribution_rules(egraph, &snaps);
     changed
 }
 
@@ -82,7 +76,7 @@ fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             Op::Add | Op::Or if snap.children.len() == 2 => {
                 let [lhs, rhs] = [snap.children[0], snap.children[1]];
                 // Add/Or(a, 0) = a
-                if let Some((0, _)) = find_iconst(egraph, rhs) {
+                if let Some((0, _)) = egraph.get_constant(rhs) {
                     let canon = egraph.unionfind.find_immutable(class_id);
                     let lhs_canon = egraph.unionfind.find_immutable(lhs);
                     if canon != lhs_canon {
@@ -90,7 +84,7 @@ fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                         changed = true;
                     }
                 }
-                if let Some((0, _)) = find_iconst(egraph, lhs) {
+                if let Some((0, _)) = egraph.get_constant(lhs) {
                     let canon = egraph.unionfind.find_immutable(class_id);
                     let rhs_canon = egraph.unionfind.find_immutable(rhs);
                     if canon != rhs_canon {
@@ -102,7 +96,7 @@ fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             Op::Mul if snap.children.len() == 2 => {
                 let [lhs, rhs] = [snap.children[0], snap.children[1]];
                 // Mul(a, 1) = a
-                if let Some((1, _)) = find_iconst(egraph, rhs) {
+                if let Some((1, _)) = egraph.get_constant(rhs) {
                     let canon = egraph.unionfind.find_immutable(class_id);
                     let lhs_canon = egraph.unionfind.find_immutable(lhs);
                     if canon != lhs_canon {
@@ -110,7 +104,7 @@ fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                         changed = true;
                     }
                 }
-                if let Some((1, _)) = find_iconst(egraph, lhs) {
+                if let Some((1, _)) = egraph.get_constant(lhs) {
                     let canon = egraph.unionfind.find_immutable(class_id);
                     let rhs_canon = egraph.unionfind.find_immutable(rhs);
                     if canon != rhs_canon {
@@ -122,7 +116,7 @@ fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             Op::And if snap.children.len() == 2 => {
                 let [lhs, rhs] = [snap.children[0], snap.children[1]];
                 // And(a, all_ones) = a — check for -1 (all ones in two's complement)
-                if let Some((-1, _)) = find_iconst(egraph, rhs) {
+                if let Some((-1, _)) = egraph.get_constant(rhs) {
                     let canon = egraph.unionfind.find_immutable(class_id);
                     let lhs_canon = egraph.unionfind.find_immutable(lhs);
                     if canon != lhs_canon {
@@ -130,7 +124,7 @@ fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                         changed = true;
                     }
                 }
-                if let Some((-1, _)) = find_iconst(egraph, lhs) {
+                if let Some((-1, _)) = egraph.get_constant(lhs) {
                     let canon = egraph.unionfind.find_immutable(class_id);
                     let rhs_canon = egraph.unionfind.find_immutable(rhs);
                     if canon != rhs_canon {
@@ -146,7 +140,7 @@ fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 }
 
 // ── Annihilation rules ────────────────────────────────────────────────────────
-// Mul(a, 0) = 0, And(a, 0) = 0
+// Mul(a, 0) = 0, And(a, 0) = 0, Or(a, -1) = -1
 
 fn apply_annihilation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
@@ -156,9 +150,9 @@ fn apply_annihilation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         match &snap.op {
             Op::Mul | Op::And if snap.children.len() == 2 => {
                 let [lhs, rhs] = [snap.children[0], snap.children[1]];
-                let zero_side = if let Some((0, ref ty)) = find_iconst(egraph, rhs) {
+                let zero_side = if let Some((0, ref ty)) = egraph.get_constant(rhs) {
                     Some((0i64, ty.clone()))
-                } else if let Some((0, ref ty)) = find_iconst(egraph, lhs) {
+                } else if let Some((0, ref ty)) = egraph.get_constant(lhs) {
                     Some((0i64, ty.clone()))
                 } else {
                     None
@@ -169,6 +163,26 @@ fn apply_annihilation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                     let zero_canon = egraph.unionfind.find_immutable(zero_class);
                     if canon != zero_canon {
                         egraph.merge(class_id, zero_class);
+                        changed = true;
+                    }
+                }
+            }
+            // Or(a, -1) = -1
+            Op::Or if snap.children.len() == 2 => {
+                let [lhs, rhs] = [snap.children[0], snap.children[1]];
+                let all_ones = if let Some((-1, ref ty)) = egraph.get_constant(rhs) {
+                    Some(ty.clone())
+                } else if let Some((-1, ref ty)) = egraph.get_constant(lhs) {
+                    Some(ty.clone())
+                } else {
+                    None
+                };
+                if let Some(ty) = all_ones {
+                    let ones_class = make_iconst(egraph, -1, ty);
+                    let canon = egraph.unionfind.find_immutable(class_id);
+                    let ones_canon = egraph.unionfind.find_immutable(ones_class);
+                    if canon != ones_canon {
+                        egraph.merge(class_id, ones_class);
                         changed = true;
                     }
                 }
@@ -250,7 +264,7 @@ fn apply_double_negation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool 
         if snap.op != Op::Sub || snap.children.len() != 2 {
             continue;
         }
-        if find_iconst(egraph, snap.children[0]).map(|(v, _)| v) != Some(0) {
+        if egraph.get_constant(snap.children[0]).map(|(v, _)| v) != Some(0) {
             continue;
         }
         // Inner child must be Sub(0, a)
@@ -260,7 +274,7 @@ fn apply_double_negation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool 
             if inner_node.op != Op::Sub || inner_node.children.len() != 2 {
                 continue;
             }
-            if find_iconst(egraph, inner_node.children[0]).map(|(v, _)| v) != Some(0) {
+            if egraph.get_constant(inner_node.children[0]).map(|(v, _)| v) != Some(0) {
                 continue;
             }
             // Found Sub(0, Sub(0, a)); merge outer with a
@@ -288,10 +302,10 @@ fn apply_constant_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         }
         let lhs = snap.children[0];
         let rhs = snap.children[1];
-        let Some((lv, lty)) = find_iconst(egraph, lhs) else {
+        let Some((lv, lty)) = egraph.get_constant(lhs) else {
             continue;
         };
-        let Some((rv, _rty)) = find_iconst(egraph, rhs) else {
+        let Some((rv, _rty)) = egraph.get_constant(rhs) else {
             continue;
         };
 
@@ -306,9 +320,9 @@ fn apply_constant_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             Op::And => Some(lv & rv),
             Op::Or => Some(lv | rv),
             Op::Xor => Some(lv ^ rv),
-            Op::Shl => Some(lv.wrapping_shl(rv as u32)),
-            Op::Shr => Some(((lv as u64).wrapping_shr(rv as u32)) as i64),
-            Op::Sar => Some(lv.wrapping_shr(rv as u32)),
+            Op::Shl if rv >= 0 && rv < 64 => Some(lv.wrapping_shl(rv as u32)),
+            Op::Shr if rv >= 0 && rv < 64 => Some(((lv as u64).wrapping_shr(rv as u32)) as i64),
+            Op::Sar if rv >= 0 && rv < 64 => Some(lv.wrapping_shr(rv as u32)),
             _ => None,
         };
 
@@ -360,6 +374,554 @@ fn apply_commutativity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             let swapped_canon = egraph.unionfind.find_immutable(swapped);
             if class_canon != swapped_canon {
                 egraph.merge(snap.class_id, swapped);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+// ── Reassociation rules ───────────────────────────────────────────────────────
+// Add(Add(a, b), c) = Add(a, Add(b, c)) when b or c is constant.
+// Mul(Mul(a, b), c) = Mul(a, Mul(b, c)) when b or c is constant.
+
+fn apply_reassociation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        let is_add = snap.op == Op::Add;
+        let is_mul = snap.op == Op::Mul;
+        if (!is_add && !is_mul) || snap.children.len() != 2 {
+            continue;
+        }
+
+        let outer_lhs = snap.children[0];
+        let c = snap.children[1];
+
+        let outer_ty = egraph
+            .class(egraph.unionfind.find_immutable(class_id))
+            .ty
+            .clone();
+
+        let inner_canon = egraph.unionfind.find_immutable(outer_lhs);
+        let inner_nodes = egraph.class(inner_canon).nodes.clone();
+
+        for inner_node in inner_nodes {
+            let inner_matches = if is_add {
+                inner_node.op == Op::Add
+            } else {
+                inner_node.op == Op::Mul
+            };
+            if !inner_matches || inner_node.children.len() != 2 {
+                continue;
+            }
+
+            let a = inner_node.children[0];
+            let b = inner_node.children[1];
+
+            // All operands must share the same integer type.
+            let ty_a = egraph.class(egraph.unionfind.find_immutable(a)).ty.clone();
+            let ty_b = egraph.class(egraph.unionfind.find_immutable(b)).ty.clone();
+            let ty_c = egraph.class(egraph.unionfind.find_immutable(c)).ty.clone();
+            if ty_a != outer_ty || ty_b != outer_ty || ty_c != outer_ty {
+                continue;
+            }
+            if !outer_ty.is_integer() {
+                continue;
+            }
+
+            // Only reassociate when BOTH b and c are constants AND a is NOT
+            // a constant. This targets the pattern (a + 3) + 5 -> a + 8
+            // where a is a non-constant expression. If all three are constants,
+            // constant folding already handles it. Allowing reassociation on
+            // all-constant chains (e.g., 20 chained adds of constants) causes
+            // combinatorial blowup via interaction with commutativity.
+            let a_is_const = egraph.get_constant(a).is_some();
+            let b_is_const = egraph.get_constant(b).is_some();
+            let c_is_const = egraph.get_constant(c).is_some();
+            if a_is_const || !b_is_const || !c_is_const {
+                continue;
+            }
+
+            // Build Add/Mul(b, c) then Add/Mul(a, that).
+            let inner_op = snap.op.clone();
+            let bc = egraph.add(ENode {
+                op: inner_op.clone(),
+                children: smallvec![b, c],
+            });
+            let reassoc = egraph.add(ENode {
+                op: inner_op,
+                children: smallvec![a, bc],
+            });
+
+            let orig_canon = egraph.unionfind.find_immutable(class_id);
+            let reassoc_canon = egraph.unionfind.find_immutable(reassoc);
+            if orig_canon != reassoc_canon {
+                egraph.merge(class_id, reassoc);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+// ── Shift combining rules ─────────────────────────────────────────────────────
+// Shl(Shl(a, n), m) = Shl(a, n+m) when n, m >= 0 and n+m <= 63.
+// Same for Shr and Sar.
+
+fn apply_shift_combining_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        let is_shift = matches!(snap.op, Op::Shl | Op::Shr | Op::Sar);
+        if !is_shift || snap.children.len() != 2 {
+            continue;
+        }
+
+        let outer_val = snap.children[0];
+        let m_class = snap.children[1];
+
+        let Some((m, _)) = egraph.get_constant(m_class) else {
+            continue;
+        };
+        if m < 0 {
+            continue;
+        }
+
+        let outer_canon = egraph.unionfind.find_immutable(outer_val);
+        let outer_nodes = egraph.class(outer_canon).nodes.clone();
+
+        for inner_node in outer_nodes {
+            if inner_node.op != snap.op || inner_node.children.len() != 2 {
+                continue;
+            }
+
+            let a = inner_node.children[0];
+            let n_class = inner_node.children[1];
+
+            let Some((n, n_ty)) = egraph.get_constant(n_class) else {
+                continue;
+            };
+            if n < 0 {
+                continue;
+            }
+            let combined = n + m;
+            // Guard against exceeding the type's bit width (not just 64).
+            let class_ty = egraph
+                .class(egraph.unionfind.find_immutable(class_id))
+                .ty
+                .clone();
+            let max_shift = if class_ty.is_integer() {
+                (class_ty.bit_width() as i64) - 1
+            } else {
+                63
+            };
+            if combined > max_shift {
+                continue;
+            }
+
+            let combined_const = make_iconst(egraph, combined, n_ty);
+            let new_shift = egraph.add(ENode {
+                op: snap.op.clone(),
+                children: smallvec![a, combined_const],
+            });
+
+            let orig_canon = egraph.unionfind.find_immutable(class_id);
+            let new_canon = egraph.unionfind.find_immutable(new_shift);
+            if orig_canon != new_canon {
+                egraph.merge(class_id, new_shift);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+// ── Absorption rules ──────────────────────────────────────────────────────────
+// And(a, b) where b's class contains Or(a, c) => And class merges with a.
+// Or(a, b) where b's class contains And(a, c) => Or class merges with a.
+// Both orderings of (a, b) are checked.
+
+fn apply_absorption_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        let is_and = snap.op == Op::And;
+        let is_or = snap.op == Op::Or;
+        if (!is_and && !is_or) || snap.children.len() != 2 {
+            continue;
+        }
+
+        // For And(a, b): look for Or(a, _) inside b's class or Or(b, _) inside a's class.
+        // For Or(a, b): look for And(a, _) inside b's class or And(b, _) inside a's class.
+        let inner_op = if is_and { Op::Or } else { Op::And };
+
+        let children = [snap.children[0], snap.children[1]];
+
+        // Try both orderings: treat children[0] as `a` and children[1] as `b`, then swap.
+        for &(a, b) in &[(children[0], children[1]), (children[1], children[0])] {
+            let a_canon = egraph.unionfind.find_immutable(a);
+            let b_canon = egraph.unionfind.find_immutable(b);
+            let b_nodes = egraph.class(b_canon).nodes.clone();
+
+            for inner_node in b_nodes {
+                if inner_node.op != inner_op || inner_node.children.len() != 2 {
+                    continue;
+                }
+                let x_canon = egraph.unionfind.find_immutable(inner_node.children[0]);
+                let y_canon = egraph.unionfind.find_immutable(inner_node.children[1]);
+                if x_canon == a_canon || y_canon == a_canon {
+                    let orig_canon = egraph.unionfind.find_immutable(class_id);
+                    if orig_canon != a_canon {
+                        egraph.merge(class_id, a);
+                        changed = true;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    changed
+}
+
+// ── Division/remainder identity rules ─────────────────────────────────────────
+// SDiv(a, 1) = a, UDiv(a, 1) = a, SRem(a, 1) = 0, URem(a, 1) = 0,
+// SDiv(a, -1) = Sub(0, a)
+
+fn apply_div_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        if snap.children.len() != 2 {
+            continue;
+        }
+        let a = snap.children[0];
+        let b = snap.children[1];
+
+        match &snap.op {
+            Op::SDiv | Op::UDiv => {
+                if let Some((1, _)) = egraph.get_constant(b) {
+                    // Div(a, 1) = a
+                    let canon = egraph.unionfind.find_immutable(class_id);
+                    let a_canon = egraph.unionfind.find_immutable(a);
+                    if canon != a_canon {
+                        egraph.merge(class_id, a);
+                        changed = true;
+                    }
+                } else if snap.op == Op::SDiv {
+                    if let Some((-1, _)) = egraph.get_constant(b) {
+                        // SDiv(a, -1) = Sub(0, a)
+                        let ty = egraph
+                            .class(egraph.unionfind.find_immutable(class_id))
+                            .ty
+                            .clone();
+                        let zero = make_iconst(egraph, 0, ty);
+                        let neg = egraph.add(ENode {
+                            op: Op::Sub,
+                            children: smallvec![zero, a],
+                        });
+                        let canon = egraph.unionfind.find_immutable(class_id);
+                        let neg_canon = egraph.unionfind.find_immutable(neg);
+                        if canon != neg_canon {
+                            egraph.merge(class_id, neg);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            Op::SRem | Op::URem => {
+                if let Some((1, _)) = egraph.get_constant(b) {
+                    // Rem(a, 1) = 0
+                    let ty = egraph
+                        .class(egraph.unionfind.find_immutable(class_id))
+                        .ty
+                        .clone();
+                    let zero = make_iconst(egraph, 0, ty);
+                    let canon = egraph.unionfind.find_immutable(class_id);
+                    let zero_canon = egraph.unionfind.find_immutable(zero);
+                    if canon != zero_canon {
+                        egraph.merge(class_id, zero);
+                        changed = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+// ── Select simplification rules ──────────────────────────────────────────────
+// Select(c, a, a) = a (same true/false value)
+// Select(c, a, b) where c is Icmp on two equal constants -> fold
+
+fn apply_select_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        if snap.op != Op::Select || snap.children.len() != 3 {
+            continue;
+        }
+        let t = snap.children[1];
+        let f = snap.children[2];
+
+        // Select(c, a, a) = a
+        let t_canon = egraph.unionfind.find_immutable(t);
+        let f_canon = egraph.unionfind.find_immutable(f);
+        if t_canon == f_canon {
+            let canon = egraph.unionfind.find_immutable(class_id);
+            if canon != t_canon {
+                egraph.merge(class_id, t);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+// ── Extension folding rules ──────────────────────────────────────────────────
+// Sext(Sext(a)) = Sext(a) (outer type), Zext(Zext(a)) = Zext(a),
+// Trunc(Trunc(a)) = Trunc(a)
+// More precisely: the composition of two same-kind extensions is one extension
+// from the innermost type to the outermost type.
+
+fn apply_extension_folding_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        if snap.children.len() != 1 {
+            continue;
+        }
+        let child = snap.children[0];
+
+        let outer_ty = match &snap.op {
+            Op::Sext(ty) | Op::Zext(ty) | Op::Trunc(ty) => ty.clone(),
+            _ => continue,
+        };
+
+        // Scan child class for a matching inner extension
+        let child_canon = egraph.unionfind.find_immutable(child);
+        let child_nodes = egraph.class(child_canon).nodes.clone();
+
+        for inner_node in child_nodes {
+            if inner_node.children.len() != 1 {
+                continue;
+            }
+            let same_kind = match (&snap.op, &inner_node.op) {
+                (Op::Sext(_), Op::Sext(_)) => true,
+                (Op::Zext(_), Op::Zext(_)) => true,
+                (Op::Trunc(_), Op::Trunc(_)) => true,
+                _ => false,
+            };
+            if !same_kind {
+                continue;
+            }
+
+            // Ext_outer(Ext_inner(a)) = Ext_outer(a) -- skip the intermediate
+            let a = inner_node.children[0];
+            let folded_op = match &snap.op {
+                Op::Sext(_) => Op::Sext(outer_ty.clone()),
+                Op::Zext(_) => Op::Zext(outer_ty.clone()),
+                Op::Trunc(_) => Op::Trunc(outer_ty.clone()),
+                _ => unreachable!(),
+            };
+            let folded = egraph.add(ENode {
+                op: folded_op,
+                children: smallvec![a],
+            });
+            let canon = egraph.unionfind.find_immutable(class_id);
+            let folded_canon = egraph.unionfind.find_immutable(folded);
+            if canon != folded_canon {
+                egraph.merge(class_id, folded);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+// ── Bitwise complement rules ─────────────────────────────────────────────────
+// In this IR, Not(a) is represented as Xor(a, -1).
+// Or(a, Xor(a, -1)) = -1, And(a, Xor(a, -1)) = 0
+
+fn apply_complement_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        let is_and = snap.op == Op::And;
+        let is_or = snap.op == Op::Or;
+        if (!is_and && !is_or) || snap.children.len() != 2 {
+            continue;
+        }
+
+        let children = [snap.children[0], snap.children[1]];
+
+        // Check both orderings: (a, Xor(a,-1)) and (Xor(a,-1), a)
+        for &(a, b) in &[(children[0], children[1]), (children[1], children[0])] {
+            let a_canon = egraph.unionfind.find_immutable(a);
+            let b_canon = egraph.unionfind.find_immutable(b);
+            let b_nodes = egraph.class(b_canon).nodes.clone();
+
+            for b_node in b_nodes {
+                if b_node.op != Op::Xor || b_node.children.len() != 2 {
+                    continue;
+                }
+                // Check if Xor(a, -1) or Xor(-1, a)
+                let x0 = egraph.unionfind.find_immutable(b_node.children[0]);
+                let x1 = egraph.unionfind.find_immutable(b_node.children[1]);
+                let is_not_a = (x0 == a_canon
+                    && egraph.get_constant(b_node.children[1]).map(|(v, _)| v) == Some(-1))
+                    || (x1 == a_canon
+                        && egraph.get_constant(b_node.children[0]).map(|(v, _)| v) == Some(-1));
+                if !is_not_a {
+                    continue;
+                }
+
+                let ty = egraph
+                    .class(egraph.unionfind.find_immutable(class_id))
+                    .ty
+                    .clone();
+                let result_val = if is_or { -1i64 } else { 0i64 };
+                let result = make_iconst(egraph, result_val, ty);
+                let canon = egraph.unionfind.find_immutable(class_id);
+                let result_canon = egraph.unionfind.find_immutable(result);
+                if canon != result_canon {
+                    egraph.merge(class_id, result);
+                    changed = true;
+                }
+                break;
+            }
+        }
+    }
+    changed
+}
+
+// ── De Morgan's law rules ────────────────────────────────────────────────────
+// Not(And(a,b)) = Or(Not(a), Not(b))
+// Not(Or(a,b)) = And(Not(a), Not(b))
+// Where Not(x) = Xor(x, -1).
+
+fn apply_demorgan_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        // Match Xor(inner, -1) where inner is And or Or
+        if snap.op != Op::Xor || snap.children.len() != 2 {
+            continue;
+        }
+
+        // Identify which child is -1 and which is the inner op
+        let (inner, neg_child) = {
+            let c0 = snap.children[0];
+            let c1 = snap.children[1];
+            if egraph.get_constant(c1).map(|(v, _)| v) == Some(-1) {
+                (c0, c1)
+            } else if egraph.get_constant(c0).map(|(v, _)| v) == Some(-1) {
+                (c1, c0)
+            } else {
+                continue;
+            }
+        };
+
+        let inner_canon = egraph.unionfind.find_immutable(inner);
+        let inner_nodes = egraph.class(inner_canon).nodes.clone();
+
+        for inner_node in inner_nodes {
+            if inner_node.children.len() != 2 {
+                continue;
+            }
+            let (target_op, inner_is_and_or_or) = match &inner_node.op {
+                Op::And => (Op::Or, true),
+                Op::Or => (Op::And, true),
+                _ => (Op::And, false), // placeholder
+            };
+            if !inner_is_and_or_or {
+                continue;
+            }
+
+            let a = inner_node.children[0];
+            let b = inner_node.children[1];
+
+            // Build Not(a) = Xor(a, -1), Not(b) = Xor(b, -1)
+            let not_a = egraph.add(ENode {
+                op: Op::Xor,
+                children: smallvec![a, neg_child],
+            });
+            let not_b = egraph.add(ENode {
+                op: Op::Xor,
+                children: smallvec![b, neg_child],
+            });
+            // Build target_op(Not(a), Not(b))
+            let result = egraph.add(ENode {
+                op: target_op,
+                children: smallvec![not_a, not_b],
+            });
+
+            let canon = egraph.unionfind.find_immutable(class_id);
+            let result_canon = egraph.unionfind.find_immutable(result);
+            if canon != result_canon {
+                egraph.merge(class_id, result);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+// ── Negation distribution rule ───────────────────────────────────────────────
+// Sub(0, Add(a, b)) = Add(Sub(0, a), Sub(0, b))
+
+fn apply_negation_distribution_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        // Match Sub(0, inner) where inner is Add
+        if snap.op != Op::Sub || snap.children.len() != 2 {
+            continue;
+        }
+        if egraph.get_constant(snap.children[0]).map(|(v, _)| v) != Some(0) {
+            continue;
+        }
+
+        let inner = snap.children[1];
+        let zero = snap.children[0];
+        let inner_canon = egraph.unionfind.find_immutable(inner);
+        let inner_nodes = egraph.class(inner_canon).nodes.clone();
+
+        for inner_node in inner_nodes {
+            if inner_node.op != Op::Add || inner_node.children.len() != 2 {
+                continue;
+            }
+            let a = inner_node.children[0];
+            let b = inner_node.children[1];
+
+            // Build Sub(0, a), Sub(0, b), Add(Sub(0,a), Sub(0,b))
+            let neg_a = egraph.add(ENode {
+                op: Op::Sub,
+                children: smallvec![zero, a],
+            });
+            let neg_b = egraph.add(ENode {
+                op: Op::Sub,
+                children: smallvec![zero, b],
+            });
+            let result = egraph.add(ENode {
+                op: Op::Add,
+                children: smallvec![neg_a, neg_b],
+            });
+
+            let canon = egraph.unionfind.find_immutable(class_id);
+            let result_canon = egraph.unionfind.find_immutable(result);
+            if canon != result_canon {
+                egraph.merge(class_id, result);
                 changed = true;
             }
         }
@@ -440,7 +1002,7 @@ pub fn propagate_block_params(func: &Function, egraph: &mut EGraph) {
             };
             let source_class = args[i];
             // Only propagate constants to avoid extraction scheduling issues.
-            if find_iconst(egraph, source_class).is_none() {
+            if egraph.get_constant(source_class).is_none() {
                 continue;
             }
             let bp_canon = egraph.unionfind.find(bp_class);
@@ -573,5 +1135,429 @@ mod tests {
             count < 50_000,
             "e-class count {count} exceeded blowup threshold"
         );
+    }
+
+    // Reassociation: (a + 3) + 5 should fold to a + 8
+    #[test]
+    fn reassociate_add_constants() {
+        use crate::egraph::phases::{CompileOptions, run_phases};
+        let mut g = EGraph::new();
+        let a = g.add(ENode {
+            op: Op::Param(0, Type::I64),
+            children: smallvec![],
+        });
+        let c3 = iconst(&mut g, 3, Type::I64);
+        let c5 = iconst(&mut g, 5, Type::I64);
+        let inner = add(&mut g, a, c3);
+        let outer = add(&mut g, inner, c5);
+        run_phases(&mut g, &CompileOptions::default()).unwrap();
+        // After reassociation + constant folding: (a+3)+5 = a+(3+5) = a+8
+        let c8 = iconst(&mut g, 8, Type::I64);
+        let expected = add(&mut g, a, c8);
+        assert_eq!(g.find(outer), g.find(expected));
+    }
+
+    // Shift combining: Shl(Shl(a, 2), 3) = Shl(a, 5)
+    #[test]
+    fn shift_combine_shl() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 42, Type::I64);
+        let c2 = iconst(&mut g, 2, Type::I64);
+        let c3 = iconst(&mut g, 3, Type::I64);
+        let inner = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![a, c2],
+        });
+        let outer = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![inner, c3],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        let c5 = iconst(&mut g, 5, Type::I64);
+        let combined = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![a, c5],
+        });
+        assert_eq!(g.find(outer), g.find(combined));
+    }
+
+    // Shift combining overflow guard: Shl(Shl(a, 32), 32) should NOT combine
+    #[test]
+    fn shift_combine_overflow_guard() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 1, Type::I64);
+        let c32 = iconst(&mut g, 32, Type::I64);
+        let inner = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![a, c32],
+        });
+        let outer = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![inner, c32],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        let c64 = iconst(&mut g, 64, Type::I64);
+        let bad_combined = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![a, c64],
+        });
+        // Should NOT be merged (64 > 63)
+        assert_ne!(g.find(outer), g.find(bad_combined));
+    }
+
+    // Absorption: And(a, Or(a, b)) = a
+    #[test]
+    fn absorption_and_or() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 0xFF, Type::I64);
+        let b = iconst(&mut g, 0x0F, Type::I64);
+        let or_ab = g.add(ENode {
+            op: Op::Or,
+            children: smallvec![a, b],
+        });
+        let and_result = g.add(ENode {
+            op: Op::And,
+            children: smallvec![a, or_ab],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        assert_eq!(g.find(and_result), g.find(a));
+    }
+
+    // Absorption: Or(a, And(a, b)) = a
+    #[test]
+    fn absorption_or_and() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 0xFF, Type::I64);
+        let b = iconst(&mut g, 0x0F, Type::I64);
+        let and_ab = g.add(ENode {
+            op: Op::And,
+            children: smallvec![a, b],
+        });
+        let or_result = g.add(ENode {
+            op: Op::Or,
+            children: smallvec![a, and_ab],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        assert_eq!(g.find(or_result), g.find(a));
+    }
+
+    // ── Division/remainder identity tests ────────────────────────────────────
+
+    #[test]
+    fn sdiv_by_one() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 42, Type::I64);
+        let one = iconst(&mut g, 1, Type::I64);
+        let div = g.add(ENode {
+            op: Op::SDiv,
+            children: smallvec![a, one],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        assert_eq!(g.find(div), g.find(a));
+    }
+
+    #[test]
+    fn udiv_by_one() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 42, Type::I64);
+        let one = iconst(&mut g, 1, Type::I64);
+        let div = g.add(ENode {
+            op: Op::UDiv,
+            children: smallvec![a, one],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        assert_eq!(g.find(div), g.find(a));
+    }
+
+    #[test]
+    fn srem_by_one() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 42, Type::I64);
+        let one = iconst(&mut g, 1, Type::I64);
+        let rem = g.add(ENode {
+            op: Op::SRem,
+            children: smallvec![a, one],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        let zero = iconst(&mut g, 0, Type::I64);
+        assert_eq!(g.find(rem), g.find(zero));
+    }
+
+    #[test]
+    fn urem_by_one() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 42, Type::I64);
+        let one = iconst(&mut g, 1, Type::I64);
+        let rem = g.add(ENode {
+            op: Op::URem,
+            children: smallvec![a, one],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        let zero = iconst(&mut g, 0, Type::I64);
+        assert_eq!(g.find(rem), g.find(zero));
+    }
+
+    #[test]
+    fn sdiv_by_neg_one() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 42, Type::I64);
+        let neg1 = iconst(&mut g, -1, Type::I64);
+        let div = g.add(ENode {
+            op: Op::SDiv,
+            children: smallvec![a, neg1],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // SDiv(a, -1) = Sub(0, a) = -42
+        let zero = iconst(&mut g, 0, Type::I64);
+        let neg = g.add(ENode {
+            op: Op::Sub,
+            children: smallvec![zero, a],
+        });
+        assert_eq!(g.find(div), g.find(neg));
+    }
+
+    // ── Select simplification tests ──────────────────────────────────────────
+
+    #[test]
+    fn select_same_branches() {
+        let mut g = EGraph::new();
+        let c1 = iconst(&mut g, 1, Type::I64);
+        let c2 = iconst(&mut g, 2, Type::I64);
+        let cond = g.add(ENode {
+            op: Op::Icmp(crate::ir::condcode::CondCode::Eq),
+            children: smallvec![c1, c2],
+        });
+        let val = iconst(&mut g, 99, Type::I64);
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, val, val],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        assert_eq!(g.find(sel), g.find(val));
+    }
+
+    // ── Extension folding tests ──────────────────────────────────────────────
+
+    #[test]
+    fn sext_sext_folds() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 5, Type::I8);
+        let inner = g.add(ENode {
+            op: Op::Sext(Type::I32),
+            children: smallvec![a],
+        });
+        let outer = g.add(ENode {
+            op: Op::Sext(Type::I64),
+            children: smallvec![inner],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // Sext(I64, Sext(I32, a)) = Sext(I64, a)
+        let direct = g.add(ENode {
+            op: Op::Sext(Type::I64),
+            children: smallvec![a],
+        });
+        assert_eq!(g.find(outer), g.find(direct));
+    }
+
+    #[test]
+    fn zext_zext_folds() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 5, Type::I8);
+        let inner = g.add(ENode {
+            op: Op::Zext(Type::I32),
+            children: smallvec![a],
+        });
+        let outer = g.add(ENode {
+            op: Op::Zext(Type::I64),
+            children: smallvec![inner],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        let direct = g.add(ENode {
+            op: Op::Zext(Type::I64),
+            children: smallvec![a],
+        });
+        assert_eq!(g.find(outer), g.find(direct));
+    }
+
+    #[test]
+    fn trunc_trunc_folds() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 1000, Type::I64);
+        let inner = g.add(ENode {
+            op: Op::Trunc(Type::I32),
+            children: smallvec![a],
+        });
+        let outer = g.add(ENode {
+            op: Op::Trunc(Type::I8),
+            children: smallvec![inner],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        let direct = g.add(ENode {
+            op: Op::Trunc(Type::I8),
+            children: smallvec![a],
+        });
+        assert_eq!(g.find(outer), g.find(direct));
+    }
+
+    // ── Bitwise complement tests ─────────────────────────────────────────────
+
+    #[test]
+    fn or_a_not_a_is_all_ones() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 0xFF, Type::I64);
+        let neg1 = iconst(&mut g, -1, Type::I64);
+        let not_a = g.add(ENode {
+            op: Op::Xor,
+            children: smallvec![a, neg1],
+        });
+        let result = g.add(ENode {
+            op: Op::Or,
+            children: smallvec![a, not_a],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        assert_eq!(g.find(result), g.find(neg1));
+    }
+
+    #[test]
+    fn and_a_not_a_is_zero() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 0xFF, Type::I64);
+        let neg1 = iconst(&mut g, -1, Type::I64);
+        let not_a = g.add(ENode {
+            op: Op::Xor,
+            children: smallvec![a, neg1],
+        });
+        let result = g.add(ENode {
+            op: Op::And,
+            children: smallvec![a, not_a],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        let zero = iconst(&mut g, 0, Type::I64);
+        assert_eq!(g.find(result), g.find(zero));
+    }
+
+    // ── Or annihilation test ─────────────────────────────────────────────────
+
+    #[test]
+    fn or_a_all_ones() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 42, Type::I64);
+        let neg1 = iconst(&mut g, -1, Type::I64);
+        let result = g.add(ENode {
+            op: Op::Or,
+            children: smallvec![a, neg1],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        assert_eq!(g.find(result), g.find(neg1));
+    }
+
+    // ── De Morgan's law tests ────────────────────────────────────────────────
+
+    #[test]
+    fn demorgan_not_and() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 0xF0, Type::I64);
+        let b = iconst(&mut g, 0x0F, Type::I64);
+        let neg1 = iconst(&mut g, -1, Type::I64);
+        let and_ab = g.add(ENode {
+            op: Op::And,
+            children: smallvec![a, b],
+        });
+        // Not(And(a, b)) = Xor(And(a, b), -1)
+        let not_and = g.add(ENode {
+            op: Op::Xor,
+            children: smallvec![and_ab, neg1],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // Should equal Or(Xor(a, -1), Xor(b, -1))
+        let not_a = g.add(ENode {
+            op: Op::Xor,
+            children: smallvec![a, neg1],
+        });
+        let not_b = g.add(ENode {
+            op: Op::Xor,
+            children: smallvec![b, neg1],
+        });
+        let or_not = g.add(ENode {
+            op: Op::Or,
+            children: smallvec![not_a, not_b],
+        });
+        assert_eq!(g.find(not_and), g.find(or_not));
+    }
+
+    #[test]
+    fn demorgan_not_or() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 0xF0, Type::I64);
+        let b = iconst(&mut g, 0x0F, Type::I64);
+        let neg1 = iconst(&mut g, -1, Type::I64);
+        let or_ab = g.add(ENode {
+            op: Op::Or,
+            children: smallvec![a, b],
+        });
+        let not_or = g.add(ENode {
+            op: Op::Xor,
+            children: smallvec![or_ab, neg1],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        let not_a = g.add(ENode {
+            op: Op::Xor,
+            children: smallvec![a, neg1],
+        });
+        let not_b = g.add(ENode {
+            op: Op::Xor,
+            children: smallvec![b, neg1],
+        });
+        let and_not = g.add(ENode {
+            op: Op::And,
+            children: smallvec![not_a, not_b],
+        });
+        assert_eq!(g.find(not_or), g.find(and_not));
+    }
+
+    // ── Negation distribution test ───────────────────────────────────────────
+
+    #[test]
+    fn neg_distributes_over_add() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 3, Type::I64);
+        let b = iconst(&mut g, 5, Type::I64);
+        let zero = iconst(&mut g, 0, Type::I64);
+        let sum = add(&mut g, a, b);
+        let neg_sum = g.add(ENode {
+            op: Op::Sub,
+            children: smallvec![zero, sum],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+        // Sub(0, Add(a, b)) = Add(Sub(0, a), Sub(0, b))
+        let neg_a = g.add(ENode {
+            op: Op::Sub,
+            children: smallvec![zero, a],
+        });
+        let neg_b = g.add(ENode {
+            op: Op::Sub,
+            children: smallvec![zero, b],
+        });
+        let distributed = add(&mut g, neg_a, neg_b);
+        assert_eq!(g.find(neg_sum), g.find(distributed));
     }
 }
