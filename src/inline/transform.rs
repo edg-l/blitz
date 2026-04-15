@@ -132,7 +132,7 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
 
     // Build continuation block param types: return value (if any) + external live-through values.
     let mut cont_param_types = ret_tys.clone();
-    let caller_egraph = caller.egraph.as_ref().unwrap();
+    let caller_egraph = caller.egraph.as_ref().expect("caller must have egraph");
     for &id in &external_ids {
         let canonical = caller_egraph.unionfind.find_immutable(id);
         let ty = caller_egraph.classes[canonical.0 as usize].ty.clone();
@@ -142,7 +142,7 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
     let mut cont_block = BasicBlock::new(cont_id, cont_param_types);
 
     // Create BlockParam e-nodes for external params and build substitution map.
-    let caller_egraph = caller.egraph.as_mut().unwrap();
+    let caller_egraph = caller.egraph.as_mut().expect("caller must have egraph");
     let ret_param_count = ret_tys.len();
     let mut subst_map: Vec<(ClassId, ClassId)> = Vec::new();
 
@@ -201,7 +201,7 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
 
     // Merge CallResult with continuation block param 0.
     if ret_tys.len() == 1 {
-        let caller_egraph = caller.egraph.as_mut().unwrap();
+        let caller_egraph = caller.egraph.as_mut().expect("caller must have egraph");
         let block_param_enode = ENode {
             op: Op::BlockParam(cont_id, 0, ret_tys[0].clone()),
             children: smallvec![],

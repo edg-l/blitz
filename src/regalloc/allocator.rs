@@ -614,46 +614,6 @@ fn add_clobber_interferences(
     (graph, phantom_precolors)
 }
 
-/// Returns true if `op` produces an XMM (FP) register as its destination.
-fn is_fp_op(op: &Op) -> bool {
-    use crate::ir::types::Type;
-    match op {
-        // F64 arithmetic
-        Op::X86Addsd
-        | Op::X86Subsd
-        | Op::X86Mulsd
-        | Op::X86Divsd
-        | Op::X86Sqrtsd
-        // F32 arithmetic
-        | Op::X86Addss
-        | Op::X86Subss
-        | Op::X86Mulss
-        | Op::X86Divss
-        | Op::X86Sqrtss
-        // Conversions that produce XMM results
-        | Op::X86Cvtsi2sd
-        | Op::X86Cvtsi2ss
-        | Op::X86Cvtsd2ss
-        | Op::X86Cvtss2sd
-        // FP constants
-        | Op::Fconst(_, _)
-        // XMM spill reloads produce XMM values
-        | Op::XmmSpillLoad(_) => true,
-        // Block parameters (phi destinations) with float types
-        Op::BlockParam(_, _, ty) => ty.is_float(),
-        // Call results with float return types
-        Op::CallResult(_, ty) => ty.is_float(),
-        // Load results with float types
-        Op::LoadResult(_, ty) => ty.is_float(),
-        // Function parameters with float types
-        Op::Param(_, ty) => ty.is_float(),
-        Op::X86Bitcast { to, .. } => matches!(to, Type::F32 | Type::F64),
-        // X86Cvttsd2si / X86Cvttss2si produce GPR (not XMM)
-        // X86Ucomisd / X86Ucomiss produce flags (not XMM)
-        _ => false,
-    }
-}
-
 /// Build a VReg class map for all VRegs referenced in the instruction list.
 /// FP ops (X86Addsd etc.) use XMM; everything else uses GPR.
 fn build_vreg_classes(
@@ -662,7 +622,7 @@ fn build_vreg_classes(
 ) -> BTreeMap<VReg, RegClass> {
     let mut map = BTreeMap::new();
     for inst in insts {
-        let class = if is_fp_op(&inst.op) {
+        let class = if inst.op.is_fp_op() {
             RegClass::XMM
         } else {
             RegClass::GPR
@@ -679,7 +639,7 @@ fn build_vreg_classes(
     // because their operands are call/store args of mixed types -- the operands'
     // classes should come from their defining instructions, not the barrier.
     for inst in insts {
-        if is_fp_op(&inst.op)
+        if inst.op.is_fp_op()
             && !matches!(
                 &inst.op,
                 Op::CallResult(_, _) | Op::VoidCallBarrier | Op::StoreBarrier

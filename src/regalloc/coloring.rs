@@ -214,27 +214,7 @@ pub fn map_colors_to_regs(
     // Prefer caller-saved first (avoids callee-save push/pop overhead).
     let available: Vec<Reg> = match reg_class {
         RegClass::GPR => allocatable_gpr_order(uses_frame_pointer),
-        RegClass::XMM => {
-            // XMM0-XMM15 (all caller-saved in SysV ABI).
-            vec![
-                Reg::XMM0,
-                Reg::XMM1,
-                Reg::XMM2,
-                Reg::XMM3,
-                Reg::XMM4,
-                Reg::XMM5,
-                Reg::XMM6,
-                Reg::XMM7,
-                Reg::XMM8,
-                Reg::XMM9,
-                Reg::XMM10,
-                Reg::XMM11,
-                Reg::XMM12,
-                Reg::XMM13,
-                Reg::XMM14,
-                Reg::XMM15,
-            ]
-        }
+        RegClass::XMM => allocatable_xmm_order(),
     };
 
     // Track which physical registers are already claimed.

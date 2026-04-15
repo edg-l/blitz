@@ -109,12 +109,17 @@ pub struct FunctionBuilder {
     pub(crate) egraph: EGraph,
     pub(crate) blocks: Vec<BlockData>,
     pub(crate) current_block: Option<BlockId>,
+    /// Index into `blocks` for the current block. Kept in sync with `current_block`.
+    current_block_idx: Option<usize>,
     next_block_id: BlockId,
     /// Entry block parameter values (function arguments).
     entry_params: Vec<Value>,
 
     // ── Stack slots ──────────────────────────────────────────────────────────
     stack_slots: Vec<StackSlotData>,
+
+    // ── Unique ID counter for LoadResult/CallResult e-class disambiguation ──
+    next_uid: u32,
 
     // ── SSA variable API state (Braun et al.) ────────────────────────────────
     pub(crate) next_var: u32,
@@ -168,9 +173,11 @@ impl FunctionBuilder {
             egraph,
             blocks: vec![entry_block],
             current_block: Some(0),
+            current_block_idx: Some(0),
             next_block_id: 1,
             entry_params,
             stack_slots: Vec::new(),
+            next_uid: 0,
             next_var: 0,
             var_types: Vec::new(),
             var_defs: HashMap::new(),
@@ -228,6 +235,7 @@ impl FunctionBuilder {
     /// Set the current insertion block.
     pub fn set_block(&mut self, block: BlockId) {
         self.current_block = Some(block);
+        self.current_block_idx = self.blocks.iter().position(|b| b.id == block);
     }
 
     /// Get function parameters as Values.
@@ -242,14 +250,10 @@ impl FunctionBuilder {
 
     /// Return true if the current block already has a terminator.
     pub fn is_current_block_terminated(&self) -> bool {
-        let Some(id) = self.current_block else {
-            return false;
-        };
-        self.blocks
-            .iter()
-            .find(|b| b.id == id)
-            .map(|b| b.terminated)
-            .unwrap_or(false)
+        match self.current_block_idx {
+            Some(idx) => self.blocks[idx].terminated,
+            None => false,
+        }
     }
 
     /// Return the result type of `val` by inspecting its e-class.
@@ -286,13 +290,10 @@ impl FunctionBuilder {
     // ── Internal helpers ──────────────────────────────────────────────────────
 
     fn current_block_mut(&mut self) -> &mut BlockData {
-        let id = self
-            .current_block
+        let idx = self
+            .current_block_idx
             .expect("no current block set; call set_block first");
-        self.blocks
-            .iter_mut()
-            .find(|b| b.id == id)
-            .expect("current block not found")
+        &mut self.blocks[idx]
     }
 
     /// Add an e-node to the e-graph and return a Value handle.
@@ -490,20 +491,14 @@ impl FunctionBuilder {
 
     /// Emit a load from `addr` of type `ty`. Returns the loaded value.
     pub fn load(&mut self, addr: Value, ty: Type) -> Value {
-        let block_id = self
+        // Validate that a current block is set before we proceed.
+        let _block_id = self
             .current_block
             .expect("no current block set; call set_block first");
         // Compute a unique ID so that two loads with the same type in the same
         // function get distinct e-classes (the egraph memo deduplicates by op+children).
-        let load_count = {
-            let block = self
-                .blocks
-                .iter()
-                .find(|b| b.id == block_id)
-                .expect("current block not found");
-            block.ops.len() as u32
-        };
-        let uid = block_id * 1000 + load_count;
+        let uid = self.next_uid;
+        self.next_uid += 1;
         // Create a fresh e-class for the loaded value using a LoadResult placeholder.
         let node = ENode {
             op: Op::LoadResult(uid, ty.clone()),
@@ -533,29 +528,18 @@ impl FunctionBuilder {
     /// Emit a call to `func` with the given `args`. Returns Values for each
     /// return type.
     pub fn call(&mut self, func: &str, args: &[Value], ret_tys: &[Type]) -> Vec<Value> {
-        let block_id = self
-            .current_block
-            .expect("no current block set; call set_block first");
-        // Unique call index within the block, used to disambiguate CallResult nodes
-        // so each call site gets distinct e-classes even for the same return type.
-        let call_idx = {
-            let block = self
-                .blocks
-                .iter()
-                .find(|b| b.id == block_id)
-                .expect("current block not found");
-            block.ops.len()
-        };
+        // Pre-compute UIDs for CallResult nodes before any closures capture &mut self.
+        let uid_base = self.next_uid;
+        self.next_uid += ret_tys.len() as u32;
 
         // Create a CallResult placeholder node for each return value.
-        // The uid encodes (block_id, call_idx, result_index) to guarantee a distinct
-        // e-class per call site, preventing the egraph from merging return values of
-        // different calls that happen to have the same type.
+        // Each result gets a globally unique UID to prevent the egraph from merging
+        // return values of different calls that happen to have the same type.
         let ret_vals: Vec<Value> = ret_tys
             .iter()
             .enumerate()
             .map(|(i, ty)| {
-                let uid = block_id * 100_000 + call_idx as u32 * 100 + i as u32;
+                let uid = uid_base + i as u32;
                 let node = ENode {
                     op: Op::CallResult(uid, ty.clone()),
                     children: smallvec![],
@@ -704,17 +688,19 @@ impl FunctionBuilder {
             }
         }
 
+        // Build a block_id -> param count map for O(1) arg count validation.
+        let block_param_count: HashMap<BlockId, usize> = self
+            .blocks
+            .iter()
+            .map(|b| (b.id, b.param_types.len()))
+            .collect();
+
         // Validate arg counts match target block param counts (deferred from jump/branch).
         for block in &self.blocks {
             if let Some(term) = block.ops.last() {
                 match term {
                     EffectfulOp::Jump { target, args } => {
-                        let expected = self
-                            .blocks
-                            .iter()
-                            .find(|b| b.id == *target)
-                            .map(|b| b.param_types.len())
-                            .unwrap_or(0);
+                        let expected = block_param_count.get(target).copied().unwrap_or(0);
                         if args.len() != expected {
                             return Err(BuildError::ArgCountMismatch {
                                 block: *target,
@@ -730,12 +716,7 @@ impl FunctionBuilder {
                         false_args,
                         ..
                     } => {
-                        let true_expected = self
-                            .blocks
-                            .iter()
-                            .find(|b| b.id == *bb_true)
-                            .map(|b| b.param_types.len())
-                            .unwrap_or(0);
+                        let true_expected = block_param_count.get(bb_true).copied().unwrap_or(0);
                         if true_args.len() != true_expected {
                             return Err(BuildError::ArgCountMismatch {
                                 block: *bb_true,
@@ -743,12 +724,7 @@ impl FunctionBuilder {
                                 got: true_args.len(),
                             });
                         }
-                        let false_expected = self
-                            .blocks
-                            .iter()
-                            .find(|b| b.id == *bb_false)
-                            .map(|b| b.param_types.len())
-                            .unwrap_or(0);
+                        let false_expected = block_param_count.get(bb_false).copied().unwrap_or(0);
                         if false_args.len() != false_expected {
                             return Err(BuildError::ArgCountMismatch {
                                 block: *bb_false,

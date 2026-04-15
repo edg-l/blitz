@@ -207,7 +207,7 @@ pub(super) fn lower_terminator(
                         let ret_size = func
                             .return_types
                             .first()
-                            .map(OpSize::from_type)
+                            .map(OpSize::from_int_type)
                             .unwrap_or(OpSize::S64);
                         items.push(BlockItem::Inst(MachInst::MovRR {
                             size: ret_size,
@@ -420,7 +420,7 @@ fn build_phi_copies(
         let size = if param_ty.is_float() {
             OpSize::S64
         } else {
-            OpSize::from_type(param_ty)
+            OpSize::from_int_type(param_ty)
         };
 
         copies.push((src_reg, dst_reg, size));

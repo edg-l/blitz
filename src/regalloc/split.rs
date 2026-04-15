@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
 use crate::ir::op::Op;
-use crate::ir::types::Type;
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::reg::RegClass;
 
@@ -83,10 +82,8 @@ pub fn assign_cross_block_slots(
 }
 
 /// Returns true if the instruction is rematerializable (can be cheaply re-emitted).
-/// Iconst and StackAddr have no dependencies and produce a constant value,
-/// so they can be re-emitted in any block without spilling.
 fn is_rematerializable_inst(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::Iconst(_, _) | Op::StackAddr(_))
+    inst.op.is_rematerializable()
 }
 
 /// Rewrite a single block's schedule to insert cross-block spill/reload code.
@@ -256,7 +253,7 @@ pub fn build_vreg_classes_from_schedules(
 
     for sched in block_schedules {
         for inst in sched {
-            let class = if is_fp_op(&inst.op) {
+            let class = if inst.op.is_fp_op() {
                 RegClass::XMM
             } else {
                 RegClass::GPR
@@ -271,7 +268,7 @@ pub fn build_vreg_classes_from_schedules(
     // Propagate XMM class: if an instruction is FP, its operands are also XMM.
     for sched in block_schedules {
         for inst in sched {
-            if is_fp_op(&inst.op) {
+            if inst.op.is_fp_op() {
                 for &op in &inst.operands {
                     map.insert(op, RegClass::XMM);
                 }
@@ -282,45 +279,10 @@ pub fn build_vreg_classes_from_schedules(
     map
 }
 
-fn is_fp_op(op: &Op) -> bool {
-    match op {
-        // F64 arithmetic
-        Op::X86Addsd
-        | Op::X86Subsd
-        | Op::X86Mulsd
-        | Op::X86Divsd
-        | Op::X86Sqrtsd
-        // F32 arithmetic
-        | Op::X86Addss
-        | Op::X86Subss
-        | Op::X86Mulss
-        | Op::X86Divss
-        | Op::X86Sqrtss
-        // Conversions that produce XMM results
-        | Op::X86Cvtsi2sd
-        | Op::X86Cvtsi2ss
-        | Op::X86Cvtsd2ss
-        | Op::X86Cvtss2sd
-        // FP constants
-        | Op::Fconst(_, _)
-        // XMM spill reloads produce XMM values
-        | Op::XmmSpillLoad(_) => true,
-        // Block parameters (phi destinations) with float types
-        Op::BlockParam(_, _, ty) => ty.is_float(),
-        // Call results with float return types
-        Op::CallResult(_, ty) => ty.is_float(),
-        // Load results with float types
-        Op::LoadResult(_, ty) => ty.is_float(),
-        // Function parameters with float types
-        Op::Param(_, ty) => ty.is_float(),
-        Op::X86Bitcast { to, .. } => matches!(to, Type::F32 | Type::F64),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::types::Type;
     use crate::regalloc::global_liveness::compute_global_liveness;
     use crate::regalloc::spill::{is_spill_load, is_spill_store, spill_slot_of};
 

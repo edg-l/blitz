@@ -232,10 +232,13 @@ fn push_block_class_ids(block: &BasicBlock, out: &mut Vec<ClassId>) {
     }
 }
 
-pub(super) fn collect_roots(func: &Function) -> Vec<ClassId> {
+pub(super) fn collect_roots(func: &Function, egraph: &EGraph) -> Vec<ClassId> {
     let mut roots = Vec::new();
     for block in &func.blocks {
         push_block_class_ids(block, &mut roots);
+    }
+    for r in &mut roots {
+        *r = egraph.unionfind.find_immutable(*r);
     }
     roots.sort_by_key(|c| c.0);
     roots.dedup();

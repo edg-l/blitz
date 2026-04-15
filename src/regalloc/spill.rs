@@ -76,6 +76,42 @@ pub fn compute_live_range_length(insts: &[ScheduledInst]) -> BTreeMap<usize, usi
     range_lengths
 }
 
+/// Compute the composite spill score for a candidate VReg.
+///
+/// Returns `(next_use_penalized, tiebreaker, idx)` — higher is a better spill target.
+/// Used as the key for `max_by_key` in both `select_spill` and `select_spill_for_class`.
+fn spill_score(
+    idx: usize,
+    next_use: &BTreeMap<usize, usize>,
+    range_lengths: &BTreeMap<usize, usize>,
+    graph: &InterferenceGraph,
+    loop_depths: &BTreeMap<VReg, u32>,
+) -> (u64, u64, usize) {
+    let next = next_use.get(&idx).copied().unwrap_or(usize::MAX) as u64;
+    let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
+    let penalty = 10u64.saturating_pow(depth).max(1);
+    let degree = graph.adj[idx].len() as u64;
+    let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
+    let tiebreaker = (degree * range_len) / penalty;
+    (next / penalty, tiebreaker, idx)
+}
+
+/// Compute the fallback spill score (no next-use info) for a candidate VReg.
+///
+/// Returns `(degree_range_penalized, idx)` — higher is a better spill target.
+fn spill_fallback_score(
+    idx: usize,
+    range_lengths: &BTreeMap<usize, usize>,
+    graph: &InterferenceGraph,
+    loop_depths: &BTreeMap<VReg, u32>,
+) -> (u64, usize) {
+    let degree = graph.adj[idx].len() as u64;
+    let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
+    let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
+    let penalty = 10u64.saturating_pow(depth).max(1);
+    ((degree * range_len) / penalty, idx)
+}
+
 /// Select a VReg to spill using a composite heuristic:
 ///   Primary: farthest next-use (Belady's algorithm)
 ///   Tiebreaker: degree * range_length (higher = more pressure relief)
@@ -108,15 +144,10 @@ pub fn select_spill(
             .collect();
 
         // Pick the candidate with the best composite score.
-        if let Some(best) = candidates.into_iter().max_by_key(|&idx| {
-            let next = next_use.get(&idx).copied().unwrap_or(usize::MAX) as u64;
-            let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
-            let penalty = 10u64.saturating_pow(depth).max(1);
-            let degree = graph.adj[idx].len() as u64;
-            let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
-            let tiebreaker = (degree * range_len) / penalty;
-            (next / penalty, tiebreaker, idx)
-        }) {
+        if let Some(best) = candidates
+            .into_iter()
+            .max_by_key(|&idx| spill_score(idx, &next_use, &range_lengths, graph, loop_depths))
+        {
             return Some(best);
         }
     }
@@ -126,13 +157,7 @@ pub fn select_spill(
     (0..graph.num_vregs)
         .filter(|&idx| !graph.adj[idx].is_empty())
         .filter(|idx| !excluded.contains(idx))
-        .max_by_key(|&idx| {
-            let degree = graph.adj[idx].len() as u64;
-            let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
-            let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
-            let penalty = 10u64.saturating_pow(depth).max(1);
-            ((degree * range_len) / penalty, idx)
-        })
+        .max_by_key(|&idx| spill_fallback_score(idx, &range_lengths, graph, loop_depths))
 }
 
 fn find_pressure_point(liveness: &LivenessInfo, available_regs: u32) -> Option<usize> {
@@ -194,15 +219,10 @@ pub fn select_spill_for_class(
             .filter(|&idx| graph.reg_class[idx] == target_class)
             .collect();
 
-        if let Some(best) = candidates.into_iter().max_by_key(|&idx| {
-            let next = next_use.get(&idx).copied().unwrap_or(usize::MAX) as u64;
-            let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
-            let penalty = 10u64.saturating_pow(depth).max(1);
-            let degree = graph.adj[idx].len() as u64;
-            let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
-            let tiebreaker = (degree * range_len) / penalty;
-            (next / penalty, tiebreaker, idx)
-        }) {
+        if let Some(best) = candidates
+            .into_iter()
+            .max_by_key(|&idx| spill_score(idx, &next_use, &range_lengths, graph, loop_depths))
+        {
             return Some(best);
         }
     }
@@ -212,13 +232,7 @@ pub fn select_spill_for_class(
         .filter(|&idx| graph.reg_class[idx] == target_class)
         .filter(|&idx| !graph.adj[idx].is_empty())
         .filter(|idx| !excluded.contains(idx))
-        .max_by_key(|&idx| {
-            let degree = graph.adj[idx].len() as u64;
-            let range_len = range_lengths.get(&idx).copied().unwrap_or(1) as u64;
-            let depth = loop_depths.get(&VReg(idx as u32)).copied().unwrap_or(0);
-            let penalty = 10u64.saturating_pow(depth).max(1);
-            ((degree * range_len) / penalty, idx)
-        })
+        .max_by_key(|&idx| spill_fallback_score(idx, &range_lengths, graph, loop_depths))
 }
 
 fn compute_next_use(insts: &[ScheduledInst], from: usize) -> BTreeMap<usize, usize> {
@@ -236,12 +250,8 @@ fn compute_next_use(insts: &[ScheduledInst], from: usize) -> BTreeMap<usize, usi
 
 /// Returns true if the VReg defined by `inst` can be rematerialized
 /// (i.e., cheaply recomputed instead of spilled to memory).
-/// Both Iconst and StackAddr have no dependencies and produce constants.
 pub fn is_rematerializable(inst: &ScheduledInst) -> bool {
-    matches!(
-        &inst.op,
-        Op::Iconst(_, _) | Op::StackAddr(_) | Op::GlobalAddr(_)
-    )
+    inst.op.is_rematerializable()
 }
 
 /// Collect the set of VRegs that are call arguments (operands of CallResult or

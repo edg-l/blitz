@@ -18,13 +18,13 @@ pub enum OpSize {
 }
 
 impl OpSize {
-    pub fn from_type(ty: &Type) -> Self {
+    pub fn from_int_type(ty: &Type) -> Self {
         match ty {
             Type::I8 => OpSize::S8,
             Type::I16 => OpSize::S16,
             Type::I32 => OpSize::S32,
             Type::I64 => OpSize::S64,
-            _ => panic!("OpSize::from_type: unsupported type {ty:?}"),
+            _ => panic!("OpSize::from_int_type: not an integer type: {ty:?}"),
         }
     }
 

@@ -168,38 +168,8 @@ impl EGraph {
         self.classes[canonical.0 as usize].nodes.extend(moved_nodes);
         self.classes[canonical.0 as usize].constant_value = joined_cv;
 
-        // Merge best_cost: keep the lower cost
-        let non_cost = self.classes[non_canonical.0 as usize].best_cost;
-        let non_best = self.classes[non_canonical.0 as usize].best_node;
-        let can_cost = self.classes[canonical.0 as usize].best_cost;
-
-        if non_cost < can_cost {
-            // Non-canonical had a better node; its index is no longer valid after
-            // extending, so we need to recalculate the offset
-            let offset = self.classes[canonical.0 as usize].nodes.len()
-                - self.classes[non_canonical.0 as usize].nodes.len().max(1);
-            // Actually: after the extend, the moved nodes start at original_canonical_len
-            // We stored moved_nodes above but already moved them; recompute from scratch
-            // by finding the canonical class's node count before the extend.
-            // Let's track this differently: record pre-extend length.
-            // (See note below - we'll recalculate via a scan instead)
-            let _ = (non_best, offset); // suppress unused warnings
-            // Re-scan to find best node in canonical class
-            self.update_best_node(canonical);
-        }
-
         self.worklist.push(canonical);
         canonical
-    }
-
-    /// Re-scan nodes in a class to update best_cost and best_node.
-    fn update_best_node(&mut self, id: ClassId) {
-        let class = &mut self.classes[id.0 as usize];
-        // We don't have a cost model here; keep existing best or pick index 0
-        // as a placeholder. The optimizer layer will assign real costs.
-        if class.best_node.is_none() && !class.nodes.is_empty() {
-            class.best_node = Some(0);
-        }
     }
 
     /// Rebuild the e-graph to a consistent state (process the worklist).
@@ -269,10 +239,9 @@ impl EGraph {
     }
 
     /// Number of live e-classes (those where find(id) == id).
-    pub fn class_count(&mut self) -> usize {
-        let ids: Vec<u32> = (0..self.classes.len() as u32).collect();
-        ids.iter()
-            .filter(|&&i| self.unionfind.find(ClassId(i)) == ClassId(i))
+    pub fn class_count(&self) -> usize {
+        (0..self.classes.len() as u32)
+            .filter(|&i| self.unionfind.find_immutable(ClassId(i)) == ClassId(i))
             .count()
     }
 

@@ -119,6 +119,28 @@ enum FpWidth {
     F64,
 }
 
+fn lower_shift_imm(
+    name: &str,
+    size: OpSize,
+    dst_reg: Option<Reg>,
+    operand_regs: &[Option<Reg>],
+    imm: u8,
+    make_inst: impl FnOnce(Operand, u8) -> MachInst,
+) -> Result<Vec<MachInst>, String> {
+    let dst = get_dst(name, dst_reg)?;
+    let src = get_op(name, operand_regs, 0)?;
+    let mut insts = Vec::new();
+    if dst != src {
+        insts.push(MachInst::MovRR {
+            size,
+            dst: Operand::Reg(dst),
+            src: Operand::Reg(src),
+        });
+    }
+    insts.push(make_inst(Operand::Reg(dst), imm));
+    Ok(insts)
+}
+
 fn lower_fp_binary(
     name: &str,
     dst_reg: Option<Reg>,
@@ -167,7 +189,7 @@ fn lower_op(
         Op::Iconst(val, ty) => {
             let dst = dst_reg.ok_or_else(|| "Iconst: no register for dst".to_string())?;
             Ok(vec![MachInst::MovRI {
-                size: OpSize::from_type(ty),
+                size: OpSize::from_int_type(ty),
                 dst: Operand::Reg(dst),
                 imm: *val,
             }])
@@ -213,60 +235,30 @@ fn lower_op(
         }),
 
         // Immediate-form shifts: no CL constraint, emit mov+shift directly.
-        Op::X86ShlImm(imm) => {
-            let dst = get_dst("X86ShlImm", dst_reg)?;
-            let src = get_op("X86ShlImm", operand_regs, 0)?;
-            let mut insts = Vec::new();
-            if dst != src {
-                insts.push(MachInst::MovRR {
-                    size,
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src),
-                });
-            }
-            insts.push(MachInst::ShlRI {
-                size,
-                dst: Operand::Reg(dst),
-                imm: *imm,
-            });
-            Ok(insts)
-        }
-        Op::X86ShrImm(imm) => {
-            let dst = get_dst("X86ShrImm", dst_reg)?;
-            let src = get_op("X86ShrImm", operand_regs, 0)?;
-            let mut insts = Vec::new();
-            if dst != src {
-                insts.push(MachInst::MovRR {
-                    size,
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src),
-                });
-            }
-            insts.push(MachInst::ShrRI {
-                size,
-                dst: Operand::Reg(dst),
-                imm: *imm,
-            });
-            Ok(insts)
-        }
-        Op::X86SarImm(imm) => {
-            let dst = get_dst("X86SarImm", dst_reg)?;
-            let src = get_op("X86SarImm", operand_regs, 0)?;
-            let mut insts = Vec::new();
-            if dst != src {
-                insts.push(MachInst::MovRR {
-                    size,
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src),
-                });
-            }
-            insts.push(MachInst::SarRI {
-                size,
-                dst: Operand::Reg(dst),
-                imm: *imm,
-            });
-            Ok(insts)
-        }
+        Op::X86ShlImm(imm) => lower_shift_imm(
+            "X86ShlImm",
+            size,
+            dst_reg,
+            operand_regs,
+            *imm,
+            |dst, imm| MachInst::ShlRI { size, dst, imm },
+        ),
+        Op::X86ShrImm(imm) => lower_shift_imm(
+            "X86ShrImm",
+            size,
+            dst_reg,
+            operand_regs,
+            *imm,
+            |dst, imm| MachInst::ShrRI { size, dst, imm },
+        ),
+        Op::X86SarImm(imm) => lower_shift_imm(
+            "X86SarImm",
+            size,
+            dst_reg,
+            operand_regs,
+            *imm,
+            |dst, imm| MachInst::SarRI { size, dst, imm },
+        ),
 
         Op::X86Idiv => {
             // Pre-coloring ensures dividend is in RAX.
@@ -1075,7 +1067,7 @@ pub(super) fn lower_block_pure_ops(
                 if let Some(dst_reg) = get_reg(inst.dst) {
                     match arg_locs.get(*param_idx as usize) {
                         Some(ArgLoc::Stack { offset }) => {
-                            let size = OpSize::from_type(ty);
+                            let size = OpSize::from_int_type(ty);
                             let offset = *offset;
                             let addr = if frame_layout.uses_frame_pointer {
                                 Addr {
@@ -1212,10 +1204,10 @@ pub(super) fn lower_block_pure_ops(
         let result_size = vreg_types
             .get(&inst.dst)
             .map(|ty| match ty {
-                Type::I8 | Type::I16 | Type::I32 | Type::I64 => OpSize::from_type(ty),
+                Type::I8 | Type::I16 | Type::I32 | Type::I64 => OpSize::from_int_type(ty),
                 Type::Pair(inner, _) => {
                     if inner.is_integer() {
-                        OpSize::from_type(inner)
+                        OpSize::from_int_type(inner)
                     } else {
                         OpSize::S64
                     }

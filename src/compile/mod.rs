@@ -177,7 +177,7 @@ pub(super) fn run_egraph_and_extract(
 
     let block_param_map = build_block_param_class_map(egraph);
 
-    let mut all_roots = collect_roots(func);
+    let mut all_roots = collect_roots(func, egraph);
     all_roots.extend(block_param_map.values().copied());
     all_roots.sort_by_key(|c| c.0);
     all_roots.dedup();

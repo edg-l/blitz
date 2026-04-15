@@ -153,7 +153,7 @@ pub(super) fn lower_effectful_op(
                     },
                 }
             } else {
-                let load_size = OpSize::from_type(ty);
+                let load_size = OpSize::from_int_type(ty);
                 // S8/S16 loads must use zero-extending loads (MovzxBRM/MovzxWRM) to
                 // avoid partial register writes that leave upper bits unchanged.
                 match load_size {
@@ -216,7 +216,7 @@ pub(super) fn lower_effectful_op(
                     },
                 }
             } else {
-                let store_size = OpSize::from_type(ty);
+                let store_size = OpSize::from_int_type(ty);
                 MachInst::MovMR {
                     size: store_size,
                     addr,
@@ -310,7 +310,7 @@ pub(super) fn lower_effectful_op(
                     } else {
                         let ret_size = ret_tys
                             .first()
-                            .map(OpSize::from_type)
+                            .map(OpSize::from_int_type)
                             .unwrap_or(OpSize::S64);
                         insts.push(MachInst::MovRR {
                             size: ret_size,
