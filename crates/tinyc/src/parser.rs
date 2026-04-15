@@ -862,7 +862,7 @@ impl Parser {
                     break;
                 }
                 self.advance();
-                let rhs = self.parse_expr_bp(0)?;
+                let rhs = self.parse_expr_bp(1)?;
                 lhs = SpannedExpr::new(Expr::Comma(Box::new(lhs), Box::new(rhs)), op_span);
                 continue;
             }

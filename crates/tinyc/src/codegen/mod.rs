@@ -19,7 +19,7 @@ pub(super) fn err(span: Span, msg: impl Into<String>) -> TinyErr {
 }
 
 mod structs;
-use structs::{build_struct_registry, compute_global_size_align, StructRegistry};
+use structs::{StructRegistry, build_struct_registry, compute_global_size_align};
 mod stmts;
 use stmts::compile_fn;
 mod expr;
@@ -75,7 +75,7 @@ impl Codegen {
         let mut rodata = Vec::new();
         let mut string_counter: usize = 0;
         // Deduplicate strings by their null-terminated content
-        let mut string_dedup: HashMap<String, String> = HashMap::new();
+        let mut string_dedup: HashMap<Vec<u8>, String> = HashMap::new();
         let mut global_types: HashMap<String, CType> = HashMap::new();
 
         // Process global variable declarations.
@@ -168,7 +168,7 @@ pub(super) struct FnCtx<'b> {
     pub(super) loop_stack: Vec<LoopContext>,
     pub(super) rodata: &'b mut Vec<blitz::emit::object::GlobalInfo>,
     pub(super) string_counter: &'b mut usize,
-    pub(super) string_dedup: &'b mut HashMap<String, String>,
+    pub(super) string_dedup: &'b mut HashMap<Vec<u8>, String>,
 }
 
 impl<'b> FnCtx<'b> {
@@ -181,7 +181,7 @@ impl<'b> FnCtx<'b> {
         global_types: &'b HashMap<String, CType>,
         rodata: &'b mut Vec<blitz::emit::object::GlobalInfo>,
         string_counter: &'b mut usize,
-        string_dedup: &'b mut HashMap<String, String>,
+        string_dedup: &'b mut HashMap<Vec<u8>, String>,
     ) -> Self {
         FnCtx {
             builder,

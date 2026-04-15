@@ -7,7 +7,7 @@ use crate::ast::CType;
 use crate::error::TinyErr;
 use crate::lexer::Span;
 
-use super::{err, FnCtx};
+use super::{FnCtx, err};
 
 pub(crate) struct StructLayout {
     pub(crate) fields: Vec<(String, CType, u32)>, // (name, type, offset)

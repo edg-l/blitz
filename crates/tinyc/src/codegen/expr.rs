@@ -7,7 +7,7 @@ use crate::error::TinyErr;
 use crate::lexer::Span;
 
 use super::structs::{emit_struct_copy, resolve_field, type_byte_size};
-use super::{err, FnCtx};
+use super::{FnCtx, err};
 
 impl<'b> FnCtx<'b> {
     /// Emit pointer +/- integer arithmetic: scale the integer by pointee size.
@@ -197,14 +197,12 @@ impl<'b> FnCtx<'b> {
                 }
             }
             Expr::StringLit(bytes) => {
-                // Build the null-terminated string as String for dedup key
+                // Build the null-terminated byte vector as dedup key
                 let mut data: Vec<u8> = bytes.clone();
                 data.push(0u8);
-                // Safe: string literals are ASCII/UTF-8 in C
-                let key = String::from_utf8_lossy(&data).into_owned();
 
                 // Check if we've already emitted this string
-                let label = if let Some(existing) = self.string_dedup.get(&key) {
+                let label = if let Some(existing) = self.string_dedup.get(&data) {
                     existing.clone()
                 } else {
                     // New string, emit it
@@ -215,10 +213,10 @@ impl<'b> FnCtx<'b> {
                         name: label.clone(),
                         size: data.len(),
                         align: 1,
-                        init: Some(data),
+                        init: Some(data.clone()),
                     });
 
-                    self.string_dedup.insert(key, label.clone());
+                    self.string_dedup.insert(data, label.clone());
                     label
                 };
 

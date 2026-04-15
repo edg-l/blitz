@@ -49,6 +49,7 @@ pub struct ObjectFile {
 }
 
 const ELF64_EHDR_SIZE: usize = 64;
+const ELF64_SHDR_SIZE: u16 = 64;
 
 // ── Alignment helpers ─────────────────────────────────────────────────────────
 
@@ -704,7 +705,7 @@ impl ObjectFile {
             e_ehsize: ELF64_EHDR_SIZE as u16,
             e_phentsize: 0,
             e_phnum: 0,
-            e_shentsize: 64,
+            e_shentsize: ELF64_SHDR_SIZE,
             e_shnum: layout.num_sections,
             e_shstrndx: layout.sec_shstrtab,
         };
