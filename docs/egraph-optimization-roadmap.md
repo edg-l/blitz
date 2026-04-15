@@ -42,12 +42,23 @@ Status of rewrite rules and e-class analyses in Blitz's e-graph.
 - LEA4: `Add(Add(a, Shl(b, n)), Iconst(d))` -> `X86Lea4{scale, disp}`
 - LEA4: `Add(a, Iconst(d))` -> `X86Lea4{scale:1, disp:d}`
 
+### Comparison Folding (`algebraic.rs`)
+- Same-operand: `Select(Icmp(Eq,a,a), t, f)=t`, `Select(Icmp(Ne,a,a), t, f)=f`, etc.
+- Constant-constant: `Select(Icmp(cc, c1, c2), t, f)` evaluated at compile time
+
+### Distributivity/Factoring (`distributive.rs`)
+- `Add(Mul(a,b), Mul(a,c)) = Mul(a, Add(b,c))` with blowup guard
+- `Sub(Mul(a,b), Mul(a,c)) = Mul(a, Sub(b,c))` with blowup guard
+
 ### E-Class Analyses
 - Constant analysis: `Option<(i64, Type)>` per class, maintained in add/merge
+- Known-bits analysis: `KnownBits { known_zeros: u64, known_ones: u64 }` per class, maintained in add/merge, propagated through And/Or/Xor/Shl/Shr/Sar/Zext/Sext/Trunc
 
-## Recently Implemented (this session)
+### Known-Bits Exploitation (`known_bits.rs`)
+- Redundant And removal: `And(x, mask)=x` when mask doesn't clear any possibly-set bits
+- Known-constant promotion: when all bits are determined, add Iconst and merge
 
-### New Algebraic Rules
+### Previously Added Algebraic Rules
 - Division/remainder identities: `SDiv(a,1)=a`, `SRem(a,1)=0`, `URem(a,1)=0`, `UDiv(a,1)=a`, `SDiv(a,-1)=Sub(0,a)`
 - Select simplifications: `Select(c,a,a)=a`
 - Extension folding: `Zext(Zext(a))=Zext(a)`, `Sext(Sext(a))=Sext(a)`, `Trunc(Trunc(a))=Trunc(a)`
@@ -56,19 +67,10 @@ Status of rewrite rules and e-class analyses in Blitz's e-graph.
 - Negation distribution: `Sub(0, Add(a,b))=Add(Sub(0,a), Sub(0,b))`
 - Or annihilation: `Or(a,-1)=-1`
 
-## TODO: Medium Impact, More Complex
+## TODO
 
 ### Additional Rules
-- [ ] Distributivity/factoring: `a*b + a*c = a*(b+c)` (needs blowup guard)
-- [ ] Comparison folding: `Icmp(a,a)` for various conditions, `Icmp(const,const)`
 - [ ] Shift + mask optimization: `And(Shr(a,n), mask)` when shift zeroes masked bits
-
-## TODO: High Impact, Requires New E-Class Analysis
-
-### Known-Bits Analysis
-- Domain: `(known_zeros: u64, known_ones: u64)` per class
-- Enables: redundant And removal after Zext, dead mask elimination, range simplifications
-- Requires: make/merge/modify hooks, propagation through Shl/Shr/And/Or/Xor/Zext/Trunc
 
 ### Type-Width Analysis
 - Domain: `(min_bits: u8, signed: bool)` per class
@@ -79,11 +81,11 @@ Status of rewrite rules and e-class analyses in Blitz's e-graph.
 | Component | Status | Notes |
 |-----------|--------|-------|
 | add() with hash-consing | Done | Canonicalizes children, checks memo |
-| merge() with analysis join | Done | Joins constant_value |
+| merge() with analysis join | Done | Joins constant_value and known_bits |
 | rebuild() congruence closure | Done | Full memo drain + re-canonicalize |
 | Unified saturation loop | Done | All rule categories per iteration |
-| E-class analysis: make | Done | constant_value in add() |
-| E-class analysis: merge | Done | constant_value join in merge() |
-| E-class analysis: modify | Not yet | Could trigger merges from analysis (e.g., constant fold) |
+| E-class analysis: make | Done | constant_value and known_bits in add() |
+| E-class analysis: merge | Done | constant_value and known_bits join in merge() |
+| E-class analysis: modify | Done | Known-bits propagation + constant promotion |
 | Blowup protection | Done | max_classes limit |
 | Cost-based extraction | Done | Bottom-up DP |
