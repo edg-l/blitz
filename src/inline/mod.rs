@@ -97,6 +97,7 @@ fn clone_function(f: &Function) -> Function {
         egraph: f.egraph.clone(),
         stack_slots: f.stack_slots.clone(),
         noinline: f.noinline,
+        next_block_id: f.next_block_id,
     }
 }
 

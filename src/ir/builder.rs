@@ -761,6 +761,7 @@ impl FunctionBuilder {
             egraph: Some(self.egraph),
             stack_slots: self.stack_slots,
             noinline: false,
+            next_block_id: self.next_block_id,
         };
 
         Ok(func)

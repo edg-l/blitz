@@ -14,8 +14,8 @@
 - Block param const propagation for multi-predecessor case
 
 ### E-graph optimization (from docs/egraph-optimization-roadmap.md)
-- Medium impact: Distributivity/factoring (a*b + a*c = a*(b+c)), comparison folding, shift+mask optimization
-- High impact: Known-bits analysis (tracks provably-known 0/1 bits; enables redundant And removal, dead mask elimination)
+- Shift+mask optimization: And(Shr(a,n), mask) when shift zeroes masked bits
+- Type-width analysis: (min_bits, signed) per class; enables narrowing, avoids unnecessary extensions
 
 ### Infrastructure
 - CI pipeline / benchmarks / compile-time tracking

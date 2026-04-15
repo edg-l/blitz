@@ -43,6 +43,7 @@ use cfg::{
 };
 mod effectful;
 use effectful::lower_effectful_op;
+mod licm;
 mod lower;
 use lower::lower_block_pure_ops;
 mod precolor;
@@ -67,6 +68,8 @@ pub struct CompileOptions {
     /// general-purpose register. Set to `true` for debuggability or when a frame pointer is
     /// required (e.g. kernel code).
     pub force_frame_pointer: bool,
+    /// Enable Loop-Invariant Code Motion (LICM) before e-graph optimization.
+    pub enable_licm: bool,
     /// Enable function inlining before optimization.
     pub enable_inlining: bool,
     /// Maximum inlining depth (transitive inlining limit).
@@ -91,6 +94,7 @@ impl Default for CompileOptions {
             enable_nop_alignment: false,
             verbosity: Verbosity::Silent,
             force_frame_pointer: false,
+            enable_licm: false,
             enable_inlining: false,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -214,6 +218,14 @@ pub fn compile(
         .egraph
         .take()
         .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
+
+    // LICM: detect loops, insert preheaders, identify invariant classes.
+    let extra_roots = if opts.enable_licm {
+        licm::run_licm(&mut func, &mut egraph)
+    } else {
+        Default::default()
+    };
+
     let func = &func;
 
     // Build BlockId -> index map for O(1) lookups.
@@ -312,6 +324,10 @@ pub fn compile(
             if let Some(&cid) = block_param_map.get(&(block_id, pidx)) {
                 all_roots.push(cid);
             }
+        }
+        // Include LICM-hoisted roots for this block (invariant classes to emit here).
+        if let Some(hoisted) = extra_roots.get(&block_idx) {
+            all_roots.extend(hoisted.iter().copied());
         }
         all_roots.sort_by_key(|c| c.0);
         all_roots.dedup();

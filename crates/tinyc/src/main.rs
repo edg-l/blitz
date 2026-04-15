@@ -13,7 +13,9 @@ enum Mode {
 }
 
 fn usage() -> ! {
-    eprintln!("Usage: tinyc <input.c> [input2.c ...] [-o <output>] [-c] [--emit-ir] [--emit-asm]");
+    eprintln!(
+        "Usage: tinyc <input.c> [input2.c ...] [-o <output>] [-c] [--emit-ir] [--emit-asm] [--enable-licm]"
+    );
     exit(1);
 }
 
@@ -29,6 +31,7 @@ fn main() {
     let mut output_path = "a.out".to_string();
     let mut mode = Mode::Compile;
     let mut compile_only = false;
+    let mut enable_licm = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -39,6 +42,10 @@ fn main() {
             }
             "--emit-asm" => {
                 mode = Mode::EmitAsm;
+                i += 1;
+            }
+            "--enable-licm" => {
+                enable_licm = true;
                 i += 1;
             }
             "-c" => {
@@ -60,6 +67,12 @@ fn main() {
             }
         }
     }
+
+    let opts = blitz::compile::CompileOptions {
+        enable_inlining: true,
+        enable_licm,
+        ..Default::default()
+    };
 
     if input_paths.is_empty() {
         usage();
@@ -85,7 +98,7 @@ fn main() {
         Mode::EmitIr => {
             let input = &input_paths[0];
             let src = read_source(input);
-            let ir = tinyc::compile_to_ir(&src).unwrap_or_else(|e| {
+            let ir = tinyc::compile_to_ir_with_opts(&src, &opts).unwrap_or_else(|e| {
                 eprintln!("tinyc: {}: {}", input, e);
                 exit(1);
             });
@@ -94,7 +107,7 @@ fn main() {
         Mode::EmitAsm => {
             let input = &input_paths[0];
             let src = read_source(input);
-            let obj = tinyc::compile_to_object(&src).unwrap_or_else(|e| {
+            let obj = tinyc::compile_to_object_with_opts(&src, &opts).unwrap_or_else(|e| {
                 eprintln!("tinyc: {}: {}", input, e);
                 exit(1);
             });
@@ -113,10 +126,11 @@ fn main() {
         Mode::CompileOnly => {
             for input in &input_paths {
                 let src = read_source(input);
-                let obj_bytes = tinyc::compile_source(&src).unwrap_or_else(|e| {
-                    eprintln!("tinyc: {}: {}", input, e);
-                    exit(1);
-                });
+                let obj_bytes =
+                    tinyc::compile_source_with_opts(&src, &opts).unwrap_or_else(|e| {
+                        eprintln!("tinyc: {}: {}", input, e);
+                        exit(1);
+                    });
                 // Determine output path: use -o if given (single file), else derive from input
                 let dest = if output_path != "a.out" {
                     PathBuf::from(&output_path)
@@ -134,11 +148,12 @@ fn main() {
             // Compile each input to a temp object file
             for (idx, input) in input_paths.iter().enumerate() {
                 let src = read_source(input);
-                let obj_bytes = tinyc::compile_source(&src).unwrap_or_else(|e| {
-                    cleanup(&tmp_objs);
-                    eprintln!("tinyc: {}: {}", input, e);
-                    exit(1);
-                });
+                let obj_bytes =
+                    tinyc::compile_source_with_opts(&src, &opts).unwrap_or_else(|e| {
+                        cleanup(&tmp_objs);
+                        eprintln!("tinyc: {}: {}", input, e);
+                        exit(1);
+                    });
                 let tmp_obj = tmp_dir.join(format!("tinyc_{pid}_{idx}.o"));
                 write_file(&tmp_obj, &obj_bytes, input);
                 tmp_objs.push(tmp_obj);

@@ -106,6 +106,8 @@ pub struct Function {
     pub stack_slots: Vec<StackSlotData>,
     /// If true, the inliner should never inline this function.
     pub noinline: bool,
+    /// Next available BlockId for inserting new blocks (e.g. LICM preheaders).
+    pub next_block_id: BlockId,
 }
 
 impl std::fmt::Debug for Function {
@@ -134,7 +136,15 @@ impl Function {
             egraph: None,
             stack_slots: Vec::new(),
             noinline: false,
+            next_block_id: 0,
         }
+    }
+
+    /// Allocate a fresh BlockId for inserting new blocks.
+    pub fn fresh_block_id(&mut self) -> BlockId {
+        let id = self.next_block_id;
+        self.next_block_id += 1;
+        id
     }
 
     /// Returns `true` if every block is well-formed and there is at least one block.

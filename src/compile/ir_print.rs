@@ -20,6 +20,14 @@ pub fn compile_to_ir_string(
         .egraph
         .take()
         .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
+
+    // LICM: detect loops, insert preheaders, identify invariant classes.
+    let extra_roots = if opts.enable_licm {
+        super::licm::run_licm(&mut func, &mut egraph)
+    } else {
+        Default::default()
+    };
+
     let func = &func;
 
     // Phases 1-2: E-graph rewrites and cost-based extraction.
@@ -41,6 +49,10 @@ pub fn compile_to_ir_string(
             if let Some(&cid) = block_param_map.get(&(block_id, pidx)) {
                 all_roots.push(cid);
             }
+        }
+        // Include LICM-hoisted roots for this block.
+        if let Some(hoisted) = extra_roots.get(&block_idx) {
+            all_roots.extend(hoisted.iter().copied());
         }
         all_roots.sort_by_key(|c| c.0);
         all_roots.dedup();
