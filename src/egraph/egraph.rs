@@ -4,6 +4,7 @@ use smallvec::SmallVec;
 
 use crate::egraph::eclass::EClass;
 use crate::egraph::enode::ENode;
+use crate::egraph::known_bits::KnownBits;
 use crate::egraph::unionfind::UnionFind;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
@@ -109,11 +110,17 @@ impl EGraph {
         } else {
             None
         };
+        let known_bits = if let Op::Iconst(v, ref iconst_ty) = enode.op {
+            KnownBits::from_constant(v, iconst_ty)
+        } else {
+            KnownBits::unknown()
+        };
         let eclass = EClass {
             id: new_id,
             nodes: vec![enode.clone()],
             ty,
             constant_value,
+            known_bits,
         };
         self.classes.push(eclass);
         self.memo.insert(enode, new_id);
@@ -143,7 +150,7 @@ impl EGraph {
         let canonical = self.unionfind.union(a, b);
         let non_canonical = if canonical == a { b } else { a };
 
-        // Read constant values before mem::take moves nodes out of non-canonical
+        // Read constant values and known-bits before mem::take moves nodes out of non-canonical
         let cv_a = self.classes[a.0 as usize].constant_value.clone();
         let cv_b = self.classes[b.0 as usize].constant_value.clone();
         let joined_cv = match (cv_a, cv_b) {
@@ -158,6 +165,9 @@ impl EGraph {
             (Some(cv), None) | (None, Some(cv)) => Some(cv),
             (None, None) => None,
         };
+        let kb_a = self.classes[a.0 as usize].known_bits;
+        let kb_b = self.classes[b.0 as usize].known_bits;
+        let joined_kb = KnownBits::merge(&kb_a, &kb_b);
 
         // Move nodes from non-canonical into canonical
         // We need to split the borrow: collect the nodes first
@@ -165,6 +175,7 @@ impl EGraph {
             std::mem::take(&mut self.classes[non_canonical.0 as usize].nodes);
         self.classes[canonical.0 as usize].nodes.extend(moved_nodes);
         self.classes[canonical.0 as usize].constant_value = joined_cv;
+        self.classes[canonical.0 as usize].known_bits = joined_kb;
 
         self.worklist.push(canonical);
         canonical
@@ -229,6 +240,15 @@ impl EGraph {
         }
         let canon = self.unionfind.find_immutable(class_id);
         self.classes[canon.0 as usize].constant_value.clone()
+    }
+
+    /// Look up the known-bits analysis for an e-class.
+    pub fn get_known_bits(&self, class_id: ClassId) -> KnownBits {
+        if class_id == ClassId::NONE {
+            return KnownBits::unknown();
+        }
+        let canon = self.unionfind.find_immutable(class_id);
+        self.classes[canon.0 as usize].known_bits
     }
 
     /// Look up an e-class by its canonical id.

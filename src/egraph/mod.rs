@@ -8,6 +8,7 @@ pub mod egraph;
 pub mod enode;
 pub mod extract;
 pub mod isel;
+pub mod known_bits;
 pub mod phases;
 pub mod rules;
 pub mod strength;
