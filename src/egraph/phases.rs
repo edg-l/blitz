@@ -525,4 +525,266 @@ mod tests {
             "(param + 3) + 5 should equal param + 8 via reassociation"
         );
     }
+
+    // ── Cross-rule interaction tests ─────────────────────────────────────────
+    //
+    // These tests verify that the NEW rules (comparison folding, distributive
+    // factoring, known-bits) interact with EXISTING rules to produce
+    // optimizations that neither could achieve alone.
+
+    // Distributive factoring → strength reduction:
+    // Add(Mul(a, 4), Mul(a, 8)) → Mul(a, 12) → Add(Shl(a, 2), Shl(a, 3)) or LEA
+    #[test]
+    fn factoring_feeds_strength_reduction() {
+        let mut g = EGraph::new();
+        let opts = CompileOptions::default();
+
+        let a = g.add(ENode {
+            op: Op::Param(0, Type::I64),
+            children: smallvec![],
+        });
+        let c4 = iconst(&mut g, 4);
+        let c8 = iconst(&mut g, 8);
+
+        let mul4 = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![a, c4],
+        });
+        let mul8 = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![a, c8],
+        });
+        let add = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![mul4, mul8],
+        });
+
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // Factoring: Mul(a,4) + Mul(a,8) = Mul(a, 12)
+        let c12 = iconst(&mut g, 12);
+        let mul12 = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![a, c12],
+        });
+        assert_eq!(
+            g.find(add),
+            g.find(mul12),
+            "factoring should produce Mul(a, 12)"
+        );
+    }
+
+    // Comparison folding → algebraic simplification:
+    // Select(Icmp(x == x), Add(a, 0), garbage) → Add(a, 0) → a
+    #[test]
+    fn comparison_fold_exposes_algebraic() {
+        use crate::ir::condcode::CondCode;
+
+        let mut g = EGraph::new();
+        let opts = CompileOptions::default();
+
+        let x = g.add(ENode {
+            op: Op::Param(0, Type::I64),
+            children: smallvec![],
+        });
+        let a = g.add(ENode {
+            op: Op::Param(1, Type::I64),
+            children: smallvec![],
+        });
+        let zero = iconst(&mut g, 0);
+        let garbage = iconst(&mut g, 999);
+
+        let cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Eq),
+            children: smallvec![x, x],
+        });
+        let add_zero = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![a, zero],
+        });
+        let sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![cond, add_zero, garbage],
+        });
+
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // Comparison fold: Icmp(Eq, x, x) always true → Select = Add(a, 0)
+        // Algebraic identity: Add(a, 0) = a
+        // Combined: Select(...) = a
+        assert_eq!(
+            g.find(sel),
+            g.find(a),
+            "comparison fold + identity should reduce Select to a"
+        );
+    }
+
+    // Known-bits constant promotion → further constant folding:
+    // Add(Shl(1, 3), Shl(1, 2)) → known-bits promotes to Iconst(8) + Iconst(4)
+    // → constant folding: 8 + 4 = 12
+    #[test]
+    fn known_bits_promotion_feeds_constant_folding() {
+        let mut g = EGraph::new();
+        let opts = CompileOptions::default();
+
+        let c1 = iconst(&mut g, 1);
+        let c3 = iconst(&mut g, 3);
+        let c2 = iconst(&mut g, 2);
+
+        let shl3 = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![c1, c3],
+        });
+        let shl2 = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![c1, c2],
+        });
+        let add = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![shl3, shl2],
+        });
+
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // known-bits promotes Shl(1,3)=8 and Shl(1,2)=4 to constants
+        // then constant folding: 8 + 4 = 12
+        let c12 = iconst(&mut g, 12);
+        assert_eq!(
+            g.find(add),
+            g.find(c12),
+            "known-bits promotion + constant folding should yield 12"
+        );
+    }
+
+    // Strength reduction (div→shr) + known-bits → constant promotion:
+    // UDiv(Iconst(16), Iconst(4)) → Shr(16, 2) → known-bits → Iconst(4)
+    #[test]
+    fn div_strength_feeds_known_bits_promotion() {
+        let mut g = EGraph::new();
+        let opts = CompileOptions::default();
+
+        let c16 = iconst(&mut g, 16);
+        let c4 = iconst(&mut g, 4);
+
+        let udiv = g.add(ENode {
+            op: Op::UDiv,
+            children: smallvec![c16, c4],
+        });
+
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // Strength: UDiv(16, 4) → Shr(16, 2)
+        // Known-bits: Shr(Iconst(16), Iconst(2)) → all bits known → Iconst(4)
+        // (or direct constant folding of UDiv(16,4) = 4)
+        let expected = iconst(&mut g, 4);
+        assert_eq!(
+            g.find(udiv),
+            g.find(expected),
+            "UDiv(16, 4) should reduce to 4 via strength + known-bits or constant fold"
+        );
+    }
+
+    // Nested Select cascade: comparison folding on outer + inner Selects.
+    // Select(Icmp(a==a), Select(Icmp(3<5), x, y), z)
+    //   → Select(always-true, Select(...), z) = Select(Icmp(3<5), x, y)
+    //   → Select(always-true, x, y) = x
+    #[test]
+    fn nested_select_cascade_fold() {
+        use crate::ir::condcode::CondCode;
+
+        let mut g = EGraph::new();
+        let opts = CompileOptions::default();
+
+        let a = g.add(ENode {
+            op: Op::Param(0, Type::I64),
+            children: smallvec![],
+        });
+        let x = iconst(&mut g, 42);
+        let y = iconst(&mut g, 99);
+        let z = iconst(&mut g, 0);
+
+        let c3 = iconst(&mut g, 3);
+        let c5 = iconst(&mut g, 5);
+
+        // Inner: Select(Icmp(Slt, 3, 5), x, y) → x (since 3 < 5 is true)
+        let inner_cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Slt),
+            children: smallvec![c3, c5],
+        });
+        let inner_sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![inner_cond, x, y],
+        });
+
+        // Outer: Select(Icmp(Eq, a, a), inner_sel, z) → inner_sel (since a==a)
+        let outer_cond = g.add(ENode {
+            op: Op::Icmp(CondCode::Eq),
+            children: smallvec![a, a],
+        });
+        let outer_sel = g.add(ENode {
+            op: Op::Select,
+            children: smallvec![outer_cond, inner_sel, z],
+        });
+
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // Outer fold: Select(true, inner, z) = inner
+        // Inner fold: Select(true, x, y) = x = Iconst(42)
+        assert_eq!(
+            g.find(outer_sel),
+            g.find(x),
+            "nested Select cascade should fold to x=42"
+        );
+    }
+
+    // Factoring → strength reduction → addr mode:
+    // Add(base, Add(Mul(idx, 2), Mul(idx, 2))) → Mul(idx, 4) → addr scale 4
+    #[test]
+    fn factoring_to_strength_to_addr_mode() {
+        let mut g = EGraph::new();
+        let opts = CompileOptions::default();
+
+        let base = g.add(ENode {
+            op: Op::Param(0, Type::I64),
+            children: smallvec![],
+        });
+        let idx = g.add(ENode {
+            op: Op::Param(1, Type::I64),
+            children: smallvec![],
+        });
+        let c2 = iconst(&mut g, 2);
+
+        let mul_a = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![idx, c2],
+        });
+        let mul_b = g.add(ENode {
+            op: Op::Mul,
+            children: smallvec![idx, c2],
+        });
+        let inner_add = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![mul_a, mul_b],
+        });
+        let outer_add = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![base, inner_add],
+        });
+
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // Factoring: Mul(idx,2) + Mul(idx,2) = Mul(idx, 4)
+        // Strength: Mul(idx, 4) = Shl(idx, 2)
+        // Addr mode: Add(base, Shl(idx, 2)) → Addr{scale:4} or LEA3{scale:4}
+        let outer_canon = g.find(outer_add);
+        let class = g.class(outer_canon);
+        let has_scale4 = class
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, Op::Addr { scale: 4, .. } | Op::X86Lea3 { scale: 4 }));
+        assert!(
+            has_scale4,
+            "factoring + strength + addr mode should produce scale-4 addressing"
+        );
+    }
 }
