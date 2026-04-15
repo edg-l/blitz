@@ -491,10 +491,6 @@ impl FunctionBuilder {
 
     /// Emit a load from `addr` of type `ty`. Returns the loaded value.
     pub fn load(&mut self, addr: Value, ty: Type) -> Value {
-        // Validate that a current block is set before we proceed.
-        let _block_id = self
-            .current_block
-            .expect("no current block set; call set_block first");
         // Compute a unique ID so that two loads with the same type in the same
         // function get distinct e-classes (the egraph memo deduplicates by op+children).
         let uid = self.next_uid;

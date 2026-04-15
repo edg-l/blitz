@@ -212,14 +212,14 @@ pub enum Op {
 
     // ── Load result placeholder ───────────────────────────────────────────────
     /// Placeholder node representing the result of a Load effectful op.
-    /// The `u32` is a unique identifier (block_id * 1000 + load_index) to
+    /// The `u32` is a globally unique ID (from `FunctionBuilder::next_uid`) to
     /// ensure each load gets a distinct e-class. Has no children.
     LoadResult(u32, Type),
 
     // ── Call result placeholder ───────────────────────────────────────────────
     /// Placeholder node representing a return value of a Call effectful op.
-    /// - `u32` index: which return value (0 = first, 1 = second, ...).
-    /// - `Type`: the type of this return value.
+    /// The `u32` is a globally unique ID (from `FunctionBuilder::next_uid`);
+    /// the `Type` is the type of this return value.
     ///
     /// Has no children. Cost is zero (instruction emitted by effectful lowering).
     CallResult(u32, Type),

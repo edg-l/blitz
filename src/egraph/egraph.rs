@@ -113,8 +113,6 @@ impl EGraph {
             id: new_id,
             nodes: vec![enode.clone()],
             ty,
-            best_cost: f64::INFINITY,
-            best_node: None,
             constant_value,
         };
         self.classes.push(eclass);
