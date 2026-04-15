@@ -3,7 +3,7 @@ use crate::egraph::algebraic::apply_algebraic_rules;
 use crate::egraph::distributive::apply_distributive_rules;
 use crate::egraph::egraph::EGraph;
 use crate::egraph::isel::apply_isel_rules;
-use crate::egraph::known_bits::propagate_known_bits;
+use crate::egraph::known_bits::{apply_known_bits_rules, propagate_known_bits};
 use crate::egraph::strength::apply_strength_reduction;
 
 /// Options controlling equality saturation.
@@ -36,6 +36,7 @@ pub fn run_phases(egraph: &mut EGraph, opts: &CompileOptions) -> Result<(), Stri
         changed |= apply_isel_rules(egraph);
         changed |= apply_addr_mode_rules(egraph);
         changed |= propagate_known_bits(egraph);
+        changed |= apply_known_bits_rules(egraph);
         egraph.rebuild();
         check_blowup(egraph, opts, iter)?;
         if !changed {

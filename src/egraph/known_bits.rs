@@ -1,4 +1,7 @@
+use smallvec::smallvec;
+
 use crate::egraph::egraph::{EGraph, snapshot_all};
+use crate::egraph::enode::ENode;
 use crate::ir::op::Op;
 use crate::ir::types::Type;
 
@@ -306,6 +309,93 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
             }
         }
     }
+    changed
+}
+
+/// Apply optimization rules that exploit known-bits information.
+/// - Redundant And removal: And(x, mask) = x when mask doesn't clear any possibly-set bits
+/// - Known-constant promotion: if all bits of a class are known, add an Iconst node
+pub fn apply_known_bits_rules(egraph: &mut EGraph) -> bool {
+    let snaps = snapshot_all(egraph);
+    let mut changed = false;
+
+    for snap in &snaps {
+        match &snap.op {
+            // Redundant And removal: And(x, mask_const) where the mask preserves all
+            // possibly-set bits of x (i.e., bits outside the mask are already known-zero in x).
+            Op::And if snap.children.len() == 2 => {
+                // Try both orderings: And(x, const) and And(const, x)
+                let (val_child, const_child) = if egraph.get_constant(snap.children[1]).is_some() {
+                    (snap.children[0], snap.children[1])
+                } else if egraph.get_constant(snap.children[0]).is_some() {
+                    (snap.children[1], snap.children[0])
+                } else {
+                    continue;
+                };
+
+                if let Some((mask_val, _)) = egraph.get_constant(const_child) {
+                    let mask = mask_val as u64;
+                    let x_kb = egraph.get_known_bits(val_child);
+                    let canon = egraph.unionfind.find_immutable(snap.class_id);
+                    let ty = &egraph.class(canon).ty;
+
+                    if !ty.is_integer() {
+                        continue;
+                    }
+                    let ty_mask = type_mask(ty);
+
+                    // If all bits outside the mask are known-zero in x,
+                    // then And(x, mask) = x (the mask is redundant).
+                    // Condition: (~mask & ~x.known_zeros & ty_mask) == 0
+                    // i.e., every bit that the mask would clear is already known-zero.
+                    let bits_outside_mask = !mask & ty_mask;
+                    if bits_outside_mask != 0 && (bits_outside_mask & !x_kb.known_zeros) == 0 {
+                        let val_canon = egraph.unionfind.find_immutable(val_child);
+                        let and_canon = egraph.unionfind.find_immutable(snap.class_id);
+                        if and_canon != val_canon {
+                            egraph.merge(snap.class_id, val_child);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Known-constant promotion: if all bits are known, add Iconst and merge.
+    // Do this in a separate pass to avoid interfering with the And removal above.
+    let snaps2 = snapshot_all(egraph);
+    // Collect classes we've already seen to avoid processing the same class multiple times.
+    let mut seen = std::collections::HashSet::new();
+    for snap in &snaps2 {
+        let canon = egraph.unionfind.find_immutable(snap.class_id);
+        if !seen.insert(canon) {
+            continue;
+        }
+        let ty = egraph.class(canon).ty.clone();
+        if !ty.is_integer() {
+            continue;
+        }
+        // Skip if the class already has a constant value
+        if egraph.get_constant(canon).is_some() {
+            continue;
+        }
+        let kb = egraph.classes[canon.0 as usize].known_bits;
+        if let Some(val) = kb.is_constant(&ty) {
+            let iconst_id = egraph.add(ENode {
+                op: Op::Iconst(val, ty),
+                children: smallvec![],
+            });
+            let iconst_canon = egraph.unionfind.find_immutable(iconst_id);
+            let class_canon = egraph.unionfind.find_immutable(canon);
+            if iconst_canon != class_canon {
+                egraph.merge(canon, iconst_id);
+                changed = true;
+            }
+        }
+    }
+
     changed
 }
 
@@ -646,5 +736,125 @@ mod tests {
         assert_eq!(kb.known_ones & upper_mask, upper_mask);
         // Lower 8 bits: all ones
         assert_eq!(kb.known_ones & 0xFF, 0xFF);
+    }
+
+    #[test]
+    fn redundant_and_after_zext() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::egraph::phases::{CompileOptions, run_phases};
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        let param = g.add(ENode {
+            op: Op::Param(0, Type::I8),
+            children: smallvec![],
+        });
+        let zext = g.add(ENode {
+            op: Op::Zext(Type::I64),
+            children: smallvec![param],
+        });
+        let mask = g.add(ENode {
+            op: Op::Iconst(0xFF, Type::I64),
+            children: smallvec![],
+        });
+        let and = g.add(ENode {
+            op: Op::And,
+            children: smallvec![zext, mask],
+        });
+
+        // Run full saturation to propagate known bits and apply rules
+        let opts = CompileOptions::default();
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // The And should be eliminated: And(Zext(I64, param_i8), 0xFF) = Zext(I64, param_i8)
+        // because Zext already zeroed upper bits, and 0xFF keeps all 8 lower bits.
+        assert_eq!(
+            g.find(and),
+            g.find(zext),
+            "And(Zext(I64, param_i8), 0xFF) should equal Zext(I64, param_i8)"
+        );
+    }
+
+    #[test]
+    fn known_constant_from_or_chain() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::egraph::phases::{CompileOptions, run_phases};
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        // Build: Shl(Iconst(1), Iconst(3)) -- this is 8
+        let one = g.add(ENode {
+            op: Op::Iconst(1, Type::I64),
+            children: smallvec![],
+        });
+        let three = g.add(ENode {
+            op: Op::Iconst(3, Type::I64),
+            children: smallvec![],
+        });
+        let shl = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![one, three],
+        });
+
+        let opts = CompileOptions::default();
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // After propagation + constant promotion, Shl(1, 3) should be in same class as Iconst(8)
+        let eight = g.add(ENode {
+            op: Op::Iconst(8, Type::I64),
+            children: smallvec![],
+        });
+        assert_eq!(
+            g.find(shl),
+            g.find(eight),
+            "Shl(1, 3) should be promoted to Iconst(8) via known-bits"
+        );
+    }
+
+    #[test]
+    fn dead_mask_elimination() {
+        use crate::egraph::egraph::EGraph;
+        use crate::egraph::enode::ENode;
+        use crate::egraph::phases::{CompileOptions, run_phases};
+        use crate::ir::op::Op;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        // And(Shl(1, 4), 0xFF) -- Shl(1,4) = 0x10, And with 0xFF doesn't change it
+        let one = g.add(ENode {
+            op: Op::Iconst(1, Type::I64),
+            children: smallvec![],
+        });
+        let four = g.add(ENode {
+            op: Op::Iconst(4, Type::I64),
+            children: smallvec![],
+        });
+        let shl = g.add(ENode {
+            op: Op::Shl,
+            children: smallvec![one, four],
+        });
+        let mask = g.add(ENode {
+            op: Op::Iconst(0xFF, Type::I64),
+            children: smallvec![],
+        });
+        let and = g.add(ENode {
+            op: Op::And,
+            children: smallvec![shl, mask],
+        });
+
+        let opts = CompileOptions::default();
+        run_phases(&mut g, &opts).expect("no blowup");
+
+        // Shl(1,4) = 0x10, And(0x10, 0xFF) = 0x10, so And should merge with Shl
+        // (or both merge with Iconst(16))
+        assert_eq!(
+            g.find(and),
+            g.find(shl),
+            "And(Shl(1,4), 0xFF) should equal Shl(1,4)"
+        );
     }
 }
