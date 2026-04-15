@@ -79,6 +79,10 @@ fn walk_expr(sexpr: &SpannedExpr, set: &mut HashSet<String>) {
             // ++x / --x / x++ / x-- may need address if x is addressed
             walk_expr(inner, set);
         }
+        Expr::Comma(left, right) => {
+            walk_expr(left, set);
+            walk_expr(right, set);
+        }
     }
 }
 

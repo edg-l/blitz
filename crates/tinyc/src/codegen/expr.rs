@@ -7,7 +7,7 @@ use crate::error::TinyErr;
 use crate::lexer::Span;
 
 use super::structs::{emit_struct_copy, resolve_field, type_byte_size};
-use super::{FnCtx, err};
+use super::{err, FnCtx};
 
 impl<'b> FnCtx<'b> {
     /// Emit pointer +/- integer arithmetic: scale the integer by pointee size.
@@ -434,6 +434,10 @@ impl<'b> FnCtx<'b> {
             Expr::PostIncrement(inner) | Expr::PostDecrement(inner) => {
                 let is_inc = matches!(&sexpr.expr, Expr::PostIncrement(_));
                 self.compile_inc_dec(inner, is_inc, false, span)
+            }
+            Expr::Comma(left, right) => {
+                self.compile_expr(left)?;
+                self.compile_expr(right)
             }
         }
     }

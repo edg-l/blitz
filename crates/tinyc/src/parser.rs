@@ -856,6 +856,17 @@ impl Parser {
                 continue;
             }
 
+            // Comma operator: left-to-right sequencing, returns rightmost value (lowest precedence)
+            if self.at(Token::Comma) {
+                if min_bp > 0 {
+                    break;
+                }
+                self.advance();
+                let rhs = self.parse_expr_bp(0)?;
+                lhs = SpannedExpr::new(Expr::Comma(Box::new(lhs), Box::new(rhs)), op_span);
+                continue;
+            }
+
             // Infix binary operators.
             if let Some((l_bp, r_bp)) = Self::infix_bp(self.peek()) {
                 if l_bp <= min_bp {
@@ -1002,7 +1013,8 @@ impl Parser {
                     self.advance();
                     let mut args = Vec::new();
                     while !self.at(Token::RParen) {
-                        args.push(self.parse_expr()?);
+                        // Parse at precedence 1 to skip comma operator (comma in arg list is a separator)
+                        args.push(self.parse_expr_bp(1)?);
                         if self.at(Token::Comma) {
                             self.advance();
                         } else {

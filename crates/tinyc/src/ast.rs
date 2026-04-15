@@ -364,6 +364,7 @@ pub enum Expr {
     PreDecrement(Box<SpannedExpr>),
     PostIncrement(Box<SpannedExpr>),
     PostDecrement(Box<SpannedExpr>),
+    Comma(Box<SpannedExpr>, Box<SpannedExpr>),
 }
 
 #[derive(Debug, Clone, Copy)]
