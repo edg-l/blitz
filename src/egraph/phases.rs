@@ -1,5 +1,6 @@
 use crate::egraph::addr_mode::apply_addr_mode_rules;
 use crate::egraph::algebraic::apply_algebraic_rules;
+use crate::egraph::distributive::apply_distributive_rules;
 use crate::egraph::egraph::EGraph;
 use crate::egraph::isel::apply_isel_rules;
 use crate::egraph::strength::apply_strength_reduction;
@@ -30,6 +31,7 @@ pub fn run_phases(egraph: &mut EGraph, opts: &CompileOptions) -> Result<(), Stri
         let mut changed = false;
         changed |= apply_algebraic_rules(egraph);
         changed |= apply_strength_reduction(egraph);
+        changed |= apply_distributive_rules(egraph, opts.max_classes);
         changed |= apply_isel_rules(egraph);
         changed |= apply_addr_mode_rules(egraph);
         egraph.rebuild();

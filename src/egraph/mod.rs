@@ -1,6 +1,7 @@
 pub mod addr_mode;
 pub mod algebraic;
 pub mod cost;
+pub mod distributive;
 pub mod eclass;
 #[allow(clippy::module_inception)]
 pub mod egraph;
