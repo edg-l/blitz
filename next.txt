@@ -3,7 +3,6 @@
 ### Language features (tinyc)
 - switch/case
 - enum support
-- Comma operator
 - Float globals and struct fields
 
 ### Backend optimization
