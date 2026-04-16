@@ -18,66 +18,74 @@ Inlining -> LICM (CFG transform on &mut Function + &mut EGraph) -> E-graph optim
 - [x] Create `src/compile/licm.rs` with `ExtraRoots` type and stub `run_licm()`
 - [x] Checkpoint: cargo check + cargo test + lit tests all pass
 
-## Phase 2: Loop Detection
+## Phase 2: Loop Detection [DONE]
 
-- [ ] `detect_back_edges(func, rpo, idom) -> Vec<(usize, usize)>` in `licm.rs`. Back-edge = edge where target dominates source (proper dominator-based check using `dominates()` from `cfg.rs`).
-- [ ] `collect_loop_body(header_idx, back_edge_src, preds) -> BTreeSet<usize>`. Backward predecessor walk from back-edge source to header.
-- [ ] `build_predecessor_map(func) -> (Vec<Vec<usize>>, BTreeMap<BlockId, usize>)`. Returns `(preds, id_to_idx)`.
-- [ ] `LoopInfo { header_idx, body: BTreeSet<usize>, back_edges: Vec<(usize, usize)> }` struct.
-- [ ] `detect_loops(func) -> Vec<LoopInfo>`. Calls compute_rpo, compute_idom, detect_back_edges, groups by header, union of bodies. Sorted by header RPO position (outermost first).
-- [ ] Unit tests: simple while loop, nested loops, no loops, self-loop.
-- [ ] Checkpoint: cargo test passes.
+- [x] `detect_back_edges(func, rpo, idom) -> Vec<(usize, usize)>` in `licm.rs`. Back-edge = edge where target dominates source (proper dominator-based check using `dominates()` from `cfg.rs`).
+- [x] `collect_loop_body(header_idx, back_edge_src, preds) -> BTreeSet<usize>`. Backward predecessor walk from back-edge source to header.
+- [x] `build_predecessor_map(func) -> (Vec<Vec<usize>>, BTreeMap<BlockId, usize>)`. Returns `(preds, id_to_idx)`.
+- [x] `LoopInfo { header_idx, body: BTreeSet<usize> }` struct.
+- [x] `detect_loops(func) -> Vec<LoopInfo>`. Calls compute_rpo, compute_idom, detect_back_edges, groups by header, union of bodies. Sorted by header RPO position (outermost first).
+- [x] Unit tests: simple while loop, nested loops, no loops, self-loop (11 tests).
+- [x] Checkpoint: cargo test passes.
 
-## Phase 3: Preheader Insertion
+## Phase 3: Preheader Insertion [DONE]
 
-- [ ] `insert_preheader(func, egraph, loop_info, id_to_idx) -> usize`. Allocates fresh BlockId via `func.fresh_block_id()`. Creates BlockParam e-graph nodes via `egraph.add()` for preheader params (same param_types as header). Preheader Jump targets the header, forwarding its BlockParam ClassIds. Redirects non-back-edge predecessors to the preheader.
-- [ ] `redirect_predecessors(func, old_target, new_target, pred_indices)`. Rewrites Jump/Branch terminators.
-- [ ] Wire into `run_licm()`: for each loop (innermost-first), call `insert_preheader()`.
-- [ ] Update `run_licm` signature: `pub fn run_licm(func: &mut Function, egraph: &mut EGraph) -> ExtraRoots` (already done).
-- [ ] Unit tests: preheader inserted correctly, predecessors redirected, param_types match header.
-- [ ] Checkpoint: cargo test passes.
+- [x] `insert_preheader(func, egraph, loop_info, id_to_idx) -> usize`. Allocates fresh BlockId via `func.fresh_block_id()`. Creates BlockParam e-graph nodes via `egraph.add()` for preheader params (same param_types as header). Preheader Jump targets the header, forwarding its BlockParam ClassIds. Redirects non-back-edge predecessors to the preheader.
+- [x] `redirect_predecessors(func, old_target, new_target, pred_indices)`. Rewrites Jump/Branch terminators.
+- [x] Entry block as header edge case: returns header_idx without mutation.
+- [x] Unit tests: preheader inserted correctly, predecessors redirected, param_types match header, entry-block-as-header (4 tests).
+- [x] Checkpoint: cargo test passes.
 
-## Phase 4: Invariant Detection
+## Phase 4: Invariant Detection [DONE]
 
-- [ ] `is_class_loop_invariant(class_id, egraph, loop_body, header_id, loop_defined_classes, cache) -> bool`. A class is invariant if: not a BlockParam of any loop body block, not effectful (LoadResult/CallResult/StoreBarrier/VoidCallBarrier), and all e-graph node children are recursively invariant.
-- [ ] `collect_loop_defined_classes(func, egraph, loop_body) -> BTreeSet<ClassId>`. All ClassIds from effectful ops in loop body blocks (use `push_block_class_ids` pattern) + BlockParam ClassIds for loop body blocks. Canonicalize via `egraph.unionfind.find_immutable()`.
-- [ ] `find_invariant_classes(func, egraph, loop_info) -> Vec<ClassId>`. Fixed-point: collect candidate ClassIds referenced by loop body, check each with `is_class_loop_invariant`.
-- [ ] Unit tests: iconst is invariant, add(param, iconst) is invariant, add(block_param_of_header, iconst) is NOT, LoadResult is NOT.
-- [ ] Checkpoint: cargo test passes.
+- [x] `collect_loop_defined_classes(func, egraph, loop_body) -> BTreeSet<ClassId>`. Collects Load results, Call results, and BlockParam ClassIds for loop body blocks. Only outputs (not operands/uses).
+- [x] `is_class_loop_invariant(class_id, egraph, loop_defined, cache) -> bool`. A class is invariant if: not in loop_defined, and at least one node is non-effectful with all children recursively invariant. Memoized via HashMap cache.
+- [x] `find_invariant_classes(func, egraph, loop_info) -> Vec<ClassId>`. Transitive e-graph walk from effectful op operands; collects all invariant classes reachable from the loop body.
+- [x] `collect_effectful_operands(func, block_indices) -> Vec<ClassId>`. Helper for scanning effectful op operands.
+- [x] Unit tests: iconst invariant, add(param, iconst) invariant, block_param NOT invariant, LoadResult NOT invariant, add with loop-defined child NOT invariant (5 tests).
+- [x] Checkpoint: cargo test passes.
 
-## Phase 5: Hoisting and Integration
+## Phase 5: Hoisting and Integration [DONE]
 
-- [ ] Wire `find_invariant_classes()` into `run_licm()`. For each loop with a preheader, add invariant ClassIds to `ExtraRoots[preheader_idx]`.
-- [ ] ExtraRoots integration already done in compile() and compile_to_ir_string() (Phase 1).
-- [ ] LICM tracing: `BLITZ_DEBUG=licm` logs detected loops, invariant count, hoisted classes.
-- [ ] Edge cases: no loops (early return), entry block as header (skip preheader insertion).
-- [ ] Checkpoint: cargo test passes.
+- [x] Wire `find_invariant_classes()` into `run_licm()`. For each loop with a preheader, add invariant ClassIds to `ExtraRoots[preheader_idx]`.
+- [x] ExtraRoots integration already done in compile() and compile_to_ir_string() (Phase 1).
+- [x] LICM tracing: `BLITZ_DEBUG=licm` logs detected loops, per-loop stats, total hoisted count.
+- [x] Edge cases: no loops (early return), entry block as header (skip preheader insertion).
+- [x] Checkpoint: cargo test passes.
 
-## Phase 6: Lit Tests
+## Phase 6: Lit Tests [DONE]
 
-- [ ] `tests/lit/licm/simple_hoist.c` - pure computation hoisted before loop
-- [ ] `tests/lit/licm/no_hoist_load.c` - effectful op stays in loop
-- [ ] `tests/lit/licm/no_hoist_loop_dep.c` - loop-carried dep stays in loop
-- [ ] `tests/lit/licm/nested_loop.c` - hoist to outermost preheader
-- [ ] `tests/lit/licm/correctness_sum.c` - end-to-end OUTPUT test
-- [ ] Full regression suite (all existing lit tests pass with LICM off)
+- [x] `tests/lit/licm/simple_hoist.c` - pure computation hoisted before loop, correctness (EXIT: 70)
+- [x] `tests/lit/licm/no_hoist_load.c` - effectful ops stay in loop, correctness (EXIT: 55)
+- [x] `tests/lit/licm/no_hoist_loop_dep.c` - loop-carried dep stays in loop, correctness (EXIT: 55)
+- [x] `tests/lit/licm/nested_loop.c` - nested loops handled correctly (EXIT: 30)
+- [x] `tests/lit/licm/correctness_sum.c` - end-to-end with inlined function (OUTPUT: pass)
+- [x] Full regression suite: 333 lit tests pass, 591 unit + 61 codegen pass
 
-## Phase 7: Polish
+## Phase 7: Polish [DONE]
 
-- [ ] Consider enabling by default (only if no regressions)
-- [ ] Doc comments, clippy, fmt
-- [ ] Final audit: every task implemented, no stubs
+- [x] Clippy clean (collapsed nested if-let, removed unused `back_edges` field)
+- [x] cargo fmt applied
+- [x] Final audit: every task implemented, no stubs
+- [x] Fixed inliner bug: `next_block_id` not updated after `inline_call_site` (caused BlockId collision with LICM)
+- [ ] Consider enabling by default (deferred; opt-in via `--enable-licm` for now)
 
 ## Key Design Decisions
 
 - **`&mut EGraph` passed to LICM** so we can `egraph.add()` BlockParam nodes for preheaders
 - **Borrow checker solution**: take egraph out of func first, pass both separately
 - **Hoisting = extra roots**: invariant ClassIds added to preheader's root list during linearization; RPO ordering ensures they emit before the loop body
-- **Invariant check walks raw e-graph children** (not extraction); pre-optimization, each class typically has one node
+- **Invariant check walks raw e-graph children transitively** (not extraction); pre-optimization, each class typically has one node
 - **Loop bodies stored as `BTreeSet<usize>`** (block indices); stable because preheaders are appended (no index shifts)
 - **Effectful ops checked**: LoadResult, CallResult, StoreBarrier, VoidCallBarrier
 - **Preheader BlockParam nodes**: get distinct ClassIds via `egraph.add()` with unique `(block_id, param_idx)` tuples, preventing e-graph merging with header params
 - **Back-edge detection**: dominator-based (target dominates source), not the simpler index-comparison heuristic in `compute_loop_depths`
+- **loop_defined = only outputs**: Load results, Call results, BlockParams. Operands (addr, val, cond, args) are uses, not definitions, and may be loop-invariant.
+- **Transitive candidate walk**: `find_invariant_classes` walks e-graph children transitively from effectful op operands to find invariant subexpressions (e.g., `a+b` where `a` and `b` are loop-invariant params).
+
+## Bugs Found and Fixed
+
+- **Inliner `next_block_id` bug**: `inline_call_site` in `src/inline/transform.rs` did not update `caller.next_block_id` after appending remapped + continuation blocks. Fixed by adding `caller.next_block_id = caller.next_block_id.max(cont_id + 1)` after block insertion. This caused BlockId collisions when LICM's `fresh_block_id()` was called after inlining.
 
 ## Edge Cases
 
@@ -90,11 +98,13 @@ Inlining -> LICM (CFG transform on &mut Function + &mut EGraph) -> E-graph optim
 
 ## Files
 
-- `src/compile/licm.rs` - all LICM logic (loop detection, preheader insertion, invariant analysis)
+- `src/compile/licm.rs` - all LICM logic (loop detection, preheader insertion, invariant analysis, hoisting)
 - `src/compile/mod.rs` - pipeline integration, CompileOptions
 - `src/compile/ir_print.rs` - IR output pipeline integration
 - `src/ir/function.rs` - `next_block_id` field, `fresh_block_id()` helper
 - `src/ir/builder.rs` - populate `next_block_id` in finalize()
+- `src/inline/transform.rs` - fix `next_block_id` after inlining
+- `src/trace.rs` - added `licm` debug category
 - `crates/tinyc/src/main.rs` - `--enable-licm` CLI flag
 - `crates/tinyc/src/lib.rs` - `_with_opts` function variants
-- `tests/lit/licm/*.c` - lit tests
+- `tests/lit/licm/*.c` - 5 lit tests

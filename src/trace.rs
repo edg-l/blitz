@@ -43,14 +43,15 @@ fn config() -> &'static BlitzDebugConfig {
                     let part = part.trim().to_ascii_lowercase();
                     match part.as_str() {
                         "all" => {
-                            set.extend(["sched", "liveness", "regalloc", "asm"]);
+                            set.extend(["sched", "liveness", "regalloc", "asm", "licm"]);
                         }
-                        "sched" | "liveness" | "regalloc" | "asm" => {
+                        "sched" | "liveness" | "regalloc" | "asm" | "licm" => {
                             set.insert(match part.as_str() {
                                 "sched" => "sched",
                                 "liveness" => "liveness",
                                 "regalloc" => "regalloc",
                                 "asm" => "asm",
+                                "licm" => "licm",
                                 _ => unreachable!(),
                             });
                         }
@@ -58,7 +59,7 @@ fn config() -> &'static BlitzDebugConfig {
                         other => {
                             eprintln!(
                                 "warning: unknown BLITZ_DEBUG category '{other}', \
-                                 valid: sched, liveness, regalloc, asm, all"
+                                 valid: sched, liveness, regalloc, asm, licm, all"
                             );
                         }
                     }

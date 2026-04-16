@@ -215,6 +215,9 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
     // Append remapped blocks and continuation block to caller.
     caller.blocks.extend(remapped_blocks);
     caller.blocks.push(cont_block);
+
+    // Update next_block_id so fresh_block_id() won't collide with any existing block.
+    caller.next_block_id = caller.next_block_id.max(cont_id + 1);
 }
 
 /// Replace ClassIds in an effectful op according to a substitution map.
