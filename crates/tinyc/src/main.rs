@@ -2,6 +2,7 @@
 //        [-O0] [-O1] [--enable-licm] [--disable-licm]
 //        [--enable-inlining] [--disable-inlining]
 //        [--enable-peephole] [--disable-peephole]
+//        [--enable-dce] [--disable-dce]
 // Compiles one or more .c files to a native executable via Blitz backend + ld/cc linker.
 
 use std::io::Write;
@@ -22,6 +23,7 @@ fn usage() -> ! {
     eprintln!("       [-O0] [-O1] [--enable-licm] [--disable-licm]");
     eprintln!("       [--enable-inlining] [--disable-inlining]");
     eprintln!("       [--enable-peephole] [--disable-peephole]");
+    eprintln!("       [--enable-dce] [--disable-dce]");
     exit(1);
 }
 
@@ -41,6 +43,7 @@ fn main() {
     let mut override_licm: Option<bool> = None;
     let mut override_inlining: Option<bool> = None;
     let mut override_peephole: Option<bool> = None;
+    let mut override_dce: Option<bool> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -85,6 +88,14 @@ fn main() {
                 override_peephole = Some(false);
                 i += 1;
             }
+            "--enable-dce" => {
+                override_dce = Some(true);
+                i += 1;
+            }
+            "--disable-dce" => {
+                override_dce = Some(false);
+                i += 1;
+            }
             "-c" => {
                 compile_only = true;
                 i += 1;
@@ -117,6 +128,9 @@ fn main() {
     }
     if let Some(v) = override_peephole {
         opts.enable_peephole = v;
+    }
+    if let Some(v) = override_dce {
+        opts.enable_dce = v;
     }
 
     if input_paths.is_empty() {

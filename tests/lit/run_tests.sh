@@ -24,11 +24,12 @@ total=0
 run_check_test() {
     local file="$1"
     local mode="$2"
+    local extra_flags="$3"
     local name
     name="$(echo "$file" | sed "s|^$SCRIPT_DIR/||")"
     total=$((total + 1))
 
-    if "$TINYC" "$file" "$mode" 2>&1 | "$BLITZTEST" "$file" 2>/dev/null; then
+    if "$TINYC" "$file" $extra_flags "$mode" 2>&1 | "$BLITZTEST" "$file" 2>/dev/null; then
         passed=$((passed + 1))
         printf "."
     else
@@ -125,6 +126,7 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
     mode=""
 
     extra_files=""
+    check_flags=""
     file_dir="$(dirname "$file")"
 
     while IFS= read -r line; do
@@ -141,9 +143,12 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
                 ;;
             *"// RUN:"*"--emit-ir"*)
                 mode="--emit-ir"
+                # Extract compiler flags (--enable-X, --disable-X, -O0, -O1) from the RUN line.
+                check_flags="$(echo "$line" | sed 's|.*// RUN:||' | grep -oE '\-\-(enable|disable)-[a-z]+|-O[0-9]' | tr '\n' ' ')"
                 ;;
             *"// RUN:"*"--emit-asm"*)
                 mode="--emit-asm"
+                check_flags="$(echo "$line" | sed 's|.*// RUN:||' | grep -oE '\-\-(enable|disable)-[a-z]+|-O[0-9]' | tr '\n' ' ')"
                 ;;
             *"// EXTRA_FILE:"*)
                 ef="$(echo "$line" | sed 's/.*\/\/ EXTRA_FILE: *//')"
@@ -153,7 +158,7 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
     done < "$file"
 
     if [ "$has_check" = true ] && [ -n "$mode" ]; then
-        run_check_test "$file" "$mode"
+        run_check_test "$file" "$mode" "$check_flags"
     fi
     if [ "$has_exit" = true ]; then
         run_exit_test "$file" "$exit_code" $extra_files

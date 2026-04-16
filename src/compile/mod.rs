@@ -43,6 +43,7 @@ use cfg::{
 };
 mod effectful;
 use effectful::lower_effectful_op;
+mod dce;
 mod licm;
 mod lower;
 use lower::lower_block_pure_ops;
@@ -82,6 +83,8 @@ pub struct CompileOptions {
     pub force_frame_pointer: bool,
     /// Enable Loop-Invariant Code Motion (LICM) before e-graph optimization.
     pub enable_licm: bool,
+    /// Enable Dead Code Elimination (unreachable blocks, constant branches, dead loads).
+    pub enable_dce: bool,
     /// Enable function inlining before optimization.
     pub enable_inlining: bool,
     /// Maximum inlining rescan iterations per caller function. Each rescan inlines one level
@@ -117,6 +120,7 @@ impl CompileOptions {
             verbosity: Verbosity::Silent,
             force_frame_pointer: false,
             enable_licm: false,
+            enable_dce: false,
             enable_inlining: false,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -134,6 +138,7 @@ impl CompileOptions {
             verbosity: Verbosity::Silent,
             force_frame_pointer: false,
             enable_licm: true,
+            enable_dce: true,
             enable_inlining: true,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -272,22 +277,9 @@ pub fn compile(
         Default::default()
     };
 
-    let func = &func;
-
-    // Build BlockId -> index map for O(1) lookups.
-    let block_id_to_idx: HashMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
-
-    // Detect whether this function contains any call instructions.
-    // This is needed for frame layout decisions (leaf detection, red zone eligibility).
-    let has_calls = func_has_calls(func);
-
     // Phases 1-2: E-graph rewrites and cost-based extraction.
-    let (block_param_map, extraction) = run_egraph_and_extract(func, &mut egraph, opts)?;
+    // Temporarily borrow func for extraction; DCE2 needs &mut func afterwards.
+    let (block_param_map, extraction) = run_egraph_and_extract(&func, &mut egraph, opts)?;
 
     if let Some(s) = sink.as_mut() {
         s.phase_stats(
@@ -303,6 +295,28 @@ pub fn compile(
             &format!("classes_extracted={}", extraction.choices.len()),
         );
     }
+
+    // DCE2: constant branch folding, unreachable block elimination, dead loads.
+    // Must run BEFORE the immutable reborrow and before index structures are built.
+    let extra_roots = if opts.enable_dce {
+        dce::run_dce2_with_extra_roots(&mut func, &egraph, &extraction, extra_roots)
+    } else {
+        extra_roots
+    };
+
+    // NOW freeze func for the rest of the pipeline.
+    let func = &func;
+
+    // Build BlockId -> index map for O(1) lookups (must be after DCE2).
+    let block_id_to_idx: HashMap<BlockId, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+
+    // Detect whether this function contains any call instructions (must be after DCE2).
+    let has_calls = func_has_calls(func);
 
     // Phase 3: Build per-block VRegInst lists with a shared class_to_vreg map.
     //

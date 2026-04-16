@@ -24,6 +24,13 @@ pub fn compile_module_with_globals(
     let has_main = functions.iter().any(|f| f.name == "main");
     crate::inline::inline_module(&mut functions, opts, has_main);
 
+    // DCE1: remove unreachable blocks created by inlining.
+    if opts.enable_dce {
+        for func in &mut functions {
+            super::dce::run_dce1(func);
+        }
+    }
+
     // Collect global and rodata names so we can filter them from externals.
     let global_names: std::collections::HashSet<String> = globals
         .iter()

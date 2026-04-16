@@ -1,10 +1,9 @@
 // EXIT: 0
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
+// DCE folds all constant branches; the program reduces to return 0.
 // CHECK-LABEL: # main
-// constant-folded sum 0xFF + 0x10 + 0x15 = 0x124
-// CHECK: mov    {{[a-z0-9]+}},0x124
-// 0x1a check
-// CHECK: mov    {{[a-z0-9]+}},0x1a
+// CHECK: xor
+// CHECK: ret
 
 int main() {
     int a = 0xFF;

@@ -1,11 +1,10 @@
 // EXIT: 5
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// no comparison -- infinite loop desugars to while(1)
-// early return inside loop body
-// CHECK: ret
-// backward jump for infinite loop
+// Infinite loop with early return: must have backward jmp and a ret.
+// CHECK: je
 // CHECK: jmp
+// CHECK: ret
 
 int main() {
     int i = 0;

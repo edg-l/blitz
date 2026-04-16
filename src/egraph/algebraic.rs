@@ -691,7 +691,7 @@ fn apply_select_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 // Select(Icmp(cc, a, a), t, f) where cc is always-false -> f
 // Select(Icmp(cc, c1, c2), t, f) where c1,c2 are constants -> t or f
 
-fn eval_icmp(cc: &CondCode, a: i64, b: i64) -> Option<bool> {
+pub(crate) fn eval_icmp(cc: &CondCode, a: i64, b: i64) -> Option<bool> {
     match cc {
         CondCode::Eq => Some(a == b),
         CondCode::Ne => Some(a != b),

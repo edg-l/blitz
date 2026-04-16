@@ -28,10 +28,17 @@ pub fn compile_to_ir_string(
         Default::default()
     };
 
-    let func = &func;
+    // Extract before freeze so DCE2 can mutate func.
+    let (block_param_map, extraction) = run_egraph_and_extract(&func, &mut egraph, opts)?;
 
-    // Phases 1-2: E-graph rewrites and cost-based extraction.
-    let (block_param_map, extraction) = run_egraph_and_extract(func, &mut egraph, opts)?;
+    // DCE2: constant branch folding + unreachable blocks + dead loads.
+    let extra_roots = if opts.enable_dce {
+        super::dce::run_dce2_with_extra_roots(&mut func, &egraph, &extraction, extra_roots)
+    } else {
+        extra_roots
+    };
+
+    let func = &func;
 
     // Phase 3: Build per-block VRegInst lists.
     let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
@@ -199,6 +206,14 @@ pub fn compile_module_to_ir(
 ) -> Result<String, CompileError> {
     let has_main = functions.iter().any(|f| f.name == "main");
     crate::inline::inline_module(&mut functions, opts, has_main);
+
+    // DCE1: remove unreachable blocks created by inlining.
+    if opts.enable_dce {
+        for func in &mut functions {
+            super::dce::run_dce1(func);
+        }
+    }
+
     let mut results = Vec::new();
     for func in functions {
         results.push(compile_to_ir_string(func, opts)?);

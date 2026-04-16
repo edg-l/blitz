@@ -1,28 +1,61 @@
 ## Next steps for Blitz
 
+Items roughly ordered by impact within each category.
+
+### Critical (can't ship without)
+
+- DWARF debug info (.debug_info, .debug_line) for gdb/lldb support
+- Multi-block register allocator: linear scan or SSA-based (current per-block graph coloring generates excess spills/reloads)
+- Full ABI compliance: struct passing/returning, varargs, stack alignment on all paths, callee-saved preservation edge cases
+- Error recovery: emit diagnostics and continue instead of panicking on internal errors
+
+### High impact (significant quality gap)
+
+- Dead store elimination (needs alias analysis); dead loads and unreachable blocks are handled by DCE
+- Dead call elimination for provably pure functions
+- Loop strength reduction: induction variable recognition, replace `i*4` with increment-by-4
+- Loop unrolling
+- Global value numbering / cross-block CSE (egraph handles local CSE only)
+- Sparse conditional constant propagation (SCCP); current propagate_block_params only handles single-predecessor constants
+- Tail call optimization
+- Better instruction selection patterns: test instead of cmp 0, combined lea for 3-operand add, bts/btr for bit ops (LLVM has ~10x more isel patterns)
+- Alias analysis: all loads/stores currently treated as potentially aliasing; prevents load hoisting, store-to-load forwarding, load/store reordering
+
+### Medium impact
+
+- Switch/case lowering with jump tables (currently compiles as if-else chains)
+- Function signatures: struct returns, >6 int args via stack, sysv edge cases
+- PIC/PIE code generation (modern Linux distros require PIE)
+- Linker relaxation / GOT/PLT for shared libraries, TLS support
+- Better DAG scheduling: instruction latency modeling, out-of-order awareness
+- Better register coalescing across blocks
+- Better spill code: split live ranges at loop boundaries, register hints
+- Param precoloring optimization: currently skips ALL params when block has calls; could check per-param liveness at each call point
+
+### Lower priority (nice to have)
+
+- Auto-vectorization (SIMD)
+- Profile-guided optimization (PGO)
+- Link-time optimization (LTO / cross-module)
+- Sanitizer instrumentation (ASan, UBSan)
+- CI pipeline / benchmarks / compile-time tracking / fuzzing
+
 ### Language features (tinyc)
+
 - switch/case
 - enum support
 - Float globals and struct fields
 
-### Backend optimization
-- Param precoloring optimization: currently skips ALL params when block has calls; could check per-param liveness at each call point
-- Loop optimizations (LICM, strength reduction, induction variables)
-- Better register coalescing across blocks
-- Better spill code: split live ranges at loop boundaries, register hints
-- Tail call optimization
-- Block param const propagation for multi-predecessor case
+### E-graph optimization
 
-### E-graph optimization (from docs/egraph-optimization-roadmap.md)
 - Shift+mask optimization: And(Shr(a,n), mask) when shift zeroes masked bits
 - Type-width analysis: (min_bits, signed) per class; enables narrowing, avoids unnecessary extensions
 
-### Infrastructure
-- CI pipeline / benchmarks / compile-time tracking
-- DWARF debug info (.debug_info, .debug_line for gdb/lldb)
-
 ### Tech debt
-- Split compile/mod.rs (1600 lines)
+
+- Split compile/mod.rs (~1600 lines)
+- Block param const propagation for multi-predecessor case (subsumes current single-pred propagate_block_params)
 
 ### Known bugs
+
 (none currently)

@@ -1,6 +1,7 @@
 // EXIT: 2
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
-// CHECK-LABEL: # main
+// Use noinline to keep the comparisons dynamic (parameter-based).
+// CHECK-LABEL: # check
 // block0: first x > 5 comparison
 // CHECK: sub
 // CHECK: jg
@@ -11,8 +12,8 @@
 // CHECK: sub
 // CHECK: jg
 
-int main() {
-    int x = 10;
+__attribute__((noinline))
+int check(int x) {
     if (x > 5) {
         if (x > 20) {
             return 1;
@@ -23,3 +24,4 @@ int main() {
     }
     return 3;
 }
+int main() { return check(10); }
