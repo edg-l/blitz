@@ -333,22 +333,21 @@ pub(super) fn collect_loop_defined_classes(
         }
     }
 
-    // Collect BlockParam ClassIds for loop-body blocks by scanning ALL egraph classes
-    // (including non-canonical). The SSA builder's trivial-phi removal uses
-    // unionfind.union() without egraph.merge(), so BlockParam nodes may remain
-    // in non-canonical classes. We add the CANONICAL representative to loop_defined
-    // when any merged class has a loop-body BlockParam.
+    // Collect BlockParam ClassIds for loop-body blocks.
     let loop_block_ids: BTreeSet<BlockId> =
         loop_body.iter().map(|&idx| func.blocks[idx].id).collect();
 
     for i in 0..egraph.classes.len() as u32 {
         let cid = ClassId(i);
-        let class = &egraph.classes[i as usize];
+        let canon = egraph.unionfind.find_immutable(cid);
+        if canon != cid {
+            continue;
+        }
+        let class = egraph.class(cid);
         for node in &class.nodes {
             if let Op::BlockParam(bid, _, _) = &node.op
                 && loop_block_ids.contains(bid)
             {
-                let canon = egraph.unionfind.find_immutable(cid);
                 defined.insert(canon);
             }
         }
