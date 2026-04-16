@@ -23,8 +23,9 @@ impl RemapContext {
         let slot_offset = caller.stack_slots.len() as u32;
         let uid_offset = max_uid_in_function(caller) + 1;
 
-        // Map callee block IDs to new IDs starting after the caller's blocks.
-        let block_base = caller.blocks.len() as u32;
+        // Map callee block IDs to new IDs starting past the caller's max block ID.
+        // Using blocks.len() would collide when IDs are non-sequential (e.g. after LICM).
+        let block_base = caller.blocks.iter().map(|b| b.id).max().unwrap_or(0) + 1;
         let mut block_map = BTreeMap::new();
         for (i, block) in callee.blocks.iter().enumerate() {
             block_map.insert(block.id, block_base + i as u32);
@@ -216,23 +217,49 @@ impl RemapContext {
     }
 }
 
-/// Find the maximum UID used in LoadResult/CallResult ops across a function's e-graph.
+/// Find the maximum UID used in LoadResult/CallResult ops across a function's e-graph
+/// and effectful ops (for merged-away classes whose UIDs may not appear in live e-nodes).
 fn max_uid_in_function(func: &Function) -> u32 {
-    let egraph = match &func.egraph {
-        Some(eg) => eg,
-        None => return 0,
-    };
-
     let mut max_uid = 0u32;
-    for eclass in &egraph.classes {
-        for enode in &eclass.nodes {
-            match &enode.op {
-                Op::LoadResult(uid, _) | Op::CallResult(uid, _) => {
-                    max_uid = max_uid.max(*uid);
+
+    // Scan e-graph nodes.
+    if let Some(egraph) = &func.egraph {
+        for eclass in &egraph.classes {
+            for enode in &eclass.nodes {
+                match &enode.op {
+                    Op::LoadResult(uid, _) | Op::CallResult(uid, _) => {
+                        max_uid = max_uid.max(*uid);
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+        }
+
+        // Scan effectful ops for result ClassIds, then look up their UIDs in the egraph.
+        // This catches UIDs from merged-away classes that no longer have live e-nodes.
+        for block in &func.blocks {
+            for op in &block.ops {
+                let result_ids: Vec<ClassId> = match op {
+                    EffectfulOp::Load { result, .. } => vec![*result],
+                    EffectfulOp::Call { results, .. } => results.clone(),
+                    _ => continue,
+                };
+                for cid in result_ids {
+                    let canon = egraph.unionfind.find_immutable(cid);
+                    if (canon.0 as usize) < egraph.classes.len() {
+                        for enode in &egraph.classes[canon.0 as usize].nodes {
+                            match &enode.op {
+                                Op::LoadResult(uid, _) | Op::CallResult(uid, _) => {
+                                    max_uid = max_uid.max(*uid);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
             }
         }
     }
+
     max_uid
 }

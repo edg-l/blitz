@@ -68,6 +68,9 @@ pub enum OptLevel {
 pub struct CompileOptions {
     pub opt_level: OptLevel,
     pub opt_goal: OptGoal,
+    /// Maximum e-graph saturation iterations. The loop exits early when no rules fire,
+    /// so this is a safety cap. Typical programs converge in 2-4 iterations; 16 is generous.
+    /// O0 uses 1 (minimum for isel; the lowerer requires x86 ops).
     pub saturation_limit: u32,
     pub enable_peephole: bool,
     pub enable_nop_alignment: bool,
@@ -81,9 +84,14 @@ pub struct CompileOptions {
     pub enable_licm: bool,
     /// Enable function inlining before optimization.
     pub enable_inlining: bool,
-    /// Maximum inlining depth (transitive inlining limit).
+    /// Maximum inlining rescan iterations per caller function. Each rescan inlines one level
+    /// of calls; a depth-3 chain A->B->C->D needs 3 rescans. Note: this limits rescans,
+    /// not true nesting depth; a function with many independent leaf calls also consumes
+    /// iterations. Default 3 handles most practical transitive inlining.
     pub max_inline_depth: u32,
-    /// Maximum callee e-graph node count to be considered for inlining.
+    /// Maximum callee e-graph node count (pre-saturation) for inlining eligibility.
+    /// Measures raw e-nodes from IR construction, not post-optimization size. Rough proxy
+    /// for code complexity. Default 50 corresponds to roughly 20-30 IR instructions.
     pub max_inline_nodes: usize,
 }
 

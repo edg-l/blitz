@@ -116,6 +116,8 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
     let produced_in_after = collect_produced_ids(&ops_after);
     let available_before: BTreeSet<ClassId> = {
         let mut avail = BTreeSet::new();
+        // Caller function params dominate every block and are always available.
+        avail.extend(caller.param_class_ids.iter().copied());
         avail.extend(collect_referenced_ids(&ops_before));
         avail.extend(collect_produced_ids(&ops_before));
         avail.extend(call_args.iter().copied());
