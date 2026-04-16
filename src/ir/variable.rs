@@ -66,14 +66,13 @@ impl FunctionBuilder {
 
         // Resolve all incomplete phis for this block.
         let incomplete = self.incomplete_phis.remove(&block).unwrap_or_default();
-        for (var, phi) in incomplete {
+        for (var, _phi) in incomplete {
             let preds: Vec<(BlockId, PredEdge)> =
                 self.predecessors.get(&block).cloned().unwrap_or_default();
             for &(pred_block, edge) in &preds {
                 let val = self.read_variable(var, pred_block);
                 self.append_jump_arg_for_edge(pred_block, edge, val);
             }
-            self.try_remove_trivial_phi(block, phi);
         }
 
         self.sealed_blocks.insert(block);
@@ -124,7 +123,7 @@ impl FunctionBuilder {
                 self.append_jump_arg_for_edge(pred_block, edge, pred_val);
             }
 
-            self.try_remove_trivial_phi(block, phi)
+            phi
         };
 
         // Cache result for single-predecessor case.
@@ -182,74 +181,6 @@ impl FunctionBuilder {
                 false_args.push(arg.0);
             }
             _ => panic!("edge kind does not match terminator type"),
-        }
-    }
-
-    /// If all operands to a phi (block param) are the same value (ignoring the
-    /// phi itself), replace it via e-graph union. Returns the replacement value
-    /// or the phi itself if non-trivial.
-    fn try_remove_trivial_phi(&mut self, block: BlockId, phi: Value) -> Value {
-        let block_data = self.blocks.iter().find(|b| b.id == block).unwrap();
-        let param_idx = block_data
-            .param_values
-            .iter()
-            .position(|v| v.0 == phi.0)
-            .expect("phi not found in block params");
-
-        let preds: Vec<(BlockId, PredEdge)> =
-            self.predecessors.get(&block).cloned().unwrap_or_default();
-
-        let phi_canon = self.egraph.unionfind.find_immutable(phi.0);
-        let mut same: Option<Value> = None;
-
-        for &(pred_block, edge) in &preds {
-            let pred_data = self.blocks.iter().find(|b| b.id == pred_block).unwrap();
-            let term = pred_data.ops.last().expect("predecessor has no terminator");
-            let arg_cid = match (term, edge) {
-                (EffectfulOp::Jump { args, .. }, PredEdge::Jump) => args[param_idx],
-                (EffectfulOp::Branch { true_args, .. }, PredEdge::BranchTrue) => {
-                    true_args[param_idx]
-                }
-                (EffectfulOp::Branch { false_args, .. }, PredEdge::BranchFalse) => {
-                    false_args[param_idx]
-                }
-                _ => panic!("edge kind does not match terminator"),
-            };
-
-            let arg_canon = self.egraph.unionfind.find_immutable(arg_cid);
-            if arg_canon == phi_canon {
-                continue; // skip self-references
-            }
-
-            match same {
-                None => same = Some(Value(arg_cid)),
-                Some(s) => {
-                    let s_canon = self.egraph.unionfind.find_immutable(s.0);
-                    if arg_canon != s_canon {
-                        // Non-trivial phi: at least two distinct operands.
-                        return phi;
-                    }
-                }
-            }
-        }
-
-        match same {
-            None => {
-                // All operands are the phi itself -- unreachable / undefined.
-                panic!("phi has no non-self operands (undefined variable in unreachable code)");
-            }
-            Some(replacement) => {
-                // Trivial phi: all operands are the same. Union in e-graph.
-                self.egraph.unionfind.union(phi.0, replacement.0);
-                // Update var_defs that point to phi.
-                for val in self.var_defs.values_mut() {
-                    let val_canon = self.egraph.unionfind.find_immutable(val.0);
-                    if val_canon == phi_canon {
-                        *val = replacement;
-                    }
-                }
-                replacement
-            }
         }
     }
 }
