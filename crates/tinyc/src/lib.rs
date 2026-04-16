@@ -9,10 +9,7 @@ pub mod parser;
 pub use error::TinyErr;
 
 fn default_opts() -> blitz::compile::CompileOptions {
-    blitz::compile::CompileOptions {
-        enable_inlining: true,
-        ..Default::default()
-    }
+    blitz::compile::CompileOptions::o1()
 }
 
 /// Run the tinyc frontend: tokenize, parse, and generate IR.

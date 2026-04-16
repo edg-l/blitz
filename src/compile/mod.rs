@@ -56,8 +56,17 @@ use terminator::{lower_terminator, thread_branches};
 
 // ── Public options / error types ──────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptLevel {
+    /// No optimizations: fast compilation, minimal rewrites.
+    O0,
+    /// Full optimizations: inlining, egraph saturation, peephole.
+    O1,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompileOptions {
+    pub opt_level: OptLevel,
     pub opt_goal: OptGoal,
     pub saturation_limit: u32,
     pub enable_peephole: bool,
@@ -85,12 +94,13 @@ pub enum Verbosity {
     Verbose,
 }
 
-impl Default for CompileOptions {
-    fn default() -> Self {
+impl CompileOptions {
+    pub fn o0() -> Self {
         CompileOptions {
+            opt_level: OptLevel::O0,
             opt_goal: OptGoal::Balanced,
-            saturation_limit: 16,
-            enable_peephole: true,
+            saturation_limit: 1,
+            enable_peephole: false,
             enable_nop_alignment: false,
             verbosity: Verbosity::Silent,
             force_frame_pointer: false,
@@ -99,6 +109,28 @@ impl Default for CompileOptions {
             max_inline_depth: 3,
             max_inline_nodes: 50,
         }
+    }
+
+    pub fn o1() -> Self {
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            opt_goal: OptGoal::Balanced,
+            saturation_limit: 16,
+            enable_peephole: true,
+            enable_nop_alignment: false,
+            verbosity: Verbosity::Silent,
+            force_frame_pointer: false,
+            enable_licm: false,
+            enable_inlining: true,
+            max_inline_depth: 3,
+            max_inline_nodes: 50,
+        }
+    }
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        CompileOptions::o1()
     }
 }
 

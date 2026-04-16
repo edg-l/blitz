@@ -1,9 +1,14 @@
 // Usage: tinyc <input.c> [input2.c ...] [-o <output>] [-c] [--emit-ir] [--emit-asm]
+//        [-O0] [-O1] [--enable-licm] [--disable-licm]
+//        [--enable-inlining] [--disable-inlining]
+//        [--enable-peephole] [--disable-peephole]
 // Compiles one or more .c files to a native executable via Blitz backend + ld/cc linker.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::exit;
+
+use blitz::compile::OptLevel;
 
 enum Mode {
     Compile,
@@ -13,9 +18,10 @@ enum Mode {
 }
 
 fn usage() -> ! {
-    eprintln!(
-        "Usage: tinyc <input.c> [input2.c ...] [-o <output>] [-c] [--emit-ir] [--emit-asm] [--enable-licm]"
-    );
+    eprintln!("Usage: tinyc <input.c> [input2.c ...] [-o <output>] [-c] [--emit-ir] [--emit-asm]");
+    eprintln!("       [-O0] [-O1] [--enable-licm] [--disable-licm]");
+    eprintln!("       [--enable-inlining] [--disable-inlining]");
+    eprintln!("       [--enable-peephole] [--disable-peephole]");
     exit(1);
 }
 
@@ -31,7 +37,10 @@ fn main() {
     let mut output_path = "a.out".to_string();
     let mut mode = Mode::Compile;
     let mut compile_only = false;
-    let mut enable_licm = false;
+    let mut opt_level: Option<OptLevel> = None;
+    let mut override_licm: Option<bool> = None;
+    let mut override_inlining: Option<bool> = None;
+    let mut override_peephole: Option<bool> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -44,8 +53,36 @@ fn main() {
                 mode = Mode::EmitAsm;
                 i += 1;
             }
+            "-O0" => {
+                opt_level = Some(OptLevel::O0);
+                i += 1;
+            }
+            "-O1" => {
+                opt_level = Some(OptLevel::O1);
+                i += 1;
+            }
             "--enable-licm" => {
-                enable_licm = true;
+                override_licm = Some(true);
+                i += 1;
+            }
+            "--disable-licm" => {
+                override_licm = Some(false);
+                i += 1;
+            }
+            "--enable-inlining" => {
+                override_inlining = Some(true);
+                i += 1;
+            }
+            "--disable-inlining" => {
+                override_inlining = Some(false);
+                i += 1;
+            }
+            "--enable-peephole" => {
+                override_peephole = Some(true);
+                i += 1;
+            }
+            "--disable-peephole" => {
+                override_peephole = Some(false);
                 i += 1;
             }
             "-c" => {
@@ -68,11 +105,19 @@ fn main() {
         }
     }
 
-    let opts = blitz::compile::CompileOptions {
-        enable_inlining: true,
-        enable_licm,
-        ..Default::default()
+    let mut opts = match opt_level {
+        Some(OptLevel::O0) => blitz::compile::CompileOptions::o0(),
+        Some(OptLevel::O1) | None => blitz::compile::CompileOptions::o1(),
     };
+    if let Some(v) = override_licm {
+        opts.enable_licm = v;
+    }
+    if let Some(v) = override_inlining {
+        opts.enable_inlining = v;
+    }
+    if let Some(v) = override_peephole {
+        opts.enable_peephole = v;
+    }
 
     if input_paths.is_empty() {
         usage();
@@ -126,11 +171,10 @@ fn main() {
         Mode::CompileOnly => {
             for input in &input_paths {
                 let src = read_source(input);
-                let obj_bytes =
-                    tinyc::compile_source_with_opts(&src, &opts).unwrap_or_else(|e| {
-                        eprintln!("tinyc: {}: {}", input, e);
-                        exit(1);
-                    });
+                let obj_bytes = tinyc::compile_source_with_opts(&src, &opts).unwrap_or_else(|e| {
+                    eprintln!("tinyc: {}: {}", input, e);
+                    exit(1);
+                });
                 // Determine output path: use -o if given (single file), else derive from input
                 let dest = if output_path != "a.out" {
                     PathBuf::from(&output_path)
@@ -148,12 +192,11 @@ fn main() {
             // Compile each input to a temp object file
             for (idx, input) in input_paths.iter().enumerate() {
                 let src = read_source(input);
-                let obj_bytes =
-                    tinyc::compile_source_with_opts(&src, &opts).unwrap_or_else(|e| {
-                        cleanup(&tmp_objs);
-                        eprintln!("tinyc: {}: {}", input, e);
-                        exit(1);
-                    });
+                let obj_bytes = tinyc::compile_source_with_opts(&src, &opts).unwrap_or_else(|e| {
+                    cleanup(&tmp_objs);
+                    eprintln!("tinyc: {}: {}", input, e);
+                    exit(1);
+                });
                 let tmp_obj = tmp_dir.join(format!("tinyc_{pid}_{idx}.o"));
                 write_file(&tmp_obj, &obj_bytes, input);
                 tmp_objs.push(tmp_obj);
