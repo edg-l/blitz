@@ -120,7 +120,7 @@ impl CompileOptions {
             enable_nop_alignment: false,
             verbosity: Verbosity::Silent,
             force_frame_pointer: false,
-            enable_licm: false,
+            enable_licm: true,
             enable_inlining: true,
             max_inline_depth: 3,
             max_inline_nodes: 50,

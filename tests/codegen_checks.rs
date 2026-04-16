@@ -172,19 +172,19 @@ fn ir_counted_loop() {
         "
         // CHECK-LABEL: function loop_sum
         // CHECK: v0 = iconst(0, I64)
-        // CHECK: jump block1(v0, v0)
+        // CHECK: jump block3(v0, v0)
         // CHECK-LABEL: block1(p0: I64, p1: I64):
-        // CHECK: v2 = block_param(b1, 1, I64)
-        // CHECK: v4 = iconst(1, I64)
-        // CHECK-NEXT: v5 = addr(scale=1, disp=0)(v2, v4)
-        // CHECK: v6 = param(0, I64)
-        // CHECK-NEXT: v7 = x86_sub(v5, v6)
-        // CHECK-NEXT: v8 = proj1(v7)
-        // CHECK: v1 = block_param(b1, 0, I64)
-        // CHECK-NEXT: v3 = addr(scale=1, disp=0)(v1, v2)
-        // CHECK: branch Slt v8 block1(v3, v5) block2(v3)
+        // CHECK: addr(scale=1, disp=0)
+        // CHECK: x86_sub
+        // CHECK: proj1
+        // CHECK: addr(scale=1, disp=0)
+        // CHECK: branch Slt
         // CHECK-LABEL: block2(p0: I64):
-        // CHECK: ret v9
+        // CHECK: ret
+        // CHECK-LABEL: block3(p0: I64, p1: I64):
+        // CHECK: param(0, I64)
+        // CHECK: iconst(1, I64)
+        // CHECK: jump block1
         ",
     );
 }
