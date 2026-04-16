@@ -4,9 +4,9 @@
 // Inlined function with many arguments (tests param remapping).
 // First two calls const-fold after inlining (15 and 150).
 // CHECK: function main
-// CHECK: iconst(-15
 // CHECK: iconst(15
 // CHECK: iconst(150
+// CHECK: iconst(-15
 
 int sum5(int a, int b, int c, int d, int e) {
     return a + b + c + d + e;

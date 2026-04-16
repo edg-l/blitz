@@ -4,8 +4,8 @@
 // Inlined function with conditional return, used in further arithmetic.
 // abs_val(-42) and abs_val(42) both constfold to 42 after inlining.
 // CHECK: function main
-// CHECK: iconst(50
 // CHECK: iconst(42
+// CHECK: iconst(50
 
 int abs_val(int x) {
     if (x < 0) { return 0 - x; }
