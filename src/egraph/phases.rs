@@ -28,6 +28,7 @@ impl Default for CompileOptions {
 /// Returns `Err` with a diagnostic message if the e-class count exceeds
 /// `opts.max_classes` during any iteration.
 pub fn run_phases(egraph: &mut EGraph, opts: &CompileOptions) -> Result<(), String> {
+    let mut hit_limit = false;
     for iter in 0..opts.iteration_limit {
         let mut changed = false;
         changed |= apply_algebraic_rules(egraph);
@@ -42,6 +43,15 @@ pub fn run_phases(egraph: &mut EGraph, opts: &CompileOptions) -> Result<(), Stri
         if !changed {
             break;
         }
+        if iter == opts.iteration_limit - 1 {
+            hit_limit = true;
+        }
+    }
+    if hit_limit && crate::trace::is_enabled("egraph") {
+        eprintln!(
+            "[egraph] warning: saturation did not converge after {} iterations",
+            opts.iteration_limit
+        );
     }
     Ok(())
 }

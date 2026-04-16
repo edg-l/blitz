@@ -1,7 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::compile::CompileOptions;
-    use crate::inline::callgraph::{build_call_graph, is_recursive, should_inline};
+    use crate::inline::callgraph::{
+        build_call_graph, count_callers, inline_cost, is_recursive, should_inline,
+        topological_order,
+    };
     use crate::inline::inline_module;
     use crate::inline::transform::inline_call_site;
     use crate::ir::builder::FunctionBuilder;
@@ -15,6 +18,7 @@ mod tests {
             enable_inlining: true,
             max_inline_depth: 3,
             max_inline_nodes: 50,
+            inline_cost_threshold: 200,
             ..Default::default()
         }
     }
@@ -137,7 +141,7 @@ mod tests {
     fn test_should_inline_simple_leaf() {
         let opts = inline_opts();
         let leaf = build_leaf();
-        assert!(should_inline(&leaf, 0, &opts));
+        assert!(should_inline(&leaf, 2, &opts));
     }
 
     #[test]
@@ -145,24 +149,31 @@ mod tests {
         let opts = inline_opts();
         let mut f = Function::new("multi_ret", vec![Type::I64], vec![Type::I64, Type::I32]);
         // Multi-return functions should not be inlined.
-        assert!(!should_inline(&f, 0, &opts));
+        assert!(!should_inline(&f, 2, &opts));
         let _ = &mut f;
     }
 
     #[test]
-    fn test_inline_depth_limit() {
-        let opts = inline_opts();
-        let leaf = build_leaf();
-        // At depth >= max_inline_depth, should return false.
-        assert!(!should_inline(&leaf, 3, &opts));
-        assert!(should_inline(&leaf, 2, &opts));
+    fn test_inline_cost_rejection() {
+        let opts = CompileOptions {
+            enable_inlining: true,
+            max_inline_nodes: 200,
+            inline_cost_threshold: 5, // very low threshold
+            ..Default::default()
+        };
+        // build_with_slots has loads/stores which cost 3 each -> cost > 5
+        let f = build_with_slots();
+        // With multiple callers, cost check applies and rejects
+        assert!(!should_inline(&f, 2, &opts));
+        // With single caller, always inline (below 4x node cap)
+        assert!(should_inline(&f, 1, &opts));
     }
 
     #[test]
     fn test_inline_no_egraph_skipped() {
         let opts = inline_opts();
         let f = Function::new("no_eg", vec![], vec![Type::I64]);
-        assert!(!should_inline(&f, 0, &opts));
+        assert!(!should_inline(&f, 2, &opts));
     }
 
     // ── Inline transform tests ───────────────────────────────────────────────
@@ -325,5 +336,81 @@ mod tests {
             names.contains(&"leaf"),
             "called but not inlined function should be kept"
         );
+    }
+
+    // ── New cost/caller-count/topological tests ──────────────────────────────
+
+    #[test]
+    fn test_inline_cost_basic() {
+        let leaf = build_leaf();
+        let cost = inline_cost(&leaf);
+        // leaf has: iconst(42) [cost=0], Ret [cost=0], maybe a few internal nodes
+        assert!(cost < 10, "leaf cost should be small, got {cost}");
+    }
+
+    #[test]
+    fn test_count_callers_single() {
+        let caller = build_caller_of_leaf();
+        let leaf = build_leaf();
+        let graph = build_call_graph(&[caller, leaf]);
+        assert_eq!(count_callers("leaf", &graph), 1);
+    }
+
+    #[test]
+    fn test_count_callers_multiple() {
+        let caller1 = build_caller_of_leaf(); // "main" calls "leaf"
+        let leaf = build_leaf();
+        // Build a second caller
+        let mut b = FunctionBuilder::new("other", &[], &[Type::I64]);
+        let r = b.call("leaf", &[], &[Type::I64]);
+        b.ret(Some(r[0]));
+        let caller2 = b.finalize().unwrap();
+
+        let graph = build_call_graph(&[caller1, caller2, leaf]);
+        assert_eq!(count_callers("leaf", &graph), 2);
+    }
+
+    #[test]
+    fn test_topological_order_simple() {
+        // A calls B, B calls C => order should be [C, B, A]
+        let mut ba = FunctionBuilder::new("A", &[], &[Type::I64]);
+        let ra = ba.call("B", &[], &[Type::I64]);
+        ba.ret(Some(ra[0]));
+        let fn_a = ba.finalize().unwrap();
+
+        let mut bb = FunctionBuilder::new("B", &[], &[Type::I64]);
+        let rb = bb.call("C", &[], &[Type::I64]);
+        bb.ret(Some(rb[0]));
+        let fn_b = bb.finalize().unwrap();
+
+        let mut bc = FunctionBuilder::new("C", &[], &[Type::I64]);
+        let c = bc.iconst(1, Type::I64);
+        bc.ret(Some(c));
+        let fn_c = bc.finalize().unwrap();
+
+        let graph = build_call_graph(&[fn_a, fn_b, fn_c]);
+        let all = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let order = topological_order(&graph, &all);
+
+        let pos_a = order.iter().position(|n| n == "A").unwrap();
+        let pos_b = order.iter().position(|n| n == "B").unwrap();
+        let pos_c = order.iter().position(|n| n == "C").unwrap();
+        assert!(pos_c < pos_b, "C should come before B");
+        assert!(pos_b < pos_a, "B should come before A");
+    }
+
+    #[test]
+    fn test_single_caller_always_inlined() {
+        let opts = CompileOptions {
+            enable_inlining: true,
+            max_inline_nodes: 10,     // very small
+            inline_cost_threshold: 5, // very low
+            ..Default::default()
+        };
+        let callee = build_with_slots(); // has ~20+ nodes, cost > 5
+        // With single caller, should inline (under 4x node cap)
+        assert!(should_inline(&callee, 1, &opts));
+        // With multiple callers, should NOT inline (exceeds both thresholds)
+        assert!(!should_inline(&callee, 2, &opts));
     }
 }

@@ -93,6 +93,10 @@ pub struct CompileOptions {
     /// Measures raw e-nodes from IR construction, not post-optimization size. Rough proxy
     /// for code complexity. Default 50 corresponds to roughly 20-30 IR instructions.
     pub max_inline_nodes: usize,
+    /// Maximum weighted cost for inlining a callee. Each IR operation has a weight
+    /// (e.g. Add=1, SDiv=10, Call=20). If the total cost exceeds this threshold,
+    /// the callee is not inlined (unless it has a single caller). Default 100.
+    pub inline_cost_threshold: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +120,7 @@ impl CompileOptions {
             enable_inlining: false,
             max_inline_depth: 3,
             max_inline_nodes: 50,
+            inline_cost_threshold: 0,
         }
     }
 
@@ -132,6 +137,7 @@ impl CompileOptions {
             enable_inlining: true,
             max_inline_depth: 3,
             max_inline_nodes: 50,
+            inline_cost_threshold: 100,
         }
     }
 }

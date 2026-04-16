@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use crate::compile::CompileOptions;
 use crate::ir::function::Function;
 
-use callgraph::{build_call_graph, is_recursive, should_inline};
+use callgraph::{build_call_graph, count_callers, is_recursive, should_inline, topological_order};
 use transform::inline_call_site;
 
 /// Inline function calls across a module, then eliminate dead functions.
@@ -22,7 +22,9 @@ pub fn inline_module(functions: &mut Vec<Function>, opts: &CompileOptions, is_ex
         return;
     }
 
-    let max_iterations = opts.max_inline_depth as usize * 10;
+    let call_graph = build_call_graph(functions);
+    let all_names: Vec<String> = functions.iter().map(|f| f.name.clone()).collect();
+    let order = topological_order(&call_graph, &all_names);
 
     // Build a name->index map for callee lookup.
     let func_names: BTreeMap<String, usize> = functions
@@ -31,53 +33,55 @@ pub fn inline_module(functions: &mut Vec<Function>, opts: &CompileOptions, is_ex
         .map(|(i, f)| (f.name.clone(), i))
         .collect();
 
-    let call_graph = build_call_graph(functions);
+    // Process functions bottom-up: callees before callers.
+    for func_name in &order {
+        let Some(&caller_idx) = func_names.get(func_name) else {
+            continue; // external, not defined
+        };
 
-    // Process each function for inlining opportunities.
-    // We iterate by index because we need to clone callees while mutating callers.
-    for caller_idx in 0..functions.len() {
-        let caller_name = functions[caller_idx].name.clone();
-        let mut iteration = 0;
+        // Safety cap on inner rescan iterations.
+        let max_rescans = opts.max_inline_nodes * 2;
+        let mut rescan = 0;
 
-        'rescan: loop {
-            if iteration >= max_iterations {
+        loop {
+            if rescan >= max_rescans {
                 break;
             }
-            iteration += 1;
+            rescan += 1;
 
-            // Scan blocks for Call ops to inline.
+            // Scan blocks for a Call op to inline.
             let mut found = None;
-            'search: for (block_idx, block) in functions[caller_idx].blocks.iter().enumerate() {
+            for (block_idx, block) in functions[caller_idx].blocks.iter().enumerate() {
                 for (op_idx, op) in block.ops.iter().enumerate() {
-                    if let crate::ir::effectful::EffectfulOp::Call { func, .. } = op
-                        && let Some(&callee_idx) = func_names.get(func)
-                    {
-                        if callee_idx == caller_idx {
-                            continue;
-                        }
-                        let callee = &functions[callee_idx];
-                        if !is_recursive(&callee.name, &call_graph)
-                            && should_inline(callee, iteration as u32, opts)
-                        {
-                            found = Some((block_idx, op_idx, callee_idx));
-                            break 'search;
+                    if let crate::ir::effectful::EffectfulOp::Call { func, .. } = op {
+                        if let Some(&callee_idx) = func_names.get(func) {
+                            if callee_idx == caller_idx {
+                                continue; // self-recursion
+                            }
+                            let callee = &functions[callee_idx];
+                            if is_recursive(&callee.name, &call_graph) {
+                                continue;
+                            }
+                            let caller_count = count_callers(&callee.name, &call_graph);
+                            if should_inline(callee, caller_count, opts) {
+                                found = Some((block_idx, op_idx, callee_idx));
+                                break;
+                            }
                         }
                     }
+                }
+                if found.is_some() {
+                    break;
                 }
             }
 
             let Some((block_idx, op_idx, callee_idx)) = found else {
-                break 'rescan;
+                break; // no more inlining opportunities
             };
 
-            // Clone the callee so we can mutate the caller.
             let callee_clone = clone_function(&functions[callee_idx]);
             inline_call_site(&mut functions[caller_idx], block_idx, op_idx, &callee_clone);
-
-            // After inlining, rescan from the beginning for more opportunities.
         }
-
-        let _ = &caller_name; // suppress unused warning
     }
 
     // Dead function elimination: only for executable mode (has main).
