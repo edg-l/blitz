@@ -278,26 +278,46 @@ pub(super) fn insert_early_barrier_spills(
         let reload_vreg = VReg(*next_vreg);
         *next_vreg += 1;
 
-        // Insert SpillStore in def_group (right after barrier produces the value).
+        // Place SpillStore right after the def of `v` in the schedule (so it
+        // sits inside `def_group`). Place SpillLoad right before the first
+        // consumer in `consumer_group` (so the reload is guaranteed to execute
+        // before the use even without a post-pass barrier re-sort).
         let store_inst = ScheduledInst {
             op: Op::SpillStore(slot as i64),
             dst: store_vreg,
             operands: vec![*v],
         };
-        schedule.push(store_inst);
         vreg_group.insert(store_vreg, *def_group);
 
-        // Insert SpillLoad in consumer_group.
         let load_inst = ScheduledInst {
             op: Op::SpillLoad(slot as i64),
             dst: reload_vreg,
             operands: vec![],
         };
-        schedule.push(load_inst);
         vreg_group.insert(reload_vreg, *consumer_group);
 
-        // Inherit type for the reload VReg.
-        // (vreg_types is not &mut, so the caller must update it if needed.)
+        // Find def_pos (after `v`'s def) and consumer_pos (before the first
+        // scheduled consumer of `v`). Both are computed on the pre-insertion
+        // schedule to avoid index drift.
+        let def_pos = schedule
+            .iter()
+            .position(|inst| inst.dst == *v)
+            .map(|i| i + 1)
+            .unwrap_or(schedule.len());
+        let consumer_pos = schedule
+            .iter()
+            .position(|inst| inst.operands.contains(v))
+            .unwrap_or(schedule.len());
+
+        // Insert in reverse order of position (larger index first) so the
+        // earlier insertion doesn't shift the later one.
+        let (first_pos, first_inst, second_pos, second_inst) = if def_pos <= consumer_pos {
+            (consumer_pos, load_inst, def_pos, store_inst)
+        } else {
+            (def_pos, store_inst, consumer_pos, load_inst)
+        };
+        schedule.insert(first_pos, first_inst);
+        schedule.insert(second_pos, second_inst);
 
         // Rewrite all scheduled consumers of v to use reload_vreg instead.
         // The SpillStore (which references v as operand) must keep the original.

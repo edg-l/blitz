@@ -344,6 +344,11 @@ pub fn compile(
 
     // Build per-block VRegInst lists in RPO order, stored by block index.
     let mut block_vreg_insts: Vec<Vec<VRegInst>> = vec![Vec::new(); func.blocks.len()];
+    // Snapshot of class_to_vreg AT THE END of each block's processing (before
+    // `removed` is restored). Captures the block-local view: classes re-emitted
+    // in a block point to that block's VReg, not the globally-restored one.
+    let mut block_class_to_vreg_snapshot: Vec<BTreeMap<ClassId, VReg>> =
+        vec![BTreeMap::new(); func.blocks.len()];
     for &block_idx in &rpo_order {
         // Remove classes emitted in non-dominating blocks so they get fresh VRegs.
         // Also remove flags-typed classes from ALL prior blocks: EFLAGS cannot
@@ -452,6 +457,11 @@ pub fn compile(
             }
         }
 
+        // Snapshot class_to_vreg BEFORE restore: this is the block-local view.
+        // Later block lowering uses this so classes re-emitted in a block
+        // resolve to that block's VReg, not a stale cross-block one.
+        block_class_to_vreg_snapshot[block_idx] = class_to_vreg.clone();
+
         // Restore removed classes so subsequent blocks can see them.
         for (cid, vreg) in removed {
             class_to_vreg.insert(cid, vreg);
@@ -551,6 +561,13 @@ pub fn compile(
             let param_order: u8 = match inst.op {
                 Op::Param(_, _) => 0,
                 Op::LoadResult(_, _) | Op::CallResult(_, _) => 1,
+                // Spill reloads must happen early in their consumer group,
+                // BEFORE any op that uses the reloaded value. Pushing the
+                // SpillLoad's orig_idx to the end of the block (via barrier.rs)
+                // would otherwise place it after its consumer under the
+                // default param_order=2 tier. param_order=1 places it right
+                // after the group's barrier result and before pure ops.
+                Op::SpillLoad(_) | Op::XmmSpillLoad(_) => 1,
                 _ if branch_cond_chain.contains(&inst.dst) => 3,
                 _ => 2,
             };
@@ -960,12 +977,18 @@ pub fn compile(
         // Build a block-local class_to_vreg that applies cross-block renames.
         // When a VReg was renamed (SpillLoad/remat) in this block, effectful ops
         // must use the renamed VReg to get the correct physical register.
+        //
+        // Use the per-block snapshot (captured post-emission, pre-restore) so
+        // classes re-emitted in this block resolve to THIS block's VReg — not
+        // a stale one from a non-dominating prior block that was restored into
+        // the global `class_to_vreg`.
         let block_class_to_vreg: BTreeMap<ClassId, VReg> = {
+            let snapshot = &block_class_to_vreg_snapshot[block_idx];
             let renames = &block_rename_maps[block_idx];
             let mut map: BTreeMap<ClassId, VReg> = if renames.is_empty() {
-                class_to_vreg.clone()
+                snapshot.clone()
             } else {
-                class_to_vreg
+                snapshot
                     .iter()
                     .map(|(&cid, &vreg)| {
                         let renamed = renames.get(&vreg).copied().unwrap_or(vreg);

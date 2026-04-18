@@ -327,20 +327,21 @@ fn add_shift_precolors_global(insts: &[ScheduledInst], precolors: &mut Vec<(VReg
     }
 }
 
-/// Pre-color division operands and projections to RAX/RDX.
+/// Pre-color division projections to RAX (quotient).
 ///
-/// Mirrors `add_div_precolors` from `compile/precolor.rs`.
+/// The dividend is NOT pre-colored: `lower::X86Idiv` emits `mov rax, <dividend>`
+/// when needed. Precoloring the dividend would force its VReg to live in RAX
+/// across the entire live range, which breaks when the dividend is also used
+/// after the idiv (idiv clobbers RAX with the quotient).
+///
+/// Proj1 (remainder) is also not pre-colored; the lowering emits `mov dst, rdx`
+/// so the remainder can live in any register (see `lower::Proj1` for
+/// X86Idiv/X86Div sources).
 fn add_div_precolors_global(insts: &[ScheduledInst], precolors: &mut Vec<(VReg, Reg)>) {
     let mut div_dst_vregs: BTreeSet<VReg> = BTreeSet::new();
     for inst in insts {
-        if !matches!(inst.op, Op::X86Idiv | Op::X86Div) {
-            continue;
-        }
-        div_dst_vregs.insert(inst.dst);
-        if let Some(&dividend) = inst.operands.first()
-            && !precolors.iter().any(|&(v, _)| v == dividend)
-        {
-            precolors.push((dividend, Reg::RAX));
+        if matches!(inst.op, Op::X86Idiv | Op::X86Div) {
+            div_dst_vregs.insert(inst.dst);
         }
     }
     // Pre-color Proj0 nodes that project from a div result to RAX (quotient).
