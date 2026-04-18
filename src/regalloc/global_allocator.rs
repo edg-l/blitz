@@ -128,6 +128,52 @@ pub(crate) struct Phase3State {
     alias_map: BTreeMap<u32, u32>,
 }
 
+/// Add pairwise interference between all block_params of each block. Phi
+/// copies at block entry write distinct values into each param, so even if
+/// two params have disjoint schedule-level live ranges (e.g. both unused in
+/// the block body), they must occupy distinct registers during the copy
+/// sequence.
+fn add_block_param_interferences(
+    graph: &mut InterferenceGraph,
+    block_param_vregs_per_block: &[BTreeSet<VReg>],
+    alias_map: &BTreeMap<u32, u32>,
+) {
+    let resolve = |v: VReg| -> VReg {
+        let mut idx = v.0;
+        while let Some(&t) = alias_map.get(&idx) {
+            if t == idx {
+                break;
+            }
+            idx = t;
+        }
+        VReg(idx)
+    };
+    for params in block_param_vregs_per_block {
+        let mut seen: BTreeSet<VReg> = BTreeSet::new();
+        let unique: Vec<VReg> = params
+            .iter()
+            .map(|&p| resolve(p))
+            .filter(|&v| seen.insert(v))
+            .collect();
+        if unique.len() < 2 {
+            continue;
+        }
+        for i in 0..unique.len() {
+            for j in (i + 1)..unique.len() {
+                let a = unique[i].0 as usize;
+                let b = unique[j].0 as usize;
+                if a >= graph.num_vregs || b >= graph.num_vregs {
+                    continue;
+                }
+                if graph.reg_class[a] == graph.reg_class[b] {
+                    graph.adj[a].insert(b);
+                    graph.adj[b].insert(a);
+                }
+            }
+        }
+    }
+}
+
 /// Build the function-wide interference graph (Phase 2).
 ///
 /// Steps:
@@ -745,6 +791,14 @@ fn run_phase3(
         .map(|sched| apply_coalescing(sched, &coalesced))
         .collect();
 
+    // Build the coalescing alias map early so it can be used to resolve
+    // block_param VRegs to their post-coalesce canonicals before the rebuild's
+    // interference injection. (The later declaration of `alias_map` is reused.)
+    let alias_map_early: BTreeMap<u32, u32> = coalesced
+        .iter()
+        .map(|&(into, from)| (from as u32, into as u32))
+        .collect();
+
     // Task 3.7: rebuild the interference graph from scratch on post-coalesce
     // schedules. Re-run Task 2.3 (vreg class map), re-initialize graph with
     // pre-populated reg_class, re-run build_interference_into per block, and
@@ -761,7 +815,12 @@ fn run_phase3(
             block_param_vregs_per_block,
         );
 
-    let rebuilt = build_global_interference(&post_coalesce_schedules, &rebuild_global_liveness);
+    let mut rebuilt = build_global_interference(&post_coalesce_schedules, &rebuild_global_liveness);
+    add_block_param_interferences(
+        &mut rebuilt.graph,
+        block_param_vregs_per_block,
+        &alias_map_early,
+    );
 
     // Re-inject clobber phantoms into the rebuilt graph (Task 3.7).
     let (call_points_post, div_points_post) = collect_call_div_points(&post_coalesce_schedules);
@@ -780,10 +839,7 @@ fn run_phase3(
     // Rebuild precolorings on the post-coalesce VReg set: apply the alias map
     // to precolor keys. The coalescing alias map renames `from` -> `into`, so
     // a precoloring for a `from` VReg should transfer to `into`.
-    let alias_map: BTreeMap<u32, u32> = coalesced
-        .iter()
-        .map(|&(into, from)| (from as u32, into as u32))
-        .collect();
+    let alias_map = alias_map_early.clone();
 
     let resolve_vreg = |v: VReg| -> VReg {
         let mut idx = v.0;
@@ -1728,7 +1784,14 @@ fn rebuild_interference(
             phi_uses,
             block_param_vregs_per_block,
         );
-    let phase2 = build_global_interference(block_schedules, &global_liveness);
+    let mut phase2 = build_global_interference(block_schedules, &global_liveness);
+    // In the rebuild path inside the spill loop, block_schedules already have
+    // coalesce aliases applied, so the identity map suffices here.
+    add_block_param_interferences(
+        &mut phase2.graph,
+        block_param_vregs_per_block,
+        &BTreeMap::new(),
+    );
 
     // Inject clobber phantoms.
     let (graph_with_phantoms, gpr_call_phantoms, xmm_call_phantoms, div_phantoms) =
@@ -2321,7 +2384,14 @@ pub fn allocate_global(
 
     // Tasks 2.3, 2.4, 2.4.5: Build function-wide interference graph and
     // per-block liveness (stored in Phase2State for Phase 3/5 consumption).
-    let phase2 = build_global_interference(block_schedules, &global_liveness);
+    let mut phase2 = build_global_interference(block_schedules, &global_liveness);
+    // Pre-coalesce Phase 2 graph: block_params are still distinct VRegs, so no
+    // alias resolution needed.
+    add_block_param_interferences(
+        &mut phase2.graph,
+        block_param_vregs_per_block,
+        &BTreeMap::new(),
+    );
 
     // Determine starting next_vreg for phantom injection.
     let next_vreg: u32 = block_schedules

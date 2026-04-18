@@ -87,11 +87,11 @@ pub fn compute_global_liveness_with_block_params(
     let mut live_in: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
     let mut live_out: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 
-    // Initialize live_in = use(B) ∪ block_params(B). Block params are written
-    // by phi copies at a single program point (block entry), so they must all
-    // be simultaneously "live" there; otherwise the interference graph would
-    // allow two params of the same block to share a register even though the
-    // predecessor's phi_copies still write distinct values into each.
+    // Initialize live_in = use(B) ∪ block_params(B). Block params receive
+    // distinct values from phi copies at block entry and must occupy distinct
+    // registers throughout that copy sequence. The simplest way to enforce
+    // this in a liveness-driven interference builder is to treat params as
+    // "live at entry" so the boundary pass wires up pairwise edges.
     for b in 0..n {
         live_in[b].extend(block_use[b].iter().copied());
         if let Some(params) = block_param_vregs_per_block.get(b) {
@@ -105,21 +105,29 @@ pub fn compute_global_liveness_with_block_params(
         changed = false;
         // Process in reverse order (backward pass heuristic for faster convergence).
         for b in (0..n).rev() {
-            // live_out(B) = phi_uses(B) ∪ union of live_in(S) for each successor S.
+            // live_out(B) = phi_uses(B) ∪ union of (live_in(S) - block_params(S)).
             //
             // phi_uses[b] is the set of VRegs B's terminator passes to its
-            // successors' block params. These values are live at B's end
-            // (the terminator reads them to emit phi copies), even if they
-            // are not present in any successor's live_in (because the
-            // successor reads the destination BlockParam, not the source).
-            // Without this, v = add(...) in B followed by `jump T(v)` would
-            // have an empty live range and collide with other B-local values.
+            // successors' block params. These values are live at B's end.
+            //
+            // Successor block params are pre-seeded into live_in[succ] to force
+            // pairwise interference among them at the successor's entry. Those
+            // VRegs do NOT exist at the predecessor's end (the predecessor
+            // terminator writes phi-source VRegs into the successor's params
+            // via phi copies), so when propagating live_in[succ] upward we
+            // strip out the successor's block params.
             let mut new_out: BTreeSet<VReg> = BTreeSet::new();
             for &v in &phi_uses[b] {
                 new_out.insert(v);
             }
             for &s in &successors[b] {
+                let succ_params = block_param_vregs_per_block.get(s);
                 for &v in &live_in[s] {
+                    if let Some(params) = succ_params
+                        && params.contains(&v)
+                    {
+                        continue;
+                    }
                     new_out.insert(v);
                 }
             }
@@ -129,7 +137,7 @@ pub fn compute_global_liveness_with_block_params(
                 changed = true;
             }
 
-            // live_in(B) = use(B) | block_params(B) | (live_out(B) - def(B)).
+            // live_in(B) = use(B) ∪ block_params(B) ∪ (live_out(B) - def(B)).
             let mut new_in = block_use[b].clone();
             if let Some(params) = block_param_vregs_per_block.get(b) {
                 new_in.extend(params.iter().copied());
