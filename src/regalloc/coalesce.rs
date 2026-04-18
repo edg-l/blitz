@@ -19,6 +19,16 @@ pub fn coalesce(
     // Union-find to track already-merged groups.
     let mut parent: Vec<usize> = (0..graph.num_vregs).collect();
 
+    // Per-root adjacency: when two nodes are merged, their adjacency sets are
+    // unioned into the surviving root. This is required for correctness —
+    // otherwise, a post-merge coalesce check only inspects the root's
+    // original adj[], missing interferences that belonged to the merged
+    // member. Concretely: if v0 coalesces with v6, and v6 interferes with
+    // v9, then v9 must not coalesce with v0. Without union, `adj[v0]` never
+    // learned about v6's interference with v9 and the second coalesce
+    // succeeds incorrectly.
+    let mut adj: Vec<std::collections::BTreeSet<usize>> = graph.adj.clone();
+
     let find = |parent: &mut Vec<usize>, mut x: usize| -> usize {
         while parent[x] != x {
             parent[x] = parent[parent[x]]; // path compression
@@ -40,13 +50,35 @@ pub fn coalesce(
             continue;
         }
 
-        // Check if the two representative nodes interfere.
-        if graph.adj[src_root].contains(&dst_root) {
-            // They interfere; cannot coalesce.
+        // Check if the two representative groups interfere. `adj` is kept in
+        // sync with merges, so this considers every member of either group.
+        if adj[src_root].contains(&dst_root) || adj[dst_root].contains(&src_root) {
             continue;
         }
 
-        // Coalesce: merge dst_root into src_root.
+        // Different register classes must never coalesce (GPR <-> XMM merge
+        // is always invalid regardless of adjacency).
+        if graph.reg_class[src_root] != graph.reg_class[dst_root] {
+            continue;
+        }
+
+        // Coalesce: merge dst_root into src_root. Transfer adjacency so
+        // subsequent checks against src_root see dst_root's neighbors too.
+        // For every neighbor n of dst_root, update adj[n] to reference
+        // src_root (via their current roots) and add to adj[src_root].
+        let dst_neighbors: Vec<usize> = adj[dst_root].iter().copied().collect();
+        for n in dst_neighbors {
+            let n_root = find(&mut parent, n);
+            if n_root == src_root {
+                // The merged pair was both neighbors of src_root already —
+                // cannot happen here since we checked non-interference above,
+                // but skip defensively.
+                continue;
+            }
+            adj[src_root].insert(n_root);
+            adj[n_root].insert(src_root);
+        }
+        adj[dst_root].clear();
         parent[dst_root] = src_root;
         merged.push((src_root, dst_root));
     }
