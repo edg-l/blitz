@@ -105,8 +105,19 @@ pub fn compute_global_liveness_with_block_params(
         changed = false;
         // Process in reverse order (backward pass heuristic for faster convergence).
         for b in (0..n).rev() {
-            // live_out(B) = union of live_in(S) for each successor S.
+            // live_out(B) = phi_uses(B) ∪ union of live_in(S) for each successor S.
+            //
+            // phi_uses[b] is the set of VRegs B's terminator passes to its
+            // successors' block params. These values are live at B's end
+            // (the terminator reads them to emit phi copies), even if they
+            // are not present in any successor's live_in (because the
+            // successor reads the destination BlockParam, not the source).
+            // Without this, v = add(...) in B followed by `jump T(v)` would
+            // have an empty live range and collide with other B-local values.
             let mut new_out: BTreeSet<VReg> = BTreeSet::new();
+            for &v in &phi_uses[b] {
+                new_out.insert(v);
+            }
             for &s in &successors[b] {
                 for &v in &live_in[s] {
                     new_out.insert(v);
