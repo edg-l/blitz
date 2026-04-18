@@ -186,15 +186,30 @@ pub(super) fn lower_effectful_op(
                     inst: None,
                 }),
             })?;
-            let val_reg = get_reg(*val).ok_or_else(|| CompileError {
-                phase: "lowering".into(),
-                message: "Store: no register for val".into(),
-                location: Some(IrLocation {
-                    function: func.name.clone(),
-                    block: None,
-                    inst: None,
-                }),
-            })?;
+            // If val was spilled, its original VReg has no register. Find the
+            // StoreBarrier for this Store and read the (possibly renamed) val
+            // operand from it — that VReg points at the reload/remat copy.
+            let canon_val = uf.find_immutable(*val);
+            let val_reg = get_reg(canon_val)
+                .or_else(|| {
+                    resolve_store_val_reg_after_spilling(
+                        canon_addr,
+                        canon_val,
+                        class_to_vreg,
+                        regalloc,
+                        extraction,
+                        schedule,
+                    )
+                })
+                .ok_or_else(|| CompileError {
+                    phase: "lowering".into(),
+                    message: "Store: no register for val".into(),
+                    location: Some(IrLocation {
+                        function: func.name.clone(),
+                        block: None,
+                        inst: None,
+                    }),
+                })?;
             let addr = build_mem_addr(
                 canon_addr,
                 addr_reg,
@@ -460,4 +475,73 @@ fn resolve_call_arg_regs_after_spilling(
             regalloc.vreg_to_reg.get(original_vreg).copied()
         })
         .collect()
+}
+
+/// Resolve the physical register for a Store's `val` operand after spilling.
+///
+/// When the val VReg is spilled, its original VReg has no register
+/// assignment. The StoreBarrier for this Store has the operand renamed to a
+/// SpillLoad/remat VReg which does have a register. Find the matching
+/// StoreBarrier (identified by containing this Store's addr VReg in its
+/// operand set) and locate the replacement val VReg in the barrier operands.
+fn resolve_store_val_reg_after_spilling(
+    canon_addr: ClassId,
+    canon_val: ClassId,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    regalloc: &RegAllocResult,
+    extraction: &ExtractionResult,
+    schedule: &[ScheduledInst],
+) -> Option<Reg> {
+    let addr_vreg = class_to_vreg.get(&canon_addr)?;
+    let original_val_vreg = class_to_vreg.get(&canon_val)?;
+
+    // `populate_effectful_operands` sorts StoreBarrier operands by VReg index
+    // and may add Addr children, so we cannot rely on positional lookup.
+    // Match by membership: find the StoreBarrier whose operands contain the
+    // addr VReg for this specific store.
+    let barrier = schedule
+        .iter()
+        .find(|inst| matches!(inst.op, Op::StoreBarrier) && inst.operands.contains(addr_vreg))?;
+
+    // Build a VReg -> defining instruction lookup for this barrier's operands.
+    let barrier_op_defs: BTreeMap<VReg, &ScheduledInst> = schedule
+        .iter()
+        .filter(|inst| barrier.operands.contains(&inst.dst))
+        .map(|inst| (inst.dst, inst))
+        .collect();
+
+    // Build a spill-slot -> original-VReg map so we can trace reloads back to
+    // the VReg whose value they reload.
+    let mut slot_to_original_vreg: BTreeMap<i64, VReg> = BTreeMap::new();
+    for inst in schedule {
+        if let Op::SpillStore(slot) | Op::XmmSpillStore(slot) = &inst.op {
+            if let Some(&original_vreg) = inst.operands.first() {
+                slot_to_original_vreg.insert(*slot, original_vreg);
+            }
+        }
+    }
+
+    // If the original val is still among the barrier's operands, use it.
+    if barrier.operands.contains(original_val_vreg) {
+        return regalloc.vreg_to_reg.get(original_val_vreg).copied();
+    }
+
+    // A SpillLoad in the barrier operands that reloads val's slot.
+    for (&op_vreg, def_inst) in &barrier_op_defs {
+        if let Op::SpillLoad(slot) | Op::XmmSpillLoad(slot) = &def_inst.op {
+            if slot_to_original_vreg.get(slot) == Some(original_val_vreg) {
+                return regalloc.vreg_to_reg.get(&op_vreg).copied();
+            }
+        }
+    }
+
+    // Remat: val was rematerialized before each use and its original def was
+    // dropped from the schedule. Match by op against extraction.choices[val].
+    let val_choice = &extraction.choices.get(&canon_val)?.op;
+    for (&op_vreg, def_inst) in &barrier_op_defs {
+        if op_vreg != *original_val_vreg && &def_inst.op == val_choice {
+            return regalloc.vreg_to_reg.get(&op_vreg).copied();
+        }
+    }
+    None
 }

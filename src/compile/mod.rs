@@ -968,6 +968,11 @@ pub fn compile(
             .cloned()
             .collect();
         let rewritten = &rewritten;
+        // Retain the un-stripped schedule for effectful-op lowering: the
+        // StoreBarrier/VoidCallBarrier pseudo-ops carry the (post-spill)
+        // operand renames that resolve_*_regs_after_spilling uses to find
+        // reload/remat VRegs for Store val and Call args.
+        let full_schedule_for_barriers = &block_rewritten[block_idx];
 
         // The block that follows this one in emission order (for fallthrough).
         let next_block_id: Option<BlockId> = rpo_order
@@ -1164,7 +1169,7 @@ pub fn compile(
                 &extraction,
                 func,
                 &egraph.unionfind,
-                rewritten,
+                full_schedule_for_barriers,
             )?;
             all_insts.extend(extra);
         }
