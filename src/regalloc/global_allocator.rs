@@ -818,20 +818,41 @@ fn run_phase3(
     // re-add cross-block boundary interferences.
     //
     // The CFG topology (cfg_succs) is unchanged by coalescing — only VReg
-    // names change. We rebuild liveness on the post-coalesce schedules using
-    // the same successors and phi_uses to get fresh live sets.
+    // names change. Apply the alias map to phi_uses and block_param_vregs
+    // before rebuilding liveness: the schedule operands have been renamed by
+    // apply_coalescing, but phi_uses/block_param_vregs still carry pre-coalesce
+    // VReg names. Without renaming, liveness seeds live_out[b] with a VReg
+    // that never appears in the schedule, so interferences between phi-source
+    // values and defs in the block are missed — the canonical post-coalesce
+    // VReg (e.g. v1 for n) is not recognized as live, and a new def in the
+    // block can land on the same register as n.
+    let resolve_vreg_early = |v: VReg| -> VReg {
+        let mut idx = v.0;
+        while let Some(&target) = alias_map_early.get(&idx) {
+            idx = target;
+        }
+        VReg(idx)
+    };
+    let renamed_phi_uses: Vec<BTreeSet<VReg>> = phi_uses
+        .iter()
+        .map(|set| set.iter().map(|&v| resolve_vreg_early(v)).collect())
+        .collect();
+    let renamed_block_param_vregs: Vec<BTreeSet<VReg>> = block_param_vregs_per_block
+        .iter()
+        .map(|set| set.iter().map(|&v| resolve_vreg_early(v)).collect())
+        .collect();
     let rebuild_global_liveness =
         crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
             &post_coalesce_schedules,
             cfg_succs,
-            phi_uses,
-            block_param_vregs_per_block,
+            &renamed_phi_uses,
+            &renamed_block_param_vregs,
         );
 
     let mut rebuilt = build_global_interference(&post_coalesce_schedules, &rebuild_global_liveness);
     add_block_param_interferences(
         &mut rebuilt.graph,
-        block_param_vregs_per_block,
+        &renamed_block_param_vregs,
         &alias_map_early,
     );
 

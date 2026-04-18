@@ -417,10 +417,22 @@ pub fn compile(
                             block.param_types[pidx as usize].clone(),
                         );
                         inst.operands.clear();
+                    } else if pre_emission.contains(&canon) {
+                        // The canonical class was already emitted in a
+                        // dominating block (survived this block's filter). The
+                        // block param is a pass-through — propagate_block_params
+                        // merged it with the dominating definition, so no fresh
+                        // VReg is needed. Skipping prevents creating a dead
+                        // BlockParam VReg that the regalloc may place in a
+                        // caller-saved register, only to be clobbered by a
+                        // subsequent call in this block. Subsequent users of
+                        // the class (including Ret) then find the dominating
+                        // block's VReg, whose value is actually live.
+                        continue;
                     } else {
-                        // The VReg was emitted by a prior block. Allocate a
-                        // fresh VReg local to this block to avoid the e-graph
-                        // merging outer/inner loop header params.
+                        // The VReg was emitted by a non-dominating prior block.
+                        // Allocate a fresh VReg local to this block to avoid
+                        // outer/inner loop header param aliasing.
                         let fresh_vreg = VReg(next_vreg);
                         next_vreg += 1;
                         // Rewrite all operand references to the old vreg in
