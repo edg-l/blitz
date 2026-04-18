@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
-use crate::ir::effectful::EffectfulOp;
+use crate::egraph::unionfind::UnionFind;
+use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 use crate::schedule::scheduler::ScheduledInst;
@@ -108,6 +109,86 @@ pub fn compute_global_liveness(
     }
 
     GlobalLiveness { live_in, live_out }
+}
+
+/// Apply block-param-override renames to the phi_uses sets.
+///
+/// When a back-edge terminator arg's e-class matches a target block param that
+/// has an override VReg (created to break SSA cycles), this function replaces
+/// the global VReg with the override VReg in `phi_uses[block_idx]`. This keeps
+/// the override VReg alive across the back edge so liveness is correct.
+///
+/// Only back edges (source RPO position >= target RPO position) are processed;
+/// forward edges use the original VReg.
+///
+/// # Arguments
+///
+/// * `func` - The function whose blocks are scanned.
+/// * `unionfind` - E-graph union-find for canonical class lookup.
+/// * `block_param_vreg_overrides` - Map of `(BlockId, param_idx) -> override VReg`
+///   produced during VReg linearization for back-edge block params.
+/// * `block_param_map` - Map of `(BlockId, param_idx) -> ClassId` built from the e-graph.
+/// * `class_to_vreg` - Map from canonical ClassId to the assigned VReg.
+/// * `rpo_order` - Block indices in reverse post-order; used to compute RPO positions.
+/// * `phi_uses` - Per-block sets of VRegs referenced in terminators; mutated in-place.
+pub fn apply_block_param_overrides_to_phi_uses(
+    func: &Function,
+    unionfind: &UnionFind,
+    block_param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
+    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    rpo_order: &[usize],
+    phi_uses: &mut [BTreeSet<VReg>],
+) {
+    let rpo_pos: BTreeMap<BlockId, usize> = rpo_order
+        .iter()
+        .enumerate()
+        .map(|(pos, &idx)| (func.blocks[idx].id, pos))
+        .collect();
+
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        if let Some(term) = block.ops.last() {
+            let src_pos = rpo_pos.get(&block.id).copied().unwrap_or(0);
+            let mut process_args = |target: BlockId, args: &[ClassId]| {
+                let tgt_pos = rpo_pos.get(&target).copied().unwrap_or(0);
+                if src_pos < tgt_pos {
+                    return; // Forward edge: use the original VReg.
+                }
+                for (pidx, &arg_cid) in args.iter().enumerate() {
+                    if let Some(&fresh_vreg) =
+                        block_param_vreg_overrides.get(&(target, pidx as u32))
+                        && let Some(&param_cid) = block_param_map.get(&(target, pidx as u32))
+                    {
+                        let canon_arg = unionfind.find_immutable(arg_cid);
+                        let canon_param = unionfind.find_immutable(param_cid);
+                        if canon_arg == canon_param {
+                            // Replace the global VReg with the override.
+                            if let Some(&old_vreg) = class_to_vreg.get(&canon_arg) {
+                                phi_uses[block_idx].remove(&old_vreg);
+                            }
+                            phi_uses[block_idx].insert(fresh_vreg);
+                        }
+                    }
+                }
+            };
+            match term {
+                EffectfulOp::Jump { target, args } => {
+                    process_args(*target, args);
+                }
+                EffectfulOp::Branch {
+                    bb_true,
+                    bb_false,
+                    true_args,
+                    false_args,
+                    ..
+                } => {
+                    process_args(*bb_true, true_args);
+                    process_args(*bb_false, false_args);
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Extract CFG successor block indices from each block's terminator.

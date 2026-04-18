@@ -67,7 +67,8 @@ pub(super) fn add_shift_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec
 ///
 /// - For each X86Idiv/X86Div in the schedule: operand 0 (dividend) → RAX.
 /// - For each Proj0 projecting from an X86Idiv/X86Div VReg: Proj0 dst → RAX (quotient).
-/// - For each Proj1 projecting from an X86Idiv/X86Div VReg: Proj1 dst → RDX (remainder).
+/// - Proj1 (remainder) is NOT pre-colored; the lowering emits `mov dst, rdx`
+///   so the remainder can live in any register.
 /// - The X86Idiv/X86Div Pair node itself is NOT pre-colored.
 pub(super) fn add_div_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(VReg, Reg)>) {
     // Collect VRegs defined by X86Idiv/X86Div instructions.

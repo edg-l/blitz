@@ -26,6 +26,46 @@ impl InterferenceGraph {
     }
 }
 
+/// Add interference edges into an existing graph from per-block liveness.
+///
+/// Assumes `graph.reg_class` is already fully populated for all VReg indices
+/// that may appear in `liveness` or `insts`. Only adds edges; does not resize
+/// the graph or overwrite `reg_class`.
+///
+/// This is the inner workhorse called by both `build_interference` (per-block
+/// path, which allocates and populates `reg_class` itself) and the global
+/// allocator path (which pre-populates `reg_class` from all blocks before
+/// calling this for each block).
+pub fn build_interference_into(
+    graph: &mut InterferenceGraph,
+    liveness: &LivenessInfo,
+    insts: &[ScheduledInst],
+) {
+    // For each program point (live_at[i] = live before inst i):
+    // all simultaneously live VRegs of the same register class interfere.
+    for live_set in &liveness.live_at {
+        add_interferences_in_set(graph, live_set);
+    }
+
+    // The def interferes with everything live at its program point.
+    for (i, inst) in insts.iter().enumerate() {
+        let dst_idx = inst.dst.0 as usize;
+        if dst_idx >= graph.num_vregs {
+            continue;
+        }
+        let dst_class = graph.reg_class[dst_idx];
+        for &live_vreg in &liveness.live_at[i] {
+            let live_idx = live_vreg.0 as usize;
+            if live_idx < graph.num_vregs
+                && graph.reg_class[live_idx] == dst_class
+                && live_idx != dst_idx
+            {
+                graph.add_edge(dst_idx, live_idx);
+            }
+        }
+    }
+}
+
 /// Build an interference graph from liveness information.
 ///
 /// For each program point, all simultaneously live VRegs of the same register
@@ -34,6 +74,10 @@ impl InterferenceGraph {
 /// Additionally, a def always interferes with all other VRegs live at the same
 /// point (to handle the case where a definition and live range overlap at the
 /// same instruction boundary).
+///
+/// This is a thin wrapper around `build_interference_into` for the per-block
+/// path. The per-block path allocates and populates `reg_class` here before
+/// delegating to the inner function.
 pub fn build_interference(
     liveness: &LivenessInfo,
     insts: &[ScheduledInst],
@@ -87,29 +131,7 @@ pub fn build_interference(
         reg_class,
     };
 
-    // For each program point (live_at[i] = live before inst i):
-    // all simultaneously live VRegs of the same class interfere.
-    for live_set in &liveness.live_at {
-        add_interferences_in_set(&mut graph, live_set);
-    }
-
-    // Also add interferences at the point where each VReg is defined:
-    // the def interferes with everything live right after the def (live_at[i]
-    // without the def itself, which represents the set live *before* the def
-    // after our backward-pass computation — but since we removed dst before
-    // adding uses, live_at[i] is "live before" meaning the dst is NOT in
-    // live_at[i] for its own instruction). We handle this by adding interferences
-    // between the def and whatever is live at that point.
-    for (i, inst) in insts.iter().enumerate() {
-        let dst_idx = inst.dst.0 as usize;
-        let dst_class = graph.reg_class[dst_idx];
-        for &live_vreg in &liveness.live_at[i] {
-            let live_idx = live_vreg.0 as usize;
-            if graph.reg_class[live_idx] == dst_class && live_idx != dst_idx {
-                graph.add_edge(dst_idx, live_idx);
-            }
-        }
-    }
+    build_interference_into(&mut graph, liveness, insts);
 
     graph
 }

@@ -722,59 +722,17 @@ pub fn compile(
             &class_to_vreg,
         );
 
-        // Post-process phi_uses: when a back-edge terminator arg's e-class
-        // matches a target block param that has an override, replace the
-        // global VReg with the override VReg so cross-block liveness keeps
-        // it alive. Only apply on back edges (source RPO position >= target)
-        // because forward edges should use the original VReg.
-        let rpo_pos: BTreeMap<BlockId, usize> = rpo_order
-            .iter()
-            .enumerate()
-            .map(|(pos, &idx)| (func.blocks[idx].id, pos))
-            .collect();
-        for (block_idx, block) in func.blocks.iter().enumerate() {
-            if let Some(term) = block.ops.last() {
-                let src_pos = rpo_pos.get(&block.id).copied().unwrap_or(0);
-                let mut process_args = |target: BlockId, args: &[ClassId]| {
-                    let tgt_pos = rpo_pos.get(&target).copied().unwrap_or(0);
-                    if src_pos < tgt_pos {
-                        return; // Forward edge: use the original VReg.
-                    }
-                    for (pidx, &arg_cid) in args.iter().enumerate() {
-                        if let Some(&fresh_vreg) =
-                            block_param_vreg_overrides.get(&(target, pidx as u32))
-                            && let Some(&param_cid) = block_param_map.get(&(target, pidx as u32))
-                        {
-                            let canon_arg = egraph.unionfind.find_immutable(arg_cid);
-                            let canon_param = egraph.unionfind.find_immutable(param_cid);
-                            if canon_arg == canon_param {
-                                // Replace the global VReg with the override.
-                                if let Some(&old_vreg) = class_to_vreg.get(&canon_arg) {
-                                    phi_uses[block_idx].remove(&old_vreg);
-                                }
-                                phi_uses[block_idx].insert(fresh_vreg);
-                            }
-                        }
-                    }
-                };
-                match term {
-                    EffectfulOp::Jump { target, args } => {
-                        process_args(*target, args);
-                    }
-                    EffectfulOp::Branch {
-                        bb_true,
-                        bb_false,
-                        true_args,
-                        false_args,
-                        ..
-                    } => {
-                        process_args(*bb_true, true_args);
-                        process_args(*bb_false, false_args);
-                    }
-                    _ => {}
-                }
-            }
-        }
+        // Post-process phi_uses: replace back-edge terminator VRegs with their
+        // block-param override VRegs so cross-block liveness is correct.
+        crate::regalloc::global_liveness::apply_block_param_overrides_to_phi_uses(
+            func,
+            &egraph.unionfind,
+            &block_param_vreg_overrides,
+            &block_param_map,
+            &class_to_vreg,
+            &rpo_order,
+            &mut phi_uses,
+        );
 
         // Populate effectful-op operands onto barrier instructions (LoadResult,
         // CallResult, StoreBarrier, VoidCallBarrier) in each block's schedule
