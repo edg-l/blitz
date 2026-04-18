@@ -354,8 +354,15 @@ impl Encoder {
             let offset = fixup.offset;
             match fixup.kind {
                 FixupKind::Rel8 => {
-                    let rel = (target as i64 - (offset as i64 + 1)) as i8;
-                    self.buf[offset] = rel as u8;
+                    let rel_i64 = target as i64 - (offset as i64 + 1);
+                    debug_assert!(
+                        (-128..=127).contains(&rel_i64),
+                        "Rel8 fixup out of range: target={} offset={} rel={} — branch relaxation should have widened to Rel32",
+                        target,
+                        offset,
+                        rel_i64
+                    );
+                    self.buf[offset] = (rel_i64 as i8) as u8;
                 }
                 FixupKind::Rel32 => {
                     let rel = (target as i64 - (offset as i64 + 4)) as i32;

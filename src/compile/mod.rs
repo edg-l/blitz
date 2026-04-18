@@ -1294,8 +1294,28 @@ pub fn compile(
     }
 
     // Step 10b: Branch relaxation -- determine which jumps use short (rel8) form.
+    //
+    // MachInst::Ret is lowered by `emit_epilogue`, not by `encode_inst`. The
+    // default `inst_size` routes Ret through `encode_inst` (a single c3 byte)
+    // and therefore underestimates the expansion to epilogue size (frame
+    // teardown + callee-saved pops + ret). relax_branches' byte offsets would
+    // drift, potentially leaving a short jump whose real displacement is out
+    // of rel8 range (panics at fixup time). Provide a size oracle that
+    // substitutes the actual epilogue byte count for each Ret.
+    let epilogue_size = {
+        let mut scratch = Encoder::new();
+        emit_epilogue(&mut scratch, &frame_layout);
+        scratch.buf.len()
+    };
+    let inst_size_for_relax = |inst: &MachInst| -> usize {
+        if matches!(inst, MachInst::Ret) {
+            epilogue_size
+        } else {
+            inst_size(inst)
+        }
+    };
     let (flat_insts, is_short) =
-        crate::emit::relax::relax_branches(&flat_insts, &label_positions, &inst_size);
+        crate::emit::relax::relax_branches(&flat_insts, &label_positions, &inst_size_for_relax);
 
     // Step 10c: Encode.
     let mut encoder = Encoder::new();
