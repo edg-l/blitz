@@ -175,6 +175,7 @@ pub(super) fn lower_terminator(
     ret_class_to_vreg: &BTreeMap<ClassId, VReg>,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
+    coalesce_aliases: &BTreeMap<VReg, VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
     next_label: &mut LabelId,
@@ -231,6 +232,7 @@ pub(super) fn lower_terminator(
                 ret_class_to_vreg,
                 block_param_map,
                 param_vreg_overrides,
+                coalesce_aliases,
                 regalloc,
                 func,
             )?;
@@ -266,6 +268,7 @@ pub(super) fn lower_terminator(
                 ret_class_to_vreg,
                 block_param_map,
                 param_vreg_overrides,
+                coalesce_aliases,
                 regalloc,
                 func,
             )?;
@@ -277,6 +280,7 @@ pub(super) fn lower_terminator(
                 ret_class_to_vreg,
                 block_param_map,
                 param_vreg_overrides,
+                coalesce_aliases,
                 regalloc,
                 func,
             )?;
@@ -344,6 +348,7 @@ fn build_phi_copies(
     block_class_to_vreg: &BTreeMap<ClassId, VReg>,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
+    coalesce_aliases: &BTreeMap<VReg, VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
 ) -> Result<Vec<(Reg, Reg, OpSize)>, CompileError> {
@@ -396,7 +401,7 @@ fn build_phi_copies(
             }
         };
 
-        let param_vreg = param_vreg_overrides
+        let mut param_vreg = param_vreg_overrides
             .get(&(target, param_idx as u32))
             .copied()
             .or_else(|| class_to_vreg.get(&param_cid).copied())
@@ -405,10 +410,23 @@ fn build_phi_copies(
                 message: format!("param class {:?} not in class_to_vreg", param_cid),
                 location: None,
             })?;
+        // Apply coalesce aliases so a dest VReg merged away by Phase 3 resolves
+        // to its canonical. Without this, vreg_to_reg lookup fails and the copy
+        // is silently dropped, dropping the back-edge and miscompiling loops.
+        // Source-side aliasing is already done via block_class_to_vreg (see
+        // compile/mod.rs:963-1004); this is the symmetric fix for the dest side.
+        while let Some(&aliased) = coalesce_aliases.get(&param_vreg) {
+            if aliased == param_vreg {
+                break;
+            }
+            param_vreg = aliased;
+        }
         let dst_reg = match regalloc.vreg_to_reg.get(&param_vreg).copied() {
             Some(r) => r,
             None => {
-                // Same: XMM block param with no register assignment.
+                // XMM values that flow through cross-block spill slots
+                // are not assigned registers. Skip the phi copy; the
+                // successor will load from the spill slot at block entry.
                 continue;
             }
         };

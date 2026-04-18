@@ -1206,6 +1206,7 @@ pub fn compile(
             &block_class_to_vreg,
             &block_param_map,
             &block_param_vreg_overrides,
+            &coalesce_aliases,
             &regalloc_result,
             func,
             &mut next_label,
