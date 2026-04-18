@@ -703,14 +703,21 @@ fn merge_precolorings_global(
 ) -> BTreeMap<usize, u32> {
     let mut merged = param_color_map.clone();
 
-    // For each GPR call phantom, check if any param precoloring conflicts
-    // (same color + interference edge). Drop conflicting param precolorings.
+    // For each GPR call phantom, check if any precoloring conflicts (same
+    // color + interference edge). Drop conflicting precolorings: the VReg
+    // will get a callee-saved register, and the lowering will emit a mov to
+    // the ABI register at the use site (call arg setup or function prologue).
+    //
+    // This covers both function params AND call-arg VRegs: a call-arg VReg
+    // whose value is live across OTHER calls that clobber the target register
+    // cannot be precolored to that register, or its value is destroyed by the
+    // intervening call. The `setup_call_args` lowering handles non-precolored
+    // arg VRegs by emitting `mov rdi, <arg_reg>` before the call.
     for (&phantom_vreg, &phantom_color) in gpr_call_phantoms {
         let conflicting: Vec<usize> = merged
             .iter()
             .filter(|&(&pv, &pc)| {
                 pc == phantom_color
-                    && param_vreg_indices.contains(&pv)
                     && phantom_vreg < graph.num_vregs
                     && pv < graph.num_vregs
                     && graph.adj[phantom_vreg].contains(&pv)
@@ -722,7 +729,12 @@ fn merge_precolorings_global(
             merged.remove(&pv);
             let vreg = VReg(pv as u32);
             if let Some(reg) = param_vreg_to_reg.remove(&vreg) {
-                unprecolored_params.push((vreg, reg));
+                // Params get re-added to unprecolored_params so the lowering
+                // emits an entry move. Call-arg VRegs aren't in param_vreg_to_reg
+                // so no entry move is needed (setup_call_args handles them).
+                if param_vreg_indices.contains(&pv) {
+                    unprecolored_params.push((vreg, reg));
+                }
             }
         }
     }
