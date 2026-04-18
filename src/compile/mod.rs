@@ -333,6 +333,11 @@ pub fn compile(
 
     // Compute RPO block ordering (indices into func.blocks).
     let rpo_order = compute_rpo(func);
+    // Predecessor counts per block index. Used by block_param_fixup to
+    // distinguish loop headers / merge points (multi-pred, need phi storage)
+    // from pass-through blocks (single-pred, the block param IS its sole
+    // predecessor's argument and doesn't need a fresh VReg).
+    let (block_preds, _) = licm::build_predecessor_map(func);
 
     // Map (BlockId, param_idx) -> fresh VReg for block params whose canonical
     // VReg was emitted by a prior block. This prevents the e-graph from merging
@@ -417,17 +422,23 @@ pub fn compile(
                             block.param_types[pidx as usize].clone(),
                         );
                         inst.operands.clear();
-                    } else if pre_emission.contains(&canon) {
-                        // The canonical class was already emitted in a
-                        // dominating block (survived this block's filter). The
-                        // block param is a pass-through — propagate_block_params
-                        // merged it with the dominating definition, so no fresh
-                        // VReg is needed. Skipping prevents creating a dead
-                        // BlockParam VReg that the regalloc may place in a
-                        // caller-saved register, only to be clobbered by a
-                        // subsequent call in this block. Subsequent users of
-                        // the class (including Ret) then find the dominating
-                        // block's VReg, whose value is actually live.
+                    } else if pre_emission.contains(&canon) && block_preds[block_idx].len() <= 1 {
+                        // Pass-through: the canonical class was already emitted
+                        // in a dominating block (survived this block's filter)
+                        // AND this block has at most one predecessor, so
+                        // propagate_block_params merged the param with the
+                        // dominating definition and no phi storage is needed.
+                        // Skipping prevents creating a dead BlockParam VReg
+                        // that the regalloc places in a caller-saved register,
+                        // only to be clobbered by a subsequent call in this
+                        // block — later users (including Ret) would then find
+                        // the dead VReg instead of the live dominating one.
+                        //
+                        // Multi-predecessor blocks (loop headers, merge points)
+                        // still need the else branch: each predecessor passes
+                        // a distinct value via phi copy into a shared storage
+                        // slot, so a fresh VReg local to this block is
+                        // required.
                         continue;
                     } else {
                         // The VReg was emitted by a non-dominating prior block.

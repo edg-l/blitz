@@ -1103,8 +1103,11 @@ pub(super) fn lower_block_pure_ops(
             continue;
         }
 
-        // Skip function param VRegs (pre-colored to ABI arg regs).
-        if param_vreg_set.contains(&inst.dst) {
+        // Skip function param ops (pre-colored to ABI arg regs). Only skip
+        // when the op itself is Param — after coalescing, a later inst (e.g.
+        // Proj0 or a phi-related copy) may legitimately write to the same
+        // VReg and still needs lowering.
+        if matches!(inst.op, Op::Param(_, _)) {
             continue;
         }
         // Skip block param VRegs: their values arrive from predecessor phi copies.
