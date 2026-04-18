@@ -4474,4 +4474,144 @@ mod tests {
             "expected at least one of v0..v5 to land on its ABI reg; got {assigned_abi_count}"
         );
     }
+
+    // ── Regression: loop with three phi params must not merge two params ────
+    //
+    // Mirrors the `sum` miscompile from Phase 6. The IR is:
+    //   block0: v0 = iconst(1)  (initial i)
+    //           v1 = iconst(5)  (initial n, the bound)
+    //           v2 = iconst(0)  (initial acc)
+    //           jump block1(v0, v1, v2)
+    //   block1(p0=v3 (i), p1=v4 (n), p2=v5 (acc)):
+    //           v6 = x86_sub(v3, v4)  // cmp-like i - n
+    //           jump block2(v6)
+    //   block2(p0=v7): use(v7)
+    //
+    // This triggers the same structural pattern as loop-sum: three block
+    // params on a single block fed by three distinct iconsts. After Phase 6
+    // cutover, the allocator must assign v3, v4, v5 to three DISTINCT
+    // registers — NOT merge two of them into the same color. Two params on
+    // the same register would cause the phi-copy lowering to emit two movs
+    // with the same destination, overwriting one value.
+    //
+    // This test exercises `allocate_global` directly with a hand-built
+    // schedule. It does NOT exercise build_phi_copies (that's compile/mod.rs
+    // territory) — the invariant being checked is purely on the allocator:
+    // each distinct block param gets a distinct color.
+    //
+    // Current status (pre-fix): v3, v4, v5 correctly get distinct colors when
+    // `add_block_param_interferences` runs on the post-coalesce graph with
+    // alias resolution. If this test regresses, check that the
+    // block_param_vregs_per_block argument is being propagated to both the
+    // initial phase 2 build AND the post-coalesce rebuild inside run_phase3.
+    #[test]
+    fn three_phi_params_get_distinct_colors() {
+        use crate::ir::op::Op;
+        use crate::ir::types::Type;
+
+        fn iconst(dst: u32, val: i64) -> ScheduledInst {
+            ScheduledInst {
+                op: Op::Iconst(val, Type::I64),
+                dst: VReg(dst),
+                operands: vec![],
+            }
+        }
+        fn block_param(dst: u32, bid: u32, idx: u32) -> ScheduledInst {
+            ScheduledInst {
+                op: Op::BlockParam(bid, idx, Type::I64),
+                dst: VReg(dst),
+                operands: vec![],
+            }
+        }
+
+        let block_schedules = vec![
+            // block 0: three iconsts fed as phi sources to block 1.
+            vec![iconst(0, 1), iconst(1, 5), iconst(2, 0)],
+            // block 1: three block params; sub to exercise them; feed block 2.
+            vec![
+                block_param(3, 1, 0),
+                block_param(4, 1, 1),
+                block_param(5, 1, 2),
+                ScheduledInst {
+                    op: Op::X86Sub,
+                    dst: VReg(6),
+                    operands: vec![VReg(3), VReg(4)],
+                },
+            ],
+            // block 2: single block param, use it.
+            vec![
+                block_param(7, 2, 0),
+                ScheduledInst {
+                    op: Op::X86Sub,
+                    dst: VReg(8),
+                    operands: vec![VReg(7), VReg(7)],
+                },
+            ],
+        ];
+        let cfg_succs = vec![vec![1usize], vec![2usize], vec![]];
+        // phi_uses[0] = {v0, v1, v2} (terminator args of block 0 to block 1).
+        // phi_uses[1] = {v6} (terminator arg of block 1 to block 2 — v6 is the sub result).
+        let mut phi_uses: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); 3];
+        phi_uses[0].insert(VReg(0));
+        phi_uses[0].insert(VReg(1));
+        phi_uses[0].insert(VReg(2));
+        phi_uses[1].insert(VReg(6));
+        let mut block_param_vregs: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); 3];
+        block_param_vregs[1].extend([VReg(3), VReg(4), VReg(5)]);
+        block_param_vregs[2].insert(VReg(7));
+        // Copy pairs: the phi args → block params. These are what coalesce
+        // will attempt to merge. Critically, (v0, v3) (v1, v4) (v2, v5) must
+        // NOT coalesce in a way that collapses v3/v4/v5 onto a single color.
+        let copy_pairs = vec![
+            (VReg(0), VReg(3)),
+            (VReg(1), VReg(4)),
+            (VReg(2), VReg(5)),
+            (VReg(6), VReg(7)),
+        ];
+
+        let result = allocate_global(
+            &block_schedules,
+            &[],
+            vec![],
+            &copy_pairs,
+            &BTreeMap::new(),
+            &cfg_succs,
+            &phi_uses,
+            &block_param_vregs,
+            "three_phi_params",
+            false,
+        )
+        .expect("allocate_global must succeed");
+
+        // Resolve each param to its canonical (via coalesce_aliases) and
+        // physical register.
+        let resolve = |v: VReg| -> Reg {
+            let mut cur = v;
+            while let Some(&aliased) = result.coalesce_aliases.get(&cur) {
+                if aliased == cur {
+                    break;
+                }
+                cur = aliased;
+            }
+            *result
+                .vreg_to_reg
+                .get(&cur)
+                .unwrap_or_else(|| panic!("VReg {cur:?} has no register"))
+        };
+        let r3 = resolve(VReg(3));
+        let r4 = resolve(VReg(4));
+        let r5 = resolve(VReg(5));
+        assert_ne!(
+            r3, r4,
+            "v3 (param 0) and v4 (param 1) must be in distinct regs"
+        );
+        assert_ne!(
+            r3, r5,
+            "v3 (param 0) and v5 (param 2) must be in distinct regs"
+        );
+        assert_ne!(
+            r4, r5,
+            "v4 (param 1) and v5 (param 2) must be in distinct regs"
+        );
+    }
 }
