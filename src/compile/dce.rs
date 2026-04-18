@@ -508,9 +508,34 @@ pub(super) fn run_dce2_with_extra_roots(
     extraction: &ExtractionResult,
     extra_roots: super::licm::ExtraRoots,
 ) -> super::licm::ExtraRoots {
+    // Filter extra_roots: LICM's find_invariant_classes walks the PRE-saturation
+    // e-graph transitively and hoists any invariant ancestor. After saturation
+    // and extraction, the chosen ops may no longer reference those ancestors
+    // (e.g. `i * 4` may fold into an Addr with scale=4 embedded, leaving
+    // iconst(4, I64) orphan in the e-graph). Emitting an orphan VRegInst for
+    // such a class clobbers a live register at the preheader with no consumer.
+    //
+    // Keep only hoisted classes that are reachable from effectful-op operands
+    // via extraction.choices (i.e., classes the extracted IR actually uses).
+    let consumed = collect_consumed_class_ids(func, egraph, extraction);
+    let filtered_extra_roots: super::licm::ExtraRoots = extra_roots
+        .into_iter()
+        .map(|(idx, classes)| {
+            let kept: Vec<ClassId> = classes
+                .into_iter()
+                .filter(|cid| {
+                    let canon = egraph.unionfind.find_immutable(*cid);
+                    consumed.contains(&canon)
+                })
+                .collect();
+            (idx, kept)
+        })
+        .filter(|(_, classes)| !classes.is_empty())
+        .collect();
+
     // Convert index-keyed extra_roots to BlockId-keyed.
     let mut id_keyed: BTreeMap<BlockId, Vec<ClassId>> = BTreeMap::new();
-    for (&idx, roots) in &extra_roots {
+    for (&idx, roots) in &filtered_extra_roots {
         debug_assert!(
             idx < func.blocks.len(),
             "extra_roots index {idx} out of bounds (blocks.len() = {})",
