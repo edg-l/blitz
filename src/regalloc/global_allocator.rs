@@ -118,6 +118,14 @@ pub(crate) struct Phase3State {
 
     /// Shared next_vreg counter after Phase 3 phantom injection.
     next_vreg: u32,
+
+    /// Coalescing alias map: `from_idx -> into_idx`. When two VRegs are coalesced,
+    /// the "from" VReg no longer exists in the post-coalesce schedules; its uses
+    /// have been rewritten to "into". Downstream callers (e.g. lowering's
+    /// `block_class_to_vreg`) must apply this map when resolving ClassId -> VReg
+    /// so that stale `class_to_vreg` entries pointing at `from` VRegs are chased
+    /// to their live canonical counterparts.
+    alias_map: BTreeMap<u32, u32>,
 }
 
 /// Build the function-wide interference graph (Phase 2).
@@ -705,6 +713,7 @@ fn run_phase3(
     copy_pairs: &[(VReg, VReg)],
     cfg_succs: &[Vec<usize>],
     phi_uses: &[BTreeSet<VReg>],
+    block_param_vregs_per_block: &[BTreeSet<VReg>],
     uses_frame_pointer: bool,
     mut next_vreg: u32,
 ) -> Phase3State {
@@ -744,11 +753,13 @@ fn run_phase3(
     // The CFG topology (cfg_succs) is unchanged by coalescing — only VReg
     // names change. We rebuild liveness on the post-coalesce schedules using
     // the same successors and phi_uses to get fresh live sets.
-    let rebuild_global_liveness = crate::regalloc::global_liveness::compute_global_liveness(
-        &post_coalesce_schedules,
-        cfg_succs,
-        phi_uses,
-    );
+    let rebuild_global_liveness =
+        crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
+            &post_coalesce_schedules,
+            cfg_succs,
+            phi_uses,
+            block_param_vregs_per_block,
+        );
 
     let rebuilt = build_global_interference(&post_coalesce_schedules, &rebuild_global_liveness);
 
@@ -824,6 +835,7 @@ fn run_phase3(
         pre_coloring_colors,
         unprecolored_params,
         next_vreg,
+        alias_map,
     }
 }
 
@@ -864,6 +876,9 @@ pub(crate) struct Phase4State {
 
     /// Inherited from Phase 3: post-coalesce instruction lists, one per block.
     pub per_block_insts: Vec<Vec<ScheduledInst>>,
+
+    /// Inherited from Phase 3: coalesce alias map (`from_idx -> into_idx`).
+    pub alias_map: BTreeMap<u32, u32>,
 }
 
 /// Run Phase 4: global coloring and color-to-register mapping.
@@ -1036,6 +1051,7 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
         xmm_overshoot,
         unprecolored_params: phase3.unprecolored_params,
         per_block_insts: phase3.per_block_insts,
+        alias_map: phase3.alias_map,
     }
 }
 
@@ -1314,6 +1330,29 @@ fn build_def_ops_global(
     def_ops
 }
 
+/// Transitively resolve every chain in a raw alias map (`from -> into`) to
+/// produce `VReg -> canonical_VReg` entries. The result keeps only mappings
+/// whose key differs from the value, so lookups can short-circuit identity.
+fn build_transitive_alias_map(raw: &BTreeMap<u32, u32>) -> BTreeMap<VReg, VReg> {
+    if raw.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut out = BTreeMap::new();
+    for &from in raw.keys() {
+        let mut cur = from;
+        while let Some(&next) = raw.get(&cur) {
+            if next == cur {
+                break;
+            }
+            cur = next;
+        }
+        if cur != from {
+            out.insert(VReg(from), VReg(cur));
+        }
+    }
+    out
+}
+
 /// Spill kind for a global spill candidate.
 #[derive(Clone)]
 enum SpillKind {
@@ -1346,6 +1385,8 @@ fn insert_spills_global(
     vreg_classes: &BTreeMap<VReg, RegClass>,
     next_vreg: &mut u32,
     per_block_rename_maps: &mut Vec<BTreeMap<VReg, VReg>>,
+    terminator_vregs: &[BTreeSet<VReg>],
+    phi_uses: &mut [BTreeSet<VReg>],
 ) {
     if spilled.is_empty() {
         return;
@@ -1393,8 +1434,11 @@ fn insert_spills_global(
                                 dst: nv,
                                 operands: vec![],
                             });
-                            // Record rename (first reload in this block for this VReg).
-                            per_block_rename_maps[b].entry(op).or_insert(nv);
+                            // Record rename: always update to LAST reload in this block.
+                            // The terminator/effectful-op lookup via block_class_to_vreg
+                            // must find the reload closest to program order end, so that
+                            // the VReg alive at the terminator is the most recent one.
+                            per_block_rename_maps[b].insert(op, nv);
                             nv
                         }
                     };
@@ -1440,6 +1484,67 @@ fn insert_spills_global(
                     dst: dummy_dst,
                     operands: vec![spilled_vreg],
                 });
+            }
+        }
+
+        // Emit end-of-block reloads/remats for terminator-consumed VRegs that
+        // were spilled. `terminator_vregs[b]` is the set of VRegs a block's
+        // terminator (Ret val, Jump/Branch phi args) references. Their uses are
+        // NOT `ScheduledInst.operands` (terminators live outside the schedule),
+        // so the per-operand reload pass above does not cover them. Without this
+        // end-of-block pass, the lowering would find the original spilled VReg
+        // with no register assignment and either miscompile (silent phi-copy
+        // skip) or panic (8a-ret safety net).
+        if b < terminator_vregs.len() {
+            for &tv in &terminator_vregs[b] {
+                let tv_idx = tv.0 as usize;
+                let Some(kind) = spilled.get(&tv_idx) else {
+                    continue;
+                };
+                // If an earlier use in this block already reloaded `tv`, reuse
+                // the last recorded rename (which is closest to program order
+                // end — see the LAST-not-FIRST policy in the operand loop).
+                if per_block_rename_maps[b].contains_key(&tv) {
+                    continue;
+                }
+                let nv = VReg(*next_vreg);
+                *next_vreg += 1;
+                match kind {
+                    SpillKind::Remat(remat_op) => {
+                        new_insts.push(ScheduledInst {
+                            op: remat_op.clone(),
+                            dst: nv,
+                            operands: vec![],
+                        });
+                    }
+                    SpillKind::Slot(slot) => {
+                        let is_xmm = vreg_classes
+                            .get(&tv)
+                            .copied()
+                            .map(|c| c == RegClass::XMM)
+                            .unwrap_or(false);
+                        let load_op = if is_xmm {
+                            Op::XmmSpillLoad(*slot as i64)
+                        } else {
+                            Op::SpillLoad(*slot as i64)
+                        };
+                        new_insts.push(ScheduledInst {
+                            op: load_op,
+                            dst: nv,
+                            operands: vec![],
+                        });
+                    }
+                }
+                per_block_rename_maps[b].insert(tv, nv);
+
+                // Rewrite phi_uses so next round's liveness tracks the reload
+                // VReg (which has a proper def in the schedule) instead of the
+                // spilled original. Without this, `tv` stays "live at block end"
+                // in subsequent rounds, keeps demanding a register, gets spilled
+                // again, and the spill loop diverges.
+                if b < phi_uses.len() && phi_uses[b].remove(&tv) {
+                    phi_uses[b].insert(nv);
+                }
             }
         }
 
@@ -1603,6 +1708,7 @@ fn rebuild_interference(
     block_schedules: &[Vec<ScheduledInst>],
     cfg_succs: &[Vec<usize>],
     phi_uses: &[BTreeSet<VReg>],
+    block_param_vregs_per_block: &[BTreeSet<VReg>],
     call_points: &[(usize, usize)],
     div_points: &[(usize, usize)],
     uses_frame_pointer: bool,
@@ -1615,11 +1721,13 @@ fn rebuild_interference(
     BTreeMap<usize, u32>, // pre_coloring_colors
     Vec<(VReg, Reg)>,     // unprecolored_params (may change after rebuild)
 ) {
-    let global_liveness = crate::regalloc::global_liveness::compute_global_liveness(
-        block_schedules,
-        cfg_succs,
-        phi_uses,
-    );
+    let global_liveness =
+        crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
+            block_schedules,
+            cfg_succs,
+            phi_uses,
+            block_param_vregs_per_block,
+        );
     let phase2 = build_global_interference(block_schedules, &global_liveness);
 
     // Inject clobber phantoms.
@@ -1777,7 +1885,7 @@ fn select_spill_by_phantom_interference(
 /// here.
 pub(crate) fn run_phase5(
     phase4: Phase4State,
-    ctx: Phase5Context,
+    mut ctx: Phase5Context,
 ) -> Result<GlobalRegAllocResult, String> {
     use super::coloring::{available_gpr_colors, greedy_color, map_colors_to_regs, mcs_ordering};
     use crate::x86::abi::CALLEE_SAVED;
@@ -1800,6 +1908,7 @@ pub(crate) fn run_phase5(
             .into_iter()
             .collect();
         let n_blocks = phase4.per_block_insts.len();
+        let coalesce_aliases = build_transitive_alias_map(&phase4.alias_map);
         return Ok(GlobalRegAllocResult {
             per_block_insts: phase4.per_block_insts,
             vreg_to_reg: phase4.vreg_to_reg,
@@ -1807,6 +1916,9 @@ pub(crate) fn run_phase5(
             callee_saved_used,
             unprecolored_params: phase4.unprecolored_params,
             per_block_rename_maps: vec![BTreeMap::new(); n_blocks],
+            vreg_slot: BTreeMap::new(),
+            vreg_remat_op: BTreeMap::new(),
+            coalesce_aliases,
         });
     }
 
@@ -1858,6 +1970,7 @@ pub(crate) fn run_phase5(
                 &per_block_insts,
                 &ctx.cfg_succs,
                 &ctx.phi_uses,
+                &ctx.block_param_vregs_per_block,
                 &call_points,
                 &div_points,
                 uses_frame_pointer,
@@ -2021,8 +2134,17 @@ pub(crate) fn run_phase5(
 
         let vreg_classes = crate::regalloc::build_vreg_classes_from_all_blocks(&per_block_insts);
 
+        // `phi_uses` already includes every VReg any terminator consumes
+        // (Jump/Branch args and Ret values; `compute_phi_uses` populates all
+        // three). insert_spills_global treats phi_uses as terminator_vregs for
+        // end-of-block reload insertion.
+        let terminator_vregs: Vec<BTreeSet<VReg>> = ctx.phi_uses.clone();
+
         // Insert spill/reload code into the schedules.
         // `real_next_vreg` is advanced here to account for new reload VRegs.
+        // `ctx.phi_uses` is mutated: when a phi-arg VReg gets an end-of-block
+        // reload, phi_uses is rewritten to reference the reload VReg so next
+        // round's liveness tracks it (and not the dead spilled original).
         insert_spills_global(
             &mut per_block_insts,
             &new_spilled,
@@ -2031,6 +2153,8 @@ pub(crate) fn run_phase5(
             &vreg_classes,
             &mut real_next_vreg,
             &mut per_block_rename_maps,
+            &terminator_vregs,
+            &mut ctx.phi_uses,
         );
 
         all_spilled.extend(new_spilled);
@@ -2059,6 +2183,25 @@ pub(crate) fn run_phase5(
             .unwrap_or(usize::MAX)
     });
 
+    // Expose spilled-VReg info so the caller can materialize reloads for
+    // terminator/effectful-op ClassIds that resolve to a spilled VReg whose use
+    // was not a `ScheduledInst` operand (e.g., a Ret value).
+    let mut vreg_slot: BTreeMap<VReg, u32> = BTreeMap::new();
+    let mut vreg_remat_op: BTreeMap<VReg, crate::ir::op::Op> = BTreeMap::new();
+    for (&idx, kind) in &all_spilled {
+        let v = VReg(idx as u32);
+        match kind {
+            SpillKind::Slot(s) => {
+                vreg_slot.insert(v, *s);
+            }
+            SpillKind::Remat(op) => {
+                vreg_remat_op.insert(v, op.clone());
+            }
+        }
+    }
+
+    let coalesce_aliases = build_transitive_alias_map(&ctx.alias_map);
+
     Ok(GlobalRegAllocResult {
         per_block_insts,
         vreg_to_reg: final_vreg_to_reg,
@@ -2066,6 +2209,9 @@ pub(crate) fn run_phase5(
         callee_saved_used,
         unprecolored_params: final_unprecolored_params,
         per_block_rename_maps,
+        vreg_slot,
+        vreg_remat_op,
+        coalesce_aliases,
     })
 }
 
@@ -2155,12 +2301,23 @@ pub fn allocate_global(
     func_name: &str,
     uses_frame_pointer: bool,
 ) -> Result<GlobalRegAllocResult, String> {
-    // Task 2.2: Compute function-wide global liveness.
-    let global_liveness = crate::regalloc::global_liveness::compute_global_liveness(
-        block_schedules,
-        cfg_succs,
-        phi_uses,
-    );
+    // Task 2.2: Compute function-wide global liveness. Block params are added
+    // to their block's live_in so pairs of params on the same block interfere
+    // (they're written simultaneously by phi copies and must occupy distinct
+    // registers even when the block body never reads them).
+    let global_liveness =
+        crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
+            block_schedules,
+            cfg_succs,
+            phi_uses,
+            block_param_vregs_per_block,
+        );
+    // Also augment the global liveness that run_phase3 and rebuild_interference
+    // will recompute internally: they use plain `compute_global_liveness` which
+    // doesn't know about block params. We pre-augment `phi_uses` by unioning
+    // each block's params into its predecessors' phi_uses — no, simpler: pass
+    // block_param_vregs_per_block down. But that's a larger refactor, so for
+    // now we carry the param set and augment at each site (see below).
 
     // Tasks 2.3, 2.4, 2.4.5: Build function-wide interference graph and
     // per-block liveness (stored in Phase2State for Phase 3/5 consumption).
@@ -2185,6 +2342,7 @@ pub fn allocate_global(
         copy_pairs,
         cfg_succs,
         phi_uses,
+        block_param_vregs_per_block,
         uses_frame_pointer,
         next_vreg,
     );
@@ -2192,13 +2350,12 @@ pub fn allocate_global(
     // Phase 4: global coloring and color-to-register mapping.
     let phase4 = run_phase4(phase3, uses_frame_pointer);
 
-    // Build coalescing alias map for def_ops key canonicalization in Phase 5.
-    // We need to reconstruct this from Phase 3's output. Since `run_phase3`
-    // already applied coalescing and returned post-coalesce schedules, we
-    // cannot retrieve the alias map directly. We instead pass an empty alias
-    // map to `build_def_ops_global`; the post-coalesce schedules already have
-    // canonical VReg names so no additional aliasing is needed.
-    let alias_map: BTreeMap<u32, u32> = BTreeMap::new();
+    // Coalescing alias map: threaded through from Phase 3. Needed in Phase 5
+    // for `build_def_ops_global` (canonicalize def lookup keys) AND at the end
+    // of run_phase5 to seed `per_block_rename_maps` so the caller's
+    // ClassId -> VReg resolution (block_class_to_vreg in compile/mod.rs) chases
+    // stale `class_to_vreg` entries that still point at pre-coalesce VRegs.
+    let alias_map = phase4.alias_map.clone();
 
     // Phase 5: global spilling.
     let ctx = Phase5Context {
@@ -2532,6 +2689,7 @@ mod tests {
             &copy_pairs,
             &successors,
             &phi_uses,
+            &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false, // uses_frame_pointer
             10,    // next_vreg start
         );
@@ -2603,6 +2761,7 @@ mod tests {
             &copy_pairs,
             &successors,
             &phi_uses,
+            &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false,
             next_vreg,
         );
@@ -2656,6 +2815,7 @@ mod tests {
             &copy_pairs,
             &successors,
             &phi_uses,
+            &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false,
             next_vreg,
         );
@@ -2708,6 +2868,7 @@ mod tests {
             &copy_pairs,
             &successors,
             &phi_uses,
+            &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false,
             next_vreg,
         );
@@ -2744,6 +2905,7 @@ mod tests {
             copy_pairs,
             successors,
             &phi_uses,
+            &Vec::<std::collections::BTreeSet<VReg>>::new(),
             uses_frame_pointer,
             next_vreg,
         )
@@ -3104,6 +3266,8 @@ mod tests {
             &vreg_classes,
             &mut next_vreg,
             &mut rename_maps,
+            &[],
+            &mut [],
         );
 
         let insts = &per_block_insts[0];
@@ -3401,6 +3565,8 @@ mod tests {
             &vreg_classes,
             &mut next_vreg,
             &mut rename_maps,
+            &[],
+            &mut [],
         );
 
         // Count SpillStores across ALL blocks.
@@ -3507,6 +3673,8 @@ mod tests {
             &vreg_classes,
             &mut next_vreg,
             &mut rename_maps,
+            &[],
+            &mut [],
         );
 
         let insts = &per_block_insts[0];
@@ -3603,6 +3771,8 @@ mod tests {
             &vreg_classes,
             &mut next_vreg,
             &mut rename_maps,
+            &[],
+            &mut [],
         );
 
         let insts = &per_block_insts[0];
@@ -3723,6 +3893,8 @@ mod tests {
             &vreg_classes,
             &mut next_vreg,
             &mut rename_maps,
+            &[],
+            &mut [],
         );
 
         let insts = &per_block_insts[0];
@@ -3804,6 +3976,8 @@ mod tests {
             &vreg_classes,
             &mut next_vreg,
             &mut rename_maps,
+            &[],
+            &mut [],
         );
 
         let insts = &per_block_insts[0];
@@ -4106,6 +4280,8 @@ mod tests {
             &vreg_classes,
             &mut next_vreg,
             &mut rename_maps,
+            &[],
+            &mut [],
         );
 
         // SpillStore must appear in block 0 (after v0's def).

@@ -44,6 +44,25 @@ pub struct GlobalRegAllocResult {
     /// the live name of a value; terminator and effectful-op lowering consult these
     /// maps to resolve ClassId -> VReg after allocation.
     pub per_block_rename_maps: Vec<BTreeMap<VReg, VReg>>,
+    /// VRegs that were spilled to a stack slot. Maps `VReg -> slot index`.
+    /// The caller uses this to materialize reloads for terminator/effectful-op
+    /// ClassIds that resolve to a spilled VReg but whose use was not already
+    /// rewritten by `insert_spills_global` (e.g., a Ret value whose only use is
+    /// the terminator itself, not a `ScheduledInst` operand).
+    pub vreg_slot: BTreeMap<VReg, u32>,
+    /// VRegs that were rematerialized (not slot-backed). Maps `VReg -> defining Op`.
+    /// The caller uses this to emit a fresh remat copy (with empty operands) for
+    /// terminator/effectful-op ClassIds whose def was dropped by
+    /// `insert_spills_global`.
+    pub vreg_remat_op: BTreeMap<VReg, crate::ir::op::Op>,
+    /// Coalesce alias map: `from_idx -> into_idx`. When two VRegs are coalesced
+    /// by Phase 3, the `from` VReg is rewritten to `into` in every post-coalesce
+    /// schedule. The `vreg_to_reg` map contains only `into` keys; `from` has no
+    /// register assignment. Callers must apply this map when resolving a
+    /// `ClassId -> VReg` (e.g. for terminator or phi-copy lowering) so stale
+    /// `class_to_vreg` entries pointing at `from` chase to their canonical
+    /// `into` counterpart. Transitively resolve until no further entry exists.
+    pub coalesce_aliases: BTreeMap<VReg, VReg>,
 }
 
 /// Check whether a VReg is in the XMM register class.

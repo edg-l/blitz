@@ -24,6 +24,7 @@ use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
+use crate::regalloc::allocate_global;
 use crate::regalloc::allocator::{RegAllocResult, allocate};
 use crate::schedule::scheduler::{ScheduleDag, ScheduledInst, schedule};
 use crate::x86::abi::{compute_frame_layout, emit_epilogue, emit_prologue};
@@ -612,17 +613,12 @@ pub fn compile(
     // Compute loop depths from the CFG for spill selection.
     let loop_depths = compute_loop_depths(func, &block_schedules);
 
-    // Shared next_vreg counter for fresh VReg allocation across all blocks.
-    let shared_next_vreg_start: u32 = block_schedules
-        .iter()
-        .flatten()
-        .flat_map(|i| std::iter::once(i.dst.0).chain(i.operands.iter().map(|v| v.0)))
-        .max()
-        .map(|m| m + 1)
-        .unwrap_or(0);
-
     // Single-block fast path skips global liveness.
-    let (regalloc_result, block_rewritten, block_rename_maps) = if func.blocks.len() == 1 {
+    let (regalloc_result, block_rewritten, block_rename_maps, coalesce_aliases) = if func
+        .blocks
+        .len()
+        == 1
+    {
         // --- Single-block fast path ---
         let mut all_scheduled: Vec<ScheduledInst> =
             block_schedules.iter().flatten().cloned().collect();
@@ -710,9 +706,10 @@ pub fn compile(
         }
         let rewritten = vec![result.insts.clone()];
         let rename_maps: Vec<BTreeMap<VReg, VReg>> = vec![BTreeMap::new()];
-        (result, rewritten, rename_maps)
+        let aliases: BTreeMap<VReg, VReg> = BTreeMap::new();
+        (result, rewritten, rename_maps, aliases)
     } else {
-        // --- Multi-block path ---
+        // --- Multi-block path: global register allocator (Phase 6 cutover) ---
 
         // Step 1: Compute CFG successors and phi uses per block.
         let cfg_succs = crate::regalloc::global_liveness::cfg_successors(func);
@@ -734,10 +731,64 @@ pub fn compile(
             &mut phi_uses,
         );
 
+        // Task 6.1a (CRITICAL ORDER): Collect call-arg precolors BEFORE calling
+        // populate_effectful_operands. The barrier system sorts operands by VReg
+        // index (barrier.rs:388,405-406), destroying ABI argument order.
+        // add_call_precolors_for_block reads EffectfulOp::Call args in positional
+        // ABI order and must run BEFORE the barrier sort.
+        let mut call_arg_precolors: Vec<(VReg, Reg)> = Vec::new();
+        for block in func.blocks.iter() {
+            let mut dummy_live_out: std::collections::BTreeSet<VReg> =
+                std::collections::BTreeSet::new();
+            add_call_precolors_for_block(
+                block,
+                &egraph,
+                &class_to_vreg,
+                &mut call_arg_precolors,
+                &mut dummy_live_out,
+            );
+        }
+
+        // Task 6.4: insert_early_barrier_spills per block before allocate_global.
+        // Tracks slot numbers used so we can separate them from global-allocator
+        // slots after the fact (the global allocator also starts its slot counter
+        // from 0 internally, so we need to distinguish the two ranges).
+        let mut early_barrier_slots: std::collections::BTreeSet<u32> =
+            std::collections::BTreeSet::new();
+        let mut pre_spill_slots: u32 = 0;
+        {
+            let mut early_next_vreg = next_vreg;
+            for (block_idx, block) in func.blocks.iter().enumerate() {
+                let non_term_count = block.non_term_count();
+                if non_term_count > 0 {
+                    let (result_map, arg_map) =
+                        build_barrier_context(block, &egraph, &class_to_vreg);
+                    let mut vreg_group =
+                        assign_barrier_groups(&block_schedules[block_idx], &result_map, &arg_map);
+                    let slots_before = pre_spill_slots;
+                    insert_early_barrier_spills(
+                        &mut block_schedules[block_idx],
+                        &result_map,
+                        &arg_map,
+                        &mut vreg_group,
+                        &vreg_types,
+                        &mut early_next_vreg,
+                        &mut pre_spill_slots,
+                    );
+                    // Record which slot numbers were allocated by early-barrier spills.
+                    for slot in slots_before..pre_spill_slots {
+                        early_barrier_slots.insert(slot);
+                    }
+                }
+            }
+            next_vreg = early_next_vreg;
+        }
+
         // Populate effectful-op operands onto barrier instructions (LoadResult,
         // CallResult, StoreBarrier, VoidCallBarrier) in each block's schedule
         // BEFORE global liveness, so compute_global_liveness sees them as regular
         // instruction operands and includes them in cross-block liveness.
+        // This MUST happen AFTER call_arg_precolors collection (Task 6.1a).
         for (block_idx, block) in func.blocks.iter().enumerate() {
             let non_term_count = block.non_term_count();
             if non_term_count > 0 {
@@ -756,14 +807,7 @@ pub fn compile(
             }
         }
 
-        // Step 2: Compute global liveness.
-        let global_liveness = crate::regalloc::global_liveness::compute_global_liveness(
-            &block_schedules,
-            &cfg_succs,
-            &phi_uses,
-        );
-
-        // Step 3: Determine block params per block (excluded from reload insertion).
+        // Step 3: Determine block params per block (passed to allocate_global).
         let mut block_param_vregs_per_block =
             crate::regalloc::global_liveness::collect_block_param_vregs_per_block(
                 func,
@@ -777,505 +821,72 @@ pub fn compile(
             block_param_vregs_per_block[block_idx].insert(fresh_vreg);
         }
 
-        // Step 4: Assign cross-block spill slots.
-        let mut spill_map = crate::regalloc::split::assign_cross_block_slots(
-            &global_liveness,
+        // Task 6.1 / Task 6.2: Call allocate_global. This replaces the entire
+        // per-block loop (assign_cross_block_slots + rewrite_block_for_splitting +
+        // allocate() per block). Those functions are no longer called here.
+        // `phi_uses` already includes Ret values (compute_phi_uses covers Ret
+        // val, Jump args, Branch args), so the allocator has the full set of
+        // terminator-consumed VRegs for liveness + end-of-block reload logic.
+        let global_result = allocate_global(
             &block_schedules,
+            &param_vregs,
+            call_arg_precolors,
+            &copy_pairs,
+            &loop_depths,
+            &cfg_succs,
+            &phi_uses,
             &block_param_vregs_per_block,
-        );
+            &func.name,
+            opts.force_frame_pointer,
+        )
+        .map_err(|e| CompileError {
+            phase: "regalloc".into(),
+            message: e,
+            location: Some(IrLocation {
+                function: func.name.clone(),
+                block: None,
+                inst: None,
+            }),
+        })?;
 
-        // Step 5: Build def_insts map for rematerialization.
-        let def_insts: BTreeMap<VReg, ScheduledInst> = block_schedules
-            .iter()
-            .flatten()
-            .map(|inst| (inst.dst, inst.clone()))
-            .collect();
+        // Task 6.5 (deleted per-block spill slot offset code): no per-block slot
+        // offsetting is needed. The global allocator uses a single slot space 0..M.
+        // Early-barrier spills (pre_spill_slots) are in the input schedule with
+        // slot numbers 0..pre_spill_slots. The global allocator's new spills use
+        // 0..M internally. We shift the global-allocator slots by +pre_spill_slots
+        // and leave early-barrier slots unchanged, giving disjoint ranges.
+        let mut block_rewritten_storage = global_result.per_block_insts;
+        let block_rename_maps = global_result.per_block_rename_maps;
+        let merged_vreg_to_reg = global_result.vreg_to_reg;
+        let mut merged_callee_saved = global_result.callee_saved_used;
+        let global_alloc_slots = global_result.spill_slots;
+        let global_unprecolored_params = global_result.unprecolored_params;
+        let coalesce_aliases: BTreeMap<VReg, VReg> = global_result.coalesce_aliases;
 
-        // Step 6: Build vreg_classes map from all schedules.
-        let vreg_classes =
-            crate::regalloc::split::build_vreg_classes_from_schedules(&block_schedules);
-
-        // Step 6b: Ensure ALL XMM vregs that flow across block boundaries
-        // (as phi args or block params) have cross-block spill slots.
-        // All XMM registers are caller-saved in SysV ABI, so XMM values
-        // can never survive calls in registers. They must go through spill
-        // slots for cross-block persistence.
-        {
-            use crate::x86::reg::RegClass;
-            for phi_set in &phi_uses {
-                for &v in phi_set {
-                    let is_xmm = vreg_classes
-                        .get(&v)
-                        .copied()
-                        .map(|c| c == RegClass::XMM)
-                        .unwrap_or(false);
-                    if is_xmm
-                        && !spill_map.vreg_to_slot.contains_key(&v)
-                        && !spill_map.remat_vregs.contains(&v)
-                    {
-                        let slot = spill_map.num_slots;
-                        spill_map.num_slots += 1;
-                        spill_map.vreg_to_slot.insert(v, slot);
-                    }
-                }
-            }
-            // Also ensure XMM block params that appear in phi_uses of successors
-            // have spill slots.
-            for block_param_set in &block_param_vregs_per_block {
-                for &v in block_param_set {
-                    let is_xmm = vreg_classes
-                        .get(&v)
-                        .copied()
-                        .map(|c| c == RegClass::XMM)
-                        .unwrap_or(false);
-                    if is_xmm
-                        && !spill_map.vreg_to_slot.contains_key(&v)
-                        && !spill_map.remat_vregs.contains(&v)
-                    {
-                        let slot = spill_map.num_slots;
-                        spill_map.num_slots += 1;
-                        spill_map.vreg_to_slot.insert(v, slot);
+        // Shift global-allocator slot numbers by pre_spill_slots to avoid collision
+        // with early-barrier slots (which occupy 0..pre_spill_slots).
+        if pre_spill_slots > 0 {
+            for block_insts in block_rewritten_storage.iter_mut() {
+                for inst in block_insts.iter_mut() {
+                    match &mut inst.op {
+                        Op::SpillStore(slot)
+                        | Op::SpillLoad(slot)
+                        | Op::XmmSpillStore(slot)
+                        | Op::XmmSpillLoad(slot) => {
+                            // Shift global-allocator slots (not early-barrier ones).
+                            // Early-barrier slots are in early_barrier_slots set.
+                            // Note: after coalescing, early-barrier slot numbers in
+                            // the result match the original 0..pre_spill_slots range.
+                            if !early_barrier_slots.contains(&(*slot as u32)) {
+                                *slot += pre_spill_slots as i64;
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
         }
-        let cross_block_slots = spill_map.num_slots;
-
-        // Step 7: Compute block defs.
-        let block_defs = crate::regalloc::split::compute_block_defs(&block_schedules);
-
-        // Build function-level pre-colorings for filtering per block.
-        let mut func_level_param_vregs = param_vregs.clone();
-        {
-            let all_scheduled: Vec<ScheduledInst> =
-                block_schedules.iter().flatten().cloned().collect();
-            add_shift_precolors(&all_scheduled, &mut func_level_param_vregs);
-            add_div_precolors(&all_scheduled, &mut func_level_param_vregs);
-        }
-
-        // Step 8: Per-block allocation loop (RPO order).
-        let mut shared_next_vreg = shared_next_vreg_start;
-        let mut merged_vreg_to_reg: BTreeMap<VReg, Reg> = BTreeMap::new();
-        let mut merged_callee_saved: Vec<Reg> = Vec::new();
-        let mut spill_slot_counter = cross_block_slots;
-        let mut block_rewritten_storage: Vec<Vec<ScheduledInst>> =
-            vec![Vec::new(); func.blocks.len()];
-        let mut block_rename_maps: Vec<BTreeMap<VReg, VReg>> =
-            vec![BTreeMap::new(); func.blocks.len()];
-
-        for &block_idx in &rpo_order {
-            let block = &func.blocks[block_idx];
-
-            // Step 8a: Insert cross-block spill/reload code.
-            let (split_schedule, rename) = crate::regalloc::split::rewrite_block_for_splitting(
-                &block_schedules[block_idx],
-                block_idx,
-                &global_liveness,
-                &spill_map,
-                &block_defs,
-                &def_insts,
-                &mut shared_next_vreg,
-                &block_param_vregs_per_block[block_idx],
-                &vreg_classes,
-            );
-
-            // Step 8a-ret: If this block ends with Ret, ensure the return value
-            // is available in this block's schedule. The global liveness doesn't
-            // include Ret operands (adding them breaks while loop liveness), so
-            // rewrite_block_for_splitting won't insert a reload/remat for them.
-            // Handle it here: if the ret value is from another block and not
-            // already in the schedule, insert a remat (for Iconst/StackAddr) or
-            // spill-load.
-            let (split_schedule, mut rename) = {
-                let mut schedule = split_schedule;
-                let mut rename = rename;
-                if let Some(EffectfulOp::Ret { val: Some(cid) }) = block.ops.last() {
-                    let canon = egraph.unionfind.find_immutable(*cid);
-                    if let Some(&vreg) = class_to_vreg.get(&canon) {
-                        let in_schedule = schedule.iter().any(|i| i.dst == vreg)
-                            || rename
-                                .values()
-                                .any(|&v| schedule.iter().any(|i| i.dst == v));
-                        if !in_schedule {
-                            // Value not in this block's schedule -- need remat or reload.
-                            if let Some(def) = def_insts.get(&vreg) {
-                                if crate::regalloc::spill::is_rematerializable(def) {
-                                    let new_vreg = VReg(shared_next_vreg);
-                                    shared_next_vreg += 1;
-                                    schedule.push(ScheduledInst {
-                                        op: def.op.clone(),
-                                        dst: new_vreg,
-                                        operands: def.operands.clone(),
-                                    });
-                                    rename.insert(vreg, new_vreg);
-                                } else if let Some(&slot) = spill_map.vreg_to_slot.get(&vreg) {
-                                    let new_vreg = VReg(shared_next_vreg);
-                                    shared_next_vreg += 1;
-                                    schedule.push(ScheduledInst {
-                                        op: Op::SpillLoad(slot as i64),
-                                        dst: new_vreg,
-                                        operands: vec![],
-                                    });
-                                    rename.insert(vreg, new_vreg);
-                                }
-                            }
-                        }
-                    }
-                }
-                // Step 8a-phi: Ensure phi source VRegs (terminator args) are in the
-                // schedule. The pass-through optimization in cross-block splitting
-                // skips VRegs that are live-in/live-out but not used in the
-                // schedule. Phi source VRegs need to be in registers for phi copy
-                // emission, so insert remat/reload if missing.
-                for &phi_vreg in &phi_uses[block_idx] {
-                    let vreg = phi_vreg;
-                    let in_schedule = schedule.iter().any(|i| i.dst == vreg)
-                        || rename
-                            .get(&vreg)
-                            .is_some_and(|&v| schedule.iter().any(|i| i.dst == v));
-                    if !in_schedule && let Some(def) = def_insts.get(&vreg) {
-                        if crate::regalloc::spill::is_rematerializable(def) {
-                            let new_vreg = VReg(shared_next_vreg);
-                            shared_next_vreg += 1;
-                            schedule.push(ScheduledInst {
-                                op: def.op.clone(),
-                                dst: new_vreg,
-                                operands: def.operands.clone(),
-                            });
-                            rename.insert(vreg, new_vreg);
-                        } else if let Some(&slot) = spill_map.vreg_to_slot.get(&vreg) {
-                            let new_vreg = VReg(shared_next_vreg);
-                            shared_next_vreg += 1;
-                            schedule.push(ScheduledInst {
-                                op: Op::SpillLoad(slot as i64),
-                                dst: new_vreg,
-                                operands: vec![],
-                            });
-                            rename.insert(vreg, new_vreg);
-                        }
-                    }
-                }
-                (schedule, rename)
-            };
-
-            // Step 8a-reorder: Move all BlockParam instructions to the front of
-            // split_schedule. Block params receive their values from predecessor
-            // phi copies before the block begins execution. Placing them at
-            // position 0 ensures liveness analysis treats them as live from the
-            // start of the block, preventing other instructions scheduled before
-            // their original position from sharing the same physical register.
-            let split_schedule = {
-                let (mut bps, rest): (Vec<_>, Vec<_>) = split_schedule
-                    .into_iter()
-                    .partition(|inst| matches!(inst.op, Op::BlockParam(_, _, _)));
-                bps.extend(rest);
-                bps
-            };
-
-            // Step 8a-spill: Insert early spill/reload for distant barrier results.
-            // Rebuild barrier maps with post-rename VRegs, then insert pairs.
-            // Strip barrier pseudo-ops (StoreBarrier, VoidCallBarrier) and clear
-            // operands from LoadResult/CallResult — they'll be re-populated with
-            // post-rename VRegs after the early spill pass.
-            let mut split_schedule: Vec<_> = split_schedule
-                .into_iter()
-                .filter(|inst| !matches!(inst.op, Op::StoreBarrier | Op::VoidCallBarrier))
-                .map(|mut inst| {
-                    if matches!(inst.op, Op::LoadResult(_, _) | Op::CallResult(_, _)) {
-                        inst.operands.clear();
-                    }
-                    inst
-                })
-                .collect();
-            {
-                let non_term_count = block.non_term_count();
-                let non_term_ops = &block.ops[..non_term_count];
-                if non_term_count > 0 {
-                    // Build block_class_to_vreg with renames applied.
-                    let mut bcv: BTreeMap<ClassId, VReg> = class_to_vreg
-                        .iter()
-                        .map(|(&cid, &vreg)| {
-                            let renamed = rename.get(&vreg).copied().unwrap_or(vreg);
-                            (cid, renamed)
-                        })
-                        .collect();
-                    let (result_map, arg_map) = build_barrier_context(block, &egraph, &bcv);
-                    let mut vreg_group =
-                        assign_barrier_groups(&split_schedule, &result_map, &arg_map);
-                    insert_early_barrier_spills(
-                        &mut split_schedule,
-                        &result_map,
-                        &arg_map,
-                        &mut vreg_group,
-                        &vreg_types,
-                        &mut shared_next_vreg,
-                        &mut spill_slot_counter,
-                    );
-
-                    // Re-sort by barrier group after inserting SpillStore/SpillLoad.
-                    // SpillLoad must come before consumers in the same group (like
-                    // LoadResult/CallResult), and SpillStore right after its source.
-                    {
-                        let mut indexed: Vec<(usize, ScheduledInst)> =
-                            split_schedule.drain(..).enumerate().collect();
-                        indexed.sort_by_key(|(orig_idx, inst)| {
-                            let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
-                            let priority: u8 = match inst.op {
-                                Op::Param(_, _) | Op::BlockParam(_, _, _) => 0,
-                                Op::LoadResult(_, _) | Op::CallResult(_, _) | Op::SpillLoad(_) => 1,
-                                _ => 2,
-                            };
-                            (g, priority, *orig_idx)
-                        });
-                        split_schedule.extend(indexed.into_iter().map(|(_, inst)| inst));
-                    }
-
-                    // Step 8a-effectful: Ensure effectful op operands are in
-                    // the schedule. If an operand's VReg is not in this block's
-                    // schedule (because global liveness didn't detect it as
-                    // cross-block live), insert a remat instruction.
-                    {
-                        let sched_vregs: BTreeSet<VReg> =
-                            split_schedule.iter().map(|i| i.dst).collect();
-                        for op in non_term_ops {
-                            let cids: Vec<ClassId> = match op {
-                                EffectfulOp::Store { addr, val, .. } => vec![*addr, *val],
-                                EffectfulOp::Load { addr, .. } => vec![*addr],
-                                EffectfulOp::Call { args, .. } => args.clone(),
-                                _ => continue,
-                            };
-                            for cid in cids {
-                                let canon = egraph.unionfind.find_immutable(cid);
-                                if let Some(&vreg) = bcv.get(&canon) {
-                                    if sched_vregs.contains(&vreg) {
-                                        continue;
-                                    }
-                                    // Try original (pre-rename) VReg for def lookup.
-                                    let orig_vreg =
-                                        class_to_vreg.get(&canon).copied().unwrap_or(vreg);
-                                    if let Some(def) =
-                                        def_insts.get(&vreg).or_else(|| def_insts.get(&orig_vreg))
-                                        && crate::regalloc::spill::is_rematerializable(def)
-                                    {
-                                        let new_vreg = VReg(shared_next_vreg);
-                                        shared_next_vreg += 1;
-                                        split_schedule.push(ScheduledInst {
-                                            op: def.op.clone(),
-                                            dst: new_vreg,
-                                            operands: def.operands.clone(),
-                                        });
-                                        bcv.insert(canon, new_vreg);
-                                        rename.insert(orig_vreg, new_vreg);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Re-populate effectful-op operands with post-rename VRegs.
-                    populate_effectful_operands(
-                        &mut split_schedule,
-                        non_term_ops,
-                        &egraph,
-                        &bcv,
-                        &mut vreg_group,
-                        &mut shared_next_vreg,
-                    );
-
-                    if crate::trace::is_enabled("sched") && crate::trace::fn_matches(&func.name) {
-                        tracing::debug!(
-                            target: "blitz::sched",
-                            "[{}] block {block_idx} after markers:\n{}",
-                            func.name,
-                            crate::trace::format_schedule(&split_schedule, Some(&vreg_group)),
-                        );
-                    }
-                }
-            }
-
-            // Step 8b: Per-block live_out for allocate():
-            //   - phi source VRegs (from this block's terminator args): ensures the
-            //     phi source values stay live at the terminator for phi copy emission.
-            //   - block param VRegs for this block: forces them into the interference
-            //     graph so they are not coalesced away, ensuring build_phi_copies can
-            //     find their physical registers in merged_vreg_to_reg.
-            //   - effectful op operands are NOT in live_out: they're operands on
-            //     barrier instructions (LoadResult/CallResult/StoreBarrier/VoidCallBarrier).
-            //   - Ret operands ARE in live_out (terminator, no barrier instruction).
-            let mut block_live_out: BTreeSet<VReg> = phi_uses[block_idx]
-                .iter()
-                .map(|v| rename.get(v).copied().unwrap_or(*v))
-                .chain(block_param_vregs_per_block[block_idx].iter().copied())
-                .collect();
-            if let Some(EffectfulOp::Ret { val: Some(cid) }) = block.ops.last() {
-                let canon = egraph.unionfind.find_immutable(*cid);
-                if let Some(&vreg) = class_to_vreg.get(&canon) {
-                    let renamed = rename.get(&vreg).copied().unwrap_or(vreg);
-                    block_live_out.insert(renamed);
-                }
-            }
-            // All XMM registers are caller-saved in SysV ABI. XMM vregs
-            // in live_out force the per-block regalloc to keep them alive
-            // across calls, which is impossible when there are no callee-
-            // saved XMM registers. Remove XMM vregs that have exit spill
-            // stores from live_out -- the value is already persisted to the
-            // spill slot and successors will reload from it.
-            {
-                use crate::x86::reg::RegClass;
-                let spilled_xmm_in_schedule: BTreeSet<VReg> = split_schedule
-                    .iter()
-                    .filter(|inst| {
-                        matches!(inst.op, Op::XmmSpillStore(_)) && !inst.operands.is_empty()
-                    })
-                    .flat_map(|inst| inst.operands.iter().copied())
-                    .collect();
-                // Also remove XMM block params from live_out. They flow to
-                // successors through phi copies, but since XMM values can't
-                // survive calls, we need to ensure they go through spill slots.
-                // Their exit spill stores were added by step 6b + split pass.
-                block_live_out.retain(|v| {
-                    if spilled_xmm_in_schedule.contains(v) {
-                        return false;
-                    }
-                    let is_xmm = vreg_classes
-                        .get(v)
-                        .copied()
-                        .map(|c| c == RegClass::XMM)
-                        .unwrap_or(false);
-                    if is_xmm && spill_map.vreg_to_slot.contains_key(v) {
-                        return false;
-                    }
-                    true
-                });
-            }
-            // Step 8c: Filter pre-colorings to VRegs in this block's schedule.
-            let split_vreg_set: BTreeSet<VReg> = split_schedule
-                .iter()
-                .flat_map(|i| std::iter::once(i.dst).chain(i.operands.iter().copied()))
-                .collect();
-
-            let block_param_vregs: Vec<(VReg, Reg)> = func_level_param_vregs
-                .iter()
-                .filter(|&&(v, _)| split_vreg_set.contains(&v))
-                .copied()
-                .collect();
-
-            // Step 8c2: Add call precolors specific to THIS block only.
-            // Call-arg precolors must not leak from other blocks where the same
-            // VReg may be used as a call arg in a different ABI position.
-            let mut block_param_vregs = block_param_vregs;
-            {
-                let mut dummy_live_out: BTreeSet<VReg> = BTreeSet::new();
-                add_call_precolors_for_block(
-                    block,
-                    &egraph,
-                    &class_to_vreg,
-                    &mut block_param_vregs,
-                    &mut dummy_live_out,
-                );
-            }
-
-            // Step 8d: Filter copy pairs to VRegs in this block.
-            let block_copy_pairs: Vec<(VReg, VReg)> = copy_pairs
-                .iter()
-                .filter(|&&(a, b)| split_vreg_set.contains(&a) && split_vreg_set.contains(&b))
-                .copied()
-                .collect();
-
-            // Step 8e: Per-block loop depths.
-            let block_loop_depths: BTreeMap<VReg, u32> = loop_depths
-                .iter()
-                .filter(|(v, _)| split_vreg_set.contains(v))
-                .map(|(&v, &d)| (v, d))
-                .collect();
-
-            // Step 8f: Run per-block allocation.
-            let block_result = allocate(
-                &split_schedule,
-                &block_param_vregs,
-                &block_live_out,
-                &block_copy_pairs,
-                &block_loop_depths,
-                opts.force_frame_pointer,
-                &func.name,
-            )
-            .map_err(|e| CompileError {
-                phase: "regalloc".into(),
-                message: format!("block {}: {}", block.id, e),
-                location: Some(IrLocation {
-                    function: func.name.clone(),
-                    block: Some(block.id),
-                    inst: None,
-                }),
-            })?;
-
-            // Merge results: include VRegs that appear in either the
-            // pre-allocation schedule OR the post-allocation instruction list.
-            // Pre-alloc is needed because effectful op args reference VRegs
-            // from the original schedule (even if the allocator rematerialized
-            // them internally). Post-alloc is needed for new VRegs created by
-            // spill/remat. The interference graph includes "phantom" entries
-            // for all VReg indices up to the max; those get color 0 (RAX) and
-            // must not be merged as they would overwrite correct assignments.
-            let post_alloc_vregs: BTreeSet<VReg> = block_result
-                .insts
-                .iter()
-                .flat_map(|i| std::iter::once(i.dst).chain(i.operands.iter().copied()))
-                .collect();
-            for (v, r) in &block_result.vreg_to_reg {
-                if split_vreg_set.contains(v) || post_alloc_vregs.contains(v) {
-                    merged_vreg_to_reg.insert(*v, *r);
-                }
-            }
-            for &r in &block_result.callee_saved_used {
-                if !merged_callee_saved.contains(&r) {
-                    merged_callee_saved.push(r);
-                }
-            }
-
-            // Offset per-block spill slot numbers in ScheduledInsts to avoid
-            // overlap with cross-block spill slots and other blocks' slots.
-            // This must happen before lowering to MachInst since spill_addr
-            // converts slot numbers to memory addresses.
-            let per_block_offset = spill_slot_counter as i64;
-            let block_result_insts: Vec<ScheduledInst> =
-                if block_result.spill_slots > 0 && per_block_offset > 0 {
-                    block_result
-                        .insts
-                        .iter()
-                        .map(|inst| {
-                            let mut inst = inst.clone();
-                            match &mut inst.op {
-                                Op::SpillStore(slot)
-                                | Op::SpillLoad(slot)
-                                | Op::XmmSpillStore(slot)
-                                | Op::XmmSpillLoad(slot) => {
-                                    *slot += per_block_offset;
-                                }
-                                _ => {}
-                            }
-                            inst
-                        })
-                        .collect()
-                } else {
-                    block_result.insts.clone()
-                };
-
-            for inst in &block_result_insts {
-                for &op in &inst.operands {
-                    debug_assert!(
-                        block_result.vreg_to_reg.contains_key(&op),
-                        "operand VReg {:?} has no register assignment",
-                        op
-                    );
-                }
-            }
-            let rewritten_insts = block_result_insts;
-            // Note: rewritten_insts are ScheduledInsts, lowered to MachInst later.
-            spill_slot_counter += block_result.spill_slots;
-            block_rewritten_storage[block_idx] = rewritten_insts;
-            block_rename_maps[block_idx] = rename;
-        }
+        let spill_slot_counter = global_alloc_slots + pre_spill_slots;
 
         merged_callee_saved.sort_by_key(|r| *r as u8);
         merged_callee_saved.dedup();
@@ -1284,11 +895,16 @@ pub fn compile(
             vreg_to_reg: merged_vreg_to_reg,
             spill_slots: spill_slot_counter,
             callee_saved_used: merged_callee_saved,
-            insts: vec![],               // per-block insts already consumed above
-            unprecolored_params: vec![], // multi-block handles this separately
+            insts: vec![],
+            unprecolored_params: global_unprecolored_params,
         };
 
-        (merged_result, block_rewritten_storage, block_rename_maps)
+        (
+            merged_result,
+            block_rewritten_storage,
+            block_rename_maps,
+            coalesce_aliases,
+        )
     };
 
     if let Some(s) = sink.as_mut() {
@@ -1373,6 +989,17 @@ pub fn compile(
                     }
                 }
             }
+            // After renames and overrides, apply the global coalesce alias map
+            // so `class_to_vreg[canon]` never points at a stale pre-coalesce
+            // VReg that has no register assignment. The alias map is from
+            // `allocate_global`'s result and is constant across blocks.
+            if !coalesce_aliases.is_empty() {
+                for v in map.values_mut() {
+                    if let Some(&aliased) = coalesce_aliases.get(v) {
+                        *v = aliased;
+                    }
+                }
+            }
             map
         };
 
@@ -1452,6 +1079,30 @@ pub fn compile(
                 }
             }
         }
+        // Task 6.6: Emit entry movs for unprecolored params from the global
+        // allocator. Only in the entry block; these are params whose ABI
+        // precoloring was dropped by merge_precolorings_global because they
+        // are live across a call that clobbers their ABI register.
+        if block_idx == rpo_order[0] {
+            for &(param_vreg, abi_reg) in &regalloc_result.unprecolored_params {
+                if let Some(&dst_reg) = regalloc_result.vreg_to_reg.get(&param_vreg) {
+                    if dst_reg != abi_reg {
+                        if abi_reg.is_xmm() {
+                            all_insts.push(MachInst::MovsdRR {
+                                dst: crate::x86::inst::Operand::Reg(dst_reg),
+                                src: crate::x86::inst::Operand::Reg(abi_reg),
+                            });
+                        } else {
+                            all_insts.push(MachInst::MovRR {
+                                size: crate::x86::inst::OpSize::S64,
+                                src: crate::x86::inst::Operand::Reg(abi_reg),
+                                dst: crate::x86::inst::Operand::Reg(dst_reg),
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         let lower_group = |group: &[&ScheduledInst],
                            regalloc_result: &RegAllocResult,
@@ -1507,6 +1158,42 @@ pub fn compile(
                 &vreg_types,
             )?;
             all_insts.extend(post_insts);
+        }
+
+        // Task 6.3 debug asserts: after the global allocator cutover, every
+        // VReg that appears in a terminator (Ret value) must have a physical
+        // register in vreg_to_reg. These asserts fire if the global allocator's
+        // insert_spills_global is incomplete. Only active for multi-block functions
+        // (single-block uses the old allocator path with its own guarantees).
+        if func.blocks.len() > 1 {
+            let terminator_check = block.ops.last().expect("block must have terminator");
+            // 8a-ret: Ret value must have a register.
+            if let EffectfulOp::Ret { val: Some(cid) } = terminator_check {
+                let canon = egraph.unionfind.find_immutable(*cid);
+                if let Some(&vreg) = block_class_to_vreg.get(&canon) {
+                    debug_assert!(
+                        regalloc_result.vreg_to_reg.contains_key(&vreg),
+                        "8a-ret safety net fired after global regalloc: \
+                         Ret value VReg {:?} has no register assignment in function '{}'",
+                        vreg,
+                        func.name,
+                    );
+                }
+            }
+            // 8a-phi and 8a-effectful: all VRegs in the rewritten schedule must
+            // have register assignments (guaranteed by allocate_global).
+            for inst in rewritten.iter() {
+                for &op in &inst.operands {
+                    debug_assert!(
+                        regalloc_result.vreg_to_reg.contains_key(&op),
+                        "8a-effectful safety net fired after global regalloc: \
+                         operand VReg {:?} in block {} of function '{}' has no register assignment",
+                        op,
+                        block_idx,
+                        func.name,
+                    );
+                }
+            }
         }
 
         // Handle the terminator.

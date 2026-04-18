@@ -33,6 +33,22 @@ pub fn compute_global_liveness(
     successors: &[Vec<usize>],
     phi_uses: &[BTreeSet<VReg>],
 ) -> GlobalLiveness {
+    compute_global_liveness_with_block_params(block_schedules, successors, phi_uses, &[])
+}
+
+/// Same as `compute_global_liveness`, but also treats each entry of
+/// `block_param_vregs_per_block[b]` as live at block-B entry. Block params are
+/// the destinations of phi copies; the predecessor's phi_copies write to each
+/// param at a single program point (block entry), so they must receive distinct
+/// physical registers even when the block body never reads them. Adding them to
+/// live_in forces pairwise interference via `build_interference_into`'s
+/// cross-block boundary edges.
+pub fn compute_global_liveness_with_block_params(
+    block_schedules: &[Vec<ScheduledInst>],
+    successors: &[Vec<usize>],
+    phi_uses: &[BTreeSet<VReg>],
+    block_param_vregs_per_block: &[BTreeSet<VReg>],
+) -> GlobalLiveness {
     let n = block_schedules.len();
     assert_eq!(successors.len(), n);
     assert_eq!(phi_uses.len(), n);
@@ -71,8 +87,17 @@ pub fn compute_global_liveness(
     let mut live_in: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
     let mut live_out: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 
-    // Initialize live_in = use(B).
-    live_in[..n].clone_from_slice(&block_use[..n]);
+    // Initialize live_in = use(B) ∪ block_params(B). Block params are written
+    // by phi copies at a single program point (block entry), so they must all
+    // be simultaneously "live" there; otherwise the interference graph would
+    // allow two params of the same block to share a register even though the
+    // predecessor's phi_copies still write distinct values into each.
+    for b in 0..n {
+        live_in[b].extend(block_use[b].iter().copied());
+        if let Some(params) = block_param_vregs_per_block.get(b) {
+            live_in[b].extend(params.iter().copied());
+        }
+    }
 
     // Iterate until fixed point.
     let mut changed = true;
@@ -93,8 +118,11 @@ pub fn compute_global_liveness(
                 changed = true;
             }
 
-            // live_in(B) = use(B) | (live_out(B) - def(B))
+            // live_in(B) = use(B) | block_params(B) | (live_out(B) - def(B)).
             let mut new_in = block_use[b].clone();
+            if let Some(params) = block_param_vregs_per_block.get(b) {
+                new_in.extend(params.iter().copied());
+            }
             for &v in &live_out[b] {
                 if !block_def[b].contains(&v) {
                     new_in.insert(v);
@@ -268,6 +296,17 @@ pub fn compute_phi_uses(
                     for &cid in true_args.iter().chain(false_args.iter()) {
                         add_vreg(cid);
                     }
+                }
+                EffectfulOp::Ret { val: Some(cid) } => {
+                    // Ret values are also terminator-consumed VRegs. Including
+                    // them in phi_uses keeps their live range extended to the
+                    // Ret block's end so the function-scope allocator assigns a
+                    // register (or triggers an end-of-block reload if spilled).
+                    // The older per-block allocator excluded Ret values from
+                    // phi_uses because adding them caused spurious cross-block
+                    // spill slots under its split-based liveness; the global
+                    // allocator has no such constraint.
+                    add_vreg(*cid);
                 }
                 _ => {}
             }
