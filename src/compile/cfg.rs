@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::EGraph;
-use crate::egraph::extract::VReg;
+use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
@@ -303,7 +303,7 @@ pub(super) fn build_block_param_class_map(egraph: &EGraph) -> BTreeMap<(BlockId,
 pub(super) fn collect_phi_source_vregs(
     func: &Function,
     egraph: &EGraph,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     result: &mut BTreeSet<VReg>,
 ) {
     for block in &func.blocks {
@@ -317,7 +317,7 @@ pub(super) fn collect_phi_source_vregs(
                 } => {
                     for &cid in true_args.iter().chain(false_args.iter()) {
                         let canon = egraph.unionfind.find_immutable(cid);
-                        if let Some(&vreg) = class_to_vreg.get(&canon) {
+                        if let Some(vreg) = class_to_vreg.lookup_single(canon) {
                             result.insert(vreg);
                         }
                     }
@@ -327,7 +327,7 @@ pub(super) fn collect_phi_source_vregs(
             };
             for &cid in args {
                 let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(&vreg) = class_to_vreg.get(&canon) {
+                if let Some(vreg) = class_to_vreg.lookup_single(canon) {
                     result.insert(vreg);
                 }
             }
@@ -342,7 +342,7 @@ pub(super) fn collect_phi_source_vregs(
 /// and add them as copy pairs: (arg_vreg, param_vreg).
 pub(super) fn compute_copy_pairs(
     func: &Function,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     egraph: &EGraph,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
@@ -351,7 +351,7 @@ pub(super) fn compute_copy_pairs(
 
     let get_vreg = |cid: ClassId| -> Option<VReg> {
         let canon = egraph.unionfind.find_immutable(cid);
-        class_to_vreg.get(&canon).copied()
+        class_to_vreg.lookup_single(canon)
     };
 
     // Look up the destination VReg for a block param, preferring the

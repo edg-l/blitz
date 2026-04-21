@@ -16,7 +16,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::egraph::cost::{CostModel, OptGoal};
-use crate::egraph::extract::{VReg, VRegInst, build_vreg_types, extract, vreg_insts_for_block};
+use crate::egraph::extract::{
+    ClassVRegMap, VReg, VRegInst, build_vreg_types, extract, vreg_insts_for_block,
+};
 use crate::egraph::phases::{CompileOptions as EGraphOptions, run_phases};
 use crate::emit::object::{FunctionInfo, ObjectFile};
 use crate::emit::peephole::peephole;
@@ -328,7 +330,7 @@ pub fn compile(
     // DO NOT pre-populate class_to_vreg here — let the DFS assign VRegs
     // naturally so that param/block-param VRegInsts appear in the scheduled
     // list and regalloc can see them.
-    let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
+    let mut class_to_vreg = ClassVRegMap::new();
     let mut next_vreg: u32 = 0;
 
     // Compute RPO block ordering (indices into func.blocks).
@@ -352,8 +354,8 @@ pub fn compile(
     // Snapshot of class_to_vreg AT THE END of each block's processing (before
     // `removed` is restored). Captures the block-local view: classes re-emitted
     // in a block point to that block's VReg, not the globally-restored one.
-    let mut block_class_to_vreg_snapshot: Vec<BTreeMap<ClassId, VReg>> =
-        vec![BTreeMap::new(); func.blocks.len()];
+    let mut block_class_to_vreg_snapshot: Vec<ClassVRegMap> =
+        vec![ClassVRegMap::new(); func.blocks.len()];
     for &block_idx in &rpo_order {
         // Remove classes emitted in non-dominating blocks so they get fresh VRegs.
         // Also remove flags-typed classes from ALL prior blocks: EFLAGS cannot
@@ -380,7 +382,7 @@ pub fn compile(
             .collect();
         let mut removed: Vec<(ClassId, VReg)> = Vec::new();
         for cid in removable_classes {
-            if let Some(vreg) = class_to_vreg.remove(&cid) {
+            if let Some(vreg) = class_to_vreg.remove(cid) {
                 removed.push((cid, vreg));
             }
         }
@@ -402,7 +404,7 @@ pub fn compile(
         }
         all_roots.sort_by_key(|c| c.0);
         all_roots.dedup();
-        let pre_emission: BTreeSet<ClassId> = class_to_vreg.keys().copied().collect();
+        let pre_emission: BTreeSet<ClassId> = class_to_vreg.keys().collect();
         let mut insts =
             vreg_insts_for_block(&extraction, &all_roots, &mut class_to_vreg, &mut next_vreg);
 
@@ -414,7 +416,7 @@ pub fn compile(
         for pidx in 0..block.param_types.len() as u32 {
             if let Some(&cid) = block_param_map.get(&(block_id, pidx)) {
                 let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(&vreg) = class_to_vreg.get(&canon) {
+                if let Some(vreg) = class_to_vreg.lookup_single(canon) {
                     if let Some(inst) = insts.iter_mut().find(|i| i.dst == vreg) {
                         inst.op = Op::BlockParam(
                             block_id,
@@ -474,7 +476,7 @@ pub fn compile(
         block_vreg_insts[block_idx] = insts;
 
         // Track newly emitted classes for dominator filtering.
-        for cid in class_to_vreg.keys().copied().collect::<Vec<_>>() {
+        for cid in class_to_vreg.keys().collect::<Vec<_>>() {
             if !pre_emission.contains(&cid) && !class_emitted_in.contains_key(&cid) {
                 class_emitted_in.insert(cid, block_idx);
             }
@@ -487,7 +489,7 @@ pub fn compile(
 
         // Restore removed classes so subsequent blocks can see them.
         for (cid, vreg) in removed {
-            class_to_vreg.insert(cid, vreg);
+            class_to_vreg.insert_single(cid, vreg);
         }
     }
 
@@ -551,7 +553,7 @@ pub fn compile(
         let mut branch_cond_chain: BTreeSet<VReg> = BTreeSet::new();
         if let Some(EffectfulOp::Branch { cond, .. }) = block.ops.last() {
             let canon = egraph.unionfind.find_immutable(*cond);
-            if let Some(&vreg) = class_to_vreg.get(&canon) {
+            if let Some(vreg) = class_to_vreg.lookup_single(canon) {
                 // Add the flags VReg (proj1).
                 branch_cond_chain.insert(vreg);
                 // Find the instruction that produces it and add its parent
@@ -698,7 +700,7 @@ pub fn compile(
         // instruction) so its operands must survive until end of block.
         if let Some(EffectfulOp::Ret { val: Some(cid) }) = func.blocks[0].ops.last() {
             let canon = egraph.unionfind.find_immutable(*cid);
-            if let Some(&vreg) = class_to_vreg.get(&canon) {
+            if let Some(vreg) = class_to_vreg.lookup_single(canon) {
                 live_out.insert(vreg);
             }
         }
@@ -1010,19 +1012,18 @@ pub fn compile(
         // classes re-emitted in this block resolve to THIS block's VReg — not
         // a stale one from a non-dominating prior block that was restored into
         // the global `class_to_vreg`.
-        let block_class_to_vreg: BTreeMap<ClassId, VReg> = {
+        let block_class_to_vreg: ClassVRegMap = {
             let snapshot = &block_class_to_vreg_snapshot[block_idx];
             let renames = &block_rename_maps[block_idx];
-            let mut map: BTreeMap<ClassId, VReg> = if renames.is_empty() {
+            let mut map: ClassVRegMap = if renames.is_empty() {
                 snapshot.clone()
             } else {
-                snapshot
-                    .iter()
-                    .map(|(&cid, &vreg)| {
-                        let renamed = renames.get(&vreg).copied().unwrap_or(vreg);
-                        (cid, renamed)
-                    })
-                    .collect()
+                let mut m = ClassVRegMap::new();
+                for (cid, vreg) in snapshot.iter() {
+                    let renamed = renames.get(&vreg).copied().unwrap_or(vreg);
+                    m.insert_single(cid, renamed);
+                }
+                m
             };
             // Apply override VRegs: if an override's fresh VReg was renamed
             // (reloaded) in this block, or this IS the block that defines it,
@@ -1033,10 +1034,10 @@ pub fn compile(
                     let canon = egraph.unionfind.find_immutable(param_cid);
                     if bid == block.id {
                         // This block defines the override VReg.
-                        map.insert(canon, fresh_vreg);
+                        map.insert_single(canon, fresh_vreg);
                     } else if let Some(&renamed) = renames.get(&fresh_vreg) {
                         // The override was reloaded into this block.
-                        map.insert(canon, renamed);
+                        map.insert_single(canon, renamed);
                     }
                 }
             }
@@ -1045,11 +1046,12 @@ pub fn compile(
             // VReg that has no register assignment. The alias map is from
             // `allocate_global`'s result and is constant across blocks.
             if !coalesce_aliases.is_empty() {
-                for v in map.values_mut() {
-                    if let Some(&aliased) = coalesce_aliases.get(v) {
-                        *v = aliased;
-                    }
+                let mut aliased_map = ClassVRegMap::new();
+                for (cid, vreg) in map.iter() {
+                    let aliased = coalesce_aliases.get(&vreg).copied().unwrap_or(vreg);
+                    aliased_map.insert_single(cid, aliased);
                 }
+                map = aliased_map;
             }
             map
         };
@@ -1221,7 +1223,7 @@ pub fn compile(
             // 8a-ret: Ret value must have a register.
             if let EffectfulOp::Ret { val: Some(cid) } = terminator_check {
                 let canon = egraph.unionfind.find_immutable(*cid);
-                if let Some(&vreg) = block_class_to_vreg.get(&canon) {
+                if let Some(vreg) = block_class_to_vreg.lookup_single(canon) {
                     debug_assert!(
                         regalloc_result.vreg_to_reg.contains_key(&vreg),
                         "8a-ret safety net fired after global regalloc: \

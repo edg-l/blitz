@@ -5,6 +5,81 @@ use crate::egraph::egraph::EGraph;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 
+// ── ClassVRegMap ──────────────────────────────────────────────────────────────
+
+/// A newtype wrapper around `BTreeMap<ClassId, VReg>` that provides a narrow,
+/// controlled API for mapping e-class IDs to virtual registers.
+///
+/// All callers use the named methods rather than reaching into the inner map
+/// directly. This makes it straightforward to evolve the representation in
+/// later phases (e.g. range-keyed segments for pressure splitting) without
+/// changing every call site.
+#[derive(Debug, Clone, Default)]
+pub struct ClassVRegMap {
+    single: BTreeMap<ClassId, VReg>,
+}
+
+impl ClassVRegMap {
+    pub fn new() -> Self {
+        ClassVRegMap {
+            single: BTreeMap::new(),
+        }
+    }
+
+    /// Insert a single (class, vreg) mapping, replacing any existing entry.
+    pub fn insert_single(&mut self, class: ClassId, vreg: VReg) {
+        self.single.insert(class, vreg);
+    }
+
+    /// Look up the VReg for `class`, if present.
+    pub fn lookup_single(&self, class: ClassId) -> Option<VReg> {
+        self.single.get(&class).copied()
+    }
+
+    /// Remove the entry for `class` and return the VReg if it existed.
+    pub fn remove(&mut self, class: ClassId) -> Option<VReg> {
+        self.single.remove(&class)
+    }
+
+    /// Iterate over all (ClassId, VReg) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (ClassId, VReg)> + '_ {
+        self.single.iter().map(|(&c, &v)| (c, v))
+    }
+
+    /// Iterate over all ClassIds in this map.
+    pub fn keys(&self) -> impl Iterator<Item = ClassId> + '_ {
+        self.single.keys().copied()
+    }
+
+    /// Returns `true` if `class` has an entry in this map.
+    pub fn contains(&self, class: ClassId) -> bool {
+        self.single.contains_key(&class)
+    }
+
+    /// Returns the number of entries.
+    pub fn len(&self) -> usize {
+        self.single.len()
+    }
+
+    /// Returns `true` if the map has no entries.
+    pub fn is_empty(&self) -> bool {
+        self.single.is_empty()
+    }
+
+    /// Clone the underlying map. Used for block-local snapshots.
+    pub fn clone_inner(&self) -> BTreeMap<ClassId, VReg> {
+        self.single.clone()
+    }
+
+    /// Returns an entry API for the underlying map. Used by `vreg_insts_for_block`.
+    pub(crate) fn entry(
+        &mut self,
+        class: ClassId,
+    ) -> std::collections::btree_map::Entry<'_, ClassId, VReg> {
+        self.single.entry(class)
+    }
+}
+
 // ── Extraction error ──────────────────────────────────────────────────────────
 
 /// Returned when an e-class has no finite-cost node (no legal x86-64 lowering).
@@ -250,8 +325,8 @@ pub struct VRegInst {
 pub fn extraction_to_vreg_insts_with_map(
     extraction: &ExtractionResult,
     roots: &[ClassId],
-) -> (Vec<VRegInst>, BTreeMap<ClassId, VReg>) {
-    let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
+) -> (Vec<VRegInst>, ClassVRegMap) {
+    let mut class_to_vreg = ClassVRegMap::new();
     let mut next_vreg: u32 = 0;
 
     let mut visited: std::collections::BTreeSet<ClassId> = std::collections::BTreeSet::new();
@@ -264,13 +339,13 @@ pub fn extraction_to_vreg_insts_with_map(
     for &class_id in &emit_order {
         let vreg = VReg(next_vreg);
         next_vreg += 1;
-        class_to_vreg.insert(class_id, vreg);
+        class_to_vreg.insert_single(class_id, vreg);
     }
 
     let mut insts: Vec<VRegInst> = Vec::with_capacity(emit_order.len());
     for &class_id in &emit_order {
         let ext = &extraction.choices[&class_id];
-        let dst = class_to_vreg[&class_id];
+        let dst = class_to_vreg.lookup_single(class_id).unwrap();
         let operands: Vec<Option<VReg>> = ext
             .children
             .iter()
@@ -278,7 +353,7 @@ pub fn extraction_to_vreg_insts_with_map(
                 if child == ClassId::NONE {
                     None
                 } else {
-                    Some(class_to_vreg[&child])
+                    Some(class_to_vreg.lookup_single(child).unwrap())
                 }
             })
             .collect();
@@ -294,7 +369,7 @@ pub fn extraction_to_vreg_insts_with_map(
 
 pub fn extraction_to_vreg_insts(extraction: &ExtractionResult, roots: &[ClassId]) -> Vec<VRegInst> {
     // Assign a VReg to each class in the extraction result.
-    let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
+    let mut class_to_vreg = ClassVRegMap::new();
     let mut next_vreg: u32 = 0;
 
     // Build emission order: post-order DFS over extraction DAG from roots.
@@ -309,14 +384,14 @@ pub fn extraction_to_vreg_insts(extraction: &ExtractionResult, roots: &[ClassId]
     for &class_id in &emit_order {
         let vreg = VReg(next_vreg);
         next_vreg += 1;
-        class_to_vreg.insert(class_id, vreg);
+        class_to_vreg.insert_single(class_id, vreg);
     }
 
     // Emit instructions in emission order.
     let mut insts: Vec<VRegInst> = Vec::with_capacity(emit_order.len());
     for &class_id in &emit_order {
         let ext = &extraction.choices[&class_id];
-        let dst = class_to_vreg[&class_id];
+        let dst = class_to_vreg.lookup_single(class_id).unwrap();
         let operands: Vec<Option<VReg>> = ext
             .children
             .iter()
@@ -324,7 +399,7 @@ pub fn extraction_to_vreg_insts(extraction: &ExtractionResult, roots: &[ClassId]
                 if child == ClassId::NONE {
                     None
                 } else {
-                    Some(class_to_vreg[&child])
+                    Some(class_to_vreg.lookup_single(child).unwrap())
                 }
             })
             .collect();
@@ -348,11 +423,11 @@ pub fn extraction_to_vreg_insts(extraction: &ExtractionResult, roots: &[ClassId]
 pub fn vreg_insts_for_block(
     extraction: &ExtractionResult,
     roots: &[ClassId],
-    class_to_vreg: &mut BTreeMap<ClassId, VReg>,
+    class_to_vreg: &mut ClassVRegMap,
     next_vreg: &mut u32,
 ) -> Vec<VRegInst> {
     // DFS to find emission order for classes not yet visited.
-    let mut visited: std::collections::BTreeSet<ClassId> = class_to_vreg.keys().copied().collect();
+    let mut visited: std::collections::BTreeSet<ClassId> = class_to_vreg.keys().collect();
     let mut emit_order: Vec<ClassId> = Vec::new();
 
     for &root in roots {
@@ -371,7 +446,7 @@ pub fn vreg_insts_for_block(
     let mut insts = Vec::with_capacity(emit_order.len());
     for &class_id in &emit_order {
         let ext = &extraction.choices[&class_id];
-        let dst = class_to_vreg[&class_id];
+        let dst = class_to_vreg.lookup_single(class_id).unwrap();
         let operands: Vec<Option<VReg>> = ext
             .children
             .iter()
@@ -379,7 +454,7 @@ pub fn vreg_insts_for_block(
                 if child == ClassId::NONE {
                     None
                 } else {
-                    Some(class_to_vreg[&child])
+                    Some(class_to_vreg.lookup_single(child).unwrap())
                 }
             })
             .collect();
@@ -395,12 +470,9 @@ pub fn vreg_insts_for_block(
 /// Build a map from VReg to its IR Type by looking up each VReg's e-class type
 /// in the egraph. The egraph stores a `ty: Type` on every e-class, so this is
 /// a straightforward lookup rather than a bottom-up type inference pass.
-pub fn build_vreg_types(
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
-    egraph: &EGraph,
-) -> BTreeMap<VReg, Type> {
+pub fn build_vreg_types(class_to_vreg: &ClassVRegMap, egraph: &EGraph) -> BTreeMap<VReg, Type> {
     let mut vreg_types = BTreeMap::new();
-    for (&class_id, &vreg) in class_to_vreg {
+    for (class_id, vreg) in class_to_vreg.iter() {
         let canon = egraph.unionfind.find_immutable(class_id);
         let ty = egraph.class(canon).ty.clone();
         vreg_types.insert(vreg, ty);
@@ -725,5 +797,49 @@ mod tests {
             }
             defined.insert(inst.dst);
         }
+    }
+
+    #[test]
+    fn classvregmap_single_insert_lookup() {
+        let mut map = ClassVRegMap::new();
+        let c0 = ClassId(0);
+        let c1 = ClassId(1);
+        let c2 = ClassId(2);
+        let v0 = VReg(0);
+        let v1 = VReg(1);
+
+        // Fresh map returns None for any class.
+        assert_eq!(map.lookup_single(c0), None);
+
+        // Insert and round-trip.
+        map.insert_single(c0, v0);
+        assert_eq!(map.lookup_single(c0), Some(v0));
+        assert_eq!(map.lookup_single(c1), None);
+
+        // Insert a second class independently.
+        map.insert_single(c1, v1);
+        assert_eq!(map.lookup_single(c0), Some(v0));
+        assert_eq!(map.lookup_single(c1), Some(v1));
+
+        // Overwrite an existing entry.
+        map.insert_single(c0, v1);
+        assert_eq!(map.lookup_single(c0), Some(v1));
+
+        // contains/keys/iter.
+        assert!(map.contains(c0));
+        assert!(map.contains(c1));
+        assert!(!map.contains(c2));
+
+        let keys: Vec<ClassId> = map.keys().collect();
+        assert_eq!(keys, vec![c0, c1]);
+
+        let pairs: Vec<(ClassId, VReg)> = map.iter().collect();
+        assert_eq!(pairs, vec![(c0, v1), (c1, v1)]);
+
+        // Remove.
+        let removed = map.remove(c0);
+        assert_eq!(removed, Some(v1));
+        assert_eq!(map.lookup_single(c0), None);
+        assert_eq!(map.len(), 1);
     }
 }

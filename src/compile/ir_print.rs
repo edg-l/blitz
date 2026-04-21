@@ -1,8 +1,6 @@
-use std::collections::BTreeMap;
-
-use crate::egraph::extract::{VReg, vreg_insts_for_block};
+use crate::egraph::extract::{ClassVRegMap, VReg, vreg_insts_for_block};
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::Op;
 use crate::ir::print::{PrintableBlock, PrintableGroup, print_function_ir};
 use crate::schedule::scheduler::{ScheduleDag, ScheduledInst, schedule};
 
@@ -41,7 +39,7 @@ pub fn compile_to_ir_string(
     let func = &func;
 
     // Phase 3: Build per-block VRegInst lists.
-    let mut class_to_vreg: BTreeMap<ClassId, VReg> = BTreeMap::new();
+    let mut class_to_vreg = ClassVRegMap::new();
     let mut next_vreg: u32 = 0;
     let rpo_order = compute_rpo(func);
 
@@ -69,7 +67,7 @@ pub fn compile_to_ir_string(
         for pidx in 0..block.param_types.len() as u32 {
             if let Some(&cid) = block_param_map.get(&(block_id, pidx)) {
                 let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(&vreg) = class_to_vreg.get(&canon) {
+                if let Some(vreg) = class_to_vreg.lookup_single(canon) {
                     if let Some(inst) = insts.iter_mut().find(|i| i.dst == vreg) {
                         inst.op = Op::BlockParam(
                             block_id,

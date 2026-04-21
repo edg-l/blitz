@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::egraph::extract::{ExtractionResult, VReg};
+use crate::egraph::extract::{ClassVRegMap, ExtractionResult, VReg};
 use crate::egraph::unionfind::UnionFind;
 use crate::ir::Type;
 use crate::ir::effectful::EffectfulOp;
@@ -27,7 +27,7 @@ fn build_mem_addr(
     addr_cid: ClassId,
     addr_reg: Reg,
     extraction: &ExtractionResult,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
     conflict_reg: Option<Reg>,
     schedule: &[ScheduledInst],
@@ -36,11 +36,11 @@ fn build_mem_addr(
     // When it's a SpillLoad, BlockParam, or other non-Addr op, the extraction
     // may show an Addr node for the class, but the children's registers aren't
     // guaranteed live at the load/store point.
-    let addr_vreg = class_to_vreg.get(&addr_cid);
+    let addr_vreg = class_to_vreg.lookup_single(addr_cid);
     let is_addr_inst = addr_vreg.is_some_and(|v| {
         schedule
             .iter()
-            .any(|inst| inst.dst == *v && matches!(inst.op, Op::Addr { .. }))
+            .any(|inst| inst.dst == v && matches!(inst.op, Op::Addr { .. }))
     });
 
     if is_addr_inst
@@ -51,14 +51,14 @@ fn build_mem_addr(
         let base_reg = ext
             .children
             .first()
-            .and_then(|&c| class_to_vreg.get(&c))
-            .and_then(|v| regalloc.vreg_to_reg.get(v).copied());
+            .and_then(|&c| class_to_vreg.lookup_single(c))
+            .and_then(|v| regalloc.vreg_to_reg.get(&v).copied());
         let index_reg = ext
             .children
             .get(1)
             .filter(|&&c| c != ClassId::NONE)
-            .and_then(|&c| class_to_vreg.get(&c))
-            .and_then(|v| regalloc.vreg_to_reg.get(v).copied());
+            .and_then(|&c| class_to_vreg.lookup_single(c))
+            .and_then(|v| regalloc.vreg_to_reg.get(&v).copied());
         if let Some(base) = base_reg {
             // If the folded base or index register conflicts with an
             // operand that is read simultaneously (e.g. the Store value),
@@ -92,7 +92,7 @@ fn build_mem_addr(
 /// Lower a non-terminator effectful op (Load, Store, Call) to MachInsts.
 pub(super) fn lower_effectful_op(
     op: &EffectfulOp,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
     extraction: &ExtractionResult,
     func: &Function,
@@ -102,8 +102,8 @@ pub(super) fn lower_effectful_op(
     let get_reg = |cid: ClassId| -> Option<Reg> {
         let canon = uf.find_immutable(cid);
         class_to_vreg
-            .get(&canon)
-            .and_then(|v| regalloc.vreg_to_reg.get(v).copied())
+            .lookup_single(canon)
+            .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
     };
 
     match op {
@@ -121,8 +121,8 @@ pub(super) fn lower_effectful_op(
             })?;
             let canon_result = uf.find_immutable(*result);
             let result_reg = class_to_vreg
-                .get(&canon_result)
-                .and_then(|v| regalloc.vreg_to_reg.get(v).copied())
+                .lookup_single(canon_result)
+                .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
                 .ok_or_else(|| CompileError {
                     phase: "lowering".into(),
                     message: "Load: no register for result".into(),
@@ -354,7 +354,7 @@ pub(super) fn lower_effectful_op(
 fn resolve_call_arg_regs_after_spilling(
     args: &[ClassId],
     results: &[ClassId],
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
     uf: &UnionFind,
     schedule: &[ScheduledInst],
@@ -362,17 +362,17 @@ fn resolve_call_arg_regs_after_spilling(
     // Find the barrier instruction (CallResult or VoidCallBarrier).
     let barrier_inst = if let Some(&first_result_cid) = results.first() {
         let canon = uf.find_immutable(first_result_cid);
-        class_to_vreg.get(&canon).and_then(|result_vreg| {
+        class_to_vreg.lookup_single(canon).and_then(|result_vreg| {
             schedule
                 .iter()
-                .find(|inst| inst.dst == *result_vreg && matches!(inst.op, Op::CallResult(_, _)))
+                .find(|inst| inst.dst == result_vreg && matches!(inst.op, Op::CallResult(_, _)))
         })
     } else {
         let arg_vregs: Vec<VReg> = args
             .iter()
             .filter_map(|&cid| {
                 let canon = uf.find_immutable(cid);
-                class_to_vreg.get(&canon).copied()
+                class_to_vreg.lookup_single(canon)
             })
             .collect();
         schedule.iter().find(|inst| {
@@ -388,8 +388,8 @@ fn resolve_call_arg_regs_after_spilling(
             .map(|&cid| {
                 let canon = uf.find_immutable(cid);
                 class_to_vreg
-                    .get(&canon)
-                    .and_then(|v| regalloc.vreg_to_reg.get(v).copied())
+                    .lookup_single(canon)
+                    .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
             })
             .collect();
     };
@@ -425,7 +425,7 @@ fn resolve_call_arg_regs_after_spilling(
     let mut original_to_replacement: BTreeMap<VReg, VReg> = BTreeMap::new();
     for &cid in args {
         let canon = uf.find_immutable(cid);
-        let Some(&original_vreg) = class_to_vreg.get(&canon) else {
+        let Some(original_vreg) = class_to_vreg.lookup_single(canon) else {
             continue;
         };
 
@@ -468,11 +468,11 @@ fn resolve_call_arg_regs_after_spilling(
     args.iter()
         .map(|&cid| {
             let canon = uf.find_immutable(cid);
-            let original_vreg = class_to_vreg.get(&canon)?;
-            if let Some(&replacement) = original_to_replacement.get(original_vreg) {
+            let original_vreg = class_to_vreg.lookup_single(canon)?;
+            if let Some(&replacement) = original_to_replacement.get(&original_vreg) {
                 return regalloc.vreg_to_reg.get(&replacement).copied();
             }
-            regalloc.vreg_to_reg.get(original_vreg).copied()
+            regalloc.vreg_to_reg.get(&original_vreg).copied()
         })
         .collect()
 }
@@ -487,13 +487,13 @@ fn resolve_call_arg_regs_after_spilling(
 fn resolve_store_val_reg_after_spilling(
     canon_addr: ClassId,
     canon_val: ClassId,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
     extraction: &ExtractionResult,
     schedule: &[ScheduledInst],
 ) -> Option<Reg> {
-    let addr_vreg = class_to_vreg.get(&canon_addr)?;
-    let original_val_vreg = class_to_vreg.get(&canon_val)?;
+    let addr_vreg = class_to_vreg.lookup_single(canon_addr)?;
+    let original_val_vreg = class_to_vreg.lookup_single(canon_val)?;
 
     // `populate_effectful_operands` sorts StoreBarrier operands by VReg index
     // and may add Addr children, so we cannot rely on positional lookup.
@@ -501,7 +501,7 @@ fn resolve_store_val_reg_after_spilling(
     // addr VReg for this specific store.
     let barrier = schedule
         .iter()
-        .find(|inst| matches!(inst.op, Op::StoreBarrier) && inst.operands.contains(addr_vreg))?;
+        .find(|inst| matches!(inst.op, Op::StoreBarrier) && inst.operands.contains(&addr_vreg))?;
 
     // Build a VReg -> defining instruction lookup for this barrier's operands.
     let barrier_op_defs: BTreeMap<VReg, &ScheduledInst> = schedule
@@ -522,14 +522,14 @@ fn resolve_store_val_reg_after_spilling(
     }
 
     // If the original val is still among the barrier's operands, use it.
-    if barrier.operands.contains(original_val_vreg) {
-        return regalloc.vreg_to_reg.get(original_val_vreg).copied();
+    if barrier.operands.contains(&original_val_vreg) {
+        return regalloc.vreg_to_reg.get(&original_val_vreg).copied();
     }
 
     // A SpillLoad in the barrier operands that reloads val's slot.
     for (&op_vreg, def_inst) in &barrier_op_defs {
         if let Op::SpillLoad(slot) | Op::XmmSpillLoad(slot) = &def_inst.op {
-            if slot_to_original_vreg.get(slot) == Some(original_val_vreg) {
+            if slot_to_original_vreg.get(slot) == Some(&original_val_vreg) {
                 return regalloc.vreg_to_reg.get(&op_vreg).copied();
             }
         }
@@ -539,7 +539,7 @@ fn resolve_store_val_reg_after_spilling(
     // dropped from the schedule. Match by op against extraction.choices[val].
     let val_choice = &extraction.choices.get(&canon_val)?.op;
     for (&op_vreg, def_inst) in &barrier_op_defs {
-        if op_vreg != *original_val_vreg && &def_inst.op == val_choice {
+        if op_vreg != original_val_vreg && &def_inst.op == val_choice {
             return regalloc.vreg_to_reg.get(&op_vreg).copied();
         }
     }

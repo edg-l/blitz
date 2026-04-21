@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::egraph::EGraph;
-use crate::egraph::extract::VReg;
+use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::emit::phi_elim::phi_copies;
 use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffectfulOp};
@@ -171,8 +171,8 @@ pub(super) fn lower_terminator(
     op: &EffectfulOp,
     next_block_id: Option<BlockId>,
     egraph: &EGraph,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
-    ret_class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
+    ret_class_to_vreg: &ClassVRegMap,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
@@ -180,10 +180,10 @@ pub(super) fn lower_terminator(
     func: &Function,
     next_label: &mut LabelId,
 ) -> Result<Vec<BlockItem>, CompileError> {
-    let get_reg = |cid: ClassId, ctv: &BTreeMap<ClassId, VReg>| -> Option<Reg> {
+    let get_reg = |cid: ClassId, ctv: &ClassVRegMap| -> Option<Reg> {
         let canon = egraph.unionfind.find_immutable(cid);
-        ctv.get(&canon)
-            .and_then(|v| regalloc.vreg_to_reg.get(v).copied())
+        ctv.lookup_single(canon)
+            .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
     };
 
     match op {
@@ -344,8 +344,8 @@ fn build_phi_copies(
     target: BlockId,
     args: &[ClassId],
     egraph: &EGraph,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
-    block_class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
+    block_class_to_vreg: &ClassVRegMap,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
@@ -384,8 +384,7 @@ fn build_phi_copies(
 
         let canon_arg = egraph.unionfind.find_immutable(arg_cid);
         let arg_vreg = block_class_to_vreg
-            .get(&canon_arg)
-            .copied()
+            .lookup_single(canon_arg)
             .ok_or_else(|| CompileError {
                 phase: "phi-elim".into(),
                 message: format!("arg class {:?} not in class_to_vreg", canon_arg),
@@ -404,7 +403,7 @@ fn build_phi_copies(
         let mut param_vreg = param_vreg_overrides
             .get(&(target, param_idx as u32))
             .copied()
-            .or_else(|| class_to_vreg.get(&param_cid).copied())
+            .or_else(|| class_to_vreg.lookup_single(param_cid))
             .ok_or_else(|| CompileError {
                 phase: "phi-elim".into(),
                 message: format!("param class {:?} not in class_to_vreg", param_cid),

@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::egraph::EGraph;
-use crate::egraph::extract::VReg;
+use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::Op;
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::{ArgLoc, FP_RETURN_REG, GPR_RETURN_REG, assign_args};
 use crate::x86::reg::Reg;
@@ -15,7 +15,7 @@ use crate::x86::reg::Reg;
 /// corresponding VRegs in the ClassId -> VReg map from extraction.
 pub(super) fn assign_param_vregs_from_map(
     func: &Function,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     egraph: &EGraph,
     block_has_calls: bool,
     arg_locs: &[ArgLoc],
@@ -30,7 +30,7 @@ pub(super) fn assign_param_vregs_from_map(
     for (param_idx, &class_id) in func.param_class_ids.iter().enumerate() {
         // Canonicalize the class_id after run_phases merges.
         let canon = egraph.unionfind.find_immutable(class_id);
-        if let Some(&vreg) = class_to_vreg.get(&canon)
+        if let Some(vreg) = class_to_vreg.lookup_single(canon)
             && let ArgLoc::Reg(reg) = arg_locs[param_idx]
         {
             // Don't precolor params to caller-saved registers when the block
@@ -110,7 +110,7 @@ pub(super) fn add_div_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(
 pub(super) fn add_call_precolors_for_block(
     block: &crate::ir::function::BasicBlock,
     egraph: &EGraph,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     param_vregs: &mut Vec<(VReg, Reg)>,
     live_out: &mut BTreeSet<VReg>,
 ) {
@@ -132,7 +132,7 @@ pub(super) fn add_call_precolors_for_block(
             let locs = assign_args(arg_tys);
             for (&cid, loc) in args.iter().zip(locs.iter()) {
                 let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(&vreg) = class_to_vreg.get(&canon) {
+                if let Some(vreg) = class_to_vreg.lookup_single(canon) {
                     match loc {
                         ArgLoc::Reg(reg) => {
                             if call_count == 1
@@ -152,7 +152,7 @@ pub(super) fn add_call_precolors_for_block(
                 && let Some(&first_result_cid) = results.first()
             {
                 let canon = egraph.unionfind.find_immutable(first_result_cid);
-                if let Some(&vreg) = class_to_vreg.get(&canon)
+                if let Some(vreg) = class_to_vreg.lookup_single(canon)
                     && !param_vregs.iter().any(|&(v, _)| v == vreg)
                 {
                     let is_float_ret = ret_tys.first().is_some_and(|t| t.is_float());

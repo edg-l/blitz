@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::egraph::extract::VReg;
+use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::egraph::unionfind::UnionFind;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
@@ -183,7 +183,7 @@ pub fn apply_block_param_overrides_to_phi_uses(
     unionfind: &UnionFind,
     block_param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     rpo_order: &[usize],
     phi_uses: &mut [BTreeSet<VReg>],
 ) {
@@ -210,7 +210,7 @@ pub fn apply_block_param_overrides_to_phi_uses(
                         let canon_param = unionfind.find_immutable(param_cid);
                         if canon_arg == canon_param {
                             // Replace the global VReg with the override.
-                            if let Some(&old_vreg) = class_to_vreg.get(&canon_arg) {
+                            if let Some(old_vreg) = class_to_vreg.lookup_single(canon_arg) {
                                 phi_uses[block_idx].remove(&old_vreg);
                             }
                             phi_uses[block_idx].insert(fresh_vreg);
@@ -288,7 +288,7 @@ pub fn cfg_successors(func: &Function) -> Vec<Vec<usize>> {
 pub fn compute_phi_uses(
     func: &Function,
     egraph_unionfind: &crate::egraph::unionfind::UnionFind,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
 ) -> Vec<BTreeSet<VReg>> {
     let n = func.blocks.len();
     let mut phi_uses: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
@@ -297,7 +297,7 @@ pub fn compute_phi_uses(
         if let Some(term) = block.ops.last() {
             let mut add_vreg = |cid: ClassId| {
                 let canon = egraph_unionfind.find_immutable(cid);
-                if let Some(&v) = class_to_vreg.get(&canon) {
+                if let Some(v) = class_to_vreg.lookup_single(canon) {
                     phi_uses[block_idx].insert(v);
                 }
             };
@@ -342,7 +342,7 @@ pub fn compute_phi_uses(
 pub fn collect_block_param_vregs_per_block(
     func: &Function,
     egraph: &crate::egraph::EGraph,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
 ) -> Vec<BTreeSet<VReg>> {
     let n = func.blocks.len();
     let mut result: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
@@ -361,7 +361,7 @@ pub fn collect_block_param_vregs_per_block(
                     if let Op::BlockParam(bid, pidx2, _) = &node.op
                         && *bid == block.id
                         && *pidx2 == pidx
-                        && let Some(&vreg) = class_to_vreg.get(&cid)
+                        && let Some(vreg) = class_to_vreg.lookup_single(cid)
                     {
                         result[block_idx].insert(vreg);
                     }

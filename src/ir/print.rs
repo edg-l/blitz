@@ -1,6 +1,4 @@
-use std::collections::BTreeMap;
-
-use crate::egraph::extract::VReg;
+use crate::egraph::extract::ClassVRegMap;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
@@ -168,11 +166,11 @@ pub struct PrintableBlock {
 /// Resolve a ClassId to a VReg number string, or `?{cid}` if not found.
 fn resolve_cid(
     cid: ClassId,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     egraph_uf: &crate::egraph::unionfind::UnionFind,
 ) -> String {
     let canon = egraph_uf.find_immutable(cid);
-    match class_to_vreg.get(&canon) {
+    match class_to_vreg.lookup_single(canon) {
         Some(vreg) => format!("v{}", vreg.0),
         None => format!("?{}", cid.0),
     }
@@ -181,7 +179,7 @@ fn resolve_cid(
 /// Format an effectful op for printing.
 fn fmt_effectful(
     op: &EffectfulOp,
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     egraph_uf: &crate::egraph::unionfind::UnionFind,
 ) -> String {
     match op {
@@ -258,7 +256,7 @@ fn fmt_effectful(
 pub fn print_function_ir(
     func: &Function,
     blocks: &[PrintableBlock],
-    class_to_vreg: &BTreeMap<ClassId, VReg>,
+    class_to_vreg: &ClassVRegMap,
     egraph_uf: &crate::egraph::unionfind::UnionFind,
 ) -> String {
     let param_types_str: Vec<String> = func.param_types.iter().map(|t| format!("{t:?}")).collect();
