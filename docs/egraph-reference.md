@@ -159,6 +159,63 @@ Extraction is the ONLY place where choices are made. Rules just add alternatives
 - `Add(base, Shl(idx, n)) -> Addr{2^n, 0}(base, idx)`
 - LEA formation: `X86Lea2`, `X86Lea3{scale}`, `X86Lea4{scale, disp}`
 
+## Constrained Extraction
+
+### `extract_at` and `extract_at_with_memo`
+
+```rust
+pub fn extract_at(
+    egraph: &EGraph,
+    class: ClassId,
+    live_classes: &BTreeSet<ClassId>,
+    cost_model: &CostModel,
+) -> Option<ExtractedNode>
+
+pub fn extract_at_with_memo(
+    egraph: &EGraph,
+    class: ClassId,
+    live_classes: &BTreeSet<ClassId>,
+    cost_model: &CostModel,
+    memo: &BTreeMap<ClassId, ExtractedNode>,
+) -> Option<ExtractedNode>
+```
+
+Cost-aware re-extraction constrained to a set of classes that are already live
+at a given program point. Used by the pressure-driven live-range splitter (Phase 5)
+to determine whether a value can be rematerialized at a split point.
+
+**Parameters:**
+- `class`: the e-class to extract a best node for.
+- `live_classes`: the set of canonical `ClassId`s whose values are live at the target
+  program point. A child class in this set contributes 0 to the total cost; a child
+  not in this set uses its pre-computed `memo` cost.
+- `cost_model`: the same `CostModel` used by the main extraction pass.
+- `memo`: (`extract_at_with_memo` only) the `ExtractionResult::choices` from a prior
+  full [`extract`] call covering at least all classes reachable from `class`.
+
+**Return value:**
+Returns the `ExtractedNode` with the lowest total cost `own_cost + sum(child_cost)`,
+or `None` if no candidate node has a finite total cost.
+
+**Free remat ops** (`Iconst`, `Fconst`, `StackAddr`, `GlobalAddr`, `Param`,
+`BlockParam`) have zero cost and no children. They are always selectable regardless
+of `live_classes`.
+
+**Cost semantics:**
+- If a child is in `live_classes`: child cost = 0.
+- Otherwise: child cost = `memo[child].cost` (the full bottom-up extraction cost).
+- If a required child has no memo entry, that candidate node is skipped.
+
+**Preferred entry point:** use `extract_at_with_memo` when the caller already has
+the full `ExtractionResult`. `extract_at` is a thin wrapper that runs `extract`
+internally first.
+
+**Invariant:** when `live_classes` is a superset of all classes reachable from
+`class`, `extract_at_with_memo` picks the same op as the standard `extract` pass
+for that class.
+
+**Source:** `src/egraph/extract.rs` — `extract_at`, `extract_at_with_memo`.
+
 ## Saturation Control
 
 - **Iteration limit**: Cap total iterations to prevent infinite loops

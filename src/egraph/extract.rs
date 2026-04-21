@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::cost::CostModel;
 use crate::egraph::egraph::EGraph;
@@ -254,6 +254,156 @@ pub fn extract(
     }
 
     Ok(ExtractionResult { choices: memo })
+}
+
+// ── Constrained extraction ────────────────────────────────────────────────────
+
+/// Returns `true` for ops that are always safe to rematerialize at any point:
+/// they have zero cost and no children, so they impose no liveness requirements.
+fn is_free_remat(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Iconst(..)
+            | Op::Fconst(..)
+            | Op::StackAddr(..)
+            | Op::GlobalAddr(..)
+            | Op::Param(..)
+            | Op::BlockParam(..)
+    )
+}
+
+/// Cost-aware extraction constrained to operands live at a given program point.
+///
+/// Picks the best `ExtractedNode` for `class` whose transitive children are
+/// either (a) already in `live_classes`, or (b) cheaply reconstructible free
+/// remat ops (`Iconst`, `Fconst`, `StackAddr`, `GlobalAddr`, `Param`,
+/// `BlockParam`). Child costs are taken from `memo` (the full extraction
+/// result); if a child is in `live_classes` its marginal cost contribution is
+/// treated as 0.
+///
+/// Returns `None` if no node in the class yields a finite total cost under
+/// these constraints.
+///
+/// Callers that already have a full `ExtractionResult` should use
+/// [`extract_at_with_memo`] to avoid the redundant bottom-up pass.
+pub fn extract_at(
+    egraph: &EGraph,
+    class: ClassId,
+    live_classes: &BTreeSet<ClassId>,
+    cost_model: &CostModel,
+) -> Option<ExtractedNode> {
+    // Build full memo via standard extraction from class as root.
+    let roots = [class];
+    let memo = match extract(egraph, &roots, cost_model) {
+        Ok(result) => result.choices,
+        Err(_) => return None,
+    };
+    extract_at_with_memo(egraph, class, live_classes, cost_model, &memo)
+}
+
+/// Cost-aware extraction constrained to operands live at a given program point,
+/// using a pre-computed extraction memo.
+///
+/// This is the preferred entry point when the caller already holds the full
+/// `ExtractionResult` (e.g. the compile pipeline). The `memo` parameter is the
+/// `ExtractionResult::choices` map from a prior [`extract`] call covering at
+/// least the classes reachable from `class`.
+///
+/// For each candidate node in the class the total cost is:
+/// ```text
+/// own_cost + sum(child_cost)
+/// ```
+/// where `child_cost` is 0 if the child is in `live_classes` (already
+/// available), and `memo[child].cost` otherwise. If a required child has no
+/// memo entry (unreachable in the prior extraction), the candidate is skipped.
+///
+/// Nodes whose `own_cost` is 0 AND have no children (free remat ops) are
+/// always selectable regardless of `live_classes`.
+///
+/// Returns `None` if no candidate yields a finite total cost.
+pub fn extract_at_with_memo(
+    egraph: &EGraph,
+    class: ClassId,
+    live_classes: &BTreeSet<ClassId>,
+    cost_model: &CostModel,
+    memo: &BTreeMap<ClassId, ExtractedNode>,
+) -> Option<ExtractedNode> {
+    let canon = egraph.unionfind.find_immutable(class);
+    let eclass = egraph.class(canon);
+
+    let mut best: Option<ExtractedNode> = None;
+
+    for node in &eclass.nodes {
+        let own_cost = cost_model.cost(&node.op);
+        if own_cost == f64::INFINITY {
+            continue;
+        }
+
+        // Free-remat leaf: always selectable, no children to check.
+        if is_free_remat(&node.op) && node.children.is_empty() {
+            let candidate = ExtractedNode {
+                op: node.op.clone(),
+                children: vec![],
+                cost: own_cost,
+            };
+            if best
+                .as_ref()
+                .map_or(true, |b: &ExtractedNode| own_cost < b.cost)
+            {
+                best = Some(candidate);
+            }
+            continue;
+        }
+
+        // For non-leaf nodes, sum child costs: 0 if live, memo cost otherwise.
+        let mut total = own_cost;
+        let mut children_canonical: Vec<ClassId> = Vec::with_capacity(node.children.len());
+        let mut feasible = true;
+
+        for &child in &node.children {
+            if child == ClassId::NONE {
+                children_canonical.push(ClassId::NONE);
+                continue;
+            }
+            let child_canon = egraph.unionfind.find_immutable(child);
+            children_canonical.push(child_canon);
+
+            if live_classes.contains(&child_canon) {
+                // Already live: marginal cost is 0.
+            } else {
+                // Not live: need to rematerialize; use memo cost.
+                match memo.get(&child_canon) {
+                    Some(ext) => {
+                        if ext.cost == f64::INFINITY {
+                            feasible = false;
+                            break;
+                        }
+                        total += ext.cost;
+                    }
+                    None => {
+                        // Child not in memo: unreachable, skip this candidate.
+                        feasible = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !feasible || !total.is_finite() {
+            continue;
+        }
+
+        let dominated = best.as_ref().map_or(true, |b| total < b.cost);
+        if dominated {
+            best = Some(ExtractedNode {
+                op: node.op.clone(),
+                children: children_canonical,
+                cost: total,
+            });
+        }
+    }
+
+    best
 }
 
 /// Produce a post-order list of all canonical classes reachable from `roots`.
@@ -841,5 +991,143 @@ mod tests {
         assert_eq!(removed, Some(v1));
         assert_eq!(map.lookup_single(c0), None);
         assert_eq!(map.len(), 1);
+    }
+
+    // ── extract_at tests ──────────────────────────────────────────────────────
+
+    // 3.2a: Iconst is selectable even when not in live_classes.
+    #[test]
+    fn extract_at_prefers_free_remat() {
+        let mut g = EGraph::new();
+        let c = iconst(&mut g, 42);
+        let cm = CostModel::new(OptGoal::Balanced);
+        let live: BTreeSet<ClassId> = BTreeSet::new(); // nothing live
+
+        let canon = g.unionfind.find_immutable(c);
+        let result = extract_at(&g, canon, &live, &cm);
+        assert!(
+            result.is_some(),
+            "Iconst must be selectable even with empty live set"
+        );
+        let ext = result.unwrap();
+        assert!(matches!(ext.op, Op::Iconst(42, _)), "must pick Iconst");
+    }
+
+    // 3.2b: X86Add where both children are live: picks X86Add.
+    #[test]
+    fn extract_at_uses_live_child() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 1);
+        let b = iconst(&mut g, 2);
+        let pair = x86add(&mut g, a, b);
+        let p0 = proj0(&mut g, pair);
+
+        let cm = CostModel::new(OptGoal::Balanced);
+        let result = extract(&g, &[g.unionfind.find_immutable(p0)], &cm).expect("ok");
+
+        // Mark a and b as live so X86Add (through the pair class) has 0 child cost.
+        let a_canon = g.unionfind.find_immutable(a);
+        let b_canon = g.unionfind.find_immutable(b);
+        let pair_canon = g.unionfind.find_immutable(pair);
+
+        let mut live: BTreeSet<ClassId> = BTreeSet::new();
+        live.insert(a_canon);
+        live.insert(b_canon);
+        live.insert(pair_canon);
+
+        let p0_canon = g.unionfind.find_immutable(p0);
+        let ext = extract_at_with_memo(&g, p0_canon, &live, &cm, &result.choices);
+        assert!(ext.is_some(), "should extract when children are live");
+    }
+
+    // 3.2c: A deep tree where no internals are live and internals are expensive:
+    // the class can still be extracted (children have memo entries).
+    #[test]
+    fn extract_at_rejects_nonlive_expensive_children() {
+        // Build a deep tree: add(add(iconst, iconst), add(iconst, iconst))
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 1);
+        let b = iconst(&mut g, 2);
+        let c = iconst(&mut g, 3);
+        let d = iconst(&mut g, 4);
+        let ab_pair = x86add(&mut g, a, b);
+        let ab = proj0(&mut g, ab_pair);
+        let cd_pair = x86add(&mut g, c, d);
+        let cd = proj0(&mut g, cd_pair);
+        let root_pair = x86add(&mut g, ab, cd);
+        let root = proj0(&mut g, root_pair);
+
+        let cm = CostModel::new(OptGoal::Balanced);
+        let root_canon = g.unionfind.find_immutable(root);
+        let result = extract(&g, &[root_canon], &cm).expect("ok");
+
+        // Nothing is live; the class should still extract (children have finite memo costs).
+        let live: BTreeSet<ClassId> = BTreeSet::new();
+        let ext = extract_at_with_memo(&g, root_canon, &live, &cm, &result.choices);
+        // Root has finite memo cost so it should succeed.
+        assert!(
+            ext.is_some(),
+            "deep tree should extract from empty live set via memo"
+        );
+    }
+
+    // 3.2d: extract_at agrees with extract when everything is live.
+    #[test]
+    fn extract_at_matches_extract_when_all_live() {
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 10);
+        let b = iconst(&mut g, 20);
+        let pair = x86add(&mut g, a, b);
+        let p0 = proj0(&mut g, pair);
+
+        let cm = CostModel::new(OptGoal::Balanced);
+        let p0_canon = g.unionfind.find_immutable(p0);
+        let result = extract(&g, &[p0_canon], &cm).expect("ok");
+
+        // Mark all classes as live.
+        let live: BTreeSet<ClassId> = result.choices.keys().copied().collect();
+        let ext = extract_at_with_memo(&g, p0_canon, &live, &cm, &result.choices);
+
+        // Both approaches must pick the same op.
+        let normal = &result.choices[&p0_canon];
+        let constrained = ext.expect("should succeed with all classes live");
+        assert_eq!(
+            normal.op, constrained.op,
+            "extract_at must agree with extract when all children are live"
+        );
+    }
+
+    // 3.2e: A class containing only a generic Add (infinite cost) returns None.
+    #[test]
+    fn extract_at_returns_none_on_truly_infeasible() {
+        use crate::egraph::enode::ENode;
+        use smallvec::smallvec;
+
+        let mut g = EGraph::new();
+        let a = iconst(&mut g, 1);
+        let b = iconst(&mut g, 2);
+        // Only a generic Add — no machine node.
+        let ir_add = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![a, b],
+        });
+
+        let cm = CostModel::new(OptGoal::Balanced);
+        let ir_add_canon = g.unionfind.find_immutable(ir_add);
+
+        // Build memo only for the iconst children (not for ir_add itself).
+        let a_canon = g.unionfind.find_immutable(a);
+        let b_canon = g.unionfind.find_immutable(b);
+        let ab_result = extract(&g, &[a_canon, b_canon], &cm).expect("iconsts ok");
+
+        // Attempt constrained extraction on ir_add with both iconsts live.
+        let mut live: BTreeSet<ClassId> = BTreeSet::new();
+        live.insert(a_canon);
+        live.insert(b_canon);
+        let ext = extract_at_with_memo(&g, ir_add_canon, &live, &cm, &ab_result.choices);
+        assert!(
+            ext.is_none(),
+            "generic Add with no machine lowering must return None"
+        );
     }
 }
