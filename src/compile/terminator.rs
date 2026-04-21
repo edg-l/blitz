@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::emit::phi_elim::phi_copies;
@@ -169,6 +170,7 @@ pub(super) fn thread_branches(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower_terminator(
     op: &EffectfulOp,
+    block_idx: usize,
     next_block_id: Option<BlockId>,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
@@ -180,9 +182,10 @@ pub(super) fn lower_terminator(
     func: &Function,
     next_label: &mut LabelId,
 ) -> Result<Vec<BlockItem>, CompileError> {
+    let exit_point = ProgramPoint::block_exit(block_idx);
     let get_reg = |cid: ClassId, ctv: &ClassVRegMap| -> Option<Reg> {
         let canon = egraph.unionfind.find_immutable(cid);
-        ctv.lookup_any(canon)
+        ctv.lookup(canon, exit_point)
             .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
     };
 
@@ -227,6 +230,7 @@ pub(super) fn lower_terminator(
             let copies = build_phi_copies(
                 *target,
                 args,
+                block_idx,
                 egraph,
                 class_to_vreg,
                 ret_class_to_vreg,
@@ -263,6 +267,7 @@ pub(super) fn lower_terminator(
             let true_copies = build_phi_copies(
                 *bb_true,
                 true_args,
+                block_idx,
                 egraph,
                 class_to_vreg,
                 ret_class_to_vreg,
@@ -275,6 +280,7 @@ pub(super) fn lower_terminator(
             let false_copies = build_phi_copies(
                 *bb_false,
                 false_args,
+                block_idx,
                 egraph,
                 class_to_vreg,
                 ret_class_to_vreg,
@@ -343,6 +349,7 @@ pub(super) fn lower_terminator(
 fn build_phi_copies(
     target: BlockId,
     args: &[ClassId],
+    src_block_idx: usize,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
     block_class_to_vreg: &ClassVRegMap,
@@ -355,10 +362,11 @@ fn build_phi_copies(
     if args.is_empty() {
         return Ok(vec![]);
     }
-    let target_block = func
+    let (target_block_idx, target_block) = func
         .blocks
         .iter()
-        .find(|b| b.id == target)
+        .enumerate()
+        .find(|(_, b)| b.id == target)
         .ok_or_else(|| CompileError {
             phase: "phi-elim".into(),
             message: format!("jump target block {target} not found"),
@@ -368,6 +376,9 @@ fn build_phi_copies(
     if n_params == 0 {
         return Ok(vec![]);
     }
+
+    let src_exit = ProgramPoint::block_exit(src_block_idx);
+    let tgt_entry = ProgramPoint::block_entry(target_block_idx);
 
     let mut copies = Vec::new();
     for (param_idx, &arg_cid) in args.iter().enumerate() {
@@ -384,7 +395,7 @@ fn build_phi_copies(
 
         let canon_arg = egraph.unionfind.find_immutable(arg_cid);
         let arg_vreg = block_class_to_vreg
-            .lookup_any(canon_arg)
+            .lookup(canon_arg, src_exit)
             .ok_or_else(|| CompileError {
                 phase: "phi-elim".into(),
                 message: format!("arg class {:?} not in class_to_vreg", canon_arg),
@@ -403,7 +414,7 @@ fn build_phi_copies(
         let mut param_vreg = param_vreg_overrides
             .get(&(target, param_idx as u32))
             .copied()
-            .or_else(|| class_to_vreg.lookup_any(param_cid))
+            .or_else(|| class_to_vreg.lookup(param_cid, tgt_entry))
             .ok_or_else(|| CompileError {
                 phase: "phi-elim".into(),
                 message: format!("param class {:?} not in class_to_vreg", param_cid),

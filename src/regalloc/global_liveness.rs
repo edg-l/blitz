@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::compile::program_point::ProgramPoint;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::egraph::unionfind::UnionFind;
 use crate::ir::effectful::{BlockId, EffectfulOp};
@@ -210,7 +211,9 @@ pub fn apply_block_param_overrides_to_phi_uses(
                         let canon_param = unionfind.find_immutable(param_cid);
                         if canon_arg == canon_param {
                             // Replace the global VReg with the override.
-                            if let Some(old_vreg) = class_to_vreg.lookup_any(canon_arg) {
+                            if let Some(old_vreg) =
+                                class_to_vreg.lookup(canon_arg, ProgramPoint::block_exit(block_idx))
+                            {
                                 phi_uses[block_idx].remove(&old_vreg);
                             }
                             phi_uses[block_idx].insert(fresh_vreg);
@@ -294,10 +297,11 @@ pub fn compute_phi_uses(
     let mut phi_uses: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
+        let exit_point = ProgramPoint::block_exit(block_idx);
         if let Some(term) = block.ops.last() {
             let mut add_vreg = |cid: ClassId| {
                 let canon = egraph_unionfind.find_immutable(cid);
-                if let Some(v) = class_to_vreg.lookup_any(canon) {
+                if let Some(v) = class_to_vreg.lookup(canon, exit_point) {
                     phi_uses[block_idx].insert(v);
                 }
             };
@@ -348,6 +352,7 @@ pub fn collect_block_param_vregs_per_block(
     let mut result: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
+        let entry_point = ProgramPoint::block_entry(block_idx);
         for pidx in 0..block.param_types.len() as u32 {
             // Look for BlockParam nodes for this (block_id, pidx).
             for i in 0..egraph.classes.len() as u32 {
@@ -361,7 +366,7 @@ pub fn collect_block_param_vregs_per_block(
                     if let Op::BlockParam(bid, pidx2, _) = &node.op
                         && *bid == block.id
                         && *pidx2 == pidx
-                        && let Some(vreg) = class_to_vreg.lookup_any(cid)
+                        && let Some(vreg) = class_to_vreg.lookup(cid, entry_point)
                     {
                         result[block_idx].insert(vreg);
                     }

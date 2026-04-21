@@ -40,6 +40,7 @@ use barrier::{
     assign_barrier_groups, build_barrier_context, insert_early_barrier_spills,
     populate_effectful_operands,
 };
+use program_point::ProgramPoint;
 mod cfg;
 use cfg::{
     build_block_param_class_map, collect_block_roots, collect_externals, collect_phi_source_vregs,
@@ -417,7 +418,9 @@ pub fn compile(
         for pidx in 0..block.param_types.len() as u32 {
             if let Some(&cid) = block_param_map.get(&(block_id, pidx)) {
                 let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(vreg) = class_to_vreg.lookup_any(canon) {
+                if let Some(vreg) =
+                    class_to_vreg.lookup(canon, ProgramPoint::block_entry(block_idx))
+                {
                     if let Some(inst) = insts.iter_mut().find(|i| i.dst == vreg) {
                         inst.op = Op::BlockParam(
                             block_id,
@@ -536,7 +539,7 @@ pub fn compile(
         }
 
         let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) = if block.non_term_count() > 0 {
-            build_barrier_context(block, &egraph, &class_to_vreg)
+            build_barrier_context(block, block_idx, &egraph, &class_to_vreg)
         } else {
             (BTreeMap::new(), BTreeMap::new())
         };
@@ -554,7 +557,7 @@ pub fn compile(
         let mut branch_cond_chain: BTreeSet<VReg> = BTreeSet::new();
         if let Some(EffectfulOp::Branch { cond, .. }) = block.ops.last() {
             let canon = egraph.unionfind.find_immutable(*cond);
-            if let Some(vreg) = class_to_vreg.lookup_any(canon) {
+            if let Some(vreg) = class_to_vreg.lookup(canon, ProgramPoint::block_exit(block_idx)) {
                 // Add the flags VReg (proj1).
                 branch_cond_chain.insert(vreg);
                 // Find the instruction that produces it and add its parent
@@ -673,11 +676,13 @@ pub fn compile(
             let non_term_count = block.non_term_count();
             if non_term_count > 0 {
                 let non_term_ops = &block.ops[..non_term_count];
-                let (result_map, arg_map) = build_barrier_context(block, &egraph, &class_to_vreg);
+                let (result_map, arg_map) =
+                    build_barrier_context(block, 0, &egraph, &class_to_vreg);
                 let mut vreg_group = assign_barrier_groups(&all_scheduled, &result_map, &arg_map);
                 populate_effectful_operands(
                     &mut all_scheduled,
                     non_term_ops,
+                    0,
                     &egraph,
                     &class_to_vreg,
                     &mut vreg_group,
@@ -701,7 +706,7 @@ pub fn compile(
         // instruction) so its operands must survive until end of block.
         if let Some(EffectfulOp::Ret { val: Some(cid) }) = func.blocks[0].ops.last() {
             let canon = egraph.unionfind.find_immutable(*cid);
-            if let Some(vreg) = class_to_vreg.lookup_any(canon) {
+            if let Some(vreg) = class_to_vreg.lookup(canon, ProgramPoint::block_exit(0)) {
                 live_out.insert(vreg);
             }
         }
@@ -714,6 +719,7 @@ pub fn compile(
         add_div_precolors(&all_scheduled, &mut all_param_vregs);
         add_call_precolors_for_block(
             &func.blocks[0],
+            0,
             &egraph,
             &class_to_vreg,
             &mut all_param_vregs,
@@ -780,11 +786,12 @@ pub fn compile(
         // add_call_precolors_for_block reads EffectfulOp::Call args in positional
         // ABI order and must run BEFORE the barrier sort.
         let mut call_arg_precolors: Vec<(VReg, Reg)> = Vec::new();
-        for block in func.blocks.iter() {
+        for (block_idx, block) in func.blocks.iter().enumerate() {
             let mut dummy_live_out: std::collections::BTreeSet<VReg> =
                 std::collections::BTreeSet::new();
             add_call_precolors_for_block(
                 block,
+                block_idx,
                 &egraph,
                 &class_to_vreg,
                 &mut call_arg_precolors,
@@ -805,7 +812,7 @@ pub fn compile(
                 let non_term_count = block.non_term_count();
                 if non_term_count > 0 {
                     let (result_map, arg_map) =
-                        build_barrier_context(block, &egraph, &class_to_vreg);
+                        build_barrier_context(block, block_idx, &egraph, &class_to_vreg);
                     let mut vreg_group =
                         assign_barrier_groups(&block_schedules[block_idx], &result_map, &arg_map);
                     let slots_before = pre_spill_slots;
@@ -836,12 +843,14 @@ pub fn compile(
             let non_term_count = block.non_term_count();
             if non_term_count > 0 {
                 let non_term_ops = &block.ops[..non_term_count];
-                let (result_map, arg_map) = build_barrier_context(block, &egraph, &class_to_vreg);
+                let (result_map, arg_map) =
+                    build_barrier_context(block, block_idx, &egraph, &class_to_vreg);
                 let mut vreg_group =
                     assign_barrier_groups(&block_schedules[block_idx], &result_map, &arg_map);
                 populate_effectful_operands(
                     &mut block_schedules[block_idx],
                     non_term_ops,
+                    block_idx,
                     &egraph,
                     &class_to_vreg,
                     &mut vreg_group,
@@ -1064,7 +1073,7 @@ pub fn compile(
         // Build barrier maps using block_class_to_vreg (with cross-block renames
         // applied) so barrier operand caps match the renamed VRegs in the schedule.
         let (vreg_to_result_of_barrier, mut vreg_to_arg_of_barrier) =
-            build_barrier_context(block, &egraph, &block_class_to_vreg);
+            build_barrier_context(block, block_idx, &egraph, &block_class_to_vreg);
 
         // After spilling, CallResult/VoidCallBarrier operands may be SpillLoad
         // vregs that aren't in the original barrier arg map. Scan the schedule
@@ -1190,6 +1199,7 @@ pub fn compile(
             // Emit the barrier (load/store/call).
             let extra = lower_effectful_op(
                 op,
+                block_idx,
                 &block_class_to_vreg,
                 &regalloc_result,
                 &extraction,
@@ -1224,7 +1234,9 @@ pub fn compile(
             // 8a-ret: Ret value must have a register.
             if let EffectfulOp::Ret { val: Some(cid) } = terminator_check {
                 let canon = egraph.unionfind.find_immutable(*cid);
-                if let Some(vreg) = block_class_to_vreg.lookup_any(canon) {
+                if let Some(vreg) =
+                    block_class_to_vreg.lookup(canon, ProgramPoint::block_exit(block_idx))
+                {
                     debug_assert!(
                         regalloc_result.vreg_to_reg.contains_key(&vreg),
                         "8a-ret safety net fired after global regalloc: \
@@ -1254,6 +1266,7 @@ pub fn compile(
         let terminator = block.ops.last().expect("block must have terminator");
         let term_items = lower_terminator(
             terminator,
+            block_idx,
             next_block_id,
             &egraph,
             &class_to_vreg,

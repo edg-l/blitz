@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::ir::effectful::EffectfulOp;
@@ -15,13 +16,15 @@ use crate::schedule::scheduler::ScheduledInst;
 pub(super) fn mark_branch_cond_barrier(
     terminator: Option<&EffectfulOp>,
     non_term_count: usize,
+    block_idx: usize,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
     vreg_to_arg: &mut BTreeMap<VReg, usize>,
 ) {
     if let Some(EffectfulOp::Branch { cond, .. }) = terminator {
         let canon = egraph.unionfind.find_immutable(*cond);
-        if let Some(vreg) = class_to_vreg.lookup_any(canon) {
+        let point = ProgramPoint::block_entry(block_idx);
+        if let Some(vreg) = class_to_vreg.lookup(canon, point) {
             // Force the cond VReg into the group after all effectful ops.
             // Use max (not min like mark_arg) because we need this to come
             // AFTER all calls, overriding any earlier constraint.
@@ -37,15 +40,18 @@ pub(super) fn mark_branch_cond_barrier(
 /// called together.
 pub(super) fn build_barrier_context(
     block: &BasicBlock,
+    block_idx: usize,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
 ) -> (BTreeMap<VReg, usize>, BTreeMap<VReg, usize>) {
     let non_term_count = block.non_term_count();
     let non_term_ops = &block.ops[..non_term_count];
-    let (result_map, mut arg_map) = build_barrier_maps(non_term_ops, egraph, class_to_vreg);
+    let (result_map, mut arg_map) =
+        build_barrier_maps(non_term_ops, block_idx, egraph, class_to_vreg);
     mark_branch_cond_barrier(
         block.ops.last(),
         non_term_count,
+        block_idx,
         egraph,
         class_to_vreg,
         &mut arg_map,
@@ -56,15 +62,17 @@ pub(super) fn build_barrier_context(
 /// Build barrier maps: which VRegs are produced/consumed by each effectful op.
 pub(super) fn build_barrier_maps(
     non_term_ops: &[EffectfulOp],
+    block_idx: usize,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
 ) -> (BTreeMap<VReg, usize>, BTreeMap<VReg, usize>) {
+    let point = ProgramPoint::block_entry(block_idx);
     let mut vreg_to_result: BTreeMap<VReg, usize> = BTreeMap::new();
     let mut vreg_to_arg: BTreeMap<VReg, usize> = BTreeMap::new();
     // Helper: mark a ClassId as consumed by barrier_k (earliest consumer wins).
     let mut mark_arg = |cid: ClassId, barrier_k: usize| {
         let canon = egraph.unionfind.find_immutable(cid);
-        if let Some(vreg) = class_to_vreg.lookup_any(canon) {
+        if let Some(vreg) = class_to_vreg.lookup(canon, point) {
             let entry = vreg_to_arg.entry(vreg).or_insert(barrier_k);
             *entry = (*entry).min(barrier_k);
         }
@@ -73,7 +81,7 @@ pub(super) fn build_barrier_maps(
         match op {
             EffectfulOp::Load { addr, result, .. } => {
                 let canon = egraph.unionfind.find_immutable(*result);
-                if let Some(vreg) = class_to_vreg.lookup_any(canon) {
+                if let Some(vreg) = class_to_vreg.lookup(canon, point) {
                     vreg_to_result.insert(vreg, barrier_k);
                 }
                 mark_arg(*addr, barrier_k);
@@ -85,7 +93,7 @@ pub(super) fn build_barrier_maps(
             EffectfulOp::Call { args, results, .. } => {
                 for &result_cid in results {
                     let canon = egraph.unionfind.find_immutable(result_cid);
-                    if let Some(vreg) = class_to_vreg.lookup_any(canon) {
+                    if let Some(vreg) = class_to_vreg.lookup(canon, point) {
                         vreg_to_result.insert(vreg, barrier_k);
                     }
                 }
@@ -347,6 +355,7 @@ pub(super) fn insert_early_barrier_spills(
 pub(super) fn populate_effectful_operands(
     schedule: &mut Vec<ScheduledInst>,
     non_term_ops: &[EffectfulOp],
+    block_idx: usize,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
     vreg_group: &mut BTreeMap<VReg, usize>,
@@ -372,12 +381,15 @@ pub(super) fn populate_effectful_operands(
     let mut markers: Vec<(usize, ScheduledInst)> = Vec::new();
 
     for (barrier_k, op) in non_term_ops.iter().enumerate() {
+        // Program point for this barrier: used for point-aware VReg lookup.
+        let barrier_pt = ProgramPoint::barrier_point(block_idx, barrier_k, schedule);
+
         // Resolve ClassIds to VRegs with Addr children, dedup.
-        let resolve_vregs = |cids: &[ClassId]| -> Vec<VReg> {
+        let resolve_vregs = |cids: &[ClassId], point: ProgramPoint| -> Vec<VReg> {
             let mut vregs = Vec::new();
             for &cid in cids {
                 let canon = egraph.unionfind.find_immutable(cid);
-                let Some(vreg) = class_to_vreg.lookup_any(canon) else {
+                let Some(vreg) = class_to_vreg.lookup(canon, point) else {
                     continue;
                 };
                 vregs.push(vreg);
@@ -393,13 +405,13 @@ pub(super) fn populate_effectful_operands(
         match op {
             EffectfulOp::Load { addr, result, .. } => {
                 let cids = [*addr];
-                let vregs = resolve_vregs(&cids);
+                let vregs = resolve_vregs(&cids, barrier_pt);
                 if vregs.is_empty() {
                     continue;
                 }
                 // Find the LoadResult instruction by its result VReg.
                 let result_canon = egraph.unionfind.find_immutable(*result);
-                let Some(result_vreg) = class_to_vreg.lookup_any(result_canon) else {
+                let Some(result_vreg) = class_to_vreg.lookup(result_canon, barrier_pt) else {
                     continue;
                 };
                 if let Some(inst) = schedule.iter_mut().find(|i| i.dst == result_vreg) {
@@ -410,14 +422,14 @@ pub(super) fn populate_effectful_operands(
                 }
             }
             EffectfulOp::Call { args, results, .. } => {
-                let vregs = resolve_vregs(args);
+                let vregs = resolve_vregs(args, barrier_pt);
                 if let Some(first_result) = results.first() {
                     // Non-void call: attach to existing CallResult.
                     if vregs.is_empty() {
                         continue;
                     }
                     let result_canon = egraph.unionfind.find_immutable(*first_result);
-                    let Some(result_vreg) = class_to_vreg.lookup_any(result_canon) else {
+                    let Some(result_vreg) = class_to_vreg.lookup(result_canon, barrier_pt) else {
                         continue;
                     };
                     if let Some(inst) = schedule.iter_mut().find(|i| i.dst == result_vreg) {
@@ -443,7 +455,7 @@ pub(super) fn populate_effectful_operands(
             }
             EffectfulOp::Store { addr, val, .. } => {
                 let cids = [*addr, *val];
-                let vregs = resolve_vregs(&cids);
+                let vregs = resolve_vregs(&cids, barrier_pt);
                 if vregs.is_empty() {
                     continue;
                 }

@@ -76,6 +76,11 @@ impl ClassVRegMap {
         start: ProgramPoint,
         end: ProgramPoint,
     ) {
+        debug_assert!(
+            !self.vreg_to_class_segs.contains_key(&vreg)
+                || self.vreg_to_class_segs[&vreg].0 == class,
+            "VReg {vreg:?} already inserted under a different class"
+        );
         self.segments
             .entry(class)
             .or_default()
@@ -95,6 +100,10 @@ impl ClassVRegMap {
             }
         }
         self.segments.remove(&class);
+        // Also remove the target vreg's existing inverse-index entry if it was
+        // previously assigned to a different class; insert_single is an explicit
+        // overwrite and may legitimately move a VReg to a new class.
+        self.vreg_to_class_segs.remove(&vreg);
         self.insert_full_range(class, vreg);
     }
 

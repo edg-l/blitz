@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::ir::effectful::{BlockId, EffectfulOp};
@@ -306,7 +307,8 @@ pub(super) fn collect_phi_source_vregs(
     class_to_vreg: &ClassVRegMap,
     result: &mut BTreeSet<VReg>,
 ) {
-    for block in &func.blocks {
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        let exit_point = ProgramPoint::block_exit(block_idx);
         for op in &block.ops {
             let args: &[ClassId] = match op {
                 EffectfulOp::Jump { args, .. } => args,
@@ -317,7 +319,7 @@ pub(super) fn collect_phi_source_vregs(
                 } => {
                     for &cid in true_args.iter().chain(false_args.iter()) {
                         let canon = egraph.unionfind.find_immutable(cid);
-                        if let Some(vreg) = class_to_vreg.lookup_any(canon) {
+                        if let Some(vreg) = class_to_vreg.lookup(canon, exit_point) {
                             result.insert(vreg);
                         }
                     }
@@ -327,7 +329,7 @@ pub(super) fn collect_phi_source_vregs(
             };
             for &cid in args {
                 let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(vreg) = class_to_vreg.lookup_any(canon) {
+                if let Some(vreg) = class_to_vreg.lookup(canon, exit_point) {
                     result.insert(vreg);
                 }
             }
@@ -349,21 +351,34 @@ pub(super) fn compute_copy_pairs(
 ) -> Vec<(VReg, VReg)> {
     let mut pairs: Vec<(VReg, VReg)> = Vec::new();
 
-    let get_vreg = |cid: ClassId| -> Option<VReg> {
+    // Build block_id -> block_index map for point computation.
+    let block_id_to_idx: BTreeMap<BlockId, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+
+    let get_vreg_at = |cid: ClassId, point: ProgramPoint| -> Option<VReg> {
         let canon = egraph.unionfind.find_immutable(cid);
-        class_to_vreg.lookup_any(canon)
+        class_to_vreg.lookup(canon, point)
     };
 
     // Look up the destination VReg for a block param, preferring the
     // per-block override (fresh VReg) over the global class_to_vreg.
-    let get_param_vreg = |target: BlockId, idx: u32, param_cid: ClassId| -> Option<VReg> {
+    let get_param_vreg = |target: BlockId,
+                          idx: u32,
+                          param_cid: ClassId,
+                          entry_point: ProgramPoint|
+     -> Option<VReg> {
         param_vreg_overrides
             .get(&(target, idx))
             .copied()
-            .or_else(|| get_vreg(param_cid))
+            .or_else(|| get_vreg_at(param_cid, entry_point))
     };
 
-    for block in &func.blocks {
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        let exit_point = ProgramPoint::block_exit(block_idx);
         for op in &block.ops {
             let (target, args): (BlockId, &[ClassId]) = match op {
                 EffectfulOp::Jump { target, args } => (*target, args),
@@ -371,11 +386,15 @@ pub(super) fn compute_copy_pairs(
                     bb_true, true_args, ..
                 } => {
                     // Handle true branch.
+                    let true_entry = block_id_to_idx
+                        .get(bb_true)
+                        .map(|&i| ProgramPoint::block_entry(i))
+                        .unwrap_or(exit_point);
                     for (idx, &arg_cid) in true_args.iter().enumerate() {
                         if let Some(&param_cid) = block_param_map.get(&(*bb_true, idx as u32))
                             && let (Some(arg_v), Some(param_v)) = (
-                                get_vreg(arg_cid),
-                                get_param_vreg(*bb_true, idx as u32, param_cid),
+                                get_vreg_at(arg_cid, exit_point),
+                                get_param_vreg(*bb_true, idx as u32, param_cid, true_entry),
                             )
                         {
                             pairs.push((arg_v, param_v));
@@ -388,11 +407,15 @@ pub(super) fn compute_copy_pairs(
                         ..
                     } = op
                     {
+                        let false_entry = block_id_to_idx
+                            .get(bb_false)
+                            .map(|&i| ProgramPoint::block_entry(i))
+                            .unwrap_or(exit_point);
                         for (idx, &arg_cid) in false_args.iter().enumerate() {
                             if let Some(&param_cid) = block_param_map.get(&(*bb_false, idx as u32))
                                 && let (Some(arg_v), Some(param_v)) = (
-                                    get_vreg(arg_cid),
-                                    get_param_vreg(*bb_false, idx as u32, param_cid),
+                                    get_vreg_at(arg_cid, exit_point),
+                                    get_param_vreg(*bb_false, idx as u32, param_cid, false_entry),
                                 )
                             {
                                 pairs.push((arg_v, param_v));
@@ -403,11 +426,15 @@ pub(super) fn compute_copy_pairs(
                 }
                 _ => continue,
             };
+            let target_entry = block_id_to_idx
+                .get(&target)
+                .map(|&i| ProgramPoint::block_entry(i))
+                .unwrap_or(exit_point);
             for (idx, &arg_cid) in args.iter().enumerate() {
                 if let Some(&param_cid) = block_param_map.get(&(target, idx as u32))
                     && let (Some(arg_v), Some(param_v)) = (
-                        get_vreg(arg_cid),
-                        get_param_vreg(target, idx as u32, param_cid),
+                        get_vreg_at(arg_cid, exit_point),
+                        get_param_vreg(target, idx as u32, param_cid, target_entry),
                     )
                 {
                     pairs.push((arg_v, param_v));
