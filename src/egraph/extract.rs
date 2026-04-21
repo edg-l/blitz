@@ -191,6 +191,29 @@ impl ClassVRegMap {
         }
     }
 
+    /// Shrink a VReg's segment so it ends at `new_end` instead of its current end.
+    ///
+    /// Used by the cross-block splitter to shorten a spilled VReg's live range so
+    /// that `class_to_vreg.lookup(class, block_exit)` no longer returns the
+    /// original VReg, allowing a reload VReg's segment to cover the terminator point.
+    pub fn truncate_segment_end(&mut self, vreg: VReg, new_end: ProgramPoint) {
+        let Some(&(class, start, _old_end)) = self.vreg_to_class_segs.get(&vreg) else {
+            return;
+        };
+        // Update inverse index.
+        self.vreg_to_class_segs
+            .insert(vreg, (class, start, new_end));
+        // Update forward segments.
+        if let Some(segs) = self.segments.get_mut(&class) {
+            for seg in segs.iter_mut() {
+                if seg.vreg == vreg {
+                    seg.end = new_end;
+                    break;
+                }
+            }
+        }
+    }
+
     /// Remove the entry for `class` (all its segments). Returns the VReg of the
     /// first segment if present. Also removes from the inverse index.
     pub fn remove(&mut self, class: ClassId) -> Option<VReg> {

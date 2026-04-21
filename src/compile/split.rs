@@ -22,6 +22,7 @@ use crate::ir::types::Type;
 use crate::regalloc::global_liveness::GlobalLiveness;
 use crate::regalloc::spill::LOOP_DEPTH_PENALTY_BASE;
 use crate::schedule::scheduler::ScheduledInst;
+use crate::x86::abi::CALLER_SAVED_GPR;
 use crate::x86::reg::RegClass;
 
 // Re-export the VReg type used throughout.
@@ -84,6 +85,20 @@ pub struct SplitPlan {
     /// Key: `(block_id, param_idx)` identifying the block param in the func.
     /// Value: slot info (VReg to truncate, slot number, class, block_idx).
     pub slot_spilled_params: BTreeMap<(BlockId, u32), SlotSpilledParamInfo>,
+    /// VRegs whose class_to_vreg segments must be truncated at the END to the
+    /// given ProgramPoint. Used by cross-block slot spills to shorten the
+    /// spilled VReg's live range so the terminator point maps to a reload VReg.
+    pub segment_end_truncations: Vec<(VReg, ProgramPoint)>,
+    /// Total number of spill slots allocated by the splitter. The caller must
+    /// include this in the function's stack frame size calculation.
+    pub slots_allocated: u32,
+    /// VRegs that are end-of-block SpillLoad/XmmSpillLoad defs inserted by
+    /// cross-block slot spills. These have no scheduled consumers (only used by
+    /// the block terminator via class_to_vreg lookup), so assign_barrier_groups
+    /// would normally place them in group 0. The lowering pass must force them
+    /// into the trailing group (after all calls) to avoid loading from
+    /// uninitialized stack slots before calls execute.
+    pub end_of_block_spill_vregs: BTreeSet<VReg>,
 }
 
 /// Cost above which we prefer SlotSpill over Remat.
@@ -96,48 +111,46 @@ const SLOT_STORE_LOAD_COST: f64 = 5.0;
 
 /// Compute per-instruction live-before sets for a single block.
 ///
-/// The scan is seeded from `live_in_seed` (the block's `GlobalLiveness::live_in`
-/// entry) so pass-through VRegs are counted even if they have no local def/use.
+/// The scan is seeded from `live_out_seed` (the block's `GlobalLiveness::live_out`
+/// entry) so values defined in this block that are consumed in successor blocks are
+/// correctly tracked as live throughout their range in this block.
 ///
 /// Returns a `Vec` of length `n_insts + 1` where `result[i]` is the set of
 /// VRegs live immediately BEFORE instruction `i`. `result[n_insts]` is the
-/// live-before set for the (virtual) instruction after the last one, which
-/// equals the live-out set as seen by the splitter (not the full global
-/// live-out, since we seed only from `live_in` of this block).
+/// live-out set (equal to `live_out_seed` plus any locally-used pass-through
+/// values that survive backward from uses inside the block).
 fn compute_local_liveness(
     block_idx: usize,
     schedule: &[ScheduledInst],
-    live_in_seed: &BTreeSet<VReg>,
+    live_out_seed: &BTreeSet<VReg>,
 ) -> Vec<BTreeSet<VReg>> {
     let n = schedule.len();
     // result[i] = live set before instruction i.
-    // result[n] = live set after the last instruction (exit snapshot).
+    // result[n] = live set at exit of block (= live_out_seed for this block).
     let mut result: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n + 1];
 
-    // Seed the backward scan: start with live_in_seed as the "live after last inst".
-    let mut live: BTreeSet<VReg> = live_in_seed.clone();
+    // Seed the backward scan from live_out: values live at the exit of the block.
+    let mut live: BTreeSet<VReg> = live_out_seed.clone();
+    result[n] = live.clone();
 
     // Walk backward.
     for i in (0..n).rev() {
         let inst = &schedule[i];
 
-        // Live-before = (live ∪ uses) - {def} (if def not in uses).
-        // Add uses before removing def, because the def is not live before this inst.
+        // Standard backward liveness: live-before(I) = USE(I) ∪ (live-after(I) \ DEF(I)).
+        // Remove def first (before adding uses) to handle the case where live-after
+        // already contains def (possible when seeding from live_out, where values
+        // defined in this block that flow to successors are included).
+        live.remove(&inst.dst);
+
+        // Add uses to live (a value used by I is live before I).
         for &use_vreg in &inst.operands {
             live.insert(use_vreg);
         }
-        // Record live-before[i] (includes uses, excludes def if def != use).
+
+        // Record live-before[i].
         result[i] = live.clone();
-
-        // Now remove the def (def is live after this point only when used later).
-        live.remove(&inst.dst);
     }
-
-    // result[n] corresponds to "after last instruction" = our seed (live_in_seed
-    // propagated backward), but since we walked backward starting from live_in_seed
-    // we've already set result[0] correctly as the live-before of the first inst.
-    // Set result[n] to be the live_in_seed so the caller has a consistent "exit" view.
-    result[n] = live_in_seed.clone();
 
     // Suppress unused variable warning for block_idx (kept for callers that need it).
     let _ = block_idx;
@@ -250,7 +263,195 @@ fn collect_call_arg_vregs_set(schedule: &[ScheduledInst]) -> BTreeSet<VReg> {
     set
 }
 
+/// Compute call-crossing overshoot per call point in the schedule.
+///
+/// For each instruction that is a call (`CallResult` or `VoidCallBarrier`),
+/// count GPR values that are live BEFORE the instruction. These values must
+/// survive the call using callee-saved registers only. If the count exceeds
+/// `callee_saved_budget`, return `(inst_idx, count, excess)` for the worst
+/// call point.
+///
+/// `callee_saved_budget` = total GPRs − caller-saved GPRs.
+fn find_call_crossing_overshoot(
+    live_sets: &[BTreeSet<VReg>],
+    schedule: &[ScheduledInst],
+    vreg_classes: &BTreeMap<VReg, RegClass>,
+    callee_saved_budget: u32,
+) -> Option<(usize, u32)> {
+    let mut worst: Option<(usize, u32)> = None;
+    for (inst_idx, inst) in schedule.iter().enumerate() {
+        if !matches!(inst.op, Op::CallResult(..) | Op::VoidCallBarrier) {
+            continue;
+        }
+        // Count GPR values live before this call instruction.
+        let live_before = &live_sets[inst_idx];
+        let gpr_live: u32 = live_before
+            .iter()
+            .filter(|&&v| vreg_classes.get(&v).copied() == Some(RegClass::GPR))
+            .count() as u32;
+        if gpr_live > callee_saved_budget {
+            let excess = gpr_live - callee_saved_budget;
+            match worst {
+                None => worst = Some((inst_idx, excess)),
+                Some((_, worst_excess)) => {
+                    if excess > worst_excess {
+                        worst = Some((inst_idx, excess));
+                    }
+                }
+            }
+        }
+    }
+    worst
+}
+
 // ── Plan construction ─────────────────────────────────────────────────────────
+
+/// Apply splits for a set of victims at an overshoot point in a single block.
+///
+/// Used by both the standard pressure path and the call-crossing path so the
+/// same logic is not duplicated.
+/// Whether the overshoot requires cross-block spill (call-crossing) or per-block split.
+///
+/// - `PerBlock`: victim's uses are in the same block; use `apply_split_planned`.
+/// - `CrossBlock`: victim is live-out only; use `apply_cross_block_slot_spill`.
+#[derive(Clone, Copy)]
+enum SplitScope {
+    PerBlock,
+    CrossBlock,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_splits_for_overshoot(
+    block_idx: usize,
+    overshoot_inst_idx: usize,
+    overshoot_class: RegClass,
+    overshoot_excess: u32,
+    scope: SplitScope,
+    live_sets: &[BTreeSet<VReg>],
+    all_block_schedules: &[Vec<ScheduledInst>],
+    vreg_classes: &BTreeMap<VReg, RegClass>,
+    call_arg_vregs: &BTreeSet<VReg>,
+    def_inst_map: &BTreeMap<VReg, usize>,
+    range_lengths: &BTreeMap<VReg, usize>,
+    loop_depths: &BTreeMap<VReg, u32>,
+    class_to_vreg: &ClassVRegMap,
+    egraph: &EGraph,
+    cost_model: &CostModel,
+    extraction: &ExtractionResult,
+    next_vreg: &mut u32,
+    new_slot_count: &mut u32,
+    all_per_block_insertions: &mut [Vec<(usize, ScheduledInst)>],
+    new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
+    operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
+    segment_end_truncations: &mut Vec<(VReg, ProgramPoint)>,
+    end_of_block_spill_vregs: &mut BTreeSet<VReg>,
+    planned_victims: &mut BTreeSet<VReg>,
+) {
+    let block_schedule = &all_block_schedules[block_idx];
+    let live_at = &live_sets[overshoot_inst_idx];
+
+    // Collect candidates: VRegs of the target class that are live at the overshoot
+    // point, excluding Flags-typed VRegs, spill pseudo-op defs, and already-planned victims.
+    let mut candidates: Vec<VReg> = live_at
+        .iter()
+        .filter(|&&v| vreg_classes.get(&v).copied() == Some(overshoot_class))
+        .filter(|&&v| !planned_victims.contains(&v))
+        .filter(|&&v| {
+            if let Some(&def_idx) = def_inst_map.get(&v) {
+                let op = &block_schedule[def_idx].op;
+                // Skip spill pseudo-ops (no result_type) and Flags-typed defs.
+                if matches!(
+                    op,
+                    Op::SpillStore(_)
+                        | Op::SpillLoad(_)
+                        | Op::XmmSpillStore(_)
+                        | Op::XmmSpillLoad(_)
+                ) {
+                    return false;
+                }
+                let result_ty = op.result_type(&[]);
+                !matches!(result_ty, Type::Flags)
+            } else {
+                // VReg defined in a predecessor block.
+                // For CrossBlock scope, these are valid victims.
+                // For PerBlock scope, skip them (no local def to split at).
+                matches!(scope, SplitScope::CrossBlock)
+            }
+        })
+        .copied()
+        .collect();
+
+    // Score and sort candidates (highest score = best victim).
+    candidates.sort_by(|&a, &b| {
+        let depth_a = loop_depths.get(&a).copied().unwrap_or(0);
+        let depth_b = loop_depths.get(&b).copied().unwrap_or(0);
+        let len_a = range_lengths.get(&a).copied().unwrap_or(0);
+        let len_b = range_lengths.get(&b).copied().unwrap_or(0);
+        score_victim(b, len_b, depth_b).cmp(&score_victim(a, len_a, depth_a))
+    });
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    // Pick enough victims to eliminate the entire overshoot at this point.
+    let n_victims = (overshoot_excess as usize).min(candidates.len());
+    let victims = &candidates[..n_victims];
+
+    let use_point = ProgramPoint::inst_point(block_idx, overshoot_inst_idx);
+    let live_classes_at_use: BTreeSet<ClassId> = live_at
+        .iter()
+        .filter_map(|&v| class_to_vreg.vreg_to_class(v, use_point))
+        .collect();
+
+    for &victim in victims {
+        planned_victims.insert(victim);
+        match scope {
+            SplitScope::PerBlock => {
+                let loop_depth = loop_depths.get(&victim).copied().unwrap_or(0);
+                let victim_class = class_to_vreg.vreg_to_class(victim, use_point);
+                let kind = choose_split_kind(
+                    victim,
+                    loop_depth,
+                    call_arg_vregs,
+                    victim_class,
+                    &live_classes_at_use,
+                    egraph,
+                    cost_model,
+                    extraction,
+                );
+                apply_split_planned(
+                    block_idx,
+                    victim,
+                    kind,
+                    block_schedule,
+                    overshoot_class,
+                    next_vreg,
+                    new_slot_count,
+                    &mut all_per_block_insertions[block_idx],
+                    new_segments,
+                    operand_rewrites,
+                    class_to_vreg,
+                );
+            }
+            SplitScope::CrossBlock => {
+                apply_cross_block_slot_spill(
+                    victim,
+                    overshoot_class,
+                    all_block_schedules,
+                    next_vreg,
+                    new_slot_count,
+                    all_per_block_insertions,
+                    new_segments,
+                    operand_rewrites,
+                    segment_end_truncations,
+                    end_of_block_spill_vregs,
+                    class_to_vreg,
+                );
+            }
+        }
+    }
+}
 
 /// Build a `SplitPlan` for the given function-wide schedules.
 ///
@@ -261,6 +462,9 @@ fn collect_call_arg_vregs_set(schedule: &[ScheduledInst]) -> BTreeSet<VReg> {
 /// `SlotSpillBlockParam` splits for them (Phase 6).
 ///
 /// `loop_depths` maps VReg -> loop nesting depth (from `compute_loop_depths`).
+/// `first_slot` is the first spill-slot index the splitter may allocate; must
+/// be set to the number of slots already allocated by `insert_early_barrier_spills`
+/// so that splitter-allocated slots do not alias early-barrier slots.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_splits(
     block_schedules: &[Vec<ScheduledInst>],
@@ -272,15 +476,30 @@ pub fn plan_splits(
     gpr_budget: u32,
     xmm_budget: u32,
     mut next_vreg: u32,
+    first_slot: u32,
     loop_depths: &BTreeMap<VReg, u32>,
     func: &Function,
 ) -> SplitPlan {
     let n_blocks = block_schedules.len();
     let mut per_block_insertions: Vec<Vec<(usize, ScheduledInst)>> = vec![Vec::new(); n_blocks];
     let mut new_segments: Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)> = Vec::new();
-    let mut new_slot_count: u32 = 0;
+    let mut new_slot_count: u32 = first_slot;
     let mut operand_rewrites: Vec<(usize, usize, usize, VReg)> = Vec::new();
     let mut slot_spilled_params: BTreeMap<(BlockId, u32), SlotSpilledParamInfo> = BTreeMap::new();
+    let mut segment_end_truncations: Vec<(VReg, ProgramPoint)> = Vec::new();
+    // End-of-block SpillLoad VRegs inserted by cross-block spills.
+    // The lowering pass forces these into the trailing barrier group so they
+    // execute after all calls in the block (not before them).
+    let mut end_of_block_spill_vregs: BTreeSet<VReg> = BTreeSet::new();
+    // Deduplication set: VRegs already planned for spill by either path.
+    // Prevents the same VReg from being spilled twice when standard pressure
+    // and call-crossing pressure both select it as a victim.
+    let mut planned_victims: BTreeSet<VReg> = BTreeSet::new();
+
+    // Callee-saved budget: GPR values that can stay live across a call.
+    // Values exceeding this budget at any call site cause chromatic overshoot
+    // even when raw pressure is below gpr_budget.
+    let callee_saved_budget = gpr_budget.saturating_sub(CALLER_SAVED_GPR.len() as u32);
 
     for block_idx in 0..n_blocks {
         let schedule = &block_schedules[block_idx];
@@ -288,24 +507,40 @@ pub fn plan_splits(
             continue;
         }
 
-        // Seed from global live_in so pass-through VRegs are counted.
-        let live_in_seed = if block_idx < global_liveness.live_in.len() {
-            &global_liveness.live_in[block_idx]
+        // Seed from global live_out so values used in successor blocks are
+        // correctly tracked as live throughout their range in this block.
+        let live_out_seed = if block_idx < global_liveness.live_out.len() {
+            &global_liveness.live_out[block_idx]
         } else {
             continue;
         };
+        // Also ensure blocks array bounds are valid.
+        if block_idx >= global_liveness.live_in.len() {
+            continue;
+        }
 
         // Build VReg -> RegClass map for this block.
         let vreg_classes = crate::regalloc::build_vreg_classes_from_insts(schedule);
 
         // Compute per-instruction live-before sets.
-        let live_sets = compute_local_liveness(block_idx, schedule, live_in_seed);
+        let live_sets = compute_local_liveness(block_idx, schedule, live_out_seed);
 
         // Compute pressure per class.
         let gpr_pressure = compute_pressure_for_class(&live_sets, &vreg_classes, RegClass::GPR);
         let xmm_pressure = compute_pressure_for_class(&live_sets, &vreg_classes, RegClass::XMM);
 
-        // Find the first overshoot point.
+        // Build def-site map and call-arg set once per block (shared by both paths).
+        let def_inst_map: BTreeMap<VReg, usize> = schedule
+            .iter()
+            .enumerate()
+            .map(|(idx, inst)| (inst.dst, idx))
+            .collect();
+        let call_arg_vregs = collect_call_arg_vregs_set(schedule);
+        let range_lengths = compute_live_range_lengths(&live_sets);
+
+        // ── Standard pressure path ────────────────────────────────────────────
+        //
+        // Find the first overshoot point against the full register budget.
         let gpr_overshoot: Option<(usize, u32)> = gpr_pressure
             .iter()
             .enumerate()
@@ -318,105 +553,89 @@ pub fn plan_splits(
             .map(|(i, p)| (i, *p));
 
         // Pick the most urgent overshoot (by class and amount). Prefer XMM.
-        let (overshoot_inst_idx, overshoot_class) = match (gpr_overshoot, xmm_overshoot) {
-            (None, None) => continue,
-            (Some(g), None) => (g.0, RegClass::GPR),
-            (None, Some(x)) => (x.0, RegClass::XMM),
+        let standard_overshoot = match (gpr_overshoot, xmm_overshoot) {
+            (None, None) => None,
+            (Some(g), None) => Some((g.0, RegClass::GPR, g.1.saturating_sub(gpr_budget))),
+            (None, Some(x)) => Some((x.0, RegClass::XMM, x.1.saturating_sub(xmm_budget))),
             (Some(g), Some(x)) => {
                 let xmm_excess = x.1.saturating_sub(xmm_budget);
                 let gpr_excess = g.1.saturating_sub(gpr_budget);
                 if xmm_excess >= gpr_excess {
-                    (x.0, RegClass::XMM)
+                    Some((x.0, RegClass::XMM, xmm_excess))
                 } else {
-                    (g.0, RegClass::GPR)
+                    Some((g.0, RegClass::GPR, gpr_excess))
                 }
             }
         };
 
-        // Gather victims: VRegs of the target class live at the overshoot point.
-        let live_at = &live_sets[overshoot_inst_idx];
-        let range_lengths = compute_live_range_lengths(&live_sets);
+        if let Some((inst_idx, class, excess)) = standard_overshoot {
+            apply_splits_for_overshoot(
+                block_idx,
+                inst_idx,
+                class,
+                excess,
+                SplitScope::PerBlock,
+                &live_sets,
+                block_schedules,
+                &vreg_classes,
+                &call_arg_vregs,
+                &def_inst_map,
+                &range_lengths,
+                loop_depths,
+                class_to_vreg,
+                egraph,
+                cost_model,
+                extraction,
+                &mut next_vreg,
+                &mut new_slot_count,
+                &mut per_block_insertions,
+                &mut new_segments,
+                &mut operand_rewrites,
+                &mut segment_end_truncations,
+                &mut end_of_block_spill_vregs,
+                &mut planned_victims,
+            );
+        }
 
-        // Build def-site map for this block.
-        let def_inst_map: BTreeMap<VReg, &ScheduledInst> = schedule
-            .iter()
-            .rev()
-            .map(|inst| (inst.dst, inst))
-            .collect::<BTreeMap<_, _>>();
-
-        // Collect call-arg VRegs (must not remat).
-        let call_arg_vregs = collect_call_arg_vregs_set(schedule);
-
-        // Collect candidates: VRegs of the right class that are live at overshoot,
-        // excluding Flags-typed VRegs.
-        let mut candidates: Vec<VReg> = live_at
-            .iter()
-            .filter(|&&v| vreg_classes.get(&v).copied() == Some(overshoot_class))
-            .filter(|&&v| {
-                // Skip Flags-typed VRegs (cannot be split).
-                if let Some(inst) = def_inst_map.get(&v) {
-                    // Check if the result type is Flags.
-                    let result_ty = inst.op.result_type(&[]);
-                    !matches!(result_ty, Type::Flags)
-                } else {
-                    true
-                }
-            })
-            .copied()
-            .collect();
-
-        // Score and sort candidates (highest score = best victim).
-        candidates.sort_by(|&a, &b| {
-            let depth_a = loop_depths.get(&a).copied().unwrap_or(0);
-            let depth_b = loop_depths.get(&b).copied().unwrap_or(0);
-            let len_a = range_lengths.get(&a).copied().unwrap_or(0);
-            let len_b = range_lengths.get(&b).copied().unwrap_or(0);
-            score_victim(b, len_b, depth_b).cmp(&score_victim(a, len_a, depth_a))
-        });
-
-        let victim = match candidates.first() {
-            Some(&v) => v,
-            None => continue,
-        };
-
-        let loop_depth = loop_depths.get(&victim).copied().unwrap_or(0);
-
-        // Look up the victim's ClassId and compute the set of live classes at
-        // the overshoot point. These are passed to `extract_at_with_memo` so
-        // the e-graph can pick the cheapest op whose children are already live
-        // (cost = 0) rather than requiring re-extraction from scratch.
-        let use_point = ProgramPoint::inst_point(block_idx, overshoot_inst_idx);
-        let victim_class = class_to_vreg.vreg_to_class(victim, use_point);
-        let live_classes_at_use: BTreeSet<ClassId> = live_at
-            .iter()
-            .filter_map(|&v| class_to_vreg.vreg_to_class(v, use_point))
-            .collect();
-
-        let kind = choose_split_kind(
-            victim,
-            loop_depth,
-            &call_arg_vregs,
-            victim_class,
-            &live_classes_at_use,
-            egraph,
-            cost_model,
-            extraction,
-        );
-
-        // Apply the split: plan insertions and operand rewrites.
-        apply_split_planned(
-            block_idx,
-            victim,
-            kind,
-            schedule,
-            overshoot_class,
-            &mut next_vreg,
-            &mut new_slot_count,
-            &mut per_block_insertions[block_idx],
-            &mut new_segments,
-            &mut operand_rewrites,
-            class_to_vreg,
-        );
+        // ── Call-crossing pressure path ───────────────────────────────────────
+        //
+        // Values live at a call site must use callee-saved registers to survive.
+        // If more than `callee_saved_budget` GPR values are live at a call,
+        // the allocator will fail even if raw pressure is below `gpr_budget`.
+        // Pick victims from the GPR values live at the worst call-crossing point.
+        // Victims that have no local uses (defined here, consumed in successors)
+        // require cross-block spilling: SpillStore in this block, SpillLoad in
+        // each use block.
+        let call_crossing =
+            find_call_crossing_overshoot(&live_sets, schedule, &vreg_classes, callee_saved_budget);
+        if let Some((call_inst_idx, excess)) = call_crossing {
+            apply_splits_for_overshoot(
+                block_idx,
+                call_inst_idx,
+                RegClass::GPR,
+                excess,
+                SplitScope::CrossBlock,
+                &live_sets,
+                block_schedules,
+                &vreg_classes,
+                &call_arg_vregs,
+                &def_inst_map,
+                &range_lengths,
+                loop_depths,
+                class_to_vreg,
+                egraph,
+                cost_model,
+                extraction,
+                &mut next_vreg,
+                &mut new_slot_count,
+                &mut per_block_insertions,
+                &mut new_segments,
+                &mut operand_rewrites,
+                &mut segment_end_truncations,
+                &mut end_of_block_spill_vregs,
+                &mut planned_victims,
+            );
+        }
     }
 
     // Phase 6: Block-param split strategy.
@@ -446,6 +665,9 @@ pub fn plan_splits(
         new_segments,
         operand_rewrites,
         slot_spilled_params,
+        segment_end_truncations,
+        slots_allocated: new_slot_count,
+        end_of_block_spill_vregs,
     }
 }
 
@@ -605,6 +827,153 @@ fn detect_blockparam_call_crossings(
                 },
             );
         }
+    }
+}
+
+/// Slot-spill a victim that is live across a call and whose value is consumed
+/// both via schedule-operand uses in successor blocks AND via the block's
+/// terminator (Jump/Branch args → block params).
+///
+/// # Strategy
+///
+/// 1. Insert `SpillStore` immediately after the def in the def block.
+/// 2. Insert `SpillLoad` at the END of the def block (position `n_insts`)
+///    so that `class_to_vreg.lookup(class, block_exit)` maps to the reload VReg
+///    rather than the original VReg. This causes `compute_phi_uses` (recomputed
+///    after the plan is applied) to include the reload VReg instead of the
+///    original, breaking the live-out chain that was keeping the original VReg
+///    alive across all calls.
+/// 3. Record a `segment_end_truncation` to shorten the original VReg's segment
+///    to end at the SpillStore. `apply_plan_to` calls `truncate_segment_end`
+///    to commit this to `class_to_vreg`.
+/// 4. Insert `SpillLoad` before each schedule-operand use in any block (to
+///    handle direct uses that don't go through the block-param path).
+#[allow(clippy::too_many_arguments)]
+fn apply_cross_block_slot_spill(
+    victim: VReg,
+    reg_class: RegClass,
+    all_block_schedules: &[Vec<ScheduledInst>],
+    next_vreg: &mut u32,
+    new_slot_count: &mut u32,
+    per_block_insertions: &mut [Vec<(usize, ScheduledInst)>],
+    new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
+    operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
+    segment_end_truncations: &mut Vec<(VReg, ProgramPoint)>,
+    end_of_block_spill_vregs: &mut BTreeSet<VReg>,
+    class_to_vreg: &ClassVRegMap,
+) {
+    // Allocate a spill slot.
+    let slot = *new_slot_count as i64;
+    *new_slot_count += 1;
+
+    let load_op = if reg_class == RegClass::XMM {
+        Op::XmmSpillLoad(slot)
+    } else {
+        Op::SpillLoad(slot)
+    };
+    let store_op = if reg_class == RegClass::XMM {
+        Op::XmmSpillStore(slot)
+    } else {
+        Op::SpillStore(slot)
+    };
+
+    // Find the def block, insert SpillStore after the def, and insert a
+    // SpillLoad at the END of the def block (before the terminator).
+    let mut victim_class: Option<ClassId> = None;
+    let mut def_block_idx: Option<usize> = None;
+    for (bi, block_sched) in all_block_schedules.iter().enumerate() {
+        if let Some(def_pos) = block_sched.iter().position(|i| i.dst == victim) {
+            let n_insts = block_sched.len();
+
+            // Step 1: SpillStore after def.
+            let store_vreg = VReg(*next_vreg);
+            *next_vreg += 1;
+            let store_inst = ScheduledInst {
+                op: store_op.clone(),
+                dst: store_vreg,
+                operands: vec![victim],
+            };
+            per_block_insertions[bi].push((def_pos + 1, store_inst));
+
+            // Look up the victim's ClassId for segment registration.
+            let entry_point = ProgramPoint::block_entry(bi);
+            victim_class = class_to_vreg.vreg_to_class(victim, entry_point);
+
+            if let Some(class) = victim_class {
+                let store_point = ProgramPoint::inst_point(bi, def_pos + 1);
+                new_segments.push((class, store_vreg, store_point, store_point));
+
+                // Step 2: SpillLoad at end of def block (position n_insts).
+                // This creates a reload VReg that covers the block_exit point,
+                // so that compute_phi_uses (recomputed post-split) finds the
+                // reload VReg instead of the original when looking up the class
+                // at block_exit(bi).
+                let end_reload_vreg = VReg(*next_vreg);
+                *next_vreg += 1;
+                let end_load_inst = ScheduledInst {
+                    op: load_op.clone(),
+                    dst: end_reload_vreg,
+                    operands: vec![],
+                };
+                // Insert at n_insts: this is AFTER all current instructions, just before
+                // the terminator. After insertion, this instruction sits at the end.
+                per_block_insertions[bi].push((n_insts, end_load_inst));
+                // Register the reload segment covering block_exit.
+                let exit_point = ProgramPoint::block_exit(bi);
+                new_segments.push((class, end_reload_vreg, exit_point, exit_point));
+                // Mark this VReg so the lowering pass can force it into the
+                // trailing barrier group (after all calls).
+                end_of_block_spill_vregs.insert(end_reload_vreg);
+
+                // Step 3: Truncate the original VReg's segment to end at store_point.
+                // After apply_plan_to calls truncate_segment_end(victim, store_point),
+                // class_to_vreg.lookup(class, block_exit) returns end_reload_vreg.
+                segment_end_truncations.push((victim, store_point));
+            }
+
+            def_block_idx = Some(bi);
+            break; // A VReg has exactly one def.
+        }
+    }
+
+    // Step 4: Find all schedule-operand uses in ALL blocks and insert SpillLoad
+    // before each (excluding the def block's end-of-block position, handled above).
+    for (bi, block_sched) in all_block_schedules.iter().enumerate() {
+        let use_positions: Vec<(usize, usize)> = block_sched
+            .iter()
+            .enumerate()
+            .flat_map(|(inst_idx, inst)| {
+                inst.operands
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, op)| **op == victim)
+                    .map(move |(op_idx, _)| (inst_idx, op_idx))
+            })
+            .collect();
+
+        if use_positions.is_empty() {
+            continue;
+        }
+
+        for (inst_idx, op_idx) in use_positions {
+            let reload_vreg = VReg(*next_vreg);
+            *next_vreg += 1;
+
+            let use_load_inst = ScheduledInst {
+                op: load_op.clone(),
+                dst: reload_vreg,
+                operands: vec![],
+            };
+            per_block_insertions[bi].push((inst_idx, use_load_inst));
+            operand_rewrites.push((bi, inst_idx, op_idx, reload_vreg));
+
+            if let Some(class) = victim_class {
+                let point = ProgramPoint::inst_point(bi, inst_idx + 1);
+                new_segments.push((class, reload_vreg, point, point));
+            }
+        }
+
+        let _ = def_block_idx;
     }
 }
 
@@ -771,7 +1140,18 @@ pub fn apply_plan_to(
             continue;
         }
         // Sort by insert position descending so we insert from back to front.
-        insertions.sort_by(|a, b| b.0.cmp(&a.0));
+        // At the same position, SpillLoad/XmmSpillLoad must be inserted BEFORE
+        // SpillStore/XmmSpillStore so that after insertion the store precedes the
+        // load in the final schedule (we insert in reverse, so SpillLoad is
+        // inserted last at a given position and ends up first there).
+        insertions.sort_by(|a, b| {
+            b.0.cmp(&a.0).then_with(|| {
+                let is_load = |inst: &ScheduledInst| {
+                    matches!(inst.op, Op::SpillLoad(_) | Op::XmmSpillLoad(_))
+                };
+                is_load(&b.1).cmp(&is_load(&a.1))
+            })
+        });
         let schedule = &mut block_schedules[block_idx];
         for (pos, inst) in insertions {
             let insert_at = pos.min(schedule.len());
@@ -800,6 +1180,14 @@ pub fn apply_plan_to(
         // BLOCK_ENTRY(block_idx) (inst=0), so lookup at block_entry returns None.
         let new_start = ProgramPoint::inst_point(info.block_idx, 1);
         class_to_vreg.truncate_segment_start(info.vreg, new_start);
+    }
+
+    // Cross-block spill: truncate original VReg segments to end at the SpillStore.
+    // After truncation, class_to_vreg.lookup(class, block_exit) returns the
+    // end-of-block reload VReg (whose segment was registered above), enabling
+    // compute_phi_uses to route the terminator through the reload VReg instead.
+    for (vreg, new_end) in plan.segment_end_truncations {
+        class_to_vreg.truncate_segment_end(vreg, new_end);
     }
 
     // Advance next_vreg to the highest freshly-allocated VReg + 1.
@@ -905,6 +1293,7 @@ mod tests {
             15, // gpr_budget
             16, // xmm_budget
             100,
+            0, // first_slot
             &loop_depths,
             &func,
         );
@@ -952,6 +1341,7 @@ mod tests {
             15,
             16, // xmm_budget; 17 live XMMs > 16
             200,
+            0, // first_slot
             &loop_depths,
             &func,
         );
@@ -1163,6 +1553,9 @@ mod tests {
             new_segments,
             operand_rewrites,
             slot_spilled_params: slot_spilled_params.clone(),
+            segment_end_truncations: Vec::new(),
+            slots_allocated: 0,
+            end_of_block_spill_vregs: BTreeSet::new(),
         };
         let mut block_schedules_mut = vec![vec![], vec![call_result_inst(1, vec![0])]];
         let mut next_vreg2 = next_vreg;
@@ -1415,6 +1808,9 @@ mod tests {
             )],
             operand_rewrites: vec![],
             slot_spilled_params: BTreeMap::new(),
+            segment_end_truncations: Vec::new(),
+            slots_allocated: 0,
+            end_of_block_spill_vregs: BTreeSet::new(),
         };
 
         let mut block_schedules: Vec<Vec<ScheduledInst>> = vec![vec![]];

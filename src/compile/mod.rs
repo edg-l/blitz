@@ -14,6 +14,17 @@
 //! 11. ELF emission
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[allow(unused_imports)]
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+/// Counts how many times the legacy spill loop ran while the split pass was
+/// active. Non-zero indicates the splitter missed an infeasibility. In debug
+/// builds, any activation panics immediately. In release, this counter is
+/// incremented and `tracing::error!` is emitted; the fallback spill loop then
+/// runs so the build still succeeds.
+///
+/// Phase 7B deletion is gated on this counter reading zero after a full test run.
+pub static FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 use crate::egraph::cost::{CostModel, OptGoal};
 use crate::egraph::extract::{
@@ -665,6 +676,12 @@ pub fn compile(
     // Passed to lower_terminator so predecessor terminators emit slot stores.
     let mut slot_spilled_params: crate::compile::split::BlockParamSlotMap =
         std::collections::BTreeMap::new();
+    // Total spill slots allocated by the splitter (set inside multi-block path if splitter active).
+    let mut splitter_slots_allocated: u32 = 0;
+    // End-of-block SpillLoad VRegs inserted by cross-block spills. The lowering
+    // pass forces these into the trailing barrier group so they execute after all
+    // calls in their block (preventing loads from uninitialized stack slots).
+    let mut end_of_block_spill_vregs_for_lowering: BTreeSet<VReg> = BTreeSet::new();
 
     // Single-block fast path skips global liveness.
     let (regalloc_result, block_rewritten, block_rename_maps, coalesce_aliases) = if func
@@ -866,11 +883,12 @@ pub fn compile(
             }
         }
 
-        // Pressure-driven splitter (env-gated: BLITZ_SPLIT=1).
+        // Pressure-driven splitter (on by default; set BLITZ_SPLIT=0 to disable).
         // CRITICAL ORDER: apply_plan_to must run BEFORE collect_block_param_vregs_per_block.
         // The splitter may truncate segments, which affects what block params are found.
         //
-        if std::env::var("BLITZ_SPLIT").ok().as_deref() == Some("1") {
+        let splitter_active = std::env::var("BLITZ_SPLIT").ok().as_deref() != Some("0");
+        if splitter_active {
             use crate::regalloc::coloring::{AVAILABLE_XMM_COLORS, available_gpr_colors};
 
             let gpr_budget = available_gpr_colors(opts.force_frame_pointer);
@@ -894,11 +912,16 @@ pub fn compile(
                 gpr_budget,
                 xmm_budget,
                 next_vreg,
+                pre_spill_slots,
                 &loop_depths,
                 func,
             );
-            // Extract slot_spilled_params before consuming the plan.
+            // Extract slot_spilled_params, slots_allocated, and end_of_block_spill_vregs
+            // before consuming the plan.
             slot_spilled_params = std::mem::take(&mut plan.slot_spilled_params);
+            splitter_slots_allocated = plan.slots_allocated;
+            end_of_block_spill_vregs_for_lowering =
+                std::mem::take(&mut plan.end_of_block_spill_vregs);
 
             // Build old→new VReg remap restricted to CALL-ARG positions so we
             // can update call_arg_precolors after apply_plan_to. The precolors
@@ -934,6 +957,28 @@ pub fn compile(
                 plan,
             );
 
+            // Recompute phi_uses after the split plan is applied.
+            // Cross-block spills truncate the original VReg's class_to_vreg segment
+            // to end at the SpillStore, and add a new end-of-block reload VReg
+            // whose segment covers block_exit. Re-running compute_phi_uses ensures
+            // that terminator args (Jump/Branch) resolve to the reload VReg instead
+            // of the original spilled VReg, breaking the live-out chain that was
+            // causing the original to be live across all calls in the def block.
+            phi_uses = crate::regalloc::global_liveness::compute_phi_uses(
+                func,
+                &egraph.unionfind,
+                &class_to_vreg,
+            );
+            crate::regalloc::global_liveness::apply_block_param_overrides_to_phi_uses(
+                func,
+                &egraph.unionfind,
+                &block_param_vreg_overrides,
+                &block_param_map,
+                &class_to_vreg,
+                &rpo_order,
+                &mut phi_uses,
+            );
+
             // Update call_arg_precolors: transfer each precolor to its reload VReg.
             if !vreg_remap.is_empty() {
                 for (precolor_vreg, _reg) in call_arg_precolors.iter_mut() {
@@ -944,12 +989,10 @@ pub fn compile(
             }
 
             // Remove slot-spilled param VRegs from phi_uses.
-            // phi_uses was computed before apply_plan_to so it still references
-            // the original param VRegs (and their block-param overrides after
-            // apply_block_param_overrides_to_phi_uses). After slot-spilling,
-            // these VRegs have no registers; the allocator would try to reload
-            // them at block exit, creating spurious reloads that overwrite the
-            // slot with wrong values. The phi copy for a slot-spilled param is
+            // phi_uses was recomputed above, so this handles the post-split state.
+            // After slot-spilling, these VRegs have no registers; the allocator would
+            // try to reload them at block exit, creating spurious reloads that overwrite
+            // the slot with wrong values. The phi copy for a slot-spilled param is
             // emitted as a slot store (PhiCopy::Slot) by lower_terminator.
             for (&(bid, pidx), info) in &slot_spilled_params {
                 // Remove both the original VReg and any block-param override VReg
@@ -963,7 +1006,7 @@ pub fn compile(
                 }
             }
         } else {
-            // Splitter not running: bump split_generation so that
+            // Splitter disabled (BLITZ_SPLIT=0): bump split_generation so that
             // collect_block_param_vregs_per_block's ordering assert passes.
             class_to_vreg.split_generation += 1;
         }
@@ -1027,6 +1070,28 @@ pub fn compile(
             }),
         })?;
 
+        // Fallback detection (Phase 7A safety net).
+        // If the split pass was active but the legacy spill loop still ran,
+        // the splitter missed an infeasibility. In debug builds this is a hard
+        // panic so tests catch it immediately. In release, we count and log.
+        if splitter_active && global_result.spill_loop_triggered {
+            #[cfg(debug_assertions)]
+            panic!(
+                "split pass produced infeasible IR for function '{}': \
+                 legacy spill loop was triggered (FALLBACK_COUNT check)",
+                func.name
+            );
+            #[cfg(not(debug_assertions))]
+            {
+                FALLBACK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                tracing::error!(
+                    "split pass fallback triggered for function '{}': \
+                     legacy spill loop ran — splitter missed an infeasibility",
+                    func.name
+                );
+            }
+        }
+
         // Task 6.5 (deleted per-block spill slot offset code): no per-block slot
         // offsetting is needed. The global allocator uses a single slot space 0..M.
         // Early-barrier spills (pre_spill_slots) are in the input schedule with
@@ -1041,9 +1106,21 @@ pub fn compile(
         let global_unprecolored_params = global_result.unprecolored_params;
         let coalesce_aliases: BTreeMap<VReg, VReg> = global_result.coalesce_aliases;
 
-        // Shift global-allocator slot numbers by pre_spill_slots to avoid collision
-        // with early-barrier slots (which occupy 0..pre_spill_slots).
-        if pre_spill_slots > 0 {
+        // Shift global-allocator slot numbers to avoid collision with pre-allocated slots.
+        //
+        // Pre-allocated slots are:
+        //   0..pre_spill_slots       - early-barrier spills (in `early_barrier_slots` set)
+        //   pre_spill_slots..splitter_slots_allocated - splitter cross-block spills
+        //
+        // Global-allocator slots (created by Phase 5 spill loop) are numbered 0..global_alloc_slots
+        // internally and must be shifted up by `splitter_slots_allocated` to avoid all collisions.
+        //
+        // We identify global-allocator-created slots as those NOT in the pre-allocated set
+        // (0..splitter_slots_allocated).
+        let slot_shift = splitter_slots_allocated;
+        // Build a set of all pre-allocated slot numbers (early-barrier + splitter).
+        let pre_allocated_slots: std::collections::BTreeSet<u32> = (0..slot_shift).collect();
+        if slot_shift > 0 && global_alloc_slots > 0 {
             for block_insts in block_rewritten_storage.iter_mut() {
                 for inst in block_insts.iter_mut() {
                     match &mut inst.op {
@@ -1051,12 +1128,10 @@ pub fn compile(
                         | Op::SpillLoad(slot)
                         | Op::XmmSpillStore(slot)
                         | Op::XmmSpillLoad(slot) => {
-                            // Shift global-allocator slots (not early-barrier ones).
-                            // Early-barrier slots are in early_barrier_slots set.
-                            // Note: after coalescing, early-barrier slot numbers in
-                            // the result match the original 0..pre_spill_slots range.
-                            if !early_barrier_slots.contains(&(*slot as u32)) {
-                                *slot += pre_spill_slots as i64;
+                            let slot_u = *slot as u32;
+                            // Shift only global-allocator slots (those NOT in pre-allocated range).
+                            if !pre_allocated_slots.contains(&slot_u) {
+                                *slot += slot_shift as i64;
                             }
                         }
                         _ => {}
@@ -1064,7 +1139,7 @@ pub fn compile(
                 }
             }
         }
-        let spill_slot_counter = global_alloc_slots + pre_spill_slots;
+        let spill_slot_counter = global_alloc_slots + slot_shift;
 
         merged_callee_saved.sort_by_key(|r| *r as u8);
         merged_callee_saved.dedup();
@@ -1227,6 +1302,18 @@ pub fn compile(
         }
 
         let num_barriers = non_term_ops.len();
+
+        // Force end-of-block SpillLoad VRegs (cross-block spills) into the
+        // trailing group (num_barriers). These have no scheduled consumers so
+        // assign_barrier_groups would place them in group 0, causing them to
+        // load from the stack before any calls have stored to it.
+        for inst in rewritten.iter() {
+            if end_of_block_spill_vregs_for_lowering.contains(&inst.dst) {
+                vreg_to_arg_of_barrier
+                    .entry(inst.dst)
+                    .or_insert(num_barriers);
+            }
+        }
 
         // Partition scheduled pure insts into groups relative to barriers.
         let vreg_group = assign_barrier_groups(

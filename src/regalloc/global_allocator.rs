@@ -2016,6 +2016,7 @@ pub(crate) fn run_phase5(
             vreg_slot: BTreeMap::new(),
             vreg_remat_op: BTreeMap::new(),
             coalesce_aliases,
+            spill_loop_triggered: false,
         });
     }
 
@@ -2309,6 +2310,7 @@ pub(crate) fn run_phase5(
         vreg_slot,
         vreg_remat_op,
         coalesce_aliases,
+        spill_loop_triggered: true,
     })
 }
 

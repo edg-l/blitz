@@ -63,6 +63,10 @@ pub struct GlobalRegAllocResult {
     /// `class_to_vreg` entries pointing at `from` chase to their canonical
     /// `into` counterpart. Transitively resolve until no further entry exists.
     pub coalesce_aliases: BTreeMap<VReg, VReg>,
+    /// Set to `true` if Phase 5 needed to run the spill-and-recolor loop (i.e.,
+    /// Phase 4 reported overshoot). When the split pass is active, this indicates
+    /// the splitter missed an infeasibility and the legacy fallback ran.
+    pub spill_loop_triggered: bool,
 }
 
 /// Check whether a VReg is in the XMM register class.
