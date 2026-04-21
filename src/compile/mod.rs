@@ -14,17 +14,6 @@
 //! 11. ELF emission
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-#[allow(unused_imports)]
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-
-/// Counts how many times the legacy spill loop ran while the split pass was
-/// active. Non-zero indicates the splitter missed an infeasibility. In debug
-/// builds, any activation panics immediately. In release, this counter is
-/// incremented and `tracing::error!` is emitted; the fallback spill loop then
-/// runs so the build still succeeds.
-///
-/// Phase 7B deletion is gated on this counter reading zero after a full test run.
-pub static FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 use crate::egraph::cost::{CostModel, OptGoal};
 use crate::egraph::extract::{
@@ -672,23 +661,16 @@ pub fn compile(
     let loop_depths = compute_loop_depths(func, &block_schedules);
 
     // Block params that are slot-spilled by the Phase 6 splitter.
-    // Populated inside the multi-block path if BLITZ_SPLIT=1.
     // Passed to lower_terminator so predecessor terminators emit slot stores.
     let mut slot_spilled_params: crate::compile::split::BlockParamSlotMap =
         std::collections::BTreeMap::new();
-    // Total spill slots allocated by the splitter (set inside multi-block path if splitter active).
-    let mut splitter_slots_allocated: u32 = 0;
     // End-of-block SpillLoad VRegs inserted by cross-block spills. The lowering
     // pass forces these into the trailing barrier group so they execute after all
     // calls in their block (preventing loads from uninitialized stack slots).
     let mut end_of_block_spill_vregs_for_lowering: BTreeSet<VReg> = BTreeSet::new();
 
     // Single-block fast path skips global liveness.
-    let (regalloc_result, block_rewritten, block_rename_maps, coalesce_aliases) = if func
-        .blocks
-        .len()
-        == 1
-    {
+    let (regalloc_result, block_rewritten, coalesce_aliases) = if func.blocks.len() == 1 {
         // --- Single-block fast path ---
         let mut all_scheduled: Vec<ScheduledInst> =
             block_schedules.iter().flatten().cloned().collect();
@@ -778,9 +760,8 @@ pub fn compile(
             }
         }
         let rewritten = vec![result.insts.clone()];
-        let rename_maps: Vec<BTreeMap<VReg, VReg>> = vec![BTreeMap::new()];
         let aliases: BTreeMap<VReg, VReg> = BTreeMap::new();
-        (result, rewritten, rename_maps, aliases)
+        (result, rewritten, aliases)
     } else {
         // --- Multi-block path: global register allocator (Phase 6 cutover) ---
 
@@ -883,12 +864,11 @@ pub fn compile(
             }
         }
 
-        // Pressure-driven splitter (on by default; set BLITZ_SPLIT=0 to disable).
+        // Pressure-driven splitter.
         // CRITICAL ORDER: apply_plan_to must run BEFORE collect_block_param_vregs_per_block.
         // The splitter may truncate segments, which affects what block params are found.
-        //
-        let splitter_active = std::env::var("BLITZ_SPLIT").ok().as_deref() != Some("0");
-        if splitter_active {
+        let splitter_slots_allocated: u32;
+        {
             use crate::regalloc::coloring::{AVAILABLE_XMM_COLORS, available_gpr_colors};
 
             let gpr_budget = available_gpr_colors(opts.force_frame_pointer);
@@ -1005,10 +985,6 @@ pub fn compile(
                     }
                 }
             }
-        } else {
-            // Splitter disabled (BLITZ_SPLIT=0): bump split_generation so that
-            // collect_block_param_vregs_per_block's ordering assert passes.
-            class_to_vreg.split_generation += 1;
         }
 
         // Step 3: Determine block params per block (passed to allocate_global).
@@ -1070,28 +1046,6 @@ pub fn compile(
             }),
         })?;
 
-        // Fallback detection (Phase 7A safety net).
-        // If the split pass was active but the legacy spill loop still ran,
-        // the splitter missed an infeasibility. In debug builds this is a hard
-        // panic so tests catch it immediately. In release, we count and log.
-        if splitter_active && global_result.spill_loop_triggered {
-            #[cfg(debug_assertions)]
-            panic!(
-                "split pass produced infeasible IR for function '{}': \
-                 legacy spill loop was triggered (FALLBACK_COUNT check)",
-                func.name
-            );
-            #[cfg(not(debug_assertions))]
-            {
-                FALLBACK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-                tracing::error!(
-                    "split pass fallback triggered for function '{}': \
-                     legacy spill loop ran — splitter missed an infeasibility",
-                    func.name
-                );
-            }
-        }
-
         // Task 6.5 (deleted per-block spill slot offset code): no per-block slot
         // offsetting is needed. The global allocator uses a single slot space 0..M.
         // Early-barrier spills (pre_spill_slots) are in the input schedule with
@@ -1099,7 +1053,6 @@ pub fn compile(
         // 0..M internally. We shift the global-allocator slots by +pre_spill_slots
         // and leave early-barrier slots unchanged, giving disjoint ranges.
         let mut block_rewritten_storage = global_result.per_block_insts;
-        let block_rename_maps = global_result.per_block_rename_maps;
         let merged_vreg_to_reg = global_result.vreg_to_reg;
         let mut merged_callee_saved = global_result.callee_saved_used;
         let global_alloc_slots = global_result.spill_slots;
@@ -1152,12 +1105,7 @@ pub fn compile(
             unprecolored_params: global_unprecolored_params,
         };
 
-        (
-            merged_result,
-            block_rewritten_storage,
-            block_rename_maps,
-            coalesce_aliases,
-        )
+        (merged_result, block_rewritten_storage, coalesce_aliases)
     };
 
     if let Some(s) = sink.as_mut() {
@@ -1215,47 +1163,29 @@ pub fn compile(
             .get(rpo_pos + 1)
             .map(|&next_idx| func.blocks[next_idx].id);
 
-        // Build a block-local class_to_vreg that applies cross-block renames.
-        // When a VReg was renamed (SpillLoad/remat) in this block, effectful ops
-        // must use the renamed VReg to get the correct physical register.
-        //
+        // Build a block-local class_to_vreg using the per-block snapshot.
         // Use the per-block snapshot (captured post-emission, pre-restore) so
         // classes re-emitted in this block resolve to THIS block's VReg — not
         // a stale one from a non-dominating prior block that was restored into
         // the global `class_to_vreg`.
         let block_class_to_vreg: ClassVRegMap = {
             let snapshot = &block_class_to_vreg_snapshot[block_idx];
-            let renames = &block_rename_maps[block_idx];
-            let mut map: ClassVRegMap = if renames.is_empty() {
-                snapshot.clone()
-            } else {
-                let mut m = ClassVRegMap::new();
-                for (cid, vreg) in snapshot.iter() {
-                    let renamed = renames.get(&vreg).copied().unwrap_or(vreg);
-                    m.insert_single(cid, renamed);
-                }
-                m
-            };
-            // Apply override VRegs: if an override's fresh VReg was renamed
-            // (reloaded) in this block, or this IS the block that defines it,
-            // update the class_to_vreg mapping so phi copy source lookups
-            // find the correct register.
+            let mut map: ClassVRegMap = snapshot.clone();
+            // Apply override VRegs for block params: update class_to_vreg mapping
+            // so phi copy source lookups find the correct register.
             for (&(bid, pidx), &fresh_vreg) in &block_param_vreg_overrides {
                 if let Some(&param_cid) = block_param_map.get(&(bid, pidx)) {
                     let canon = egraph.unionfind.find_immutable(param_cid);
                     if bid == block.id {
                         // This block defines the override VReg.
                         map.insert_single(canon, fresh_vreg);
-                    } else if let Some(&renamed) = renames.get(&fresh_vreg) {
-                        // The override was reloaded into this block.
-                        map.insert_single(canon, renamed);
                     }
                 }
             }
-            // After renames and overrides, apply the global coalesce alias map
-            // so `class_to_vreg[canon]` never points at a stale pre-coalesce
-            // VReg that has no register assignment. The alias map is from
-            // `allocate_global`'s result and is constant across blocks.
+            // Apply the global coalesce alias map so `class_to_vreg[canon]`
+            // never points at a stale pre-coalesce VReg that has no register
+            // assignment. The alias map is from `allocate_global`'s result
+            // and is constant across blocks.
             if !coalesce_aliases.is_empty() {
                 let mut aliased_map = ClassVRegMap::new();
                 for (cid, vreg) in map.iter() {
@@ -1439,8 +1369,7 @@ pub fn compile(
 
         // Task 6.3 debug asserts: after the global allocator cutover, every
         // VReg that appears in a terminator (Ret value) must have a physical
-        // register in vreg_to_reg. These asserts fire if the global allocator's
-        // insert_spills_global is incomplete. Only active for multi-block functions
+        // register in vreg_to_reg. Only active for multi-block functions
         // (single-block uses the old allocator path with its own guarantees).
         if func.blocks.len() > 1 {
             let terminator_check = block.ops.last().expect("block must have terminator");

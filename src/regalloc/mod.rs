@@ -7,7 +7,6 @@ pub mod interference;
 pub mod liveness;
 pub mod rewrite;
 pub mod spill;
-pub mod split;
 
 pub use allocator::{RegAllocResult, allocate};
 pub use global_allocator::allocate_global;
@@ -39,22 +38,6 @@ pub struct GlobalRegAllocResult {
     /// emit a mov from the ABI register to the allocated register at function
     /// entry for each entry here.
     pub unprecolored_params: Vec<(VReg, Reg)>,
-    /// Per-block VReg rename maps produced by spill insertion. Entry `rename_maps[b][old]
-    /// = new` means that spill/reload code in block `b` replaced `old` with `new` as
-    /// the live name of a value; terminator and effectful-op lowering consult these
-    /// maps to resolve ClassId -> VReg after allocation.
-    pub per_block_rename_maps: Vec<BTreeMap<VReg, VReg>>,
-    /// VRegs that were spilled to a stack slot. Maps `VReg -> slot index`.
-    /// The caller uses this to materialize reloads for terminator/effectful-op
-    /// ClassIds that resolve to a spilled VReg but whose use was not already
-    /// rewritten by `insert_spills_global` (e.g., a Ret value whose only use is
-    /// the terminator itself, not a `ScheduledInst` operand).
-    pub vreg_slot: BTreeMap<VReg, u32>,
-    /// VRegs that were rematerialized (not slot-backed). Maps `VReg -> defining Op`.
-    /// The caller uses this to emit a fresh remat copy (with empty operands) for
-    /// terminator/effectful-op ClassIds whose def was dropped by
-    /// `insert_spills_global`.
-    pub vreg_remat_op: BTreeMap<VReg, crate::ir::op::Op>,
     /// Coalesce alias map: `from_idx -> into_idx`. When two VRegs are coalesced
     /// by Phase 3, the `from` VReg is rewritten to `into` in every post-coalesce
     /// schedule. The `vreg_to_reg` map contains only `into` keys; `from` has no
@@ -62,11 +45,10 @@ pub struct GlobalRegAllocResult {
     /// `ClassId -> VReg` (e.g. for terminator or phi-copy lowering) so stale
     /// `class_to_vreg` entries pointing at `from` chase to their canonical
     /// `into` counterpart. Transitively resolve until no further entry exists.
+    ///
+    /// NOTE: this field cannot be removed until `class_to_vreg` is updated after
+    /// coalescing to reflect canonical VRegs. See Phase 8 follow-up work.
     pub coalesce_aliases: BTreeMap<VReg, VReg>,
-    /// Set to `true` if Phase 5 needed to run the spill-and-recolor loop (i.e.,
-    /// Phase 4 reported overshoot). When the split pass is active, this indicates
-    /// the splitter missed an infeasibility and the legacy fallback ran.
-    pub spill_loop_triggered: bool,
 }
 
 /// Check whether a VReg is in the XMM register class.

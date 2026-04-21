@@ -3740,22 +3740,3 @@ fn early_spill_multiple_consumers_uses_earliest() {
     assert!(add.operands.contains(&reload_vreg));
     assert!(sub.operands.contains(&reload_vreg));
 }
-
-// Phase 7A: Verify FALLBACK_COUNT remains zero after all tests run with the
-// split pass active by default. If this fails, the splitter missed at least one
-// infeasibility and the legacy spill loop was triggered.
-//
-// This test runs after the compile-test suite; it reads FALLBACK_COUNT which is
-// accumulated during all previous test runs in this process. If any other test
-// in this crate triggered the fallback, this will catch it.
-#[test]
-fn split_pass_fallback_count_is_zero() {
-    use std::sync::atomic::Ordering;
-    let count = super::FALLBACK_COUNT.load(Ordering::Relaxed);
-    assert_eq!(
-        count, 0,
-        "FALLBACK_COUNT={count}: split pass triggered the legacy spill loop \
-         fallback {count} time(s). This means the splitter produced infeasible IR \
-         for at least one function. Fix the splitter before proceeding to Phase 7B."
-    );
-}

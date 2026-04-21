@@ -1,13 +1,9 @@
 //! Pressure-driven live-range splitter for Blitz.
 //!
 //! Runs AFTER scheduling and effectful-op operand population, BEFORE
-//! `allocate_global`. When `BLITZ_SPLIT=1` is set, `plan_splits` scans each
-//! block for register-pressure overshoots and inserts either rematerialization
-//! or spill/reload pairs to bring pressure within budget.
-//!
-//! Gating: the pass is disabled by default. Set `BLITZ_SPLIT=1` in the
-//! environment to enable it. This preserves the baseline pipeline for all
-//! tests that don't exercise the splitter.
+//! `allocate_global`. `plan_splits` scans each block for register-pressure
+//! overshoots and inserts either rematerialization or spill/reload pairs to
+//! bring pressure within budget.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1788,13 +1784,7 @@ mod tests {
 
     // ── Ported legacy tests (Task 7.4-pre) ───────────────────────────────────
     //
-    // These tests port the behavioral coverage of the legacy functions
-    // `insert_spills_global`, `select_spill_candidates_global`,
-    // `select_spill_by_phantom_interference`, and `rebuild_interference` from
-    // `src/regalloc/global_allocator.rs`, as well as the four tests from
-    // the old `src/regalloc/split.rs`, which is deleted in Phase 7B.
-    //
-    // Each ported test exercises the equivalent behavior in the new split pass.
+    // Each test exercises behavior of the pressure-driven split pass.
 
     fn iconst_inst_gpr(dst: u32, val: i64) -> ScheduledInst {
         ScheduledInst {
