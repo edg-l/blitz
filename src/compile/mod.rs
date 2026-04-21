@@ -59,6 +59,7 @@ use precolor::{
 };
 mod terminator;
 use terminator::{lower_terminator, thread_branches};
+pub(crate) mod split;
 
 // ── Public options / error types ──────────────────────────────────────────────
 
@@ -659,6 +660,12 @@ pub fn compile(
     // Compute loop depths from the CFG for spill selection.
     let loop_depths = compute_loop_depths(func, &block_schedules);
 
+    // Block params that are slot-spilled by the Phase 6 splitter.
+    // Populated inside the multi-block path if BLITZ_SPLIT=1.
+    // Passed to lower_terminator so predecessor terminators emit slot stores.
+    let mut slot_spilled_params: crate::compile::split::BlockParamSlotMap =
+        std::collections::BTreeMap::new();
+
     // Single-block fast path skips global liveness.
     let (regalloc_result, block_rewritten, block_rename_maps, coalesce_aliases) = if func
         .blocks
@@ -859,7 +866,110 @@ pub fn compile(
             }
         }
 
+        // Pressure-driven splitter (env-gated: BLITZ_SPLIT=1).
+        // CRITICAL ORDER: apply_plan_to must run BEFORE collect_block_param_vregs_per_block.
+        // The splitter may truncate segments, which affects what block params are found.
+        //
+        if std::env::var("BLITZ_SPLIT").ok().as_deref() == Some("1") {
+            use crate::regalloc::coloring::{AVAILABLE_XMM_COLORS, available_gpr_colors};
+
+            let gpr_budget = available_gpr_colors(opts.force_frame_pointer);
+            let xmm_budget = AVAILABLE_XMM_COLORS;
+
+            // Compute global liveness to seed the splitter's per-block backward scans.
+            let split_global_liveness = crate::regalloc::global_liveness::compute_global_liveness(
+                &block_schedules,
+                &cfg_succs,
+                &phi_uses,
+            );
+
+            let split_cost_model = CostModel::new(opts.opt_goal);
+            let mut plan = split::plan_splits(
+                &block_schedules,
+                &class_to_vreg,
+                &extraction,
+                &egraph,
+                &split_cost_model,
+                &split_global_liveness,
+                gpr_budget,
+                xmm_budget,
+                next_vreg,
+                &loop_depths,
+                func,
+            );
+            // Extract slot_spilled_params before consuming the plan.
+            slot_spilled_params = std::mem::take(&mut plan.slot_spilled_params);
+
+            // Build old→new VReg remap restricted to CALL-ARG positions so we
+            // can update call_arg_precolors after apply_plan_to. The precolors
+            // were collected before the splitter ran; if the splitter rewrites a
+            // call-arg VReg to a reload VReg, the precolor must follow the reload.
+            //
+            // Restriction to call-arg positions avoids using the wrong reload VReg
+            // when the same old VReg is rewritten in multiple blocks (non-call uses
+            // create reload VRegs that should NOT inherit the ABI precolor).
+            let call_arg_vreg_set: std::collections::BTreeSet<VReg> =
+                call_arg_precolors.iter().map(|(v, _)| *v).collect();
+            let mut vreg_remap: BTreeMap<VReg, VReg> = BTreeMap::new();
+            for &(bi, ii, oi, new_vreg) in &plan.operand_rewrites {
+                // Only update if the old VReg is a call-arg precolor candidate.
+                if let Some(old_vreg) = block_schedules
+                    .get(bi)
+                    .and_then(|s| s.get(ii))
+                    .and_then(|inst| inst.operands.get(oi))
+                    .copied()
+                {
+                    if call_arg_vreg_set.contains(&old_vreg) {
+                        // Only keep first entry (the call-site reload VReg; later
+                        // entries for the same old VReg are non-call-site reloads).
+                        vreg_remap.entry(old_vreg).or_insert(new_vreg);
+                    }
+                }
+            }
+
+            split::apply_plan_to(
+                &mut block_schedules,
+                &mut class_to_vreg,
+                &mut next_vreg,
+                plan,
+            );
+
+            // Update call_arg_precolors: transfer each precolor to its reload VReg.
+            if !vreg_remap.is_empty() {
+                for (precolor_vreg, _reg) in call_arg_precolors.iter_mut() {
+                    if let Some(&new_vreg) = vreg_remap.get(precolor_vreg) {
+                        *precolor_vreg = new_vreg;
+                    }
+                }
+            }
+
+            // Remove slot-spilled param VRegs from phi_uses.
+            // phi_uses was computed before apply_plan_to so it still references
+            // the original param VRegs (and their block-param overrides after
+            // apply_block_param_overrides_to_phi_uses). After slot-spilling,
+            // these VRegs have no registers; the allocator would try to reload
+            // them at block exit, creating spurious reloads that overwrite the
+            // slot with wrong values. The phi copy for a slot-spilled param is
+            // emitted as a slot store (PhiCopy::Slot) by lower_terminator.
+            for (&(bid, pidx), info) in &slot_spilled_params {
+                // Remove both the original VReg and any block-param override VReg
+                // (apply_block_param_overrides_to_phi_uses may have replaced it).
+                let override_vreg = block_param_vreg_overrides.get(&(bid, pidx)).copied();
+                for phi_set in phi_uses.iter_mut() {
+                    phi_set.remove(&info.vreg);
+                    if let Some(ov) = override_vreg {
+                        phi_set.remove(&ov);
+                    }
+                }
+            }
+        } else {
+            // Splitter not running: bump split_generation so that
+            // collect_block_param_vregs_per_block's ordering assert passes.
+            class_to_vreg.split_generation += 1;
+        }
+
         // Step 3: Determine block params per block (passed to allocate_global).
+        // CRITICAL ORDER: must run AFTER apply_plan_to (splitter output committed).
         let mut block_param_vregs_per_block =
             crate::regalloc::global_liveness::collect_block_param_vregs_per_block(
                 func,
@@ -871,6 +981,22 @@ pub fn compile(
         for (&(bid, _pidx), &fresh_vreg) in &block_param_vreg_overrides {
             let block_idx = block_id_to_idx[&bid];
             block_param_vregs_per_block[block_idx].insert(fresh_vreg);
+        }
+
+        // Remove slot-spilled params from block_param_vregs_per_block.
+        // Slot-spilled params have no register: they are written via slot stores
+        // by predecessor terminators and loaded on use. Adding them to
+        // block_param_vregs_per_block would cause the allocator to treat them as
+        // live-in (requiring a register at block entry), extending their live range
+        // to all predecessors' exits and triggering spurious reloads.
+        if !slot_spilled_params.is_empty() {
+            for (&(bid, pidx), info) in &slot_spilled_params {
+                let block_idx = block_id_to_idx[&bid];
+                block_param_vregs_per_block[block_idx].remove(&info.vreg);
+                if let Some(&ov) = block_param_vreg_overrides.get(&(bid, pidx)) {
+                    block_param_vregs_per_block[block_idx].remove(&ov);
+                }
+            }
         }
 
         // Task 6.1 / Task 6.2: Call allocate_global. This replaces the entire
@@ -1277,6 +1403,8 @@ pub fn compile(
             &regalloc_result,
             func,
             &mut next_label,
+            &slot_spilled_params,
+            &frame_layout,
         )?;
 
         // Phase 8: Peephole on this block's pure/effectful instructions.

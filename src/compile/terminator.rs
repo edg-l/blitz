@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::compile::program_point::ProgramPoint;
+use crate::compile::split::BlockParamSlotMap;
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::emit::phi_elim::phi_copies;
@@ -9,7 +10,8 @@ use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::ClassId;
 use crate::regalloc::allocator::RegAllocResult;
-use crate::x86::abi::{FP_RETURN_REG, GPR_RETURN_REG};
+use crate::x86::abi::{FP_RETURN_REG, FrameLayout, GPR_RETURN_REG};
+use crate::x86::addr::Addr;
 use crate::x86::inst::{LabelId, MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
@@ -158,6 +160,24 @@ pub(super) fn thread_branches(
     }
 }
 
+/// A phi copy entry: either a register-to-register copy or a slot store.
+///
+/// Used internally in `lower_terminator` to handle Phase 6 block-param
+/// slot spilling: when a block param is slot-spilled, the predecessor emits
+/// a `Slot` copy (stores the arg reg to the spill slot) instead of the
+/// normal register-to-register phi copy.
+#[derive(Debug, Clone)]
+enum PhiCopy {
+    /// Normal register copy: `src -> dst`.
+    Reg(Reg, Reg, OpSize),
+    /// Slot store: store `src_reg` to spill slot `slot` with size `size`.
+    Slot {
+        src_reg: Reg,
+        slot: i64,
+        size: OpSize,
+    },
+}
+
 /// Lower a block terminator, including phi copies for block-parameter passing.
 ///
 /// Returns a list of `BlockItem`s (instructions and label bindings).
@@ -167,6 +187,10 @@ pub(super) fn thread_branches(
 /// `next_block_id` is the block ID of the block that immediately follows this one
 /// in emission (RPO) order. When a jump target equals `next_block_id`, the jump
 /// can be omitted (fallthrough optimization).
+///
+/// `slot_spilled_params` is populated by Phase 6 when block params are slot-spilled.
+/// When a jump to `target` has a slot-spilled param at index `k`, `lower_terminator`
+/// emits a `SpillStore`/`XmmSpillStore` before the phi copies instead of a register copy.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower_terminator(
     op: &EffectfulOp,
@@ -181,6 +205,8 @@ pub(super) fn lower_terminator(
     regalloc: &RegAllocResult,
     func: &Function,
     next_label: &mut LabelId,
+    slot_spilled_params: &BlockParamSlotMap,
+    frame_layout: &FrameLayout,
 ) -> Result<Vec<BlockItem>, CompileError> {
     let exit_point = ProgramPoint::block_exit(block_idx);
     let get_reg = |cid: ClassId, ctv: &ClassVRegMap| -> Option<Reg> {
@@ -239,8 +265,9 @@ pub(super) fn lower_terminator(
                 coalesce_aliases,
                 regalloc,
                 func,
+                slot_spilled_params,
             )?;
-            let mut items: Vec<BlockItem> = phi_copies(&copies, Reg::R11)
+            let mut items: Vec<BlockItem> = emit_phi_copies(&copies, Reg::R11, frame_layout)
                 .into_iter()
                 .map(BlockItem::Inst)
                 .collect();
@@ -276,6 +303,7 @@ pub(super) fn lower_terminator(
                 coalesce_aliases,
                 regalloc,
                 func,
+                slot_spilled_params,
             )?;
             let false_copies = build_phi_copies(
                 *bb_false,
@@ -289,10 +317,11 @@ pub(super) fn lower_terminator(
                 coalesce_aliases,
                 regalloc,
                 func,
+                slot_spilled_params,
             )?;
 
-            let true_phi = phi_copies(&true_copies, Reg::R11);
-            let false_phi = phi_copies(&false_copies, Reg::R11);
+            let true_phi = emit_phi_copies(&true_copies, Reg::R11, frame_layout);
+            let false_phi = emit_phi_copies(&false_copies, Reg::R11, frame_layout);
 
             let false_is_fallthrough = next_block_id == Some(*bb_false);
             let true_is_fallthrough = next_block_id == Some(*bb_true);
@@ -345,7 +374,16 @@ pub(super) fn lower_terminator(
     }
 }
 
-/// Build (src_reg, dst_reg, size) phi copy triples for a jump to `target` with `args`.
+/// Build phi copy entries for a jump to `target` with `args`.
+///
+/// Returns a list of `PhiCopy` values: either register-to-register copies
+/// (`Reg`) or slot stores (`Slot`) for Phase 6 slot-spilled block params.
+///
+/// For each param:
+/// - If the param VReg has a register in `regalloc`, emit `PhiCopy::Reg`.
+/// - If the param VReg has NO register BUT `slot_spilled_params` has an entry
+///   for `(target, param_idx)`, emit `PhiCopy::Slot` (store arg reg to slot).
+/// - Otherwise skip (legacy: "flow through cross-block spill slots" path).
 fn build_phi_copies(
     target: BlockId,
     args: &[ClassId],
@@ -358,7 +396,8 @@ fn build_phi_copies(
     coalesce_aliases: &BTreeMap<VReg, VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
-) -> Result<Vec<(Reg, Reg, OpSize)>, CompileError> {
+    slot_spilled_params: &BlockParamSlotMap,
+) -> Result<Vec<PhiCopy>, CompileError> {
     if args.is_empty() {
         return Ok(vec![]);
     }
@@ -411,6 +450,39 @@ fn build_phi_copies(
             }
         };
 
+        // Derive OpSize from the block parameter's type.
+        // Float types use S64 here; phi_copies detects XMM registers and
+        // emits MovsdRR/MovssRR instead of MovRR.
+        let param_ty = &target_block.param_types[param_idx];
+        let size = if param_ty.is_float() {
+            OpSize::S64
+        } else {
+            OpSize::from_int_type(param_ty)
+        };
+
+        // Phase 6: if this param is slot-spilled, emit a slot store directly.
+        // The param's segment was truncated to start after block_entry so the
+        // class_to_vreg lookup at tgt_entry would fail -- we skip it entirely.
+        //
+        // Back-edge optimisation: if the argument class IS the same as the
+        // param class (e.g. an immutable loop-carried value like `base`), the
+        // slot already contains the correct value from the forward-edge store.
+        // Skip the store; re-storing from an incorrect register would clobber it.
+        if let Some(info) = slot_spilled_params.get(&(target, param_idx as u32)) {
+            let canon_param = egraph.unionfind.find_immutable(param_cid);
+            if canon_arg != canon_param {
+                // Arg differs from param: emit slot store with current src_reg.
+                copies.push(PhiCopy::Slot {
+                    src_reg,
+                    slot: info.slot,
+                    size,
+                });
+            }
+            // If canon_arg == canon_param: back-edge with unchanged value; slot
+            // already has the right value from the forward edge. Skip.
+            continue;
+        }
+
         let mut param_vreg = param_vreg_overrides
             .get(&(target, param_idx as u32))
             .copied()
@@ -431,27 +503,71 @@ fn build_phi_copies(
             }
             param_vreg = aliased;
         }
-        let dst_reg = match regalloc.vreg_to_reg.get(&param_vreg).copied() {
-            Some(r) => r,
-            None => {
-                // XMM values that flow through cross-block spill slots
-                // are not assigned registers. Skip the phi copy; the
-                // successor will load from the spill slot at block entry.
-                continue;
+
+        match regalloc.vreg_to_reg.get(&param_vreg).copied() {
+            Some(dst_reg) => {
+                copies.push(PhiCopy::Reg(src_reg, dst_reg, size));
             }
-        };
-
-        // Derive OpSize from the block parameter's type.
-        // Float types use S64 here; phi_copies detects XMM registers and
-        // emits MovsdRR/MovssRR instead of MovRR.
-        let param_ty = &target_block.param_types[param_idx];
-        let size = if param_ty.is_float() {
-            OpSize::S64
-        } else {
-            OpSize::from_int_type(param_ty)
-        };
-
-        copies.push((src_reg, dst_reg, size));
+            None => {
+                // Legacy path: param flows through cross-block spill slot.
+                // Skip; the successor reloads at block entry.
+            }
+        }
     }
     Ok(copies)
+}
+
+/// Emit `MachInst`s for a list of `PhiCopy` entries.
+///
+/// Slot copies are emitted first (as spill stores), then register copies
+/// are handed to `phi_copies` for Briggs-style permutation resolution.
+/// This ordering is safe because slot stores write to memory (never to any
+/// phi-copy destination register), so they commute with register copies.
+fn emit_phi_copies(copies: &[PhiCopy], temp: Reg, frame_layout: &FrameLayout) -> Vec<MachInst> {
+    let mut result = Vec::new();
+
+    // Emit slot stores first.
+    for copy in copies {
+        if let PhiCopy::Slot {
+            src_reg,
+            slot,
+            size,
+        } = copy
+        {
+            let addr = Addr {
+                base: Some(frame_layout.spill_base),
+                index: None,
+                scale: 1,
+                disp: frame_layout.spill_offset + (*slot as i32) * 8,
+            };
+            // Float params use movsd (S64); integer params use mov (S64 for slots).
+            if *size == OpSize::S64 && src_reg.is_xmm() {
+                result.push(MachInst::MovsdMR {
+                    addr,
+                    src: Operand::Reg(*src_reg),
+                });
+            } else {
+                result.push(MachInst::MovMR {
+                    size: OpSize::S64,
+                    addr,
+                    src: Operand::Reg(*src_reg),
+                });
+            }
+        }
+    }
+
+    // Collect register copies and run through phi_copies for permutation.
+    let reg_copies: Vec<(Reg, Reg, OpSize)> = copies
+        .iter()
+        .filter_map(|c| {
+            if let PhiCopy::Reg(src, dst, size) = c {
+                Some((*src, *dst, *size))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    result.extend(phi_copies(&reg_copies, temp));
+    result
 }

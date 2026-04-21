@@ -343,11 +343,22 @@ pub fn compute_phi_uses(
 ///
 /// Block params are handled by phi elimination and should not be treated as
 /// cross-block live-in values that need reload instructions.
+///
+/// ORDERING CONSTRAINT: This function must be called AFTER the splitter has
+/// committed its output via `apply_plan_to` (which bumps
+/// `class_to_vreg.split_generation`). The splitter may truncate block-param
+/// segments so they no longer cover `BLOCK_ENTRY`; calling this function
+/// before the splitter runs would collect stale pre-split VRegs.
 pub fn collect_block_param_vregs_per_block(
     func: &Function,
     egraph: &crate::egraph::EGraph,
     class_to_vreg: &ClassVRegMap,
 ) -> Vec<BTreeSet<VReg>> {
+    debug_assert!(
+        class_to_vreg.split_generation > 0,
+        "collect_block_param_vregs_per_block called before splitter committed output \
+         (class_to_vreg.split_generation == 0); call apply_plan_to first"
+    );
     let n = func.blocks.len();
     let mut result: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 

@@ -7,7 +7,7 @@ use crate::schedule::scheduler::ScheduledInst;
 use super::interference::InterferenceGraph;
 use super::liveness::LivenessInfo;
 
-const LOOP_DEPTH_PENALTY_BASE: u64 = 10;
+pub(crate) const LOOP_DEPTH_PENALTY_BASE: u64 = 10;
 
 // ── Spill/reload pseudo-op markers ───────────────────────────────────────────
 //
