@@ -35,6 +35,7 @@ use crate::x86::inst::{LabelId, MachInst};
 use crate::x86::reg::Reg;
 
 mod barrier;
+pub mod program_point;
 use barrier::{
     assign_barrier_groups, build_barrier_context, insert_early_barrier_spills,
     populate_effectful_operands,
