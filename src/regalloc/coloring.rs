@@ -201,8 +201,13 @@ pub fn map_colors_to_regs(
 ) -> BTreeMap<u32, Reg> {
     let mut color_to_reg: BTreeMap<u32, Reg> = BTreeMap::new();
 
-    // First, establish color->reg from pre-colored VRegs.
+    // First, establish color->reg from pre-colored VRegs of this class only.
+    // Colors are per-class (GPR and XMM share color numbers), so a precolor
+    // fixing a GPR must not seed the XMM color->reg map and vice versa.
     for (&vreg_idx, &reg) in pre_coloring {
+        if reg.reg_class() != reg_class {
+            continue;
+        }
         if vreg_idx < coloring.colors.len()
             && let Some(color) = coloring.colors[vreg_idx]
         {

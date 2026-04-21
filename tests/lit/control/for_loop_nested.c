@@ -1,15 +1,16 @@
 // EXIT: 45
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// outer loop bound
+// LICM + iconst dedup hoist the shared bound 0x3 once; both loop compares
+// use the same register.
 // CHECK: mov    {{[a-z0-9]+}},0x3
+// outer loop compare + branch
 // CHECK: sub
 // CHECK: jl
-// inner loop bound
-// CHECK: mov    {{[a-z0-9]+}},0x3
+// inner loop compare + branch
 // CHECK: sub
 // CHECK: jl
-// i*3 via lea
+// i*3 via lea (scale-by-3 addressing)
 // CHECK: lea
 
 int main() {
