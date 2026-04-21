@@ -182,7 +182,7 @@ pub(super) fn lower_terminator(
 ) -> Result<Vec<BlockItem>, CompileError> {
     let get_reg = |cid: ClassId, ctv: &ClassVRegMap| -> Option<Reg> {
         let canon = egraph.unionfind.find_immutable(cid);
-        ctv.lookup_single(canon)
+        ctv.lookup_any(canon)
             .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
     };
 
@@ -384,7 +384,7 @@ fn build_phi_copies(
 
         let canon_arg = egraph.unionfind.find_immutable(arg_cid);
         let arg_vreg = block_class_to_vreg
-            .lookup_single(canon_arg)
+            .lookup_any(canon_arg)
             .ok_or_else(|| CompileError {
                 phase: "phi-elim".into(),
                 message: format!("arg class {:?} not in class_to_vreg", canon_arg),
@@ -403,7 +403,7 @@ fn build_phi_copies(
         let mut param_vreg = param_vreg_overrides
             .get(&(target, param_idx as u32))
             .copied()
-            .or_else(|| class_to_vreg.lookup_single(param_cid))
+            .or_else(|| class_to_vreg.lookup_any(param_cid))
             .ok_or_else(|| CompileError {
                 phase: "phi-elim".into(),
                 message: format!("param class {:?} not in class_to_vreg", param_cid),

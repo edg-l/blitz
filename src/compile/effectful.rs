@@ -36,7 +36,7 @@ fn build_mem_addr(
     // When it's a SpillLoad, BlockParam, or other non-Addr op, the extraction
     // may show an Addr node for the class, but the children's registers aren't
     // guaranteed live at the load/store point.
-    let addr_vreg = class_to_vreg.lookup_single(addr_cid);
+    let addr_vreg = class_to_vreg.lookup_any(addr_cid);
     let is_addr_inst = addr_vreg.is_some_and(|v| {
         schedule
             .iter()
@@ -51,13 +51,13 @@ fn build_mem_addr(
         let base_reg = ext
             .children
             .first()
-            .and_then(|&c| class_to_vreg.lookup_single(c))
+            .and_then(|&c| class_to_vreg.lookup_any(c))
             .and_then(|v| regalloc.vreg_to_reg.get(&v).copied());
         let index_reg = ext
             .children
             .get(1)
             .filter(|&&c| c != ClassId::NONE)
-            .and_then(|&c| class_to_vreg.lookup_single(c))
+            .and_then(|&c| class_to_vreg.lookup_any(c))
             .and_then(|v| regalloc.vreg_to_reg.get(&v).copied());
         if let Some(base) = base_reg {
             // If the folded base or index register conflicts with an
@@ -102,7 +102,7 @@ pub(super) fn lower_effectful_op(
     let get_reg = |cid: ClassId| -> Option<Reg> {
         let canon = uf.find_immutable(cid);
         class_to_vreg
-            .lookup_single(canon)
+            .lookup_any(canon)
             .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
     };
 
@@ -121,7 +121,7 @@ pub(super) fn lower_effectful_op(
             })?;
             let canon_result = uf.find_immutable(*result);
             let result_reg = class_to_vreg
-                .lookup_single(canon_result)
+                .lookup_any(canon_result)
                 .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
                 .ok_or_else(|| CompileError {
                     phase: "lowering".into(),
@@ -362,7 +362,7 @@ fn resolve_call_arg_regs_after_spilling(
     // Find the barrier instruction (CallResult or VoidCallBarrier).
     let barrier_inst = if let Some(&first_result_cid) = results.first() {
         let canon = uf.find_immutable(first_result_cid);
-        class_to_vreg.lookup_single(canon).and_then(|result_vreg| {
+        class_to_vreg.lookup_any(canon).and_then(|result_vreg| {
             schedule
                 .iter()
                 .find(|inst| inst.dst == result_vreg && matches!(inst.op, Op::CallResult(_, _)))
@@ -372,7 +372,7 @@ fn resolve_call_arg_regs_after_spilling(
             .iter()
             .filter_map(|&cid| {
                 let canon = uf.find_immutable(cid);
-                class_to_vreg.lookup_single(canon)
+                class_to_vreg.lookup_any(canon)
             })
             .collect();
         schedule.iter().find(|inst| {
@@ -388,7 +388,7 @@ fn resolve_call_arg_regs_after_spilling(
             .map(|&cid| {
                 let canon = uf.find_immutable(cid);
                 class_to_vreg
-                    .lookup_single(canon)
+                    .lookup_any(canon)
                     .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
             })
             .collect();
@@ -425,7 +425,7 @@ fn resolve_call_arg_regs_after_spilling(
     let mut original_to_replacement: BTreeMap<VReg, VReg> = BTreeMap::new();
     for &cid in args {
         let canon = uf.find_immutable(cid);
-        let Some(original_vreg) = class_to_vreg.lookup_single(canon) else {
+        let Some(original_vreg) = class_to_vreg.lookup_any(canon) else {
             continue;
         };
 
@@ -468,7 +468,7 @@ fn resolve_call_arg_regs_after_spilling(
     args.iter()
         .map(|&cid| {
             let canon = uf.find_immutable(cid);
-            let original_vreg = class_to_vreg.lookup_single(canon)?;
+            let original_vreg = class_to_vreg.lookup_any(canon)?;
             if let Some(&replacement) = original_to_replacement.get(&original_vreg) {
                 return regalloc.vreg_to_reg.get(&replacement).copied();
             }
@@ -492,8 +492,8 @@ fn resolve_store_val_reg_after_spilling(
     extraction: &ExtractionResult,
     schedule: &[ScheduledInst],
 ) -> Option<Reg> {
-    let addr_vreg = class_to_vreg.lookup_single(canon_addr)?;
-    let original_val_vreg = class_to_vreg.lookup_single(canon_val)?;
+    let addr_vreg = class_to_vreg.lookup_any(canon_addr)?;
+    let original_val_vreg = class_to_vreg.lookup_any(canon_val)?;
 
     // `populate_effectful_operands` sorts StoreBarrier operands by VReg index
     // and may add Addr children, so we cannot rely on positional lookup.

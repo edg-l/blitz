@@ -67,7 +67,7 @@ pub fn compile_to_ir_string(
         for pidx in 0..block.param_types.len() as u32 {
             if let Some(&cid) = block_param_map.get(&(block_id, pidx)) {
                 let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+                if let Some(vreg) = class_to_vreg.lookup_any(canon) {
                     if let Some(inst) = insts.iter_mut().find(|i| i.dst == vreg) {
                         inst.op = Op::BlockParam(
                             block_id,

@@ -170,7 +170,7 @@ fn resolve_cid(
     egraph_uf: &crate::egraph::unionfind::UnionFind,
 ) -> String {
     let canon = egraph_uf.find_immutable(cid);
-    match class_to_vreg.lookup_single(canon) {
+    match class_to_vreg.lookup_any(canon) {
         Some(vreg) => format!("v{}", vreg.0),
         None => format!("?{}", cid.0),
     }

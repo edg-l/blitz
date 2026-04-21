@@ -417,7 +417,7 @@ pub fn compile(
         for pidx in 0..block.param_types.len() as u32 {
             if let Some(&cid) = block_param_map.get(&(block_id, pidx)) {
                 let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+                if let Some(vreg) = class_to_vreg.lookup_any(canon) {
                     if let Some(inst) = insts.iter_mut().find(|i| i.dst == vreg) {
                         inst.op = Op::BlockParam(
                             block_id,
@@ -554,7 +554,7 @@ pub fn compile(
         let mut branch_cond_chain: BTreeSet<VReg> = BTreeSet::new();
         if let Some(EffectfulOp::Branch { cond, .. }) = block.ops.last() {
             let canon = egraph.unionfind.find_immutable(*cond);
-            if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+            if let Some(vreg) = class_to_vreg.lookup_any(canon) {
                 // Add the flags VReg (proj1).
                 branch_cond_chain.insert(vreg);
                 // Find the instruction that produces it and add its parent
@@ -701,7 +701,7 @@ pub fn compile(
         // instruction) so its operands must survive until end of block.
         if let Some(EffectfulOp::Ret { val: Some(cid) }) = func.blocks[0].ops.last() {
             let canon = egraph.unionfind.find_immutable(*cid);
-            if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+            if let Some(vreg) = class_to_vreg.lookup_any(canon) {
                 live_out.insert(vreg);
             }
         }
@@ -1224,7 +1224,7 @@ pub fn compile(
             // 8a-ret: Ret value must have a register.
             if let EffectfulOp::Ret { val: Some(cid) } = terminator_check {
                 let canon = egraph.unionfind.find_immutable(*cid);
-                if let Some(vreg) = block_class_to_vreg.lookup_single(canon) {
+                if let Some(vreg) = block_class_to_vreg.lookup_any(canon) {
                     debug_assert!(
                         regalloc_result.vreg_to_reg.contains_key(&vreg),
                         "8a-ret safety net fired after global regalloc: \

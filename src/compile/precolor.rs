@@ -30,7 +30,7 @@ pub(super) fn assign_param_vregs_from_map(
     for (param_idx, &class_id) in func.param_class_ids.iter().enumerate() {
         // Canonicalize the class_id after run_phases merges.
         let canon = egraph.unionfind.find_immutable(class_id);
-        if let Some(vreg) = class_to_vreg.lookup_single(canon)
+        if let Some(vreg) = class_to_vreg.lookup_any(canon)
             && let ArgLoc::Reg(reg) = arg_locs[param_idx]
         {
             // Don't precolor params to caller-saved registers when the block
@@ -132,7 +132,7 @@ pub(super) fn add_call_precolors_for_block(
             let locs = assign_args(arg_tys);
             for (&cid, loc) in args.iter().zip(locs.iter()) {
                 let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+                if let Some(vreg) = class_to_vreg.lookup_any(canon) {
                     match loc {
                         ArgLoc::Reg(reg) => {
                             if call_count == 1
@@ -152,7 +152,7 @@ pub(super) fn add_call_precolors_for_block(
                 && let Some(&first_result_cid) = results.first()
             {
                 let canon = egraph.unionfind.find_immutable(first_result_cid);
-                if let Some(vreg) = class_to_vreg.lookup_single(canon)
+                if let Some(vreg) = class_to_vreg.lookup_any(canon)
                     && !param_vregs.iter().any(|&(v, _)| v == vreg)
                 {
                     let is_float_ret = ret_tys.first().is_some_and(|t| t.is_float());

@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use smallvec::SmallVec;
+
+use crate::compile::program_point::ProgramPoint;
 use crate::egraph::cost::CostModel;
 use crate::egraph::egraph::EGraph;
 use crate::ir::op::{ClassId, Op};
@@ -7,76 +10,227 @@ use crate::ir::types::Type;
 
 // ── ClassVRegMap ──────────────────────────────────────────────────────────────
 
-/// A newtype wrapper around `BTreeMap<ClassId, VReg>` that provides a narrow,
-/// controlled API for mapping e-class IDs to virtual registers.
+/// A single live-range segment: the VReg is valid in `[start, end]` (inclusive).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Segment {
+    pub vreg: VReg,
+    pub start: ProgramPoint,
+    pub end: ProgramPoint,
+}
+
+/// Range-keyed map from e-class IDs to virtual registers.
 ///
-/// All callers use the named methods rather than reaching into the inner map
-/// directly. This makes it straightforward to evolve the representation in
-/// later phases (e.g. range-keyed segments for pressure splitting) without
-/// changing every call site.
+/// Each class may have multiple non-overlapping segments once the pressure
+/// splitter (Phase 5) inserts new VRegs for split live ranges. Before the
+/// splitter runs all classes have a single full-range segment spanning
+/// `BLOCK_ENTRY(0)..=BLOCK_EXIT(last_block)`.
+///
+/// An eagerly-maintained inverse index (`vreg_to_class_segs`) allows O(log n)
+/// reverse lookup `vreg_to_class(vreg, point) -> Option<ClassId>`.
+///
+/// `split_generation` is bumped by `apply_plan_to` (Phase 5) whenever splitter
+/// output is committed. Consumers that must run AFTER the splitter can assert
+/// `split_generation > 0` to detect ordering mistakes.
 #[derive(Debug, Clone, Default)]
 pub struct ClassVRegMap {
-    single: BTreeMap<ClassId, VReg>,
+    /// Forward map: class -> ordered segments.
+    segments: BTreeMap<ClassId, SmallVec<[Segment; 2]>>,
+    /// Inverse map: vreg -> (class, start, end). One entry per VReg.
+    vreg_to_class_segs: BTreeMap<VReg, (ClassId, ProgramPoint, ProgramPoint)>,
+    /// Bumped by `apply_plan_to` when splitter output is committed.
+    pub(crate) split_generation: u32,
 }
 
 impl ClassVRegMap {
     pub fn new() -> Self {
         ClassVRegMap {
-            single: BTreeMap::new(),
+            segments: BTreeMap::new(),
+            vreg_to_class_segs: BTreeMap::new(),
+            split_generation: 0,
         }
     }
 
-    /// Insert a single (class, vreg) mapping, replacing any existing entry.
+    // ── Construction ─────────────────────────────────────────────────────────
+
+    /// Insert a full-range segment for `class` -> `vreg`.
+    ///
+    /// Full-range means `BLOCK_ENTRY(0)..=BLOCK_EXIT(u32::MAX as usize)`,
+    /// covering all program points in the function. Used during VReg
+    /// linearization (Phase 3 of the pipeline) when no splitting has occurred.
+    pub fn insert_full_range(&mut self, class: ClassId, vreg: VReg) {
+        let start = ProgramPoint::block_entry(0);
+        let end = ProgramPoint {
+            block: u32::MAX,
+            inst: u32::MAX,
+        };
+        self.insert_segment(class, vreg, start, end);
+    }
+
+    /// Insert a segment `(class, vreg, start, end)`, also updating the inverse index.
+    ///
+    /// Replaces any existing segment for the same VReg in the inverse index.
+    pub fn insert_segment(
+        &mut self,
+        class: ClassId,
+        vreg: VReg,
+        start: ProgramPoint,
+        end: ProgramPoint,
+    ) {
+        self.segments
+            .entry(class)
+            .or_default()
+            .push(Segment { vreg, start, end });
+        self.vreg_to_class_segs.insert(vreg, (class, start, end));
+    }
+
+    /// Legacy shim: insert a single (class, vreg) mapping, replacing any existing entry.
+    ///
+    /// Implemented as `insert_full_range`. Retained for construction sites that
+    /// haven't been migrated to `insert_full_range` yet.
     pub fn insert_single(&mut self, class: ClassId, vreg: VReg) {
-        self.single.insert(class, vreg);
+        // Remove the old segment for this class (if any) from the inverse index.
+        if let Some(segs) = self.segments.get(&class) {
+            for seg in segs.iter() {
+                self.vreg_to_class_segs.remove(&seg.vreg);
+            }
+        }
+        self.segments.remove(&class);
+        self.insert_full_range(class, vreg);
     }
 
-    /// Look up the VReg for `class`, if present.
+    // ── Lookup ───────────────────────────────────────────────────────────────
+
+    /// Return the VReg covering `point` for `class`, or `None`.
+    ///
+    /// In `debug_assertions` builds, panics if more than one segment covers
+    /// the same point (invariant violation: segments must be non-overlapping).
+    pub fn lookup(&self, class: ClassId, point: ProgramPoint) -> Option<VReg> {
+        let segs = self.segments.get(&class)?;
+        let mut found: Option<VReg> = None;
+        for seg in segs.iter() {
+            if seg.start <= point && point <= seg.end {
+                debug_assert!(
+                    found.is_none(),
+                    "ClassVRegMap: class {:?} has overlapping segments at point {:?}",
+                    class,
+                    point
+                );
+                found = Some(seg.vreg);
+                #[cfg(not(debug_assertions))]
+                {
+                    return found;
+                }
+            }
+        }
+        found
+    }
+
+    /// Return ANY VReg for `class`, or `None`.
+    ///
+    /// For use by printers and legacy callers that don't have a natural program
+    /// point. Returns the VReg from the first segment.
+    pub fn lookup_any(&self, class: ClassId) -> Option<VReg> {
+        self.segments.get(&class)?.first().map(|s| s.vreg)
+    }
+
+    /// Use `lookup(class, point)` or `lookup_any(class)` instead.
+    ///
+    /// Delegates to `lookup_any`. Will be removed in Phase 7.
+    #[deprecated(
+        since = "0.0.0",
+        note = "use lookup(class, point) or lookup_any(class)"
+    )]
     pub fn lookup_single(&self, class: ClassId) -> Option<VReg> {
-        self.single.get(&class).copied()
+        self.lookup_any(class)
     }
 
-    /// Remove the entry for `class` and return the VReg if it existed.
+    /// Inverse lookup: return the ClassId covering `vreg` at `point`, or `None`.
+    ///
+    /// Uses the eagerly-maintained inverse index for O(log n) lookup.
+    pub fn vreg_to_class(&self, vreg: VReg, point: ProgramPoint) -> Option<ClassId> {
+        let &(class, start, end) = self.vreg_to_class_segs.get(&vreg)?;
+        if start <= point && point <= end {
+            Some(class)
+        } else {
+            None
+        }
+    }
+
+    // ── Mutation ─────────────────────────────────────────────────────────────
+
+    /// Shrink a segment's start forward to `new_start`.
+    ///
+    /// Updates both the forward `segments` storage and the inverse
+    /// `vreg_to_class_segs` index atomically so stale entries are impossible.
+    /// After this call, `lookup(class, p)` returns `None` for any `p < new_start`
+    /// and `vreg_to_class(vreg, p)` also returns `None` for `p < new_start`.
+    pub fn truncate_segment_start(&mut self, vreg: VReg, new_start: ProgramPoint) {
+        let Some(&(class, _old_start, end)) = self.vreg_to_class_segs.get(&vreg) else {
+            return;
+        };
+        // Update inverse index.
+        self.vreg_to_class_segs
+            .insert(vreg, (class, new_start, end));
+        // Update forward segments.
+        if let Some(segs) = self.segments.get_mut(&class) {
+            for seg in segs.iter_mut() {
+                if seg.vreg == vreg {
+                    seg.start = new_start;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Remove the entry for `class` (all its segments). Returns the VReg of the
+    /// first segment if present. Also removes from the inverse index.
     pub fn remove(&mut self, class: ClassId) -> Option<VReg> {
-        self.single.remove(&class)
+        let segs = self.segments.remove(&class)?;
+        let first_vreg = segs.first().map(|s| s.vreg);
+        for seg in segs.iter() {
+            self.vreg_to_class_segs.remove(&seg.vreg);
+        }
+        first_vreg
     }
 
-    /// Iterate over all (ClassId, VReg) pairs.
+    // ── Iteration ────────────────────────────────────────────────────────────
+
+    /// Iterate over all `(ClassId, VReg)` pairs (one per segment).
+    ///
+    /// For multi-segment classes this yields one entry per segment.
     pub fn iter(&self) -> impl Iterator<Item = (ClassId, VReg)> + '_ {
-        self.single.iter().map(|(&c, &v)| (c, v))
+        self.segments
+            .iter()
+            .flat_map(|(&c, segs)| segs.iter().map(move |s| (c, s.vreg)))
     }
 
-    /// Iterate over all ClassIds in this map.
+    /// Iterate over all `(ClassId, VReg, start, end)` segment tuples.
+    pub fn iter_segments(
+        &self,
+    ) -> impl Iterator<Item = (ClassId, VReg, ProgramPoint, ProgramPoint)> + '_ {
+        self.segments
+            .iter()
+            .flat_map(|(&c, segs)| segs.iter().map(move |s| (c, s.vreg, s.start, s.end)))
+    }
+
+    /// Iterate over all ClassIds that have at least one segment.
     pub fn keys(&self) -> impl Iterator<Item = ClassId> + '_ {
-        self.single.keys().copied()
+        self.segments.keys().copied()
     }
 
-    /// Returns `true` if `class` has an entry in this map.
+    /// Returns `true` if `class` has at least one segment.
     pub fn contains(&self, class: ClassId) -> bool {
-        self.single.contains_key(&class)
+        self.segments.contains_key(&class)
     }
 
-    /// Returns the number of entries.
+    /// Returns the number of classes (not segments) in the map.
     pub fn len(&self) -> usize {
-        self.single.len()
+        self.segments.len()
     }
 
     /// Returns `true` if the map has no entries.
     pub fn is_empty(&self) -> bool {
-        self.single.is_empty()
-    }
-
-    /// Clone the underlying map. Used for block-local snapshots.
-    pub fn clone_inner(&self) -> BTreeMap<ClassId, VReg> {
-        self.single.clone()
-    }
-
-    /// Returns an entry API for the underlying map. Used by `vreg_insts_for_block`.
-    pub(crate) fn entry(
-        &mut self,
-        class: ClassId,
-    ) -> std::collections::btree_map::Entry<'_, ClassId, VReg> {
-        self.single.entry(class)
+        self.segments.is_empty()
     }
 }
 
@@ -489,13 +643,13 @@ pub fn extraction_to_vreg_insts_with_map(
     for &class_id in &emit_order {
         let vreg = VReg(next_vreg);
         next_vreg += 1;
-        class_to_vreg.insert_single(class_id, vreg);
+        class_to_vreg.insert_full_range(class_id, vreg);
     }
 
     let mut insts: Vec<VRegInst> = Vec::with_capacity(emit_order.len());
     for &class_id in &emit_order {
         let ext = &extraction.choices[&class_id];
-        let dst = class_to_vreg.lookup_single(class_id).unwrap();
+        let dst = class_to_vreg.lookup_any(class_id).unwrap();
         let operands: Vec<Option<VReg>> = ext
             .children
             .iter()
@@ -503,7 +657,7 @@ pub fn extraction_to_vreg_insts_with_map(
                 if child == ClassId::NONE {
                     None
                 } else {
-                    Some(class_to_vreg.lookup_single(child).unwrap())
+                    Some(class_to_vreg.lookup_any(child).unwrap())
                 }
             })
             .collect();
@@ -534,14 +688,14 @@ pub fn extraction_to_vreg_insts(extraction: &ExtractionResult, roots: &[ClassId]
     for &class_id in &emit_order {
         let vreg = VReg(next_vreg);
         next_vreg += 1;
-        class_to_vreg.insert_single(class_id, vreg);
+        class_to_vreg.insert_full_range(class_id, vreg);
     }
 
     // Emit instructions in emission order.
     let mut insts: Vec<VRegInst> = Vec::with_capacity(emit_order.len());
     for &class_id in &emit_order {
         let ext = &extraction.choices[&class_id];
-        let dst = class_to_vreg.lookup_single(class_id).unwrap();
+        let dst = class_to_vreg.lookup_any(class_id).unwrap();
         let operands: Vec<Option<VReg>> = ext
             .children
             .iter()
@@ -549,7 +703,7 @@ pub fn extraction_to_vreg_insts(extraction: &ExtractionResult, roots: &[ClassId]
                 if child == ClassId::NONE {
                     None
                 } else {
-                    Some(class_to_vreg.lookup_single(child).unwrap())
+                    Some(class_to_vreg.lookup_any(child).unwrap())
                 }
             })
             .collect();
@@ -586,9 +740,10 @@ pub fn vreg_insts_for_block(
 
     // Assign new VRegs.
     for &class_id in &emit_order {
-        if let std::collections::btree_map::Entry::Vacant(e) = class_to_vreg.entry(class_id) {
-            e.insert(VReg(*next_vreg));
+        if !class_to_vreg.contains(class_id) {
+            let vreg = VReg(*next_vreg);
             *next_vreg += 1;
+            class_to_vreg.insert_full_range(class_id, vreg);
         }
     }
 
@@ -596,7 +751,7 @@ pub fn vreg_insts_for_block(
     let mut insts = Vec::with_capacity(emit_order.len());
     for &class_id in &emit_order {
         let ext = &extraction.choices[&class_id];
-        let dst = class_to_vreg.lookup_single(class_id).unwrap();
+        let dst = class_to_vreg.lookup_any(class_id).unwrap();
         let operands: Vec<Option<VReg>> = ext
             .children
             .iter()
@@ -604,7 +759,7 @@ pub fn vreg_insts_for_block(
                 if child == ClassId::NONE {
                     None
                 } else {
-                    Some(class_to_vreg.lookup_single(child).unwrap())
+                    Some(class_to_vreg.lookup_any(child).unwrap())
                 }
             })
             .collect();
@@ -950,6 +1105,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn classvregmap_single_insert_lookup() {
         let mut map = ClassVRegMap::new();
         let c0 = ClassId(0);
@@ -1129,5 +1285,155 @@ mod tests {
             ext.is_none(),
             "generic Add with no machine lowering must return None"
         );
+    }
+
+    // ── ClassVRegMap Phase 4: multi-segment tests ─────────────────────────────
+
+    fn pp(block: u32, inst: u32) -> ProgramPoint {
+        ProgramPoint { block, inst }
+    }
+
+    // 4.7a: insert two segments for different classes, lookup at various points.
+    #[test]
+    fn multi_segment_insert_and_lookup() {
+        let mut map = ClassVRegMap::new();
+        let c0 = ClassId(0);
+        let c1 = ClassId(1);
+        let v0 = VReg(0);
+        let v1 = VReg(1);
+
+        // c0 -> v0 in block 0
+        map.insert_segment(c0, v0, pp(0, 0), pp(0, u32::MAX));
+        // c1 -> v1 in block 1
+        map.insert_segment(c1, v1, pp(1, 0), pp(1, u32::MAX));
+
+        assert_eq!(map.lookup(c0, pp(0, 5)), Some(v0));
+        assert_eq!(map.lookup(c0, pp(1, 0)), None); // out of c0's range
+        assert_eq!(map.lookup(c1, pp(1, 5)), Some(v1));
+        assert_eq!(map.lookup(c1, pp(0, 0)), None); // out of c1's range
+    }
+
+    // 4.7b: lookup respects range boundaries.
+    #[test]
+    fn lookup_respects_range_boundaries() {
+        let mut map = ClassVRegMap::new();
+        let c0 = ClassId(0);
+        let v0 = VReg(0);
+        let v1 = VReg(1);
+
+        // Two non-overlapping segments for c0.
+        map.insert_segment(c0, v0, pp(0, 1), pp(0, 5));
+        map.insert_segment(c0, v1, pp(0, 7), pp(0, 10));
+
+        assert_eq!(map.lookup(c0, pp(0, 0)), None); // before first segment
+        assert_eq!(map.lookup(c0, pp(0, 1)), Some(v0)); // at start
+        assert_eq!(map.lookup(c0, pp(0, 5)), Some(v0)); // at end
+        assert_eq!(map.lookup(c0, pp(0, 6)), None); // between segments
+        assert_eq!(map.lookup(c0, pp(0, 7)), Some(v1)); // second segment start
+        assert_eq!(map.lookup(c0, pp(0, 10)), Some(v1)); // second segment end
+        assert_eq!(map.lookup(c0, pp(0, 11)), None); // past end
+    }
+
+    // 4.7c: debug_assert fires if two segments overlap at the same point.
+    // Only testable in debug builds.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn overlapping_segments_reject_via_debug_assert() {
+        use std::panic;
+
+        let mut map = ClassVRegMap::new();
+        let c0 = ClassId(0);
+        let v0 = VReg(0);
+        let v1 = VReg(1);
+
+        // Two overlapping segments.
+        map.insert_segment(c0, v0, pp(0, 1), pp(0, 10));
+        map.insert_segment(c0, v1, pp(0, 5), pp(0, 15));
+
+        // Lookup at the overlap point should panic.
+        let result = panic::catch_unwind(|| {
+            let mut m2 = ClassVRegMap::new();
+            let c = ClassId(0);
+            let va = VReg(0);
+            let vb = VReg(1);
+            m2.insert_segment(c, va, pp(0, 1), pp(0, 10));
+            m2.insert_segment(c, vb, pp(0, 5), pp(0, 15));
+            m2.lookup(c, pp(0, 7))
+        });
+        assert!(
+            result.is_err(),
+            "lookup at overlapping segments must panic in debug mode"
+        );
+    }
+
+    // 4.7d: empty class returns None for lookup.
+    #[test]
+    fn empty_class_returns_none() {
+        let map = ClassVRegMap::new();
+        assert_eq!(map.lookup(ClassId(0), pp(0, 0)), None);
+        assert_eq!(map.lookup_any(ClassId(0)), None);
+    }
+
+    // 4.7e: lookup_any picks the first segment's VReg.
+    #[test]
+    fn lookup_any_picks_first_segment() {
+        let mut map = ClassVRegMap::new();
+        let c0 = ClassId(0);
+        let v0 = VReg(0);
+        let v1 = VReg(1);
+
+        map.insert_segment(c0, v0, pp(0, 0), pp(0, 5));
+        map.insert_segment(c0, v1, pp(0, 7), pp(0, 10));
+
+        // lookup_any returns the first segment (v0).
+        assert_eq!(map.lookup_any(c0), Some(v0));
+    }
+
+    // 4.7f: iter_segments yields all segments.
+    #[test]
+    fn iter_segments_yields_all() {
+        let mut map = ClassVRegMap::new();
+        let c0 = ClassId(0);
+        let c1 = ClassId(1);
+        let v0 = VReg(0);
+        let v1 = VReg(1);
+        let v2 = VReg(2);
+
+        map.insert_segment(c0, v0, pp(0, 0), pp(0, 5));
+        map.insert_segment(c0, v1, pp(0, 7), pp(0, 10));
+        map.insert_segment(c1, v2, pp(1, 0), pp(1, u32::MAX));
+
+        let segs: Vec<_> = map.iter_segments().collect();
+        assert_eq!(segs.len(), 3);
+        // c0 comes first (BTreeMap order), then c1.
+        assert!(segs.iter().any(|&(c, v, _, _)| c == c0 && v == v0));
+        assert!(segs.iter().any(|&(c, v, _, _)| c == c0 && v == v1));
+        assert!(segs.iter().any(|&(c, v, _, _)| c == c1 && v == v2));
+    }
+
+    // 4.7g: truncate_segment_start updates both forward and inverse index.
+    #[test]
+    fn truncate_segment_start_updates_inverse() {
+        let mut map = ClassVRegMap::new();
+        let c0 = ClassId(0);
+        let v0 = VReg(0);
+
+        map.insert_segment(c0, v0, pp(0, 0), pp(1, u32::MAX));
+
+        // Before truncation, lookup at pp(0, 5) finds v0.
+        assert_eq!(map.lookup(c0, pp(0, 5)), Some(v0));
+        assert_eq!(map.vreg_to_class(v0, pp(0, 5)), Some(c0));
+
+        // Truncate: new start is pp(1, 0).
+        map.truncate_segment_start(v0, pp(1, 0));
+
+        // After truncation, lookup at old start returns None.
+        assert_eq!(map.lookup(c0, pp(0, 5)), None);
+        assert_eq!(map.vreg_to_class(v0, pp(0, 5)), None);
+
+        // Lookup at new start and beyond still works.
+        assert_eq!(map.lookup(c0, pp(1, 0)), Some(v0));
+        assert_eq!(map.vreg_to_class(v0, pp(1, 0)), Some(c0));
+        assert_eq!(map.lookup(c0, pp(1, 10)), Some(v0));
     }
 }

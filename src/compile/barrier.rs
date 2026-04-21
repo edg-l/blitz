@@ -21,7 +21,7 @@ pub(super) fn mark_branch_cond_barrier(
 ) {
     if let Some(EffectfulOp::Branch { cond, .. }) = terminator {
         let canon = egraph.unionfind.find_immutable(*cond);
-        if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+        if let Some(vreg) = class_to_vreg.lookup_any(canon) {
             // Force the cond VReg into the group after all effectful ops.
             // Use max (not min like mark_arg) because we need this to come
             // AFTER all calls, overriding any earlier constraint.
@@ -64,7 +64,7 @@ pub(super) fn build_barrier_maps(
     // Helper: mark a ClassId as consumed by barrier_k (earliest consumer wins).
     let mut mark_arg = |cid: ClassId, barrier_k: usize| {
         let canon = egraph.unionfind.find_immutable(cid);
-        if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+        if let Some(vreg) = class_to_vreg.lookup_any(canon) {
             let entry = vreg_to_arg.entry(vreg).or_insert(barrier_k);
             *entry = (*entry).min(barrier_k);
         }
@@ -73,7 +73,7 @@ pub(super) fn build_barrier_maps(
         match op {
             EffectfulOp::Load { addr, result, .. } => {
                 let canon = egraph.unionfind.find_immutable(*result);
-                if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+                if let Some(vreg) = class_to_vreg.lookup_any(canon) {
                     vreg_to_result.insert(vreg, barrier_k);
                 }
                 mark_arg(*addr, barrier_k);
@@ -85,7 +85,7 @@ pub(super) fn build_barrier_maps(
             EffectfulOp::Call { args, results, .. } => {
                 for &result_cid in results {
                     let canon = egraph.unionfind.find_immutable(result_cid);
-                    if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+                    if let Some(vreg) = class_to_vreg.lookup_any(canon) {
                         vreg_to_result.insert(vreg, barrier_k);
                     }
                 }
@@ -377,7 +377,7 @@ pub(super) fn populate_effectful_operands(
             let mut vregs = Vec::new();
             for &cid in cids {
                 let canon = egraph.unionfind.find_immutable(cid);
-                let Some(vreg) = class_to_vreg.lookup_single(canon) else {
+                let Some(vreg) = class_to_vreg.lookup_any(canon) else {
                     continue;
                 };
                 vregs.push(vreg);
@@ -399,7 +399,7 @@ pub(super) fn populate_effectful_operands(
                 }
                 // Find the LoadResult instruction by its result VReg.
                 let result_canon = egraph.unionfind.find_immutable(*result);
-                let Some(result_vreg) = class_to_vreg.lookup_single(result_canon) else {
+                let Some(result_vreg) = class_to_vreg.lookup_any(result_canon) else {
                     continue;
                 };
                 if let Some(inst) = schedule.iter_mut().find(|i| i.dst == result_vreg) {
@@ -417,7 +417,7 @@ pub(super) fn populate_effectful_operands(
                         continue;
                     }
                     let result_canon = egraph.unionfind.find_immutable(*first_result);
-                    let Some(result_vreg) = class_to_vreg.lookup_single(result_canon) else {
+                    let Some(result_vreg) = class_to_vreg.lookup_any(result_canon) else {
                         continue;
                     };
                     if let Some(inst) = schedule.iter_mut().find(|i| i.dst == result_vreg) {

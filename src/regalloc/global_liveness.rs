@@ -210,7 +210,7 @@ pub fn apply_block_param_overrides_to_phi_uses(
                         let canon_param = unionfind.find_immutable(param_cid);
                         if canon_arg == canon_param {
                             // Replace the global VReg with the override.
-                            if let Some(old_vreg) = class_to_vreg.lookup_single(canon_arg) {
+                            if let Some(old_vreg) = class_to_vreg.lookup_any(canon_arg) {
                                 phi_uses[block_idx].remove(&old_vreg);
                             }
                             phi_uses[block_idx].insert(fresh_vreg);
@@ -297,7 +297,7 @@ pub fn compute_phi_uses(
         if let Some(term) = block.ops.last() {
             let mut add_vreg = |cid: ClassId| {
                 let canon = egraph_unionfind.find_immutable(cid);
-                if let Some(v) = class_to_vreg.lookup_single(canon) {
+                if let Some(v) = class_to_vreg.lookup_any(canon) {
                     phi_uses[block_idx].insert(v);
                 }
             };
@@ -361,7 +361,7 @@ pub fn collect_block_param_vregs_per_block(
                     if let Op::BlockParam(bid, pidx2, _) = &node.op
                         && *bid == block.id
                         && *pidx2 == pidx
-                        && let Some(vreg) = class_to_vreg.lookup_single(cid)
+                        && let Some(vreg) = class_to_vreg.lookup_any(cid)
                     {
                         result[block_idx].insert(vreg);
                     }

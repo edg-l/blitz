@@ -317,7 +317,7 @@ pub(super) fn collect_phi_source_vregs(
                 } => {
                     for &cid in true_args.iter().chain(false_args.iter()) {
                         let canon = egraph.unionfind.find_immutable(cid);
-                        if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+                        if let Some(vreg) = class_to_vreg.lookup_any(canon) {
                             result.insert(vreg);
                         }
                     }
@@ -327,7 +327,7 @@ pub(super) fn collect_phi_source_vregs(
             };
             for &cid in args {
                 let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(vreg) = class_to_vreg.lookup_single(canon) {
+                if let Some(vreg) = class_to_vreg.lookup_any(canon) {
                     result.insert(vreg);
                 }
             }
@@ -351,7 +351,7 @@ pub(super) fn compute_copy_pairs(
 
     let get_vreg = |cid: ClassId| -> Option<VReg> {
         let canon = egraph.unionfind.find_immutable(cid);
-        class_to_vreg.lookup_single(canon)
+        class_to_vreg.lookup_any(canon)
     };
 
     // Look up the destination VReg for a block param, preferring the
