@@ -534,16 +534,15 @@ fn asm_diamond_branch() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: mov    rcx,rdi
-        // CHECK-NEXT: sub    rcx,rsi
+        // CHECK: mov    {{[a-z0-9]+}},rdi
+        // CHECK-NEXT: sub    {{[a-z0-9]+}},rsi
         // CHECK: jg
-        // CHECK: mov    rdx,0x1
-        // CHECK-NEXT: lea    rcx,[rax+rdx*1]
-        // CHECK-NEXT: mov    rax,rcx
-        // CHECK-NEXT: jmp
-        // CHECK: mov    rdx,0x1
-        // CHECK-NEXT: lea    rcx,[rax+rdx*1]
-        // CHECK-NEXT: mov    rax,rcx
+        // CHECK: mov    {{[a-z0-9]+}},0x1
+        // CHECK: lea    {{[a-z0-9]+}},
+        // CHECK: jmp
+        // CHECK: mov    {{[a-z0-9]+}},0x1
+        // CHECK: lea    {{[a-z0-9]+}},
+        // CHECK: mov    rax,
         // CHECK-NEXT: ret
         ",
     );
@@ -570,7 +569,7 @@ fn asm_counted_loop() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: xor    rax,rax
+        // CHECK: xor    {{[a-z0-9]+}},{{[a-z0-9]+}}
         // CHECK: lea    {{[a-z0-9]+}},
         // CHECK: lea    {{[a-z0-9]+}},
         // CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}

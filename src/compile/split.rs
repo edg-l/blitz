@@ -1499,7 +1499,6 @@ mod tests {
     #[test]
     fn blockparam_split_truncates_segment_at_entry() {
         use crate::egraph::extract::ClassVRegMap;
-        use crate::ir::op::ClassId;
 
         let (func, egraph, param_cid, param_vreg) = make_blockparam_call_setup();
         let block1_idx = 1usize;
