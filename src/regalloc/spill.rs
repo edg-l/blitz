@@ -371,11 +371,7 @@ pub fn insert_spills(
                     // Each use gets its own reload VReg (short-lived).
                     let new_vreg = VReg(*next_vreg);
                     *next_vreg += 1;
-                    let is_xmm = vreg_classes
-                        .get(&op)
-                        .copied()
-                        .map(|c| c == crate::x86::reg::RegClass::XMM)
-                        .unwrap_or(false);
+                    let is_xmm = super::is_xmm_vreg(op, vreg_classes);
                     let load_op = if is_xmm {
                         Op::XmmSpillLoad(slot as i64)
                     } else {
@@ -418,11 +414,7 @@ pub fn insert_spills(
         // After the def of a spilled VReg, insert a SpillStore (if not remat).
         if is_spill_def && let Some(&slot) = vreg_to_slot.get(&dst_idx) {
             let spilled_vreg = VReg(dst_idx as u32);
-            let is_xmm = vreg_classes
-                .get(&spilled_vreg)
-                .copied()
-                .map(|c| c == crate::x86::reg::RegClass::XMM)
-                .unwrap_or(false);
+            let is_xmm = super::is_xmm_vreg(spilled_vreg, vreg_classes);
             let store_op = if is_xmm {
                 Op::XmmSpillStore(slot as i64)
             } else {

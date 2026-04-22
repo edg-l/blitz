@@ -90,28 +90,7 @@ pub fn allocate(
         // Recompute call and div points from current instruction list.
         // After spill insertion, instruction indices shift, so static
         // call_points from the caller become stale.
-        let call_points: Vec<usize> = insts
-            .iter()
-            .enumerate()
-            .filter_map(|(i, inst)| {
-                if matches!(inst.op, Op::CallResult(_, _) | Op::VoidCallBarrier) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let div_points: Vec<usize> = insts
-            .iter()
-            .enumerate()
-            .filter_map(|(i, inst)| {
-                if matches!(inst.op, Op::X86Idiv | Op::X86Div) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let (call_points, div_points) = collect_call_div_points(&insts);
         let call_points = &call_points[..];
         let div_points = &div_points[..];
 
@@ -240,63 +219,16 @@ pub fn allocate(
         }
 
         if gpr_colors_needed <= avail && xmm_colors_needed <= AVAILABLE_XMM_COLORS {
-            // Success: map colors to physical registers for both classes.
-            let pre_coloring_regs = build_pre_coloring_regs(&insts_coalesced, &param_vreg_to_reg);
-            let gpr_color_to_reg = map_colors_to_regs(
-                &coloring,
-                RegClass::GPR,
-                &pre_coloring_regs,
+            return Ok(finalize_allocation(
+                coloring,
+                &graph2,
+                insts_coalesced,
+                &param_vreg_to_reg,
                 uses_frame_pointer,
-            );
-            let xmm_color_to_reg = map_colors_to_regs(
-                &coloring,
-                RegClass::XMM,
-                &pre_coloring_regs,
-                uses_frame_pointer,
-            );
-
-            // Build final VReg -> Reg mapping from both class mappings.
-            let mut vreg_to_reg: BTreeMap<VReg, Reg> = BTreeMap::new();
-            for (i, color_opt) in coloring.colors.iter().enumerate() {
-                if let Some(&color) = color_opt.as_ref()
-                    && i < graph2.num_vregs
-                {
-                    let reg = if graph2.reg_class[i] == RegClass::XMM {
-                        xmm_color_to_reg.get(&color)
-                    } else {
-                        gpr_color_to_reg.get(&color)
-                    };
-                    if let Some(&r) = reg {
-                        vreg_to_reg.insert(VReg(i as u32), r);
-                    }
-                }
-            }
-
-            // Identify callee-saved registers actually used.
-            let callee_saved_set: BTreeSet<Reg> = CALLEE_SAVED.iter().copied().collect();
-            let mut callee_saved_used: Vec<Reg> = vreg_to_reg
-                .values()
-                .filter(|r| callee_saved_set.contains(r))
-                .copied()
-                .collect();
-            callee_saved_used.sort_by_key(|r| *r as u8);
-            callee_saved_used.dedup();
-
-            if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
-                tracing::debug!(
-                    target: "blitz::regalloc",
-                    "[{func_name}] allocation ok (round {round}, spills={spill_slots}, callee_saved={callee_saved_used:?}):\n{}",
-                    crate::trace::format_vreg_to_reg(&vreg_to_reg),
-                );
-            }
-
-            return Ok(RegAllocResult {
-                vreg_to_reg,
                 spill_slots,
-                callee_saved_used,
-                insts: insts_coalesced,
-                unprecolored_params: vec![],
-            });
+                func_name,
+                round,
+            ));
         }
 
         // Need to spill.
@@ -714,6 +646,94 @@ fn select_spill_candidates(
         spilled.insert(idx);
     }
     spilled
+}
+
+/// Collect instruction indices that are call sites and division sites.
+///
+/// Indices shift after spill insertion, so callers recompute these each round.
+fn collect_call_div_points(insts: &[ScheduledInst]) -> (Vec<usize>, Vec<usize>) {
+    let mut call_points: Vec<usize> = Vec::new();
+    let mut div_points: Vec<usize> = Vec::new();
+    for (i, inst) in insts.iter().enumerate() {
+        if matches!(inst.op, Op::CallResult(_, _) | Op::VoidCallBarrier) {
+            call_points.push(i);
+        }
+        if matches!(inst.op, Op::X86Idiv | Op::X86Div) {
+            div_points.push(i);
+        }
+    }
+    (call_points, div_points)
+}
+
+/// Build the final `RegAllocResult` from a successful coloring.
+///
+/// Maps colors to physical registers per class, assembles `vreg_to_reg`,
+/// computes callee-saved usage, and emits the regalloc trace line.
+#[allow(clippy::too_many_arguments)]
+fn finalize_allocation(
+    coloring: super::coloring::ColoringResult,
+    graph: &InterferenceGraph,
+    insts_coalesced: Vec<ScheduledInst>,
+    param_vreg_to_reg: &BTreeMap<VReg, Reg>,
+    uses_frame_pointer: bool,
+    spill_slots: u32,
+    func_name: &str,
+    round: usize,
+) -> RegAllocResult {
+    let pre_coloring_regs = build_pre_coloring_regs(&insts_coalesced, param_vreg_to_reg);
+    let gpr_color_to_reg = map_colors_to_regs(
+        &coloring,
+        RegClass::GPR,
+        &pre_coloring_regs,
+        uses_frame_pointer,
+    );
+    let xmm_color_to_reg = map_colors_to_regs(
+        &coloring,
+        RegClass::XMM,
+        &pre_coloring_regs,
+        uses_frame_pointer,
+    );
+
+    let mut vreg_to_reg: BTreeMap<VReg, Reg> = BTreeMap::new();
+    for (i, &color_opt) in coloring.colors.iter().enumerate() {
+        if let Some(color) = color_opt
+            && i < graph.num_vregs
+        {
+            let reg = if graph.reg_class[i] == RegClass::XMM {
+                xmm_color_to_reg.get(&color)
+            } else {
+                gpr_color_to_reg.get(&color)
+            };
+            if let Some(&r) = reg {
+                vreg_to_reg.insert(VReg(i as u32), r);
+            }
+        }
+    }
+
+    let callee_saved_set: BTreeSet<Reg> = CALLEE_SAVED.iter().copied().collect();
+    let mut callee_saved_used: Vec<Reg> = vreg_to_reg
+        .values()
+        .filter(|r| callee_saved_set.contains(r))
+        .copied()
+        .collect();
+    callee_saved_used.sort_by_key(|r| *r as u8);
+    callee_saved_used.dedup();
+
+    if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+        tracing::debug!(
+            target: "blitz::regalloc",
+            "[{func_name}] allocation ok (round {round}, spills={spill_slots}, callee_saved={callee_saved_used:?}):\n{}",
+            crate::trace::format_vreg_to_reg(&vreg_to_reg),
+        );
+    }
+
+    RegAllocResult {
+        vreg_to_reg,
+        spill_slots,
+        callee_saved_used,
+        insts: insts_coalesced,
+        unprecolored_params: vec![],
+    }
 }
 
 #[cfg(test)]
