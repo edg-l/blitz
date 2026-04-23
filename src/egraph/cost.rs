@@ -99,6 +99,27 @@ impl CostModel {
                     * 0.9
             } // small discount to prefer imm form when available
 
+            // ── x86 flag-only compare with immediate: no register output; slightly
+            //    cheaper than Proj1(X86Sub) since we don't pay for the sub's
+            //    dst register write. imm=0 lowers to `test r, r` (2 bytes, even
+            //    cheaper). imm!=0 lowers to `cmp r, imm8/imm32`.
+            Op::X86CmpI { imm, .. } => {
+                let size = if *imm == 0 {
+                    2.0
+                } else if (-128..=127).contains(imm) {
+                    3.0
+                } else {
+                    6.0
+                };
+                CostTuple {
+                    latency: 1.0,
+                    throughput: 0.25,
+                    size,
+                }
+                .weighted(self.goal)
+                    * 0.9
+            } // discount so extraction prefers it over Proj1(X86Sub) when possible
+
             // ── LEA variants ─────────────────────────────────────────────────────
             Op::X86Lea2 => CostTuple {
                 latency: 1.0,

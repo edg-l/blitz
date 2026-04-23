@@ -510,18 +510,18 @@ int main(void) {
     // (sub a, b sets the flags that cmov uses — no extra cmp needed).
     if let Some(disasm) = objdump_disasm(&obj.code) {
         // The user-level `diff = a - b` must still lower to a SUB that
-        // produces the difference. The Icmp(diff, 0) now lowers to a
-        // non-destructive CMP rather than a second SUB (the difference of
-        // `diff - 0` is dead). True flag fusion — reusing the first SUB's
-        // flags for the compare — would be unsafe for signed comparisons
-        // across overflow and is not implemented.
+        // produces the difference. The `Icmp(diff, 0)` is now lowered via
+        // `X86CmpI(0)` which becomes a flag-only `test diff, diff` — same
+        // flags as `cmp diff, 0`, 1 byte shorter. True flag fusion —
+        // reusing the first SUB's flags directly — is unsafe for signed
+        // comparisons across overflow and is not implemented.
         assert!(
             disasm.contains("sub"),
             "expected SUB in disassembly:\n{disasm}"
         );
         assert!(
-            disasm.contains("cmp"),
-            "expected CMP for the flags-only compare:\n{disasm}"
+            disasm.contains("test"),
+            "expected TEST for the flags-only compare against 0:\n{disasm}"
         );
     }
 }
@@ -1838,15 +1838,15 @@ fn codegen_flag_fusion_single_sub() {
     let obj = compile(func, &opts, None).expect("compile flag_single_sub");
 
     if let Some(disasm) = objdump_disasm(&obj.code) {
-        // See `e2e_flag_fusion` above for rationale: the user's SUB must
-        // remain, and the icmp lowers to a non-destructive CMP.
+        // See `e2e_flag_fusion` above: user's SUB remains; the Icmp(diff, 0)
+        // lowers to a flag-only `test diff, diff` via X86CmpI(0).
         assert!(
             disasm.contains("sub"),
             "expected SUB in disassembly:\n{disasm}"
         );
         assert!(
-            disasm.contains("cmp"),
-            "expected CMP for the flags-only compare:\n{disasm}"
+            disasm.contains("test"),
+            "expected TEST for the flags-only compare against 0:\n{disasm}"
         );
     }
 }

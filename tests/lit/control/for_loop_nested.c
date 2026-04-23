@@ -1,14 +1,13 @@
 // EXIT: 45
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// LICM + iconst dedup hoist the shared bound 0x3 once; both loop compares
-// use the same register.
-// CHECK: mov    {{[a-z0-9]+}},0x3
+// Each loop compare against the bound 3 fuses the immediate into `cmp`
+// directly via X86CmpI — no separate `mov ..., 0x3` for the bound.
 // outer loop compare + branch
-// CHECK: cmp
+// CHECK: cmp    {{[a-z0-9]+}},0x3
 // CHECK: jl
 // inner loop compare + branch
-// CHECK: cmp
+// CHECK: cmp    {{[a-z0-9]+}},0x3
 // CHECK: jl
 // i*3 via lea (scale-by-3 addressing)
 // CHECK: lea

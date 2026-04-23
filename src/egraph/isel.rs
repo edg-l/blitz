@@ -230,6 +230,11 @@ fn apply_shift_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
 /// Icmp(cc, a, b) -> Proj1(X86Sub(a, b))
 /// Multiple Icmps on same (a,b) share the same X86Sub.
+///
+/// Additionally, when b is an Iconst whose value fits in i32, add an
+/// X86CmpI(imm) alternative to the flags class. The cost model makes that
+/// cheaper than Proj1(X86Sub) (no register output, no iconst vreg), so
+/// extraction picks it when the Sub's difference isn't otherwise needed.
 fn apply_icmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
@@ -260,6 +265,30 @@ fn apply_icmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         if canon != proj1_canon {
             egraph.merge(class_id, proj1);
             changed = true;
+        }
+
+        // If RHS is an iconst fitting in i32, offer an X86CmpI alternative.
+        // Extraction compares costs and picks X86CmpI when the Sub's
+        // difference is unused (common: bare `if (x > n)` patterns).
+        if let Some((v, _)) = egraph.get_constant(b)
+            && let Ok(imm) = i32::try_from(v)
+        {
+            // The operand's integer type drives the compare width at lowering.
+            // Grab it from the e-class `a` (all Icmp operands are integers).
+            let a_canon = egraph.unionfind.find_immutable(a);
+            let a_ty = egraph.class(a_canon).ty.clone();
+            if a_ty.is_integer() {
+                let x86cmpi = egraph.add(ENode {
+                    op: Op::X86CmpI { imm, ty: a_ty },
+                    children: smallvec![a],
+                });
+                let cmpi_canon = egraph.unionfind.find_immutable(x86cmpi);
+                let canon2 = egraph.unionfind.find_immutable(class_id);
+                if canon2 != cmpi_canon {
+                    egraph.merge(class_id, x86cmpi);
+                    changed = true;
+                }
+            }
         }
     }
     changed

@@ -107,6 +107,19 @@ pub enum Op {
     X86Sar,
     X86Shr,
 
+    /// Flag-only compare with immediate — `cmp reg, imm` (or `test reg, reg` when
+    /// imm is 0); 1 child; produces `Flags` directly (no `Pair`). Emitted by isel
+    /// when an `Icmp` has an `Iconst` RHS that fits in i32, avoiding the
+    /// destructive `mov + sub` sequence and the separate iconst materialization.
+    ///
+    /// `ty` is the operand's integer type — needed at lowering time because
+    /// the op produces `Flags` (no size info in the dst class) and the operand
+    /// may be a spill-reload vreg whose type isn't tracked in `vreg_types`.
+    X86CmpI {
+        imm: i32,
+        ty: Type,
+    },
+
     /// Shift left by immediate count — `shl dst, imm`; 1 child. Free of RCX pressure.
     X86ShlImm(u8),
     /// Logical shift right by immediate count — `shr dst, imm`; 1 child.
@@ -553,6 +566,17 @@ impl Op {
                     child_types[0]
                 );
                 Type::Pair(Box::new(child_types[0].clone()), Box::new(Type::Flags))
+            }
+
+            // ── x86 flag-only compare with immediate (1 child → Flags) ───────────
+            Op::X86CmpI { .. } => {
+                assert_eq!(child_types.len(), 1, "X86CmpI requires 1 child");
+                assert!(
+                    child_types[0].is_integer(),
+                    "X86CmpI operand must be integer, got {:?}",
+                    child_types[0]
+                );
+                Type::Flags
             }
 
             // ── x86 LEA variants (I64, I64 → I64) ───────────────────────────

@@ -437,9 +437,8 @@ fn asm_flag_fusion_sub_cmov() {
         "
         // CHECK: mov    rax,rdi
         // CHECK-NEXT: sub    rax,rsi
-        // CHECK: xor    rdx,rdx
-        // The flags-only compare against 0 is a non-destructive CMP.
-        // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // The flags-only compare against 0 is `test r, r` (X86CmpI(0)).
+        // CHECK: test   {{[a-z0-9]+}},{{[a-z0-9]+}}
         // CHECK: cmovg  rax,{{[a-z0-9]+}}
         // CHECK-NEXT: ret
         ",
@@ -1540,6 +1539,56 @@ fn ir_combo_dblneg_reassoc_addr() {
 // CmpRR at lowering time. When the difference is live (e.g. a Sub expression
 // shares the X86Sub class), the destructive SUB is preserved.
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/// Icmp against a small immediate: isel creates X86CmpI and extraction
+/// picks it over Proj1(X86Sub). Lowers to `cmp r, imm` (no register-to-hold
+/// the immediate, no destructive sub). LHS-iconst case left for future work.
+#[test]
+fn asm_icmp_with_imm_uses_cmp_ri() {
+    let mut b = FunctionBuilder::new("icmp_imm", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let one = b.iconst(1, Type::I64);
+    let cond = b.icmp(CondCode::Sgt, x, one);
+    let yes = b.iconst(42, Type::I64);
+    let no = b.iconst(0, Type::I64);
+    let r = b.select(cond, yes, no);
+    b.ret(Some(r));
+
+    check_asm(
+        b.finalize().unwrap(),
+        "
+        // The compare fuses the `1` as an immediate; no separate mov for it.
+        // CHECK-NOT: sub
+        // CHECK: cmp    {{[a-z0-9]+}},0x1
+        // CHECK: cmov
+        // CHECK: ret
+        ",
+    );
+}
+
+/// Icmp against zero: isel creates X86CmpI(0) which lowers to `test r, r`
+/// (2 bytes, same flags as `cmp r, 0`).
+#[test]
+fn asm_icmp_zero_uses_test() {
+    let mut b = FunctionBuilder::new("icmp_zero", &[Type::I64], &[Type::I64]);
+    let x = b.params().to_vec()[0];
+    let zero = b.iconst(0, Type::I64);
+    let cond = b.icmp(CondCode::Ne, x, zero);
+    let one = b.iconst(1, Type::I64);
+    let r = b.select(cond, one, zero);
+    b.ret(Some(r));
+
+    check_asm(
+        b.finalize().unwrap(),
+        "
+        // CHECK-NOT: sub
+        // CHECK-NOT: cmp
+        // CHECK: test   {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // CHECK: cmov
+        // CHECK: ret
+        ",
+    );
+}
 
 /// Icmp alone with no separate Sub on the operands: difference is dead, so we
 /// emit `cmp` (not `mov + sub`).

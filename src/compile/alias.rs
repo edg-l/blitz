@@ -206,6 +206,9 @@ impl AliasInfo {
             // x86 immediate shifts
             Op::X86ShlImm(_) | Op::X86ShrImm(_) | Op::X86SarImm(_) => AddrBase::Unknown,
 
+            // x86 flag-only compare with immediate: produces Flags, not an address.
+            Op::X86CmpI { .. } => AddrBase::Unknown,
+
             // x86 multiply/divide
             Op::X86Imul3 | Op::X86Idiv | Op::X86Div => AddrBase::Unknown,
 

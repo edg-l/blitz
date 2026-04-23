@@ -3,10 +3,8 @@
 // CHECK-LABEL: # main
 // loop init: i = 1
 // CHECK: mov    {{[a-z0-9]+}},0x1
-// loop bound: 10
-// CHECK: mov    {{[a-z0-9]+}},0xa
-// loop comparison
-// CHECK: cmp
+// loop comparison against the 10 bound (immediate fused into cmp via X86CmpI)
+// CHECK: cmp    {{[a-z0-9]+}},0xa
 // CHECK: jle
 // loop body: add
 // CHECK: add

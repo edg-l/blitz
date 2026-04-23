@@ -1,9 +1,8 @@
 // EXIT: 15
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// loop comparison against bound 5
-// CHECK: mov    {{[a-z0-9]+}},0x5
-// CHECK: cmp
+// loop comparison against bound 5 (immediate fused into cmp via X86CmpI)
+// CHECK: cmp    {{[a-z0-9]+}},0x5
 // CHECK: jl
 // array base address via lea
 // CHECK: lea

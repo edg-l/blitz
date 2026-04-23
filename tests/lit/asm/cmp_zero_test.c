@@ -1,8 +1,9 @@
 // RUN: %tinyc %s --emit-asm 2>&1
-// Comparison with zero should use sub-then-jne (sub sets flags).
+// Comparison with zero lowers through X86CmpI(0) which emits a flag-only
+// `test r, r` — same flags as `cmp r, 0`, 1 byte shorter.
 // __attribute__((noinline)) prevents inlining + constant-folding.
 // CHECK-LABEL: # is_nonzero
-// CHECK: cmp
+// CHECK: test
 // CHECK: jne
 __attribute__((noinline))
 int is_nonzero(int x) {

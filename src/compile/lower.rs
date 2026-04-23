@@ -260,6 +260,10 @@ fn lower_op(
             |dst, imm| MachInst::SarRI { size, dst, imm },
         ),
 
+        // X86CmpI is handled in the caller (where vreg_types is available) so
+        // the OpSize is derived from the operand width, not the Flags dst.
+        Op::X86CmpI { .. } => unreachable!("X86CmpI handled in lower_block_pure_ops"),
+
         Op::X86Idiv => {
             // Pre-coloring ensures dividend is in RAX.
             // Emit the appropriate sign-extension and idiv for the operand size.
@@ -1229,6 +1233,30 @@ pub(super) fn lower_block_pure_ops(
                 _ => OpSize::S64,
             })
             .unwrap_or(OpSize::S64);
+
+        // X86CmpI: flag-only compare with a baked-in immediate. The OpSize
+        // comes from the op itself (operand vreg may be a spill reload whose
+        // type isn't in vreg_types).
+        if let Op::X86CmpI { imm, ty } = &inst.op {
+            let operand_reg = op_regs.first().copied().flatten();
+            if let Some(reg) = operand_reg {
+                let size = OpSize::from_int_type(ty);
+                if *imm == 0 {
+                    result.push(MachInst::TestRR {
+                        size,
+                        dst: Operand::Reg(reg),
+                        src: Operand::Reg(reg),
+                    });
+                } else {
+                    result.push(MachInst::CmpRI {
+                        size,
+                        dst: Operand::Reg(reg),
+                        imm: *imm,
+                    });
+                }
+                continue;
+            }
+        }
 
         // X86Sub with a dead difference: emit a flags-only `cmp` instead of
         // the destructive `mov dst, src_a; sub dst, src_b`. Saves two bytes

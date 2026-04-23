@@ -78,6 +78,9 @@ pub fn fmt_op(op: &Op) -> String {
         Op::X86ShrImm(n) => format!("x86_shr_imm({n})"),
         Op::X86SarImm(n) => format!("x86_sar_imm({n})"),
 
+        // x86 flag-only compare with immediate
+        Op::X86CmpI { imm, ty } => format!("x86_cmp_imm({imm}, {ty:?})"),
+
         // x86 LEA
         Op::X86Lea2 => "x86_lea2".into(),
         Op::X86Lea3 { scale } => format!("x86_lea3(scale={scale})"),

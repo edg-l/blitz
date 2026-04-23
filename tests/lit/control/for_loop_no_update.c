@@ -1,9 +1,8 @@
 // EXIT: 10
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// loop bound
-// CHECK: mov    {{[a-z0-9]+}},0xa
-// CHECK: cmp
+// loop bound fused into cmp via X86CmpI
+// CHECK: cmp    {{[a-z0-9]+}},0xa
 // CHECK: jl
 // increment inside body
 // CHECK: add
