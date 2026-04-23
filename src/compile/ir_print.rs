@@ -19,6 +19,12 @@ pub fn compile_to_ir_string(
         .take()
         .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
 
+    // Store-to-load / load-to-load forwarding.
+    if opts.enable_store_forwarding {
+        let alias = super::alias::AliasInfo::new();
+        super::forward::run_forwarding(&mut func, &mut egraph, &alias);
+    }
+
     // LICM: detect loops, insert preheaders, identify invariant classes.
     let extra_roots = if opts.enable_licm {
         super::licm::run_licm(&mut func, &mut egraph)

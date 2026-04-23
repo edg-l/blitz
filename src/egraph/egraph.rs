@@ -181,6 +181,35 @@ impl EGraph {
         canonical
     }
 
+    /// Remove a `LoadResult` / `CallResult` placeholder node from the graph.
+    ///
+    /// Used by pipeline passes that eliminate the effectful op backing the
+    /// placeholder (e.g. store-to-load forwarding removes a `Load` after
+    /// proving its result equals some stored value). Without removal the
+    /// placeholder can stay in its class — possibly a merged class — and
+    /// extraction may pick it, but the lowerer expects the (now-deleted)
+    /// effectful op to produce the vreg, so the vreg would be garbage.
+    ///
+    /// Only `LoadResult`/`CallResult` are valid: they're leaf nodes with
+    /// unique UIDs, so removing one can't break congruences.
+    pub fn remove_result_placeholder(&mut self, op: &Op) {
+        debug_assert!(
+            matches!(op, Op::LoadResult(_, _) | Op::CallResult(_, _)),
+            "remove_result_placeholder only accepts LoadResult/CallResult"
+        );
+        let key = ENode {
+            op: op.clone(),
+            children: SmallVec::new(),
+        };
+        if let Some(owner) = self.memo.remove(&key) {
+            let canon = self.unionfind.find(owner);
+            let class = &mut self.classes[canon.0 as usize];
+            let before = class.nodes.len();
+            class.nodes.retain(|n| &n.op != op);
+            self.node_count = self.node_count.saturating_sub(before - class.nodes.len());
+        }
+    }
+
     /// Rebuild the e-graph to a consistent state (process the worklist).
     ///
     /// Re-canonicalizes all e-nodes across the entire memo until no non-canonical

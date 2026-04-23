@@ -3,7 +3,7 @@
 //! Controlled by two environment variables:
 //!
 //! - `BLITZ_DEBUG`: comma-separated list of categories to enable.
-//!   Categories: `sched`, `liveness`, `regalloc`, `asm`, `all`.
+//!   Categories: `sched`, `liveness`, `regalloc`, `asm`, `licm`, `egraph`, `dce`, `alias`, `all`.
 //!
 //! - `BLITZ_DEBUG_FN`: optional substring filter on function names.
 //!   When set, only functions whose name contains this string produce output.
@@ -45,9 +45,17 @@ fn config() -> &'static BlitzDebugConfig {
                         "all" => {
                             set.extend([
                                 "sched", "liveness", "regalloc", "asm", "licm", "egraph", "dce",
+                                "alias",
                             ]);
                         }
-                        "sched" | "liveness" | "regalloc" | "asm" | "licm" | "egraph" | "dce" => {
+                        "sched"
+                        | "liveness"
+                        | "regalloc"
+                        | "asm"
+                        | "licm"
+                        | "egraph"
+                        | "dce"
+                        | "alias" => {
                             set.insert(match part.as_str() {
                                 "sched" => "sched",
                                 "liveness" => "liveness",
@@ -56,6 +64,7 @@ fn config() -> &'static BlitzDebugConfig {
                                 "licm" => "licm",
                                 "egraph" => "egraph",
                                 "dce" => "dce",
+                                "alias" => "alias",
                                 _ => unreachable!(),
                             });
                         }
@@ -63,7 +72,7 @@ fn config() -> &'static BlitzDebugConfig {
                         other => {
                             eprintln!(
                                 "warning: unknown BLITZ_DEBUG category '{other}', \
-                                 valid: sched, liveness, regalloc, asm, licm, egraph, dce, all"
+                                 valid: sched, liveness, regalloc, asm, licm, egraph, dce, alias, all"
                             );
                         }
                     }

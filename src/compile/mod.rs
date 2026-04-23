@@ -59,7 +59,10 @@ use precolor::{
 };
 mod terminator;
 use terminator::{lower_terminator, thread_branches};
+pub mod alias;
 pub(crate) mod split;
+pub use alias::{AddrBase, AliasInfo};
+pub mod forward;
 
 // ── Public options / error types ──────────────────────────────────────────────
 
@@ -91,6 +94,8 @@ pub struct CompileOptions {
     pub enable_licm: bool,
     /// Enable Dead Code Elimination (unreachable blocks, constant branches, dead loads).
     pub enable_dce: bool,
+    /// Enable intra-block store-to-load and load-to-load forwarding.
+    pub enable_store_forwarding: bool,
     /// Enable function inlining before optimization.
     pub enable_inlining: bool,
     /// Maximum inlining rescan iterations per caller function. Each rescan inlines one level
@@ -127,6 +132,7 @@ impl CompileOptions {
             force_frame_pointer: false,
             enable_licm: false,
             enable_dce: false,
+            enable_store_forwarding: false,
             enable_inlining: false,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -145,6 +151,7 @@ impl CompileOptions {
             force_frame_pointer: false,
             enable_licm: true,
             enable_dce: true,
+            enable_store_forwarding: true,
             enable_inlining: true,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -275,6 +282,13 @@ pub fn compile(
         .egraph
         .take()
         .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
+
+    // Store-to-load / load-to-load forwarding: intra-block, pre-LICM so
+    // hoisting and saturation both benefit from fewer memory ops.
+    if opts.enable_store_forwarding {
+        let alias = AliasInfo::new();
+        forward::run_forwarding(&mut func, &mut egraph, &alias);
+    }
 
     // LICM: detect loops, insert preheaders, identify invariant classes.
     let extra_roots = if opts.enable_licm {

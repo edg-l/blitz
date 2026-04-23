@@ -144,11 +144,11 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
             *"// RUN:"*"--emit-ir"*)
                 mode="--emit-ir"
                 # Extract compiler flags (--enable-X, --disable-X, -O0, -O1) from the RUN line.
-                check_flags="$(echo "$line" | sed 's|.*// RUN:||' | grep -oE '\-\-(enable|disable)-[a-z]+|-O[0-9]' | tr '\n' ' ')"
+                check_flags="$(echo "$line" | sed 's|.*// RUN:||' | grep -oE '\-\-(enable|disable)-[a-z][a-z-]*|-O[0-9]' | tr '\n' ' ')"
                 ;;
             *"// RUN:"*"--emit-asm"*)
                 mode="--emit-asm"
-                check_flags="$(echo "$line" | sed 's|.*// RUN:||' | grep -oE '\-\-(enable|disable)-[a-z]+|-O[0-9]' | tr '\n' ' ')"
+                check_flags="$(echo "$line" | sed 's|.*// RUN:||' | grep -oE '\-\-(enable|disable)-[a-z][a-z-]*|-O[0-9]' | tr '\n' ' ')"
                 ;;
             *"// EXTRA_FILE:"*)
                 ef="$(echo "$line" | sed 's/.*\/\/ EXTRA_FILE: *//')"

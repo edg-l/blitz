@@ -3,6 +3,7 @@
 //        [--enable-inlining] [--disable-inlining]
 //        [--enable-peephole] [--disable-peephole]
 //        [--enable-dce] [--disable-dce]
+//        [--enable-store-forwarding] [--disable-store-forwarding]
 // Compiles one or more .c files to a native executable via Blitz backend + ld/cc linker.
 
 use std::io::Write;
@@ -24,6 +25,7 @@ fn usage() -> ! {
     eprintln!("       [--enable-inlining] [--disable-inlining]");
     eprintln!("       [--enable-peephole] [--disable-peephole]");
     eprintln!("       [--enable-dce] [--disable-dce]");
+    eprintln!("       [--enable-store-forwarding] [--disable-store-forwarding]");
     exit(1);
 }
 
@@ -44,6 +46,7 @@ fn main() {
     let mut override_inlining: Option<bool> = None;
     let mut override_peephole: Option<bool> = None;
     let mut override_dce: Option<bool> = None;
+    let mut override_store_forwarding: Option<bool> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -96,6 +99,14 @@ fn main() {
                 override_dce = Some(false);
                 i += 1;
             }
+            "--enable-store-forwarding" => {
+                override_store_forwarding = Some(true);
+                i += 1;
+            }
+            "--disable-store-forwarding" => {
+                override_store_forwarding = Some(false);
+                i += 1;
+            }
             "-c" => {
                 compile_only = true;
                 i += 1;
@@ -131,6 +142,9 @@ fn main() {
     }
     if let Some(v) = override_dce {
         opts.enable_dce = v;
+    }
+    if let Some(v) = override_store_forwarding {
+        opts.enable_store_forwarding = v;
     }
 
     if input_paths.is_empty() {

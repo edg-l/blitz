@@ -33,4 +33,17 @@ impl Type {
     pub fn is_float(&self) -> bool {
         matches!(self, Type::F32 | Type::F64)
     }
+
+    /// Byte size of the type, or `None` for `Flags` and `Pair`.
+    pub(crate) fn byte_size(&self) -> Option<usize> {
+        match self {
+            Type::I8 => Some(1),
+            Type::I16 => Some(2),
+            Type::I32 => Some(4),
+            Type::I64 => Some(8),
+            Type::F32 => Some(4),
+            Type::F64 => Some(8),
+            Type::Flags | Type::Pair(_, _) => None,
+        }
+    }
 }
