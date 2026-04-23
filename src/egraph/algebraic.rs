@@ -64,6 +64,7 @@ pub fn apply_algebraic_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_demorgan_rules(egraph, &snaps);
     changed |= apply_negation_distribution_rules(egraph, &snaps);
     changed |= apply_sub_zero_eq_ne_rules(egraph, &snaps);
+    changed |= apply_add_const_zero_eq_ne_rules(egraph, &snaps);
     changed
 }
 
@@ -112,6 +113,85 @@ fn apply_sub_zero_eq_ne_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             let new_icmp = egraph.add(ENode {
                 op: Op::Icmp(*cc),
                 children: smallvec![a, b],
+            });
+            let canon = egraph.unionfind.find_immutable(class_id);
+            let new_canon = egraph.unionfind.find_immutable(new_icmp);
+            if canon != new_canon {
+                egraph.merge(class_id, new_icmp);
+                changed = true;
+            }
+            break;
+        }
+    }
+    changed
+}
+
+/// `Icmp(Eq/Ne, Add(a, k), 0)` → `Icmp(Eq/Ne, a, -k)` (and the symmetric form,
+/// including the commuted `Add(k, a)` variant). Only fires when `k` is a
+/// constant whose wrapping negation has the same type as `a`.
+///
+/// Safe because `a + k == 0` iff `a == -k` in wrapping arithmetic — true for
+/// every `k`, including `i64::MIN` (where `-k` wraps back to `i64::MIN` and
+/// the identity still holds). As with the Sub rule, only `Eq`/`Ne` — signed
+/// ordering is unsafe across `Add`'s overflow.
+///
+/// After the rewrite, if the resulting constant fits in `i32`, the `X86CmpI`
+/// isel rule fires and the compare lowers to `cmp r, imm` with no separate
+/// materialized iconst.
+fn apply_add_const_zero_eq_ne_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    use crate::ir::condcode::CondCode;
+
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        let Op::Icmp(cc) = &snap.op else { continue };
+        if !matches!(cc, CondCode::Eq | CondCode::Ne) {
+            continue;
+        }
+        if snap.children.len() != 2 {
+            continue;
+        }
+        let lhs = snap.children[0];
+        let rhs = snap.children[1];
+
+        // Pick whichever side is the zero constant; the other side must
+        // contain an Add with a constant operand.
+        let add_side = if egraph.get_constant(rhs).map(|(v, _)| v) == Some(0) {
+            lhs
+        } else if egraph.get_constant(lhs).map(|(v, _)| v) == Some(0) {
+            rhs
+        } else {
+            continue;
+        };
+
+        let add_canon = egraph.unionfind.find_immutable(add_side);
+        let add_nodes = egraph.class(add_canon).nodes.clone();
+        for node in add_nodes {
+            if node.op != Op::Add || node.children.len() != 2 {
+                continue;
+            }
+            let (var, k_class) = match (
+                egraph.get_constant(node.children[0]),
+                egraph.get_constant(node.children[1]),
+            ) {
+                (Some(_), None) => (node.children[1], node.children[0]),
+                (None, Some(_)) => (node.children[0], node.children[1]),
+                _ => continue, // both const (already folded) or neither
+            };
+            let Some((k, k_ty)) = egraph.get_constant(k_class) else {
+                continue;
+            };
+
+            // `-k` with two's-complement wraparound keeps the identity correct.
+            let neg_k_val = k.wrapping_neg();
+            let neg_k = egraph.add(ENode {
+                op: Op::Iconst(neg_k_val, k_ty),
+                children: smallvec![],
+            });
+            let new_icmp = egraph.add(ENode {
+                op: Op::Icmp(*cc),
+                children: smallvec![var, neg_k],
             });
             let canon = egraph.unionfind.find_immutable(class_id);
             let new_canon = egraph.unionfind.find_immutable(new_icmp);
@@ -2021,6 +2101,129 @@ mod tests {
             children: smallvec![a, b],
         });
         assert_eq!(g.find(ne), g.find(direct));
+    }
+
+    // ── Icmp(Eq/Ne, Add(a,k), 0) rewrite tests ───────────────────────────────
+
+    #[test]
+    fn icmp_eq_add_const_zero_rewrites_to_cmp_with_neg_const() {
+        use crate::ir::condcode::CondCode;
+        let mut g = EGraph::new();
+        let a = g.add(ENode {
+            op: Op::Param(0, Type::I64),
+            children: smallvec![],
+        });
+        let k = iconst(&mut g, 5, Type::I64);
+        let zero = iconst(&mut g, 0, Type::I64);
+        let sum = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![a, k],
+        });
+        let eq = g.add(ENode {
+            op: Op::Icmp(CondCode::Eq),
+            children: smallvec![sum, zero],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+
+        let neg5 = iconst(&mut g, -5, Type::I64);
+        let direct = g.add(ENode {
+            op: Op::Icmp(CondCode::Eq),
+            children: smallvec![a, neg5],
+        });
+        assert_eq!(g.find(eq), g.find(direct));
+    }
+
+    #[test]
+    fn icmp_ne_zero_add_const_symmetric_and_commuted() {
+        // Icmp(Ne, 0, Add(k, a)) — zero on the LHS, constant on the left of Add.
+        use crate::ir::condcode::CondCode;
+        let mut g = EGraph::new();
+        let a = g.add(ENode {
+            op: Op::Param(0, Type::I32),
+            children: smallvec![],
+        });
+        let k = iconst(&mut g, 7, Type::I32);
+        let zero = iconst(&mut g, 0, Type::I32);
+        let sum = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![k, a], // commuted: k on left
+        });
+        let ne = g.add(ENode {
+            op: Op::Icmp(CondCode::Ne),
+            children: smallvec![zero, sum],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+
+        let neg7 = iconst(&mut g, -7, Type::I32);
+        let direct = g.add(ENode {
+            op: Op::Icmp(CondCode::Ne),
+            children: smallvec![a, neg7],
+        });
+        assert_eq!(g.find(ne), g.find(direct));
+    }
+
+    #[test]
+    fn icmp_eq_add_const_int_min_wraparound() {
+        // k = i64::MIN; -k wraps back to i64::MIN. The identity
+        // `a + MIN == 0 iff a == -MIN == MIN` still holds.
+        use crate::ir::condcode::CondCode;
+        let mut g = EGraph::new();
+        let a = g.add(ENode {
+            op: Op::Param(0, Type::I64),
+            children: smallvec![],
+        });
+        let k = iconst(&mut g, i64::MIN, Type::I64);
+        let zero = iconst(&mut g, 0, Type::I64);
+        let sum = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![a, k],
+        });
+        let eq = g.add(ENode {
+            op: Op::Icmp(CondCode::Eq),
+            children: smallvec![sum, zero],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+
+        // -i64::MIN == i64::MIN under wrapping — the rewrite targets the same class.
+        let direct = g.add(ENode {
+            op: Op::Icmp(CondCode::Eq),
+            children: smallvec![a, k],
+        });
+        assert_eq!(g.find(eq), g.find(direct));
+    }
+
+    #[test]
+    fn icmp_sgt_add_const_zero_not_rewritten() {
+        // Signed ordering: overflow in the Add makes `a + k > 0` diverge from
+        // `a > -k`. Rule must leave it alone.
+        use crate::ir::condcode::CondCode;
+        let mut g = EGraph::new();
+        let a = g.add(ENode {
+            op: Op::Param(0, Type::I64),
+            children: smallvec![],
+        });
+        let k = iconst(&mut g, 5, Type::I64);
+        let zero = iconst(&mut g, 0, Type::I64);
+        let sum = g.add(ENode {
+            op: Op::Add,
+            children: smallvec![a, k],
+        });
+        let sgt = g.add(ENode {
+            op: Op::Icmp(CondCode::Sgt),
+            children: smallvec![sum, zero],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+
+        let neg5 = iconst(&mut g, -5, Type::I64);
+        let direct = g.add(ENode {
+            op: Op::Icmp(CondCode::Sgt),
+            children: smallvec![a, neg5],
+        });
+        assert_ne!(g.find(sgt), g.find(direct));
     }
 
     #[test]
