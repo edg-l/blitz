@@ -11,7 +11,7 @@ Items roughly ordered by impact within each category.
 
 ### High impact (significant quality gap)
 
-- Dead store elimination (needs alias analysis); dead loads and unreachable blocks are handled by DCE
+- Offset-aware alias analysis (currently every aliasing store invalidates every cached entry at the same base; adding byte-offset + width disjointness would unlock more forwarding + DSE); intra-block DSE and store/load forwarding are implemented
 - Dead call elimination for provably pure functions
 - Loop strength reduction: induction variable recognition, replace `i*4` with increment-by-4
 - Loop unrolling

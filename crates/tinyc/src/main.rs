@@ -4,6 +4,7 @@
 //        [--enable-peephole] [--disable-peephole]
 //        [--enable-dce] [--disable-dce]
 //        [--enable-store-forwarding] [--disable-store-forwarding]
+//        [--enable-dse] [--disable-dse]
 // Compiles one or more .c files to a native executable via Blitz backend + ld/cc linker.
 
 use std::io::Write;
@@ -26,6 +27,7 @@ fn usage() -> ! {
     eprintln!("       [--enable-peephole] [--disable-peephole]");
     eprintln!("       [--enable-dce] [--disable-dce]");
     eprintln!("       [--enable-store-forwarding] [--disable-store-forwarding]");
+    eprintln!("       [--enable-dse] [--disable-dse]");
     exit(1);
 }
 
@@ -47,6 +49,7 @@ fn main() {
     let mut override_peephole: Option<bool> = None;
     let mut override_dce: Option<bool> = None;
     let mut override_store_forwarding: Option<bool> = None;
+    let mut override_dse: Option<bool> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -107,6 +110,14 @@ fn main() {
                 override_store_forwarding = Some(false);
                 i += 1;
             }
+            "--enable-dse" => {
+                override_dse = Some(true);
+                i += 1;
+            }
+            "--disable-dse" => {
+                override_dse = Some(false);
+                i += 1;
+            }
             "-c" => {
                 compile_only = true;
                 i += 1;
@@ -145,6 +156,9 @@ fn main() {
     }
     if let Some(v) = override_store_forwarding {
         opts.enable_store_forwarding = v;
+    }
+    if let Some(v) = override_dse {
+        opts.enable_dse = v;
     }
 
     if input_paths.is_empty() {

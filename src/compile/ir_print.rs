@@ -25,6 +25,12 @@ pub fn compile_to_ir_string(
         super::forward::run_forwarding(&mut func, &mut egraph, &alias);
     }
 
+    // Dead store elimination.
+    if opts.enable_dse {
+        let alias = super::alias::AliasInfo::new();
+        super::dse::run_dse(&mut func, &egraph, &alias);
+    }
+
     // LICM: detect loops, insert preheaders, identify invariant classes.
     let extra_roots = if opts.enable_licm {
         super::licm::run_licm(&mut func, &mut egraph)

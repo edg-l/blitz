@@ -62,6 +62,7 @@ use terminator::{lower_terminator, thread_branches};
 pub mod alias;
 pub(crate) mod split;
 pub use alias::{AddrBase, AliasInfo};
+pub mod dse;
 pub mod forward;
 
 // ── Public options / error types ──────────────────────────────────────────────
@@ -96,6 +97,8 @@ pub struct CompileOptions {
     pub enable_dce: bool,
     /// Enable intra-block store-to-load and load-to-load forwarding.
     pub enable_store_forwarding: bool,
+    /// Enable intra-block dead store elimination.
+    pub enable_dse: bool,
     /// Enable function inlining before optimization.
     pub enable_inlining: bool,
     /// Maximum inlining rescan iterations per caller function. Each rescan inlines one level
@@ -133,6 +136,7 @@ impl CompileOptions {
             enable_licm: false,
             enable_dce: false,
             enable_store_forwarding: false,
+            enable_dse: false,
             enable_inlining: false,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -152,6 +156,7 @@ impl CompileOptions {
             enable_licm: true,
             enable_dce: true,
             enable_store_forwarding: true,
+            enable_dse: true,
             enable_inlining: true,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -288,6 +293,13 @@ pub fn compile(
     if opts.enable_store_forwarding {
         let alias = AliasInfo::new();
         forward::run_forwarding(&mut func, &mut egraph, &alias);
+    }
+
+    // Dead store elimination: runs after forwarding (more forwarded loads =
+    // fewer pending-store "observed by load" cancellations = more kills).
+    if opts.enable_dse {
+        let alias = AliasInfo::new();
+        dse::run_dse(&mut func, &egraph, &alias);
     }
 
     // LICM: detect loops, insert preheaders, identify invariant classes.
