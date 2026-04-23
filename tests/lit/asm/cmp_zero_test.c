@@ -2,7 +2,7 @@
 // Comparison with zero should use sub-then-jne (sub sets flags).
 // __attribute__((noinline)) prevents inlining + constant-folding.
 // CHECK-LABEL: # is_nonzero
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jne
 __attribute__((noinline))
 int is_nonzero(int x) {

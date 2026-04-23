@@ -3,7 +3,7 @@
 // CHECK-LABEL: # main
 // loop bound
 // CHECK: mov    {{[a-z0-9]+}},0xa
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jl
 // increment inside body
 // CHECK: add

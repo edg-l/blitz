@@ -10,13 +10,13 @@
 // CHECK-COUNT-17: call
 // Advance past last call, then verify sub+jne comparison pairs.
 // CHECK: call
-// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
 // CHECK: jne
-// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
 // CHECK: jne
-// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
 // CHECK: jne
-// CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
 // CHECK: jne
 
 __attribute__((noinline))

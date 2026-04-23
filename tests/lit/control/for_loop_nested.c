@@ -5,10 +5,10 @@
 // use the same register.
 // CHECK: mov    {{[a-z0-9]+}},0x3
 // outer loop compare + branch
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jl
 // inner loop compare + branch
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jl
 // i*3 via lea (scale-by-3 addressing)
 // CHECK: lea

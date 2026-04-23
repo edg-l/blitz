@@ -3,7 +3,7 @@
 // CHECK-LABEL: # main
 // loop comparison against bound 5
 // CHECK: mov    {{[a-z0-9]+}},0x5
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jl
 // array base address via lea
 // CHECK: lea

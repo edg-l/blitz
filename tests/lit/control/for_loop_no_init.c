@@ -4,7 +4,7 @@
 // loop bound: 10
 // CHECK: mov    {{[a-z0-9]+}},0xa
 // comparison
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jl
 // loop body: add 1
 // CHECK: add

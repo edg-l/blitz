@@ -2,9 +2,9 @@
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
 // while loop comparison
-// CHECK: sub
+// CHECK: cmp
 // break comparison (i == 5)
-// CHECK: sub
+// CHECK: cmp
 // CHECK: je
 // backward jump for loop
 // CHECK: jmp

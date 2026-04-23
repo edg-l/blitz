@@ -509,12 +509,19 @@ int main(void) {
     // Verify that objdump shows a SUB but no separate CMP
     // (sub a, b sets the flags that cmov uses — no extra cmp needed).
     if let Some(disasm) = objdump_disasm(&obj.code) {
-        let has_sub = disasm.contains("sub");
-        let has_cmp = disasm.contains("cmp");
-        assert!(has_sub, "expected SUB in disassembly:\n{disasm}");
+        // The user-level `diff = a - b` must still lower to a SUB that
+        // produces the difference. The Icmp(diff, 0) now lowers to a
+        // non-destructive CMP rather than a second SUB (the difference of
+        // `diff - 0` is dead). True flag fusion — reusing the first SUB's
+        // flags for the compare — would be unsafe for signed comparisons
+        // across overflow and is not implemented.
         assert!(
-            !has_cmp,
-            "expected NO CMP (flag fusion should reuse SUB flags):\n{disasm}"
+            disasm.contains("sub"),
+            "expected SUB in disassembly:\n{disasm}"
+        );
+        assert!(
+            disasm.contains("cmp"),
+            "expected CMP for the flags-only compare:\n{disasm}"
         );
     }
 }
@@ -1831,13 +1838,15 @@ fn codegen_flag_fusion_single_sub() {
     let obj = compile(func, &opts, None).expect("compile flag_single_sub");
 
     if let Some(disasm) = objdump_disasm(&obj.code) {
+        // See `e2e_flag_fusion` above for rationale: the user's SUB must
+        // remain, and the icmp lowers to a non-destructive CMP.
         assert!(
             disasm.contains("sub"),
             "expected SUB in disassembly:\n{disasm}"
         );
         assert!(
-            !disasm.contains("cmp"),
-            "no CMP expected — flag fusion should reuse SUB flags:\n{disasm}"
+            disasm.contains("cmp"),
+            "expected CMP for the flags-only compare:\n{disasm}"
         );
     }
 }

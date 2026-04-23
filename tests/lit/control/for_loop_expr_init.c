@@ -1,7 +1,7 @@
 // EXIT: 35
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jl
 // CHECK: add
 // CHECK: jmp

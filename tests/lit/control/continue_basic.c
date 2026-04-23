@@ -2,7 +2,7 @@
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
 // loop structure
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jl
 // continue jumps back to header
 // CHECK: jmp

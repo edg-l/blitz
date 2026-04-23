@@ -2,7 +2,7 @@
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
 // loop comparison
-// CHECK: sub
+// CHECK: cmp
 // break jumps to exit
 // CHECK: jmp
 

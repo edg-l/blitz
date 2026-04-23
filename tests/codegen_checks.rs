@@ -438,9 +438,9 @@ fn asm_flag_fusion_sub_cmov() {
         // CHECK: mov    rax,rdi
         // CHECK-NEXT: sub    rax,rsi
         // CHECK: xor    rdx,rdx
-        // CHECK: sub    rax,rdx
-        // CHECK-NEXT: mov    rax,rdx
-        // CHECK-NEXT: cmovg  rax,r8
+        // The flags-only compare against 0 is a non-destructive CMP.
+        // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // CHECK: cmovg  rax,{{[a-z0-9]+}}
         // CHECK-NEXT: ret
         ",
     );
@@ -534,8 +534,7 @@ fn asm_diamond_branch() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: mov    {{[a-z0-9]+}},rdi
-        // CHECK-NEXT: sub    {{[a-z0-9]+}},rsi
+        // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
         // CHECK: jg
         // CHECK: mov    {{[a-z0-9]+}},0x1
         // CHECK: lea    {{[a-z0-9]+}},
@@ -572,7 +571,7 @@ fn asm_counted_loop() {
         // CHECK: xor    {{[a-z0-9]+}},{{[a-z0-9]+}}
         // CHECK: lea    {{[a-z0-9]+}},
         // CHECK: lea    {{[a-z0-9]+}},
-        // CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
         // CHECK-NEXT: jge
         // CHECK: jmp
         // CHECK: ret
@@ -750,15 +749,13 @@ fn asm_nested_cmov() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: mov    rcx,rdi
-        // CHECK-NEXT: sub    rcx,rsi
-        // CHECK-NEXT: mov    r8,rsi
-        // CHECK-NEXT: cmovg  r8,rdi
-        // CHECK-NEXT: mov    rax,r8
-        // CHECK-NEXT: sub    rax,rdx
-        // CHECK-NEXT: mov    rax,rdx
-        // CHECK-NEXT: cmovg  rax,r8
-        // CHECK-NEXT: ret
+        // max3 = max(max(a, b), c) — two nested cmov/cmp pairs.
+        // Each icmp lowers to a non-destructive CMP.
+        // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // CHECK: cmovg  {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // CHECK: cmovg  {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // CHECK: ret
         ",
     );
 }
@@ -1534,6 +1531,60 @@ fn ir_combo_dblneg_reassoc_addr() {
         // CHECK: param(0, I64)
         // CHECK-NOT: x86_sub
         // CHECK-NOT: x86_imul
+        ",
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// cmp-vs-sub isel: X86Sub with a dead difference becomes a non-destructive
+// CmpRR at lowering time. When the difference is live (e.g. a Sub expression
+// shares the X86Sub class), the destructive SUB is preserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Icmp alone with no separate Sub on the operands: difference is dead, so we
+/// emit `cmp` (not `mov + sub`).
+#[test]
+fn asm_icmp_alone_uses_cmp() {
+    let mut b = FunctionBuilder::new("icmp_only", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = b.params().to_vec();
+    let cond = b.icmp(CondCode::Sgt, params[0], params[1]);
+    let one = b.iconst(1, Type::I64);
+    let zero = b.iconst(0, Type::I64);
+    let r = b.select(cond, one, zero);
+    b.ret(Some(r));
+
+    check_asm(
+        b.finalize().unwrap(),
+        "
+        // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // CHECK: cmov
+        // CHECK: ret
+        ",
+    );
+}
+
+/// When the same (a, b) is consumed both as `Sub(a, b)` (difference live) and
+/// as `Icmp(Sgt, a, b)` (flags), the shared X86Sub stays destructive so the
+/// flags come from the same instruction. Must see a `sub` (not a `cmp`) for
+/// the shared op. The e-graph isel hashcons merges the two X86Sub nodes.
+#[test]
+fn asm_shared_sub_keeps_destructive() {
+    let mut b = FunctionBuilder::new("shared_sub", &[Type::I64, Type::I64], &[Type::I64]);
+    let params = b.params().to_vec();
+    let diff = b.sub(params[0], params[1]);
+    let cond = b.icmp(CondCode::Sgt, params[0], params[1]);
+    let zero = b.iconst(0, Type::I64);
+    let r = b.select(cond, diff, zero);
+    b.ret(Some(r));
+
+    check_asm(
+        b.finalize().unwrap(),
+        "
+        // The shared X86Sub(a, b) feeds both Proj0 (the difference) and
+        // Proj1 (the flags). Keep the destructive SUB; no CMP needed.
+        // CHECK: sub    {{[a-z0-9]+}},{{[a-z0-9]+}}
+        // CHECK-NOT: cmp
+        // CHECK: ret
         ",
     );
 }

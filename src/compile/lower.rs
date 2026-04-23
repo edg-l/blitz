@@ -1060,6 +1060,17 @@ pub(super) fn lower_block_pure_ops(
         .map(|i| i.dst)
         .collect();
 
+    // VRegs that are operands of some Proj0 op. A Proj0 consumer means the
+    // *difference* (or sum, etc.) of a flag-producing ALU op is live and must
+    // be materialized in a register. Without a Proj0 consumer, the register
+    // output is dead and the op can be downgraded to a flags-only form (e.g.
+    // X86Sub -> cmp).
+    let has_proj0_consumer: BTreeSet<VReg> = insts
+        .iter()
+        .filter(|i| matches!(i.op, Op::Proj0))
+        .filter_map(|i| i.operands.first().copied())
+        .collect();
+
     for inst in insts {
         // Handle stack-passed function parameters (7th+ args in SysV ABI).
         if let Op::Param(param_idx, ty) = &inst.op {
@@ -1218,6 +1229,22 @@ pub(super) fn lower_block_pure_ops(
                 _ => OpSize::S64,
             })
             .unwrap_or(OpSize::S64);
+
+        // X86Sub with a dead difference: emit a flags-only `cmp` instead of
+        // the destructive `mov dst, src_a; sub dst, src_b`. Saves two bytes
+        // and a register clobber per compare-and-branch.
+        if matches!(inst.op, Op::X86Sub) && !has_proj0_consumer.contains(&inst.dst) {
+            let src_a = op_regs.first().copied().flatten();
+            let src_b = op_regs.get(1).copied().flatten();
+            if let (Some(a), Some(b)) = (src_a, src_b) {
+                result.push(MachInst::CmpRR {
+                    size: result_size,
+                    dst: Operand::Reg(a),
+                    src: Operand::Reg(b),
+                });
+                continue;
+            }
+        }
 
         // Fcmp(OrdEq/UnordNe) skipped isel -- lower directly to ucomisd/ucomiss.
         if let Op::Fcmp(cc @ (CondCode::OrdEq | CondCode::UnordNe)) = &inst.op {

@@ -3,13 +3,13 @@
 // Use noinline to keep the comparisons dynamic (parameter-based).
 // CHECK-LABEL: # check
 // block0: first x > 5 comparison
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jg
 // block1: x > 20 comparison (clobbers EFLAGS)
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jg
 // block3: fresh x > 5 comparison (must not reuse stale flags from block0)
-// CHECK: sub
+// CHECK: cmp
 // CHECK: jg
 
 __attribute__((noinline))
