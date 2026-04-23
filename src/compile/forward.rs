@@ -408,4 +408,178 @@ mod tests {
         let c_b = eg.unionfind.find_immutable(val_b);
         assert_eq!(c_res, c_b, "load result merged with second stored value");
     }
+
+    /// Regression: after forwarding Load -> Iconst and removing the Load op,
+    /// the `LoadResult` placeholder must be stripped from the merged class AND
+    /// from the memo. Without this, extraction can pick the placeholder and
+    /// the lowerer emits no writer for the vreg (garbage value).
+    #[test]
+    fn forward_to_constant_strips_placeholder_node() {
+        let mut eg = EGraph::new();
+        let s0 = stack_addr(&mut eg, 0);
+        let val = iconst_i64(&mut eg, 60);
+        let load_res = load_result_class(&mut eg, 42, Type::I64);
+
+        let mut func = make_func_with_block(vec![
+            EffectfulOp::Store {
+                addr: s0,
+                val,
+                ty: Type::I64,
+            },
+            EffectfulOp::Load {
+                addr: s0,
+                ty: Type::I64,
+                result: load_res,
+            },
+            EffectfulOp::Ret { val: None },
+        ]);
+        let ai = AliasInfo::new();
+        let count = run_forwarding(&mut func, &mut eg, &ai);
+        assert_eq!(count, 1);
+
+        let canon = eg.unionfind.find_immutable(load_res);
+        let has_placeholder = eg
+            .class(canon)
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, Op::LoadResult(_, _)));
+        assert!(
+            !has_placeholder,
+            "dead LoadResult must be stripped from merged class"
+        );
+        let key = ENode {
+            op: Op::LoadResult(42, Type::I64),
+            children: smallvec::SmallVec::new(),
+        };
+        assert!(
+            !eg.memo.contains_key(&key),
+            "dead LoadResult must be removed from memo"
+        );
+    }
+
+    /// Three consecutive loads from the same address: the last two are
+    /// forwarded to the first; only one real load op remains.
+    #[test]
+    fn three_consecutive_loads_collapsed_to_one() {
+        let mut eg = EGraph::new();
+        let s0 = stack_addr(&mut eg, 0);
+        let r1 = load_result_class(&mut eg, 1, Type::I64);
+        let r2 = load_result_class(&mut eg, 2, Type::I64);
+        let r3 = load_result_class(&mut eg, 3, Type::I64);
+
+        let mut func = make_func_with_block(vec![
+            EffectfulOp::Load {
+                addr: s0,
+                ty: Type::I64,
+                result: r1,
+            },
+            EffectfulOp::Load {
+                addr: s0,
+                ty: Type::I64,
+                result: r2,
+            },
+            EffectfulOp::Load {
+                addr: s0,
+                ty: Type::I64,
+                result: r3,
+            },
+            EffectfulOp::Ret { val: None },
+        ]);
+        let ai = AliasInfo::new();
+        let count = run_forwarding(&mut func, &mut eg, &ai);
+        assert_eq!(count, 2, "two loads forwarded");
+        assert_eq!(func.blocks[0].ops.len(), 2, "only first load + ret remain");
+        // All three should now share a canonical class.
+        let c1 = eg.unionfind.find_immutable(r1);
+        let c2 = eg.unionfind.find_immutable(r2);
+        let c3 = eg.unionfind.find_immutable(r3);
+        assert_eq!(c1, c2);
+        assert_eq!(c2, c3);
+    }
+
+    /// Forwarding must succeed even when a non-aliasing store to a different
+    /// slot sits between the store and the load.
+    #[test]
+    fn non_aliasing_store_does_not_invalidate() {
+        let mut eg = EGraph::new();
+        let s0 = stack_addr(&mut eg, 0);
+        let s1 = stack_addr(&mut eg, 1);
+        let a = iconst_i64(&mut eg, 100);
+        let b = iconst_i64(&mut eg, 200);
+        let r = load_result_class(&mut eg, 9, Type::I64);
+
+        let mut func = make_func_with_block(vec![
+            EffectfulOp::Store {
+                addr: s0,
+                val: a,
+                ty: Type::I64,
+            },
+            EffectfulOp::Store {
+                addr: s1,
+                val: b,
+                ty: Type::I64,
+            },
+            EffectfulOp::Load {
+                addr: s0,
+                ty: Type::I64,
+                result: r,
+            },
+            EffectfulOp::Ret { val: None },
+        ]);
+        let ai = AliasInfo::new();
+        let count = run_forwarding(&mut func, &mut eg, &ai);
+        assert_eq!(count, 1, "load forwarded past non-aliasing store");
+        assert_eq!(
+            eg.unionfind.find_immutable(r),
+            eg.unionfind.find_immutable(a)
+        );
+    }
+
+    /// After forwarding, a Store whose value is a load result gets its value
+    /// class canonicalized to the forwarded-from class. This verifies that
+    /// chained rewrites (load forward then load reused elsewhere) are
+    /// consistent after a single rebuild.
+    #[test]
+    fn chained_load_forward_consistent_after_rebuild() {
+        let mut eg = EGraph::new();
+        let s0 = stack_addr(&mut eg, 0);
+        let s1 = stack_addr(&mut eg, 1);
+        let val = iconst_i64(&mut eg, 7);
+        let r1 = load_result_class(&mut eg, 1, Type::I64);
+        let r2 = load_result_class(&mut eg, 2, Type::I64);
+
+        let mut func = make_func_with_block(vec![
+            // store s0 <- 7
+            EffectfulOp::Store {
+                addr: s0,
+                val,
+                ty: Type::I64,
+            },
+            // load s0 -> r1 (forwards to 7)
+            EffectfulOp::Load {
+                addr: s0,
+                ty: Type::I64,
+                result: r1,
+            },
+            // store s1 <- r1 (which is now forwarded to 7)
+            EffectfulOp::Store {
+                addr: s1,
+                val: r1,
+                ty: Type::I64,
+            },
+            // load s1 -> r2 (forwards to r1, which forwards to 7)
+            EffectfulOp::Load {
+                addr: s1,
+                ty: Type::I64,
+                result: r2,
+            },
+            EffectfulOp::Ret { val: None },
+        ]);
+        let ai = AliasInfo::new();
+        let count = run_forwarding(&mut func, &mut eg, &ai);
+        assert_eq!(count, 2, "two loads forwarded");
+        let c_val = eg.unionfind.find_immutable(val);
+        assert_eq!(eg.unionfind.find_immutable(r1), c_val);
+        assert_eq!(eg.unionfind.find_immutable(r2), c_val);
+    }
 }

@@ -509,4 +509,67 @@ mod tests {
         let ai = AliasInfo::new();
         assert!(!ai.store_clobbers_load(s0, Type::I64, s1, Type::I64, &eg));
     }
+
+    /// `Op::Addr { .. }` propagates base from its first operand, same as
+    /// `X86Lea*` and `Add`.
+    #[test]
+    fn addr_op_propagates_stack_base() {
+        let mut eg = EGraph::new();
+        let s2 = stack_addr(&mut eg, 2);
+        let c4 = iconst(&mut eg, 4);
+        let addr_node = add_node(&mut eg, Op::Addr { scale: 1, disp: 0 }, &[s2, c4]);
+        let s2b = stack_addr(&mut eg, 2);
+        let s3 = stack_addr(&mut eg, 3);
+        let ai = AliasInfo::new();
+        // Same slot base -> may-alias.
+        assert!(ai.may_alias(addr_node, s2b, &eg));
+        // Different slot -> no alias.
+        assert!(!ai.may_alias(addr_node, s3, &eg));
+    }
+
+    /// Two known bases in an `Add` (e.g. `StackAddr + GlobalAddr`) cannot form
+    /// a single-base address; `merge_add_bases` must widen to `Unknown`.
+    #[test]
+    fn add_of_two_different_known_bases_is_unknown() {
+        let mut eg = EGraph::new();
+        let s = stack_addr(&mut eg, 0);
+        let g = global_addr(&mut eg, "g");
+        let sum = add_node(&mut eg, Op::Add, &[s, g]);
+        let ai = AliasInfo::new();
+        assert_eq!(ai.classify(sum, &eg), AddrBase::Unknown);
+    }
+
+    /// Deeply nested Adds exceeding the recursion depth cap return Unknown
+    /// rather than stack-overflowing.
+    #[test]
+    fn deep_add_chain_respects_depth_cap() {
+        let mut eg = EGraph::new();
+        let mut cur = stack_addr(&mut eg, 0);
+        for _ in 0..32 {
+            let c = iconst(&mut eg, 1);
+            cur = add_node(&mut eg, Op::Add, &[cur, c]);
+        }
+        let ai = AliasInfo::new();
+        // Depth cap kicks in; conservative Unknown is acceptable (and the
+        // call must not stack-overflow).
+        let base = ai.classify(cur, &eg);
+        assert!(matches!(base, AddrBase::Unknown | AddrBase::StackSlot(0)));
+    }
+
+    /// Memoization: classifying the same class twice returns the same result
+    /// without re-walking the e-class. This is a smoke test: repeated calls
+    /// through an expression tree cache correctly.
+    #[test]
+    fn memo_caches_subexpressions() {
+        let mut eg = EGraph::new();
+        let s = stack_addr(&mut eg, 7);
+        let c = iconst(&mut eg, 16);
+        let add = add_node(&mut eg, Op::Add, &[s, c]);
+        let ai = AliasInfo::new();
+        assert_eq!(ai.classify(add, &eg), AddrBase::StackSlot(7));
+        // Second call should hit the memo cache — just verify same answer.
+        assert_eq!(ai.classify(add, &eg), AddrBase::StackSlot(7));
+        // Classifying the base directly should also work.
+        assert_eq!(ai.classify(s, &eg), AddrBase::StackSlot(7));
+    }
 }

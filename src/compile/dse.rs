@@ -343,4 +343,149 @@ mod tests {
         let n = run_dse(&mut func, &eg, &ai);
         assert_eq!(n, 0);
     }
+
+    /// Chain of 3 stores at the same address with no intervening load/call:
+    /// only the last survives.
+    #[test]
+    fn chain_of_stores_kills_all_but_last() {
+        let mut eg = EGraph::new();
+        let s0 = stack_addr(&mut eg, 0);
+        let a = iconst(&mut eg, 10);
+        let b = iconst(&mut eg, 20);
+        let c = iconst(&mut eg, 30);
+        let mut func = make_func(vec![
+            EffectfulOp::Store {
+                addr: s0,
+                val: a,
+                ty: Type::I64,
+            },
+            EffectfulOp::Store {
+                addr: s0,
+                val: b,
+                ty: Type::I64,
+            },
+            EffectfulOp::Store {
+                addr: s0,
+                val: c,
+                ty: Type::I64,
+            },
+            EffectfulOp::Ret { val: None },
+        ]);
+        let ai = AliasInfo::new();
+        let n = run_dse(&mut func, &eg, &ai);
+        assert_eq!(n, 2);
+        // Surviving ops: final store + ret.
+        assert_eq!(func.blocks[0].ops.len(), 2);
+        match &func.blocks[0].ops[0] {
+            EffectfulOp::Store { val, .. } => assert_eq!(*val, c),
+            _ => panic!("expected store of c"),
+        }
+    }
+
+    /// Two independent store chains to disjoint slots are tracked
+    /// independently: each slot's earlier store dies at its own later store.
+    #[test]
+    fn interleaved_stores_to_disjoint_slots() {
+        let mut eg = EGraph::new();
+        let s0 = stack_addr(&mut eg, 0);
+        let s1 = stack_addr(&mut eg, 1);
+        let a = iconst(&mut eg, 1);
+        let b = iconst(&mut eg, 2);
+        let c = iconst(&mut eg, 3);
+        let d = iconst(&mut eg, 4);
+        let mut func = make_func(vec![
+            EffectfulOp::Store {
+                addr: s0,
+                val: a,
+                ty: Type::I64,
+            },
+            EffectfulOp::Store {
+                addr: s1,
+                val: b,
+                ty: Type::I64,
+            },
+            EffectfulOp::Store {
+                addr: s0,
+                val: c,
+                ty: Type::I64,
+            },
+            EffectfulOp::Store {
+                addr: s1,
+                val: d,
+                ty: Type::I64,
+            },
+            EffectfulOp::Ret { val: None },
+        ]);
+        let ai = AliasInfo::new();
+        let n = run_dse(&mut func, &eg, &ai);
+        // First store to s0 killed, first store to s1 killed.
+        assert_eq!(n, 2);
+        assert_eq!(func.blocks[0].ops.len(), 3);
+    }
+
+    /// A store through a function parameter (unknown base) cannot be proven
+    /// must-alias with another store to the same canonical class, but an
+    /// immediate self-kill at canonical equality still works. This covers
+    /// the "unknown base but canonical class equal" path.
+    #[test]
+    fn param_based_address_self_kill() {
+        let mut eg = EGraph::new();
+        let p = add_node(&mut eg, Op::Param(0, Type::I64), &[]);
+        let a = iconst(&mut eg, 10);
+        let b = iconst(&mut eg, 20);
+        let mut func = make_func(vec![
+            EffectfulOp::Store {
+                addr: p,
+                val: a,
+                ty: Type::I64,
+            },
+            EffectfulOp::Store {
+                addr: p,
+                val: b,
+                ty: Type::I64,
+            },
+            EffectfulOp::Ret { val: None },
+        ]);
+        let ai = AliasInfo::new();
+        let n = run_dse(&mut func, &eg, &ai);
+        assert_eq!(n, 1, "same canonical param addr -> must_alias -> kill");
+    }
+
+    /// Regression: a load between two stores at different addresses cancels
+    /// only the entries it may-aliases; entries to non-aliasing addresses
+    /// must remain killable by later matching stores.
+    #[test]
+    fn load_at_other_slot_does_not_save_unrelated_store() {
+        let mut eg = EGraph::new();
+        let s0 = stack_addr(&mut eg, 0);
+        let s1 = stack_addr(&mut eg, 1);
+        let a = iconst(&mut eg, 10);
+        let b = iconst(&mut eg, 20);
+        let r = load_result_class(&mut eg, 1, Type::I64);
+        let mut func = make_func(vec![
+            EffectfulOp::Store {
+                addr: s0,
+                val: a,
+                ty: Type::I64,
+            },
+            // Load from s1 must NOT save the pending store to s0.
+            EffectfulOp::Load {
+                addr: s1,
+                ty: Type::I64,
+                result: r,
+            },
+            EffectfulOp::Store {
+                addr: s0,
+                val: b,
+                ty: Type::I64,
+            },
+            EffectfulOp::Ret { val: None },
+        ]);
+        let ai = AliasInfo::new();
+        let n = run_dse(&mut func, &eg, &ai);
+        assert_eq!(
+            n, 1,
+            "first store to s0 killed; load at s1 does not save it"
+        );
+    }
 }
