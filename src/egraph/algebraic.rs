@@ -63,6 +63,65 @@ pub fn apply_algebraic_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_complement_rules(egraph, &snaps);
     changed |= apply_demorgan_rules(egraph, &snaps);
     changed |= apply_negation_distribution_rules(egraph, &snaps);
+    changed |= apply_sub_zero_eq_ne_rules(egraph, &snaps);
+    changed
+}
+
+/// `Icmp(Eq/Ne, Sub(a, b), 0)` → `Icmp(Eq/Ne, a, b)` (and the symmetric form).
+///
+/// Only `Eq`/`Ne` — the rewrite is unsafe for signed ordering comparisons
+/// because `a - b` can overflow, so `Sgt((a - b), 0)` differs from `Sgt(a, b)`
+/// when overflow occurs. Equality is immune: `(a - b) == 0` iff `a == b` in
+/// wrapping arithmetic.
+fn apply_sub_zero_eq_ne_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    use crate::ir::condcode::CondCode;
+
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        let Op::Icmp(cc) = &snap.op else { continue };
+        if !matches!(cc, CondCode::Eq | CondCode::Ne) {
+            continue;
+        }
+        if snap.children.len() != 2 {
+            continue;
+        }
+        let lhs = snap.children[0];
+        let rhs = snap.children[1];
+
+        // Try (Sub(a, b), 0); also accept (0, Sub(a, b)) because Eq/Ne are
+        // symmetric in operand order.
+        let (sub_side, other) = if egraph.get_constant(rhs).map(|(v, _)| v) == Some(0) {
+            (lhs, rhs)
+        } else if egraph.get_constant(lhs).map(|(v, _)| v) == Some(0) {
+            (rhs, lhs)
+        } else {
+            continue;
+        };
+        let _ = other; // retained for clarity; we only needed to confirm the zero side
+
+        let sub_canon = egraph.unionfind.find_immutable(sub_side);
+        let sub_nodes = egraph.class(sub_canon).nodes.clone();
+        for node in sub_nodes {
+            if node.op != Op::Sub || node.children.len() != 2 {
+                continue;
+            }
+            let a = node.children[0];
+            let b = node.children[1];
+            let new_icmp = egraph.add(ENode {
+                op: Op::Icmp(*cc),
+                children: smallvec![a, b],
+            });
+            let canon = egraph.unionfind.find_immutable(class_id);
+            let new_canon = egraph.unionfind.find_immutable(new_icmp);
+            if canon != new_canon {
+                egraph.merge(class_id, new_icmp);
+                changed = true;
+            }
+            break;
+        }
+    }
     changed
 }
 
@@ -1897,6 +1956,104 @@ mod tests {
             children: smallvec![not_a, not_b],
         });
         assert_eq!(g.find(not_or), g.find(and_not));
+    }
+
+    // ── Icmp(Eq/Ne, Sub(a,b), 0) rewrite tests ───────────────────────────────
+
+    #[test]
+    fn icmp_eq_sub_zero_rewrites_to_icmp_eq_ab() {
+        use crate::ir::condcode::CondCode;
+        let mut g = EGraph::new();
+        let a = g.add(ENode {
+            op: Op::Param(0, Type::I64),
+            children: smallvec![],
+        });
+        let b = g.add(ENode {
+            op: Op::Param(1, Type::I64),
+            children: smallvec![],
+        });
+        let zero = iconst(&mut g, 0, Type::I64);
+        let diff = g.add(ENode {
+            op: Op::Sub,
+            children: smallvec![a, b],
+        });
+        let eq = g.add(ENode {
+            op: Op::Icmp(CondCode::Eq),
+            children: smallvec![diff, zero],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+
+        let direct = g.add(ENode {
+            op: Op::Icmp(CondCode::Eq),
+            children: smallvec![a, b],
+        });
+        assert_eq!(g.find(eq), g.find(direct));
+    }
+
+    #[test]
+    fn icmp_ne_zero_sub_symmetric() {
+        use crate::ir::condcode::CondCode;
+        let mut g = EGraph::new();
+        let a = g.add(ENode {
+            op: Op::Param(0, Type::I32),
+            children: smallvec![],
+        });
+        let b = g.add(ENode {
+            op: Op::Param(1, Type::I32),
+            children: smallvec![],
+        });
+        let zero = iconst(&mut g, 0, Type::I32);
+        let diff = g.add(ENode {
+            op: Op::Sub,
+            children: smallvec![a, b],
+        });
+        // RHS-first form: Icmp(Ne, 0, Sub(a, b))
+        let ne = g.add(ENode {
+            op: Op::Icmp(CondCode::Ne),
+            children: smallvec![zero, diff],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+
+        let direct = g.add(ENode {
+            op: Op::Icmp(CondCode::Ne),
+            children: smallvec![a, b],
+        });
+        assert_eq!(g.find(ne), g.find(direct));
+    }
+
+    #[test]
+    fn icmp_sgt_sub_zero_not_rewritten() {
+        // Signed ordering across Sub's overflow is NOT equivalent: leave alone.
+        use crate::ir::condcode::CondCode;
+        let mut g = EGraph::new();
+        let a = g.add(ENode {
+            op: Op::Param(0, Type::I64),
+            children: smallvec![],
+        });
+        let b = g.add(ENode {
+            op: Op::Param(1, Type::I64),
+            children: smallvec![],
+        });
+        let zero = iconst(&mut g, 0, Type::I64);
+        let diff = g.add(ENode {
+            op: Op::Sub,
+            children: smallvec![a, b],
+        });
+        let sgt = g.add(ENode {
+            op: Op::Icmp(CondCode::Sgt),
+            children: smallvec![diff, zero],
+        });
+        apply_algebraic_rules(&mut g);
+        g.rebuild();
+
+        let direct = g.add(ENode {
+            op: Op::Icmp(CondCode::Sgt),
+            children: smallvec![a, b],
+        });
+        // Must NOT be merged.
+        assert_ne!(g.find(sgt), g.find(direct));
     }
 
     // ── Negation distribution test ───────────────────────────────────────────
