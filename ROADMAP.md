@@ -211,11 +211,16 @@ that regalloc carries the highest bug density.
       value; this is the splitter not reducing pressure to the budget at all.
       Suspect it splits only the single worst point per block per pass and
       never re-measures.
-- [ ] **Silent miscompile plus a segfault**
-      (`tests/fuzz/findings/seed5_miscompile.c`, 43 lines). The generator's
-      interpreter, gcc and clang all produce 606; blitz -O1 produces 610 and
-      blitz -O0 segfaults. The program is UB-free by construction, so this is
-      not a case of two legal answers.
+- [ ] **Stack array access corrupts the frame**
+      (`tests/fuzz/findings/array_spill_frame_corruption.c`, 12 lines; reduced
+      from `seed5_miscompile.c`). Summing elements of an `int arr[8]`:
+      5 elements is correct, 6 prints the right value but returns exit 2, and
+      7 or more segfaults. Right answer with a wrong exit code, escalating to a
+      clobbered return address, points at spilled values landing on top of the
+      user array -- `compute_frame_layout` places user stack slots above the
+      regalloc spill slots, so suspect the slot *indices* assigned into that
+      layout rather than the layout arithmetic, which the property tests in
+      `src/x86/abi.rs` already cover.
 
 ## Tech debt
 
