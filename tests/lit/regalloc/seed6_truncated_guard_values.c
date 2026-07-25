@@ -1,20 +1,19 @@
-// KNOWN FAILING -- reproducer for a real bug. Do not "fix" by weakening it.
+// Regression test: the exit status carries the values a guard compares, so a
+// wrong one is visible without a printf.
 //
-//   cc -O0          226
-//   blitz -O0       104     <- wrong exit status
-//   blitz -O1       cannot allocate registers (see ROADMAP P0)
+//   cc -O0, blitz -O0, blitz -O1   226
+//
+// blitz gave 104 at -O0 and, once it could allocate registers at all, 12 at -O1.
+// Four bugs were found by reducing this one program: parameters re-emitted per
+// block so only one copy carried the ABI precolor (438bdc4), phi args resolved
+// through the global class map (ccc64b7), a loop latch overwriting its own block
+// params, and R11 handed out to values while lowering used it as a scratch. The
+// last two are what finally made it correct.
 //
 // tests/fuzz/gen_c.py seed 6, truncated after the first call and returning the
-// values the original program's guard compares, so the divergence is visible as
-// an exit status instead of `return 3`.
+// values the original program's guard compares.
 //
-// Before 7d60eab the splitter gave up after one round and this did not compile
-// at all; it compiles now and is wrong. Two contributing bugs were found and
-// fixed by reducing it (438bdc4 parameters re-emitted per block, ccc64b7 phi
-// args resolved through the global class map), and it is still wrong, so at
-// least one more remains. The smaller
-// findings/xmm_param_clobbered_at_merge.c came out of the same reduction and
-// is a much better starting point -- work that one first.
+// EXIT: 226
 //
 extern int printf(char* fmt, int x);
 

@@ -1,8 +1,14 @@
 // KNOWN FAILING -- reproducer for a real bug. Do not "fix" by weakening it.
 //
 //   cc -O0          303
-//   blitz -O0       SIGSEGV
-//   blitz -O1       cannot allocate registers (see ROADMAP P0)
+//   blitz -O0       cannot allocate registers (gpr_overshoot=2)
+//   blitz -O1       cannot allocate registers (gpr_overshoot=18)
+//
+// It used to SIGSEGV at -O0, for the reason set out below. The wrong-code bug
+// that caused it is fixed; what stops this program now is register pressure
+// only, which is ROADMAP P0 and shared with most of the fuzz corpus. Keeping the
+// file: the moment the allocator gains a spill path, this is the first program
+// to re-check, and the analysis below is still the record of the seam.
 //
 // tests/fuzz/gen_c.py seed 4. Reaches codegen only since the barrier-group pin
 // rule started scanning the un-stripped schedule; before that the splitter left
@@ -25,14 +31,13 @@
 // in that order instead. Where the two groupings disagree, a value is emitted
 // somewhere its interference was never measured.
 //
-// The fix is to stop grouping twice. The schedule handed to the allocator is
-// already ordered by barrier group, and the splitter inserts at positions within
-// it, so schedule order *is* the intended emission order: Phase 7 should emit in
-// it and place each effectful op at its own barrier instruction, rather than
-// re-partitioning. That also removes the reload-pinning rules in
-// `compile/mod.rs`, which exist only to repair the divergence.
+// That was fixed by stopping the double grouping (ae55ce9): the schedule handed
+// to the allocator is already ordered by barrier group, so Phase 7 emits in it
+// and places each effectful op at its own barrier instruction.
 //
-// findings/seed6_truncated_miscompile.c and seed 7 fail the same way.
+// The program the same reduction produced,
+// tests/lit/regalloc/seed6_truncated_guard_values.c, is correct now and is a lit
+// test. Seed 7 still gives a wrong answer at -O0.
 //
 // OUTPUT: 303
 extern int printf(char* fmt, int x);
