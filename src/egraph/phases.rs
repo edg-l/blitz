@@ -56,6 +56,34 @@ pub fn run_phases(egraph: &mut EGraph, opts: &CompileOptions) -> Result<(), Stri
     Ok(())
 }
 
+/// Upper bound on isel fixpoint rounds. Isel only adds alternatives to existing
+/// classes, so it converges in a couple of rounds; this is a runaway guard.
+const ISEL_FIXPOINT_LIMIT: u32 = 32;
+
+/// Run instruction selection to a fixpoint.
+///
+/// Isel is not an optimization: extraction fails outright if a reachable class
+/// has no machine-op alternative, so every class must be covered no matter how
+/// the optimization budget was set. [`run_phases`] cannot guarantee that on its
+/// own, because any rule that fires after `apply_isel_rules` within an
+/// iteration creates classes that iteration never sees, and the loop may stop
+/// before the next one (`-O0` runs exactly one iteration).
+///
+/// This terminates because isel only ever adds nodes to existing classes and
+/// stops reporting changes once every pattern has its machine equivalent.
+pub fn saturate_isel(egraph: &mut EGraph) -> Result<(), String> {
+    for _ in 0..ISEL_FIXPOINT_LIMIT {
+        let changed = apply_isel_rules(egraph);
+        egraph.rebuild();
+        if !changed {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "instruction selection did not converge after {ISEL_FIXPOINT_LIMIT} rounds"
+    ))
+}
+
 fn check_blowup(egraph: &mut EGraph, opts: &CompileOptions, iter: u32) -> Result<(), String> {
     let count = egraph.class_count();
     if count > opts.max_classes {

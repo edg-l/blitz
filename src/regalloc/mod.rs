@@ -97,16 +97,27 @@ pub fn build_vreg_classes_from_insts(insts: &[ScheduledInst]) -> BTreeMap<VReg, 
         }
     }
     for inst in insts {
-        if inst.op.is_fp_op()
-            && !matches!(
-                &inst.op,
-                crate::ir::op::Op::CallResult(_, _)
-                    | crate::ir::op::Op::VoidCallBarrier
-                    | crate::ir::op::Op::StoreBarrier
-            )
-        {
+        // Barrier pseudo-ops carry call/store arguments of every class, so
+        // their operand list says nothing about register class.
+        if matches!(
+            &inst.op,
+            crate::ir::op::Op::CallResult(_, _)
+                | crate::ir::op::Op::VoidCallBarrier
+                | crate::ir::op::Op::StoreBarrier
+        ) {
+            continue;
+        }
+        // Force the operand class for ops that know it. This is what fixes
+        // cross-block live-ins, whose def is in another block and would
+        // otherwise keep the GPR default from the loop above.
+        //
+        // `operand_reg_class` rather than `is_fp_op`: the latter describes the
+        // result, and cvtsi2sd/cvttsd2si/movq read the opposite class from the
+        // one they write.
+        if inst.op.is_fp_op() || inst.op.has_cross_class_operands() {
+            let class = inst.op.operand_reg_class();
             for &op in &inst.operands {
-                map.insert(op, RegClass::XMM);
+                map.insert(op, class);
             }
         }
     }

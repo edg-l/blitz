@@ -615,11 +615,11 @@ impl Encoder {
             MachInst::UcomissRR { src1, src2 } => {
                 self.encode_ucomiss_rr(Self::expect_reg(src1), Self::expect_reg(src2));
             }
-            MachInst::Cvtsi2sdRR { dst, src } => {
-                self.encode_cvtsi2sd_rr(Self::expect_reg(dst), Self::expect_reg(src));
+            MachInst::Cvtsi2sdRR { size, dst, src } => {
+                self.encode_cvtsi2sd_rr(*size, Self::expect_reg(dst), Self::expect_reg(src));
             }
-            MachInst::Cvtsi2ssRR { dst, src } => {
-                self.encode_cvtsi2ss_rr(Self::expect_reg(dst), Self::expect_reg(src));
+            MachInst::Cvtsi2ssRR { size, dst, src } => {
+                self.encode_cvtsi2ss_rr(*size, Self::expect_reg(dst), Self::expect_reg(src));
             }
             MachInst::Cvttsd2siRR { dst, src } => {
                 self.encode_cvttsd2si_rr(Self::expect_reg(dst), Self::expect_reg(src));

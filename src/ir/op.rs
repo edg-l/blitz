@@ -1,5 +1,6 @@
 use crate::ir::condcode::CondCode;
 use crate::ir::types::Type;
+use crate::x86::reg::RegClass;
 
 /// Opaque identifier for an e-class.
 /// `ClassId::NONE` is used as a sentinel for absent optional operands.
@@ -195,9 +196,16 @@ pub enum Op {
 
     // ── x86-64 FP conversion ops ────────────────────────────────────────────────
     /// `cvtsi2sd` — signed int -> f64; 1 child (GPR), result F64.
-    X86Cvtsi2sd,
+    ///
+    /// The `Type` is the *source* width and selects the 32- or 64-bit form.
+    /// It must be `I32` or `I64`: the instruction has no narrower encoding, so
+    /// isel sign-extends anything smaller first. Reading a 32-bit value with
+    /// the 64-bit form converts the caller's leftover high bits, which SysV
+    /// leaves undefined.
+    X86Cvtsi2sd(Type),
     /// `cvtsi2ss` — signed int -> f32; 1 child (GPR), result F32.
-    X86Cvtsi2ss,
+    /// The `Type` is the source width; see [`Op::X86Cvtsi2sd`].
+    X86Cvtsi2ss(Type),
     /// `cvttsd2si` — f64 -> signed int (truncation); 1 child (XMM), result = Type param.
     X86Cvttsd2si(Type),
     /// `cvttss2si` — f32 -> signed int (truncation); 1 child (XMM), result = Type param.
@@ -722,21 +730,29 @@ impl Op {
             }
 
             // ── x86 FP conversion ops ────────────────────────────────────────
-            Op::X86Cvtsi2sd => {
+            Op::X86Cvtsi2sd(src_ty) => {
                 assert_eq!(child_types.len(), 1, "X86Cvtsi2sd requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
                     "X86Cvtsi2sd requires integer child, got {:?}",
                     child_types[0]
                 );
+                assert!(
+                    matches!(src_ty, Type::I32 | Type::I64),
+                    "X86Cvtsi2sd source must be I32 or I64, got {src_ty:?}"
+                );
                 Type::F64
             }
-            Op::X86Cvtsi2ss => {
+            Op::X86Cvtsi2ss(src_ty) => {
                 assert_eq!(child_types.len(), 1, "X86Cvtsi2ss requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
                     "X86Cvtsi2ss requires integer child, got {:?}",
                     child_types[0]
+                );
+                assert!(
+                    matches!(src_ty, Type::I32 | Type::I64),
+                    "X86Cvtsi2ss source must be I32 or I64, got {src_ty:?}"
                 );
                 Type::F32
             }
@@ -891,8 +907,8 @@ impl Op {
             | Op::X86Divss
             | Op::X86Sqrtss
             // Conversions that produce XMM results
-            | Op::X86Cvtsi2sd
-            | Op::X86Cvtsi2ss
+            | Op::X86Cvtsi2sd(_)
+            | Op::X86Cvtsi2ss(_)
             | Op::X86Cvtsd2ss
             | Op::X86Cvtss2sd
             // FP constants
@@ -911,6 +927,55 @@ impl Op {
             // X86Cvttsd2si / X86Cvttss2si produce GPR (not XMM)
             // X86Ucomisd / X86Ucomiss produce flags (not XMM)
             _ => false,
+        }
+    }
+
+    /// Returns true if this op reads its operands from a different register
+    /// class than the one it writes.
+    ///
+    /// x86-64 has exactly two of these shapes and both are conversions:
+    /// `cvtsi2sd/ss` and a GPR-to-XMM `movq` write XMM from a GPR, while
+    /// `cvttsd2si/cvttss2si`, `ucomisd/ucomiss` and an XMM-to-GPR `movq` read
+    /// XMM and write a GPR or flags. Every other op keeps both sides in one
+    /// class.
+    ///
+    /// Inferring operand class from [`Self::is_fp_op`] (which describes the
+    /// *result*) puts an integer value in an XMM register for these ops.
+    pub fn has_cross_class_operands(&self) -> bool {
+        matches!(
+            self,
+            Op::X86Cvtsi2sd(_)
+                | Op::X86Cvtsi2ss(_)
+                | Op::X86Cvttsd2si(_)
+                | Op::X86Cvttss2si(_)
+                | Op::X86Ucomisd
+                | Op::X86Ucomiss
+                | Op::X86Bitcast { .. }
+        )
+    }
+
+    /// The register class this op reads its operands from.
+    ///
+    /// For the cross-class ops above this is the opposite of the result class;
+    /// for everything else it matches.
+    pub fn operand_reg_class(&self) -> RegClass {
+        match self {
+            // XMM result, GPR source.
+            Op::X86Cvtsi2sd(_) | Op::X86Cvtsi2ss(_) => RegClass::GPR,
+            // GPR or flags result, XMM source.
+            Op::X86Cvttsd2si(_) | Op::X86Cvttss2si(_) | Op::X86Ucomisd | Op::X86Ucomiss => {
+                RegClass::XMM
+            }
+            // movq between the classes: the source is whichever side `from` is.
+            Op::X86Bitcast { from, .. } => {
+                if from.is_float() {
+                    RegClass::XMM
+                } else {
+                    RegClass::GPR
+                }
+            }
+            _ if self.is_fp_op() => RegClass::XMM,
+            _ => RegClass::GPR,
         }
     }
 

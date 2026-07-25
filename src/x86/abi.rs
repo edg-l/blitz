@@ -784,4 +784,149 @@ mod tests {
         );
         assert_eq!(buf.len(), prologue.len() + epilogue.len());
     }
+
+    // ── Frame layout properties (exhaustive over the configuration space) ────
+
+    /// Bytes RSP moves below the caller's RSP by the end of the prologue,
+    /// counting the return address the caller's CALL pushed.
+    fn prologue_displacement(layout: &FrameLayout) -> u32 {
+        let mut d = 8; // return address
+        if layout.uses_frame_pointer {
+            d += 8; // push rbp
+        }
+        d += layout.callee_saved.len() as u32 * 8;
+        d += layout.frame_size;
+        d
+    }
+
+    /// Every combination of inputs `compute_frame_layout` can see in practice.
+    fn all_layouts() -> impl Iterator<Item = (u32, usize, u32, bool, bool, u32, FrameLayout)> {
+        let callee_pool = CALLEE_SAVED;
+        (0..12u32).flat_map(move |spill_slots| {
+            (0..=callee_pool.len()).flat_map(move |n_callee| {
+                (0..6u32).flat_map(move |outgoing_units| {
+                    [false, true].into_iter().flat_map(move |has_calls| {
+                        [false, true].into_iter().flat_map(move |force_fp| {
+                            (0..6u32).map(move |user_slots| {
+                                let saved = &callee_pool[..n_callee];
+                                let outgoing = outgoing_units * 8;
+                                let layout = compute_frame_layout(
+                                    spill_slots,
+                                    saved,
+                                    outgoing,
+                                    has_calls,
+                                    force_fp,
+                                    user_slots,
+                                );
+                                (
+                                    spill_slots,
+                                    n_callee,
+                                    outgoing,
+                                    has_calls,
+                                    force_fp,
+                                    user_slots,
+                                    layout,
+                                )
+                            })
+                        })
+                    })
+                })
+            })
+        })
+    }
+
+    /// SysV requires RSP to be 16-byte aligned at the point of a CALL. Getting
+    /// this wrong crashes inside any callee that uses aligned SSE moves, and
+    /// only for some frame shapes, so check the whole space rather than the
+    /// handful of shapes the unit tests above happen to cover.
+    #[test]
+    fn frame_layout_keeps_rsp_aligned_at_calls() {
+        for (spills, n_callee, outgoing, has_calls, force_fp, user, layout) in all_layouts() {
+            if !has_calls {
+                continue; // no CALL in the body: nothing to align for
+            }
+            let d = prologue_displacement(&layout);
+            assert_eq!(
+                d % 16,
+                0,
+                "misaligned RSP at call sites: displacement {d} for spills={spills} \
+                 n_callee={n_callee} outgoing={outgoing} force_fp={force_fp} user={user}"
+            );
+        }
+    }
+
+    /// The frame must actually hold what it is supposed to hold: the spill area
+    /// plus outgoing argument space.
+    #[test]
+    fn frame_layout_reserves_enough_space() {
+        for (spills, n_callee, outgoing, has_calls, force_fp, user, layout) in all_layouts() {
+            if layout.is_leaf || layout.use_red_zone {
+                assert_eq!(
+                    layout.frame_size, 0,
+                    "leaf/red-zone frames must not allocate: spills={spills} user={user}"
+                );
+                continue;
+            }
+            let needed = (spills + user) * 8 + outgoing;
+            assert!(
+                layout.frame_size >= needed,
+                "frame_size {} < needed {needed} for spills={spills} n_callee={n_callee} \
+                 outgoing={outgoing} has_calls={has_calls} force_fp={force_fp} user={user}",
+                layout.frame_size
+            );
+        }
+    }
+
+    /// Red zone is only legal when nothing shifts RSP: no calls, no pushes, and
+    /// it must stay inside the 128 bytes the ABI guarantees.
+    #[test]
+    fn frame_layout_red_zone_preconditions() {
+        for (spills, n_callee, _outgoing, has_calls, force_fp, user, layout) in all_layouts() {
+            if !layout.use_red_zone {
+                continue;
+            }
+            assert!(
+                !has_calls,
+                "red zone with calls: spills={spills} user={user}"
+            );
+            assert_eq!(n_callee, 0, "red zone with callee-saved pushes");
+            assert!(!force_fp, "red zone with a frame pointer");
+            assert_eq!(layout.frame_size, 0, "red zone must not adjust RSP");
+            let depth = -layout.spill_offset;
+            assert!(
+                depth > 0 && depth <= 128,
+                "red-zone spill area {depth} bytes is outside the 128-byte guarantee \
+                 (spills={spills} user={user})"
+            );
+        }
+    }
+
+    /// Spill slots must land inside the frame and never collide with the
+    /// outgoing-argument area at the bottom of it.
+    #[test]
+    fn frame_layout_spill_area_does_not_overlap_outgoing_args() {
+        for (spills, n_callee, outgoing, _has_calls, force_fp, user, layout) in all_layouts() {
+            let total_slots = spills + user;
+            if total_slots == 0
+                || layout.is_leaf
+                || layout.use_red_zone
+                || layout.uses_frame_pointer
+            {
+                continue; // RSP-relative, in-frame spills are the case at risk
+            }
+            assert!(
+                layout.spill_offset >= outgoing as i32,
+                "spill area starts at {} but outgoing args occupy [0, {outgoing}) \
+                 (spills={spills} n_callee={n_callee} force_fp={force_fp} user={user})",
+                layout.spill_offset
+            );
+            let top = layout.spill_offset as u32 + total_slots * 8;
+            assert!(
+                top <= layout.frame_size,
+                "spill area ends at {top} but the frame is only {} bytes \
+                 (spills={spills} user={user})",
+                layout.frame_size
+            );
+        }
+    }
 }

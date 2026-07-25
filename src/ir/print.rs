@@ -117,8 +117,8 @@ pub fn fmt_op(op: &Op) -> String {
         Op::X86Sqrtss => "x86_sqrtss".into(),
 
         // x86 FP conversion
-        Op::X86Cvtsi2sd => "x86_cvtsi2sd".into(),
-        Op::X86Cvtsi2ss => "x86_cvtsi2ss".into(),
+        Op::X86Cvtsi2sd(ty) => format!("x86_cvtsi2sd({ty:?})"),
+        Op::X86Cvtsi2ss(ty) => format!("x86_cvtsi2ss({ty:?})"),
         Op::X86Cvttsd2si(ty) => format!("x86_cvttsd2si({ty:?})"),
         Op::X86Cvttss2si(ty) => format!("x86_cvttss2si({ty:?})"),
         Op::X86Cvtsd2ss => "x86_cvtsd2ss".into(),

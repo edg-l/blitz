@@ -228,8 +228,8 @@ impl AliasInfo {
             | Op::X86Sqrtss => AddrBase::Unknown,
 
             // x86 FP conversion
-            Op::X86Cvtsi2sd
-            | Op::X86Cvtsi2ss
+            Op::X86Cvtsi2sd(_)
+            | Op::X86Cvtsi2ss(_)
             | Op::X86Cvttsd2si(_)
             | Op::X86Cvttss2si(_)
             | Op::X86Cvtsd2ss

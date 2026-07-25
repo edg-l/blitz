@@ -297,6 +297,27 @@ pub(super) fn lower_effectful_op(
                 .filter(|l| matches!(l, ArgLoc::Stack { .. }))
                 .count();
 
+            // SysV AMD64: AL holds the number of vector registers used to pass
+            // arguments. A variadic callee branches on it to decide whether to
+            // spill XMM0-7 into its register save area, so a stale AL of zero
+            // makes `printf("%f", x)` read a save area that was never written.
+            //
+            // Blitz cannot tell a variadic callee from a fixed one -- tinyc
+            // prototypes carry no `...` -- so set AL on every call. A
+            // non-variadic callee ignores it, and AL is caller-saved, so this
+            // costs 2 bytes and clobbers nothing live. `mov` is deliberate:
+            // `xor al, al` would be shorter for the zero case but writes
+            // EFLAGS, which may be live across the argument setup.
+            let n_xmm_args = locs
+                .iter()
+                .filter(|l| matches!(l, ArgLoc::Reg(r) if r.is_xmm()))
+                .count();
+            insts.push(MachInst::MovRI {
+                size: OpSize::S8,
+                dst: Operand::Reg(Reg::RAX),
+                imm: n_xmm_args as i64,
+            });
+
             insts.push(MachInst::CallDirect {
                 target: callee.clone(),
             });

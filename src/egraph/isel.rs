@@ -551,16 +551,45 @@ fn apply_conv_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             continue;
         }
 
-        let child = snap.children[0];
+        let mut child = snap.children[0];
 
         let machine_op = match &snap.op {
-            Op::IntToFloat(target) => match target {
-                Type::F64 => Op::X86Cvtsi2sd,
-                Type::F32 => Op::X86Cvtsi2ss,
-                other => {
-                    unreachable!("IntToFloat target must be F32 or F64, got {:?}", other);
+            Op::IntToFloat(target) => {
+                // cvtsi2sd/ss encode a 32- or 64-bit source only. Anything
+                // narrower has to be widened first: the high bits of a register
+                // holding an i8/i16 are undefined, and so is the high half of
+                // one holding an i32, so picking the wrong width converts
+                // whatever the caller happened to leave behind.
+                let src_ty = match infer_class_type(egraph, child) {
+                    Some(Type::I64) => Type::I64,
+                    Some(Type::I32) | None => Type::I32,
+                    Some(narrow) => {
+                        debug_assert!(
+                            matches!(narrow, Type::I8 | Type::I16),
+                            "unexpected integer source {narrow:?} for IntToFloat"
+                        );
+                        // Emit the machine op, not `Sext`: this runs inside
+                        // isel, so a generic node added here would still need
+                        // its own lowering alternative and extraction would
+                        // find the class has none.
+                        child = egraph.add(ENode {
+                            op: Op::X86Movsx {
+                                from: narrow,
+                                to: Type::I32,
+                            },
+                            children: smallvec![child],
+                        });
+                        Type::I32
+                    }
+                };
+                match target {
+                    Type::F64 => Op::X86Cvtsi2sd(src_ty),
+                    Type::F32 => Op::X86Cvtsi2ss(src_ty),
+                    other => {
+                        unreachable!("IntToFloat target must be F32 or F64, got {:?}", other);
+                    }
                 }
-            },
+            }
             Op::FloatToInt(target) => {
                 let child_ty = infer_class_type(egraph, child);
                 let is_f32 = matches!(child_ty, Some(Type::F32));

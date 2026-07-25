@@ -960,18 +960,20 @@ fn lower_op(
         }
 
         // x86 FP conversion ops (lowering implemented in Phase 2)
-        Op::X86Cvtsi2sd => {
+        Op::X86Cvtsi2sd(src_ty) => {
             let dst = get_dst("X86Cvtsi2sd", dst_reg)?;
             let src = get_op("X86Cvtsi2sd", operand_regs, 0)?;
             Ok(vec![MachInst::Cvtsi2sdRR {
+                size: OpSize::from_int_type(src_ty),
                 dst: Operand::Reg(dst),
                 src: Operand::Reg(src),
             }])
         }
-        Op::X86Cvtsi2ss => {
+        Op::X86Cvtsi2ss(src_ty) => {
             let dst = get_dst("X86Cvtsi2ss", dst_reg)?;
             let src = get_op("X86Cvtsi2ss", operand_regs, 0)?;
             Ok(vec![MachInst::Cvtsi2ssRR {
+                size: OpSize::from_int_type(src_ty),
                 dst: Operand::Reg(dst),
                 src: Operand::Reg(src),
             }])

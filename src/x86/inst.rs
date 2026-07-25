@@ -389,13 +389,17 @@ pub enum MachInst {
     },
 
     // ── SSE FP conversion ──────────────────────────────────────────────────────
-    /// cvtsi2sd: GPR -> XMM (int -> f64)
+    /// cvtsi2sd: GPR -> XMM (int -> f64).
+    /// `size` is the *source* width: `S32` for `cvtsi2sd xmm, r32`, `S64` for
+    /// the REX.W form. Using S64 on a 32-bit value converts undefined high bits.
     Cvtsi2sdRR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },
-    /// cvtsi2ss: GPR -> XMM (int -> f32)
+    /// cvtsi2ss: GPR -> XMM (int -> f32). `size` is the source width.
     Cvtsi2ssRR {
+        size: OpSize,
         dst: Operand,
         src: Operand,
     },

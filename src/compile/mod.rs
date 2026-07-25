@@ -249,6 +249,19 @@ pub(super) fn run_egraph_and_extract(
     crate::egraph::algebraic::apply_algebraic_rules(egraph);
     egraph.rebuild();
 
+    // Close instruction selection over everything the rules above produced.
+    // Extraction has no fallback for a class without a machine op, so this is
+    // a correctness step, not part of the optimization budget.
+    crate::egraph::phases::saturate_isel(egraph).map_err(|e| CompileError {
+        phase: "isel".into(),
+        message: e,
+        location: Some(IrLocation {
+            function: func.name.clone(),
+            block: None,
+            inst: None,
+        }),
+    })?;
+
     let block_param_map = build_block_param_class_map(egraph);
 
     let mut all_roots = collect_roots(func, egraph);

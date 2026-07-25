@@ -213,7 +213,7 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── x86 FP conversion ops ─────────────────────────────────────────────
-            Op::X86Cvtsi2sd | Op::X86Cvtsi2ss => CostTuple {
+            Op::X86Cvtsi2sd(_) | Op::X86Cvtsi2ss(_) => CostTuple {
                 latency: 4.0,
                 throughput: 1.0,
                 size: 5.0,

@@ -145,13 +145,22 @@ impl Encoder {
     }
 
     /// cvtsi2sd: F2 0F 2A /r (GPR -> XMM, int -> f64)
-    pub fn encode_cvtsi2sd_rr(&mut self, dst: Reg, src: Reg) {
-        self.encode_sse_rr_w(0xF2, 0x2A, dst, src);
+    /// `size` selects the source width: `S64` emits the REX.W form, anything
+    /// else the 32-bit form. Narrower sources must be sign-extended by isel;
+    /// the instruction has no 8- or 16-bit encoding.
+    pub fn encode_cvtsi2sd_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
+        match size {
+            OpSize::S64 => self.encode_sse_rr_w(0xF2, 0x2A, dst, src),
+            _ => self.encode_sse_rr(0xF2, 0x2A, dst, src),
+        }
     }
 
-    /// cvtsi2ss: F3 0F 2A /r (GPR -> XMM, int -> f32)
-    pub fn encode_cvtsi2ss_rr(&mut self, dst: Reg, src: Reg) {
-        self.encode_sse_rr_w(0xF3, 0x2A, dst, src);
+    /// cvtsi2ss: F3 0F 2A /r (GPR -> XMM, int -> f32). See `encode_cvtsi2sd_rr`.
+    pub fn encode_cvtsi2ss_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
+        match size {
+            OpSize::S64 => self.encode_sse_rr_w(0xF3, 0x2A, dst, src),
+            _ => self.encode_sse_rr(0xF3, 0x2A, dst, src),
+        }
     }
 
     /// cvttsd2si: F2 0F 2C /r (XMM -> GPR, f64 -> int truncation)
