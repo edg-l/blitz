@@ -2,6 +2,35 @@ use crate::x86::abi::sequentialize_copies;
 use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
+/// The instruction for one `src -> dst` step of a sequentialized parallel copy.
+///
+/// A step between an XMM register and a GPR is a cycle-breaking park in the
+/// scratch register, not a value conversion: `movq` moves the low 64 bits, which
+/// is the whole of an F64 and covers an F32 in the low lane. `movsd` cannot name
+/// a GPR at all, so emitting it here produced an instruction that assembles to
+/// nonsense.
+pub(crate) fn copy_inst(src: Reg, dst: Reg, size: OpSize) -> MachInst {
+    match (src.is_xmm(), dst.is_xmm()) {
+        (true, true) => MachInst::MovsdRR {
+            dst: Operand::Reg(dst),
+            src: Operand::Reg(src),
+        },
+        (true, false) => MachInst::MovqFromXmm {
+            dst: Operand::Reg(dst),
+            src: Operand::Reg(src),
+        },
+        (false, true) => MachInst::MovqToXmm {
+            dst: Operand::Reg(dst),
+            src: Operand::Reg(src),
+        },
+        (false, false) => MachInst::MovRR {
+            size,
+            dst: Operand::Reg(dst),
+            src: Operand::Reg(src),
+        },
+    }
+}
+
 /// Insert parallel copies for block parameter passing.
 ///
 /// `copies` is a list of `(src_reg, dst_reg, size)` triples from the jump/branch
@@ -53,13 +82,6 @@ pub fn phi_copies(copies: &[(Reg, Reg, OpSize)], temp: Reg) -> Vec<MachInst> {
 
     seq.into_iter()
         .map(|(src, dst)| {
-            // XMM-to-XMM copies use MovsdRR instead of MovRR.
-            if src.is_xmm() || dst.is_xmm() {
-                return MachInst::MovsdRR {
-                    dst: Operand::Reg(dst),
-                    src: Operand::Reg(src),
-                };
-            }
             // Look up the original OpSize. For temp-register moves (cycle breaking),
             // fall back to the size associated with the non-temp register.
             let size = size_map
@@ -68,11 +90,7 @@ pub fn phi_copies(copies: &[(Reg, Reg, OpSize)], temp: Reg) -> Vec<MachInst> {
                 .or_else(|| reg_size.get(&src).copied())
                 .or_else(|| reg_size.get(&dst).copied())
                 .unwrap_or(OpSize::S64);
-            MachInst::MovRR {
-                size,
-                dst: Operand::Reg(dst),
-                src: Operand::Reg(src),
-            }
+            copy_inst(src, dst, size)
         })
         .collect()
 }

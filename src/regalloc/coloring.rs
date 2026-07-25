@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::x86::abi::{CALLEE_SAVED, CALLER_SAVED_GPR};
+use crate::x86::abi::{CALLEE_SAVED, CALLER_SAVED_GPR, SCRATCH_GPR};
 use crate::x86::reg::{Reg, RegClass};
 
 use super::interference::InterferenceGraph;
@@ -259,10 +259,10 @@ pub fn map_colors_to_regs(
 /// `build_pre_coloring_colors`, and `add_call_clobber_interferences` so that
 /// color numbers correspond to the same physical register in all uses.
 pub fn allocatable_gpr_order(uses_frame_pointer: bool) -> Vec<Reg> {
-    // Caller-saved GPRs (no RSP).
+    // Caller-saved GPRs, minus RSP and minus the scratch register.
     let mut regs: Vec<Reg> = CALLER_SAVED_GPR
         .iter()
-        .filter(|&&r| r != Reg::RSP)
+        .filter(|&&r| r != Reg::RSP && r != SCRATCH_GPR)
         .copied()
         .collect();
     // Callee-saved GPRs (RBP is excluded from the fixed list here; added below conditionally).
@@ -275,10 +275,11 @@ pub fn allocatable_gpr_order(uses_frame_pointer: bool) -> Vec<Reg> {
     regs
 }
 
-/// Number of usable GPR colors when the frame pointer is used (RBP reserved): 14.
-/// Number of usable GPR colors when the frame pointer is omitted (RBP allocatable): 15.
-const GPR_COLORS_WITH_FP: u32 = 14;
-const GPR_COLORS_NO_FP: u32 = 15;
+/// Number of usable GPR colors when the frame pointer is used (RBP and the
+/// scratch reserved): 13. One more when the frame pointer is omitted and RBP
+/// becomes allocatable: 14.
+const GPR_COLORS_WITH_FP: u32 = 13;
+const GPR_COLORS_NO_FP: u32 = 14;
 
 pub fn available_gpr_colors(uses_frame_pointer: bool) -> u32 {
     if uses_frame_pointer {
@@ -448,12 +449,30 @@ mod tests {
     // map_colors_to_regs: RBP can be allocated when uses_frame_pointer=false.
     #[test]
     fn color_to_reg_rbp_available_without_frame_pointer() {
-        // available_gpr_colors(false) = 15; if we need exactly 15 colors, color 14 -> RBP.
-        assert_eq!(available_gpr_colors(false), 15);
-        assert_eq!(available_gpr_colors(true), 14);
+        // 16 GPRs, less RSP and the scratch, less RBP when it is the frame
+        // pointer. Without a frame pointer RBP is allocatable and goes last.
+        assert_eq!(available_gpr_colors(false), 14);
+        assert_eq!(available_gpr_colors(true), 13);
         let order = allocatable_gpr_order(false);
         assert_eq!(order.last(), Some(&Reg::RBP));
+        assert_eq!(order.len(), available_gpr_colors(false) as usize);
         let order_fp = allocatable_gpr_order(true);
         assert!(!order_fp.contains(&Reg::RBP));
+        assert_eq!(order_fp.len(), available_gpr_colors(true) as usize);
+    }
+
+    /// The scratch register lowering uses for its own purposes -- the
+    /// three-address fixup, 64-bit constant materialisation, parallel-copy cycle
+    /// breaking -- must never be handed to a value. It was allocatable for a
+    /// long time, which made every one of those a latent clobber, and a phi copy
+    /// that read it inside a cycle hung the compiler outright.
+    #[test]
+    fn scratch_register_is_never_allocatable() {
+        for fp in [true, false] {
+            assert!(
+                !allocatable_gpr_order(fp).contains(&SCRATCH_GPR),
+                "scratch register {SCRATCH_GPR:?} is allocatable (uses_frame_pointer={fp})",
+            );
+        }
     }
 }

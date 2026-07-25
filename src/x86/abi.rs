@@ -32,6 +32,21 @@ pub const FP_RETURN_REG: Reg = Reg::XMM0;
 /// Registers the callee must preserve across a call.
 pub const CALLEE_SAVED: [Reg; 6] = [Reg::RBX, Reg::RBP, Reg::R12, Reg::R13, Reg::R14, Reg::R15];
 
+/// The one register the compiler keeps for itself, never allocated to a value.
+///
+/// Lowering already used R11 as a scratch in four places -- the three-address
+/// fixup for `dst == src_b`, 64-bit constant materialisation into an XMM, and
+/// parallel-copy cycle breaking -- while `allocatable_gpr_order` still handed it
+/// out. A value allocated there was clobbered by any of them, and a phi copy
+/// that *read* R11 inside a cycle hung `sequentialize_copies` outright, since
+/// parking the scratch in itself makes no progress. Excluded from
+/// `allocatable_gpr_order`, which is what makes all of those sound: no value can
+/// be in it, so nothing it holds can be lost.
+///
+/// XMM cycles park here too, through `movq`, so no XMM register has to be
+/// reserved alongside it.
+pub const SCRATCH_GPR: Reg = Reg::R11;
+
 /// GPR registers clobbered by a call (caller-saved).
 pub const CALLER_SAVED_GPR: [Reg; 9] = [
     Reg::RAX,
@@ -332,6 +347,11 @@ pub fn emit_epilogue(encoder: &mut Encoder, layout: &FrameLayout) {
 /// but a source may fan out to several destinations, and a copy may be a
 /// self-copy for a value already in place.
 ///
+/// `temp` must be a register no copy mentions -- `SCRATCH_GPR`, which is not
+/// allocatable for exactly this reason. The two register classes are
+/// sequentialized apart so an XMM cycle's parking move is emitted as a `movq`
+/// into that same GPR rather than as a `movsd` (see `phi_elim::copy_inst`).
+///
 /// This used to walk cycles through a `src -> dst` map, which cannot represent a
 /// fan-out: a source with two destinations kept only one of them, so the other
 /// copy was dropped from the emitted sequence. A one-element cycle -- exactly
@@ -349,6 +369,28 @@ pub fn sequentialize_copies(copies: &[(Reg, Reg)], temp: Reg) -> Vec<Reg2Reg> {
         "parallel copy has a repeated destination, so one value would be lost: {copies:?}"
     );
 
+    let (xmm, gpr): (Vec<Reg2Reg>, Vec<Reg2Reg>) = copies
+        .iter()
+        .copied()
+        .partition(|&(s, d)| s.is_xmm() || d.is_xmm());
+    if !xmm.is_empty() && !gpr.is_empty() {
+        let mut result = sequentialize_one_class(&gpr, temp);
+        result.extend(sequentialize_one_class(&xmm, temp));
+        return result;
+    }
+    sequentialize_one_class(copies, temp)
+}
+
+/// `sequentialize_copies` for a set that is entirely GPR or entirely XMM.
+fn sequentialize_one_class(copies: &[Reg2Reg], temp: Reg) -> Vec<Reg2Reg> {
+    use std::collections::BTreeSet;
+
+    debug_assert!(
+        !copies.iter().any(|&(s, d)| s == temp || d == temp),
+        "parallel copy mentions the scratch register {temp:?}, whose value cycle \
+         breaking overwrites: {copies:?}. It must not be allocatable -- see SCRATCH_GPR."
+    );
+
     // A self-copy moves a value to where it already is.
     let mut pending: Vec<Reg2Reg> = copies.iter().copied().filter(|&(s, d)| s != d).collect();
     let mut result: Vec<Reg2Reg> = Vec::new();
@@ -361,7 +403,17 @@ pub fn sequentialize_copies(copies: &[(Reg, Reg)], temp: Reg) -> Vec<Reg2Reg> {
         }
         // Nothing is safe to write yet. Park one source in `temp` and point its
         // readers at the copy.
-        let blocked = pending[0].0;
+        //
+        // Never `temp` itself: after an earlier round redirected readers there,
+        // `temp` is a source too, and parking it in itself rewrites nothing --
+        // the loop would spin on an unchanged `pending`. A blocked set has at
+        // least two distinct sources (every destination is also a source, and
+        // self-copies are gone), so a non-`temp` one always exists.
+        let blocked = pending
+            .iter()
+            .map(|&(s, _)| s)
+            .find(|&s| s != temp)
+            .expect("blocked parallel copy with no source other than the scratch register");
         result.push((blocked, temp));
         for (src, _) in pending.iter_mut() {
             if *src == blocked {
@@ -436,19 +488,7 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
     // the call. Using S64 here avoids partial register writes.
     let seq = sequentialize_copies(&reg_copies, temp);
     for (src, dst) in seq {
-        if src.is_xmm() || dst.is_xmm() {
-            // XMM-to-XMM copy: use movsd (safe for both f32 and f64 values).
-            insts.push(MachInst::MovsdRR {
-                dst: Operand::Reg(dst),
-                src: Operand::Reg(src),
-            });
-        } else {
-            insts.push(MachInst::MovRR {
-                size: OpSize::S64,
-                dst: Operand::Reg(dst),
-                src: Operand::Reg(src),
-            });
-        }
+        insts.push(crate::emit::phi_elim::copy_inst(src, dst, OpSize::S64));
     }
 
     insts
@@ -662,7 +702,7 @@ mod tests {
     /// the parallel copy, for every shape of copy set: chains, cycles, and a
     /// source fanning out to several destinations.
     fn check_parallel_copy(copies: &[(Reg, Reg)]) {
-        let temp = Reg::R10;
+        let temp = SCRATCH_GPR;
         let regs: Vec<Reg> = copies
             .iter()
             .flat_map(|&(s, d)| [s, d])
@@ -700,6 +740,33 @@ mod tests {
         check_parallel_copy(&[(RAX, RCX), (RCX, RDX), (RDX, RAX), (RAX, RSI), (RCX, RDI)]);
         // Self-copies mixed in: a phi arg that is already in place.
         check_parallel_copy(&[(RAX, RAX), (RCX, RDX), (RDX, RCX)]);
+    }
+
+    /// The two register classes are sequentialized apart, so a cycle in each is
+    /// resolved on its own. Both park in `SCRATCH_GPR`; for XMM that parking
+    /// move is a `movq`, which is why an XMM step may name a GPR.
+    #[test]
+    fn parallel_copy_resolves_each_class_separately() {
+        use Reg::*;
+        check_parallel_copy(&[(XMM0, XMM1), (XMM1, XMM0)]);
+        check_parallel_copy(&[(XMM0, XMM1), (XMM1, XMM0), (RAX, RCX), (RCX, RAX)]);
+        check_parallel_copy(&[
+            (XMM0, XMM1),
+            (XMM1, XMM2),
+            (XMM2, XMM0),
+            (RAX, RDX),
+            (RDX, RAX),
+        ]);
+        // Every step of an all-XMM cycle stays within XMM except the parking
+        // move into the scratch and back out of it.
+        for step in sequentialize_copies(&[(XMM0, XMM1), (XMM1, XMM0)], SCRATCH_GPR) {
+            assert!(
+                (step.0.is_xmm() && step.1.is_xmm())
+                    || step.0 == SCRATCH_GPR
+                    || step.1 == SCRATCH_GPR,
+                "step {step:?} of an all-XMM cycle touches a GPR that is not the scratch",
+            );
+        }
     }
 
     // ── sequentialize_copies ─────────────────────────────────────────────────
