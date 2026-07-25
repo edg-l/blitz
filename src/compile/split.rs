@@ -345,6 +345,11 @@ fn apply_splits_for_overshoot(
 ) {
     let block_schedule = &all_block_schedules[block_idx];
     let live_at = &live_sets[overshoot_inst_idx];
+    let overshoot_point = if overshoot_inst_idx == 0 {
+        ProgramPoint::block_entry(block_idx)
+    } else {
+        ProgramPoint::inst_point(block_idx, overshoot_inst_idx)
+    };
 
     // Collect candidates: VRegs of the target class that are live at the overshoot
     // point, excluding Flags-typed VRegs, spill pseudo-op defs, and already-planned victims.
@@ -365,8 +370,19 @@ fn apply_splits_for_overshoot(
                 ) {
                     return false;
                 }
-                let result_ty = op.result_type(&[]);
-                !matches!(result_ty, Type::Flags)
+                // Ask the e-graph for the value's type rather than
+                // `op.result_type(&[])`: that asserts arity, so any def taking
+                // children (every FP binary op, every ALU op) panics. The
+                // e-graph type is also the authoritative one, and it covers
+                // shapes whose type is not knowable from the op alone, such as
+                // `Proj1` of an ALU pair.
+                //
+                // Queried at the overshoot point, where the candidate is live
+                // by construction, so its segment is guaranteed to cover it.
+                let ty = class_to_vreg
+                    .vreg_to_class(v, overshoot_point)
+                    .map(|cid| egraph.class(egraph.find_immutable(cid)).ty.clone());
+                !matches!(ty, Some(Type::Flags))
             } else {
                 // VReg defined in a predecessor block.
                 // For CrossBlock scope, these are valid victims.
@@ -394,7 +410,7 @@ fn apply_splits_for_overshoot(
     let n_victims = (overshoot_excess as usize).min(candidates.len());
     let victims = &candidates[..n_victims];
 
-    let use_point = ProgramPoint::inst_point(block_idx, overshoot_inst_idx);
+    let use_point = overshoot_point;
     let live_classes_at_use: BTreeSet<ClassId> = live_at
         .iter()
         .filter_map(|&v| class_to_vreg.vreg_to_class(v, use_point))
