@@ -235,11 +235,37 @@ that regalloc carries the highest bug density.
       needed it. `seed5_miscompile.c` prints 606 at -O1, matching gcc, clang
       and the generator.
 - [ ] **seed5 still segfaults at -O0.** The reloads write RAX while the loads
-      read RCX:
-      `mov rax,[rsp+0x30]` / `mov ecx,[rcx]`. A reload's destination register
-      and the register its consumer reads have diverged. The equivalent -O1
-      path is fixed; the simple array case passes at -O0, so it needs the
-      doubles-and-calls shape to reproduce.
+      read RCX: `mov rax,[rsp+0x30]` / `mov ecx,[rcx]`. A reload's destination
+      register and the register its consumer reads have diverged. The -O1 path
+      is fixed and the plain array case passes at -O0.
+      Narrowed by pass bisection: `-O0 --enable-inlining` **passes**, every
+      other single pass still fails. So it needs `f0` to remain a real call --
+      mixed int/double arguments with values live across it -- rather than
+      being inlined away.
+
+## Tooling to build next
+
+Ranked by what actually cost time while fixing the six bugs above, not by
+generality.
+
+- [ ] **Machine-level verifier over the final MachInst stream.** Def-before-use
+      on physical registers would have caught every one of those six at compile
+      time, naming the instruction, instead of hand-reading asm and running
+      gdb. Also: a reload must not read a slot never stored, and callee-saved
+      registers must be preserved. Needs `defs()`/`uses()` on `MachInst`
+      (~70 variants, mechanical). Runs over all lit tests and every fuzz
+      program.
+- [ ] **Splitter/allocator agreement assertion.** Assert the splitter's
+      post-plan pressure matches the allocator's chromatic number and dump the
+      disagreeing point. These two already disagreed silently once
+      (per-block vs function-wide `vreg_classes`) and that was a real bug.
+- [ ] **`BLITZ_DEBUG=split`.** Promised in `docs/split-pass-plan.md`, never
+      implemented; the split plan (victims, slots, insertion points, segments)
+      had to be re-derived with throwaway `eprintln!`s four separate times.
+- [ ] **Delta-debugging in the fuzzer.** Failures arrive at 40-3000 lines and
+      were reduced by hand twice. The generator can re-simulate any candidate
+      to confirm it is still UB-free and still failing, which is exactly what
+      automated shrinking needs.
 
 ## Tech debt
 
