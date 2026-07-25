@@ -12,7 +12,9 @@ use super::coloring::{
     AVAILABLE_XMM_COLORS, allocatable_gpr_order, allocatable_xmm_order, available_gpr_colors,
     greedy_color, interval_color, map_colors_to_regs, mcs_ordering,
 };
-use super::interference::{InterferenceGraph, build_interference, dying_clobber_operands};
+use super::interference::{
+    InterferenceGraph, build_interference, dying_clobber_operands, resolve_precoloring_conflicts,
+};
 use super::liveness::{LivenessInfo, compute_liveness};
 use super::rewrite::apply_coalescing;
 use super::spill::{insert_spills, select_spill, select_spill_for_class};
@@ -574,6 +576,14 @@ fn merge_precolorings(
             param_vreg_to_reg.remove(&VReg(pv as u32));
         }
     }
+
+    // Then the pre-colorings that collide with each other rather than with a
+    // phantom, on the real pre-colorings that survived the phantom pass.
+    for pv in resolve_precoloring_conflicts(&merged, graph, param_vreg_indices) {
+        merged.remove(&pv);
+        param_vreg_to_reg.remove(&VReg(pv as u32));
+    }
+
     merged.extend(phantom_precolors);
     merged.extend(div_phantom);
     merged.extend(xmm_phantom);

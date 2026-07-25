@@ -65,7 +65,10 @@ use super::GlobalRegAllocResult;
 use super::build_vreg_classes_from_all_blocks;
 use super::coalesce::coalesce;
 use super::coloring::{allocatable_gpr_order, allocatable_xmm_order};
-use super::interference::{InterferenceGraph, build_interference_into, dying_clobber_operands};
+use super::interference::{
+    InterferenceGraph, build_interference_into, dying_clobber_operands,
+    resolve_precoloring_conflicts,
+};
 use super::liveness::{LivenessInfo, compute_liveness};
 use super::rewrite::apply_coalescing;
 
@@ -708,6 +711,19 @@ fn merge_precolorings_global(
                     unprecolored_params.push((vreg, reg));
                 }
             }
+        }
+    }
+
+    // Then the pre-colorings that collide with each other rather than with a
+    // phantom. Done after the phantom pass and before the phantoms are merged
+    // in, so it sees exactly the real pre-colorings that survived.
+    for pv in resolve_precoloring_conflicts(&merged, graph, param_vreg_indices) {
+        merged.remove(&pv);
+        let vreg = VReg(pv as u32);
+        if let Some(reg) = param_vreg_to_reg.remove(&vreg)
+            && param_vreg_indices.contains(&pv)
+        {
+            unprecolored_params.push((vreg, reg));
         }
     }
 

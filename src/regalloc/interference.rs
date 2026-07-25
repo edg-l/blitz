@@ -103,6 +103,64 @@ pub fn dying_clobber_operands(
         .collect()
 }
 
+/// Pick pre-colorings to drop so that no two that remain interfere while
+/// sharing a color. Returns the dropped VReg indices; the caller does its own
+/// bookkeeping for them.
+///
+/// Two *phantom* pre-colorings never collide -- a phantom takes edges only to
+/// the values live across its point, never to another phantom -- and a phantom
+/// against a real value is handled before this, by dropping the real one. What
+/// is left is two real pre-colorings claiming one register over a range where
+/// both are live, and the later definition destroys the earlier.
+///
+/// The reachable case is a call result. `add_call_precolors_for_block` pins the
+/// first result of a call to RAX under a `call_count == 1` guard, which holds
+/// for the block it examines but not once `allocate_global` aggregates every
+/// block's pre-colors into one function-wide list: two results from two
+/// single-call blocks then both claim RAX.
+///
+/// Dropping either side is safe, because every pre-coloring reaching here is a
+/// preference the lowering can restore with a move -- `mov dst, rax` after a
+/// call, `mov rcx, count` before a variable shift, the entry move for a
+/// parameter. The parameter is kept where the choice arises, since its move is
+/// the one that costs a prologue instruction.
+pub fn resolve_precoloring_conflicts(
+    pre_coloring: &BTreeMap<usize, u32>,
+    graph: &InterferenceGraph,
+    param_vreg_indices: &BTreeSet<usize>,
+) -> Vec<usize> {
+    let entries: Vec<(usize, u32)> = pre_coloring.iter().map(|(&v, &c)| (v, c)).collect();
+    let mut dropped: BTreeSet<usize> = BTreeSet::new();
+
+    for (i, &(va, ca)) in entries.iter().enumerate() {
+        if dropped.contains(&va) || va >= graph.num_vregs {
+            continue;
+        }
+        for &(vb, cb) in &entries[i + 1..] {
+            if ca != cb
+                || dropped.contains(&vb)
+                || vb >= graph.num_vregs
+                || !graph.adj[va].contains(&vb)
+            {
+                continue;
+            }
+            let a_is_param = param_vreg_indices.contains(&va);
+            let b_is_param = param_vreg_indices.contains(&vb);
+            let victim = match (a_is_param, b_is_param) {
+                (true, false) => vb,
+                (false, true) => va,
+                _ => va.max(vb),
+            };
+            dropped.insert(victim);
+            if victim == va {
+                break;
+            }
+        }
+    }
+
+    dropped.into_iter().collect()
+}
+
 /// Build an interference graph from liveness information.
 ///
 /// For each program point, all simultaneously live VRegs of the same register
