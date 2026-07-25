@@ -125,10 +125,23 @@ pub(super) fn assign_barrier_groups(
         for inst in sched {
             if let Some(&barrier_k) = vreg_to_arg.get(&inst.dst) {
                 for &op in &inst.operands {
-                    let entry = vreg_to_arg.entry(op).or_insert(barrier_k);
-                    if barrier_k < *entry {
-                        *entry = barrier_k;
-                        changed = true;
+                    // Inserting a constraint counts as a change. Without this
+                    // the fixpoint can stop one level short: an operand that
+                    // gains its first constraint here never gets the chance to
+                    // pass it on, so a value further up the chain keeps a
+                    // later barrier's constraint and is emitted after the
+                    // barrier that actually needs it.
+                    match vreg_to_arg.entry(op) {
+                        std::collections::btree_map::Entry::Vacant(slot) => {
+                            slot.insert(barrier_k);
+                            changed = true;
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut slot) => {
+                            if barrier_k < *slot.get() {
+                                slot.insert(barrier_k);
+                                changed = true;
+                            }
+                        }
                     }
                 }
             }
