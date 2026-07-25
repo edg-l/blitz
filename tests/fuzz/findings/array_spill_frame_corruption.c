@@ -10,34 +10,27 @@
 //   6          correct value, exit 2      exit 0     <- return path clobbered
 //   >= 7       SIGSEGV (exit 139)         correct    <- return address clobbered
 //
-// ── Diagnosis (from --emit-asm, not the frame layout) ───────────────────────
+// ── Status ─────────────────────────────────────────────────────────────────
 //
-// Not a frame-layout bug: the layout and slot indices are fine. The store of
-// arr[6] is emitted with the array base as its own index register:
+// Three of the four defects behind this are fixed (8acd79b, 350d36a): the
+// addressing-mode fold reading a stale index register, load/store addresses
+// resolving to the pre-spill register, and `return 0` being dropped after a
+// call. Five and six elements now match gcc exactly.
 //
-//   mov  r13, 0x18            ; byte offset of arr[6]
-//   lea  r14,[rax+r13*1]      ; r14 = &arr[6]      (rax = array base)
-//   mov  [rsp], r14           ; the address is SPILLED
-//   mov  r13d, 0xb            ; r13 reused for the value 11
-//   mov  DWORD PTR [rax+rax*1], r13d   ; <-- index is rax, not the offset
+// Seven or more still segfaults, for a remaining splitter defect. The address
+// of arr[6] is spilled:
 //
-// The address vreg was spilled, so the correct lowering reloads it. Instead
-// `build_mem_addr` (src/compile/effectful.rs) folded the Addr node and looked
-// its children's registers up fresh, and by then the offset register had been
-// reused for the stored value, yielding [rax+rax*1] -- a store far outside the
-// frame, which is what clobbers the return path and then the return address.
+//   lea  r14,[rax+r13*1]     ; r14 = &arr[6]
+//   mov  [rsp], r14          ; spilled
+//   mov  DWORD PTR [r15], r13d   ; <-- r15 never written
 //
-// build_mem_addr already intends to guard this: "If the addr VReg came from a
-// SpillLoad or cross-block import, the children's registers aren't guaranteed
-// live at the load/store point." The guard tests whether an Op::Addr
-// instruction defines the addr vreg, which is still true after the value has
-// been spilled, so it does not fire. The guard needs to ask whether the
-// address is still in its original register at this point, not whether it was
-// ever computed by an Addr.
-//
-// Resolving registers at the barrier's own program point instead of the block
-// exit was tried and changes nothing, since the stale lookup is of the Addr
-// node's children rather than of the address itself.
+// The splitter rewrote the store barrier's operand from VReg(19) to a reload
+// VReg it created, but never emitted the reload instruction ahead of the use:
+// the barrier's operands are [VReg(1), VReg(90), VReg(111), VReg(20)] and
+// VReg(19) is absent, while nothing loads [rsp] back before the store. The
+// reload is inserted for a later consumer instead. So the plan is right and
+// the insertion point is wrong -- a bug in where the splitter places reloads
+// for effectful-op operands, not in how lowering resolves them.
 //
 // OUTPUT: 28
 // EXIT: 0

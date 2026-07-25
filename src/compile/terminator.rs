@@ -232,11 +232,10 @@ pub(super) fn lower_terminator(
             // Restricted to functions containing a call so call-free code keeps
             // the single `mov rax, K; ret` it already emits; with no call there
             // is nothing that could have clobbered RAX behind our back.
-            let func_has_calls = func.blocks.iter().any(|b| {
-                b.ops
-                    .iter()
-                    .any(|o| matches!(o, EffectfulOp::Call { .. }))
-            });
+            let func_has_calls = func
+                .blocks
+                .iter()
+                .any(|b| b.ops.iter().any(|o| matches!(o, EffectfulOp::Call { .. })));
             let const_ret = val
                 .as_ref()
                 .filter(|_| func_has_calls)
