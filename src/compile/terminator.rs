@@ -218,7 +218,37 @@ pub(super) fn lower_terminator(
     match op {
         EffectfulOp::Ret { val } => {
             let mut items = Vec::new();
-            if let Some(&ret_cid) = val.as_ref()
+            // A constant return value in a function that makes calls is
+            // materialized straight into the ABI register instead of being
+            // trusted to a register assignment.
+            //
+            // The assignment cannot be trusted there: the class map may resolve
+            // the constant to a VReg the allocator placed in RAX, and the code
+            // below then emits nothing because the value looks like it is
+            // already in place. For `return 0` after a call that is exactly
+            // wrong -- RAX holds the callee's return value, so main returned
+            // whatever printf did.
+            //
+            // Restricted to functions containing a call so call-free code keeps
+            // the single `mov rax, K; ret` it already emits; with no call there
+            // is nothing that could have clobbered RAX behind our back.
+            let func_has_calls = func.blocks.iter().any(|b| {
+                b.ops
+                    .iter()
+                    .any(|o| matches!(o, EffectfulOp::Call { .. }))
+            });
+            let const_ret = val
+                .as_ref()
+                .filter(|_| func_has_calls)
+                .filter(|_| !func.return_types.first().is_some_and(|t| t.is_float()))
+                .and_then(|&cid| egraph.get_constant(cid));
+            if let Some((value, ty)) = const_ret {
+                items.push(BlockItem::Inst(MachInst::MovRI {
+                    size: OpSize::from_int_type(&ty),
+                    dst: Operand::Reg(GPR_RETURN_REG),
+                    imm: value,
+                }));
+            } else if let Some(&ret_cid) = val.as_ref()
                 && let Some(ret_reg) = get_reg(ret_cid, ret_class_to_vreg)
             {
                 let is_float_ret = func.return_types.first().is_some_and(|t| t.is_float());

@@ -492,10 +492,10 @@ fn resolve_arg_regs_after_spilling(
         }
     }
 
-    // Build original VReg -> defining instruction op.
-    let mut original_def_ops: BTreeMap<VReg, &Op> = BTreeMap::new();
+    // Build original VReg -> defining instruction.
+    let mut original_def_insts: BTreeMap<VReg, &ScheduledInst> = BTreeMap::new();
     for inst in schedule {
-        original_def_ops.entry(inst.dst).or_insert(&inst.op);
+        original_def_insts.entry(inst.dst).or_insert(inst);
     }
 
     // For each original arg VReg, find its replacement in the barrier operands.
@@ -532,11 +532,19 @@ fn resolve_arg_regs_after_spilling(
             continue;
         }
 
-        // Case 3: find rematerialized VReg with same op.
-        let orig_op = original_def_ops.get(&original_vreg);
-        if let Some(orig_op) = orig_op {
+        // Case 3: find a rematerialized VReg computing the same value.
+        //
+        // Both the op and its operands must match. Matching on the op alone
+        // picks any instruction of the same shape, and a block full of
+        // `arr[i]` addresses has one `Op::Addr { scale: 1, disp: 0 }` per
+        // element -- so a store to arr[6] would happily take the address of
+        // some other element, or of an uninitialized register.
+        if let Some(orig_inst) = original_def_insts.get(&original_vreg) {
             for (&op_vreg, &def_inst) in &barrier_op_defs {
-                if op_vreg != original_vreg && &def_inst.op == *orig_op {
+                if op_vreg != original_vreg
+                    && def_inst.op == orig_inst.op
+                    && def_inst.operands == orig_inst.operands
+                {
                     original_to_replacement.insert(original_vreg, op_vreg);
                     break;
                 }
