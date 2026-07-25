@@ -1007,12 +1007,11 @@ pub fn compile(
                     .and_then(|s| s.get(ii))
                     .and_then(|inst| inst.operands.get(oi))
                     .copied()
+                    && call_arg_vreg_set.contains(&old_vreg)
                 {
-                    if call_arg_vreg_set.contains(&old_vreg) {
-                        // Only keep first entry (the call-site reload VReg; later
-                        // entries for the same old VReg are non-call-site reloads).
-                        vreg_remap.entry(old_vreg).or_insert(new_vreg);
-                    }
+                    // Only keep first entry (the call-site reload VReg; later
+                    // entries for the same old VReg are non-call-site reloads).
+                    vreg_remap.entry(old_vreg).or_insert(new_vreg);
                 }
             }
 
@@ -1353,22 +1352,18 @@ pub fn compile(
         // the function, before any barrier group / call arg setup.
         let arg_locs = &func_arg_locs;
         for inst in rewritten.iter() {
-            if let Op::Param(param_idx, _) = &inst.op {
-                if !param_vreg_set.contains(&inst.dst) {
-                    if let Some(crate::x86::abi::ArgLoc::Reg(abi_reg)) =
-                        arg_locs.get(*param_idx as usize)
-                    {
-                        if let Some(&dst_reg) = regalloc_result.vreg_to_reg.get(&inst.dst) {
-                            if dst_reg != *abi_reg {
-                                all_insts.push(MachInst::MovRR {
-                                    size: crate::x86::inst::OpSize::S64,
-                                    src: crate::x86::inst::Operand::Reg(*abi_reg),
-                                    dst: crate::x86::inst::Operand::Reg(dst_reg),
-                                });
-                            }
-                        }
-                    }
-                }
+            if let Op::Param(param_idx, _) = &inst.op
+                && !param_vreg_set.contains(&inst.dst)
+                && let Some(crate::x86::abi::ArgLoc::Reg(abi_reg)) =
+                    arg_locs.get(*param_idx as usize)
+                && let Some(&dst_reg) = regalloc_result.vreg_to_reg.get(&inst.dst)
+                && dst_reg != *abi_reg
+            {
+                all_insts.push(MachInst::MovRR {
+                    size: crate::x86::inst::OpSize::S64,
+                    src: crate::x86::inst::Operand::Reg(*abi_reg),
+                    dst: crate::x86::inst::Operand::Reg(dst_reg),
+                });
             }
         }
         // Task 6.6: Emit entry movs for unprecolored params from the global
@@ -1377,20 +1372,20 @@ pub fn compile(
         // are live across a call that clobbers their ABI register.
         if block_idx == rpo_order[0] {
             for &(param_vreg, abi_reg) in &regalloc_result.unprecolored_params {
-                if let Some(&dst_reg) = regalloc_result.vreg_to_reg.get(&param_vreg) {
-                    if dst_reg != abi_reg {
-                        if abi_reg.is_xmm() {
-                            all_insts.push(MachInst::MovsdRR {
-                                dst: crate::x86::inst::Operand::Reg(dst_reg),
-                                src: crate::x86::inst::Operand::Reg(abi_reg),
-                            });
-                        } else {
-                            all_insts.push(MachInst::MovRR {
-                                size: crate::x86::inst::OpSize::S64,
-                                src: crate::x86::inst::Operand::Reg(abi_reg),
-                                dst: crate::x86::inst::Operand::Reg(dst_reg),
-                            });
-                        }
+                if let Some(&dst_reg) = regalloc_result.vreg_to_reg.get(&param_vreg)
+                    && dst_reg != abi_reg
+                {
+                    if abi_reg.is_xmm() {
+                        all_insts.push(MachInst::MovsdRR {
+                            dst: crate::x86::inst::Operand::Reg(dst_reg),
+                            src: crate::x86::inst::Operand::Reg(abi_reg),
+                        });
+                    } else {
+                        all_insts.push(MachInst::MovRR {
+                            size: crate::x86::inst::OpSize::S64,
+                            src: crate::x86::inst::Operand::Reg(abi_reg),
+                            dst: crate::x86::inst::Operand::Reg(dst_reg),
+                        });
                     }
                 }
             }
@@ -1410,7 +1405,7 @@ pub fn compile(
                 param_vreg_set,
                 frame_layout,
                 vreg_types,
-                &arg_locs,
+                arg_locs,
             )
         };
 

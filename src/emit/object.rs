@@ -213,8 +213,8 @@ impl ObjectFile {
             &mut buf,
             &rela_bytes,
             &symtab_bytes,
-            &strtab_bytes,
-            &shstrtab_bytes,
+            strtab_bytes,
+            shstrtab_bytes,
         );
         self.write_section_headers(
             &mut buf,

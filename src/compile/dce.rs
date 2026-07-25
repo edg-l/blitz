@@ -292,6 +292,91 @@ pub(super) fn eliminate_dead_loads(
     eliminated
 }
 
+/// DCE pass 1: unreachable block elimination after inlining, before LICM.
+pub(super) fn run_dce1(func: &mut Function) {
+    eliminate_unreachable_blocks(func);
+}
+
+/// DCE pass 2: constant branch folding + unreachable blocks + dead loads.
+///
+/// Runs after e-graph extraction, before the immutable func freeze and
+/// index construction in compile().
+fn run_dce2_inner(func: &mut Function, egraph: &EGraph, extraction: &ExtractionResult) {
+    let folded = fold_constant_branches(func, egraph, extraction);
+    let unreachable = eliminate_unreachable_blocks(func);
+    let dead_loads = eliminate_dead_loads(func, egraph, extraction);
+
+    if (folded > 0 || unreachable > 0 || dead_loads > 0)
+        && crate::trace::is_enabled("dce")
+        && crate::trace::fn_matches(&func.name)
+    {
+        eprintln!(
+            "[dce] dce2 {}: folded {} branch(es), removed {} unreachable block(s), eliminated {} dead load(s)",
+            func.name, folded, unreachable, dead_loads
+        );
+    }
+}
+
+/// Run DCE2 and remap LICM extra_roots through the block removal.
+///
+/// Extra roots are keyed by block index; block removal shifts indices.
+/// This converts to BlockId keys, runs DCE2, then rebuilds index keys.
+pub(super) fn run_dce2_with_extra_roots(
+    func: &mut Function,
+    egraph: &EGraph,
+    extraction: &ExtractionResult,
+    extra_roots: super::licm::ExtraRoots,
+) -> super::licm::ExtraRoots {
+    // Filter extra_roots: LICM's find_invariant_classes walks the PRE-saturation
+    // e-graph transitively and hoists any invariant ancestor. After saturation
+    // and extraction, the chosen ops may no longer reference those ancestors
+    // (e.g. `i * 4` may fold into an Addr with scale=4 embedded, leaving
+    // iconst(4, I64) orphan in the e-graph). Emitting an orphan VRegInst for
+    // such a class clobbers a live register at the preheader with no consumer.
+    //
+    // Keep only hoisted classes that are reachable from effectful-op operands
+    // via extraction.choices (i.e., classes the extracted IR actually uses).
+    let consumed = collect_consumed_class_ids(func, egraph, extraction);
+    let filtered_extra_roots: super::licm::ExtraRoots = extra_roots
+        .into_iter()
+        .map(|(idx, classes)| {
+            let kept: Vec<ClassId> = classes
+                .into_iter()
+                .filter(|cid| {
+                    let canon = egraph.unionfind.find_immutable(*cid);
+                    consumed.contains(&canon)
+                })
+                .collect();
+            (idx, kept)
+        })
+        .filter(|(_, classes)| !classes.is_empty())
+        .collect();
+
+    // Convert index-keyed extra_roots to BlockId-keyed.
+    let mut id_keyed: BTreeMap<BlockId, Vec<ClassId>> = BTreeMap::new();
+    for (&idx, roots) in &filtered_extra_roots {
+        debug_assert!(
+            idx < func.blocks.len(),
+            "extra_roots index {idx} out of bounds (blocks.len() = {})",
+            func.blocks.len()
+        );
+        if idx < func.blocks.len() {
+            id_keyed.insert(func.blocks[idx].id, roots.clone());
+        }
+    }
+
+    run_dce2_inner(func, egraph, extraction);
+
+    // Rebuild index-keyed map using post-DCE2 block order.
+    let mut rebuilt: BTreeMap<usize, Vec<ClassId>> = BTreeMap::new();
+    for (i, block) in func.blocks.iter().enumerate() {
+        if let Some(roots) = id_keyed.remove(&block.id) {
+            rebuilt.insert(i, roots);
+        }
+    }
+    rebuilt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,89 +556,4 @@ mod tests {
         assert_eq!(removed, 3);
         assert_eq!(func.blocks.len(), 1);
     }
-}
-
-/// DCE pass 1: unreachable block elimination after inlining, before LICM.
-pub(super) fn run_dce1(func: &mut Function) {
-    eliminate_unreachable_blocks(func);
-}
-
-/// DCE pass 2: constant branch folding + unreachable blocks + dead loads.
-///
-/// Runs after e-graph extraction, before the immutable func freeze and
-/// index construction in compile().
-fn run_dce2_inner(func: &mut Function, egraph: &EGraph, extraction: &ExtractionResult) {
-    let folded = fold_constant_branches(func, egraph, extraction);
-    let unreachable = eliminate_unreachable_blocks(func);
-    let dead_loads = eliminate_dead_loads(func, egraph, extraction);
-
-    if (folded > 0 || unreachable > 0 || dead_loads > 0)
-        && crate::trace::is_enabled("dce")
-        && crate::trace::fn_matches(&func.name)
-    {
-        eprintln!(
-            "[dce] dce2 {}: folded {} branch(es), removed {} unreachable block(s), eliminated {} dead load(s)",
-            func.name, folded, unreachable, dead_loads
-        );
-    }
-}
-
-/// Run DCE2 and remap LICM extra_roots through the block removal.
-///
-/// Extra roots are keyed by block index; block removal shifts indices.
-/// This converts to BlockId keys, runs DCE2, then rebuilds index keys.
-pub(super) fn run_dce2_with_extra_roots(
-    func: &mut Function,
-    egraph: &EGraph,
-    extraction: &ExtractionResult,
-    extra_roots: super::licm::ExtraRoots,
-) -> super::licm::ExtraRoots {
-    // Filter extra_roots: LICM's find_invariant_classes walks the PRE-saturation
-    // e-graph transitively and hoists any invariant ancestor. After saturation
-    // and extraction, the chosen ops may no longer reference those ancestors
-    // (e.g. `i * 4` may fold into an Addr with scale=4 embedded, leaving
-    // iconst(4, I64) orphan in the e-graph). Emitting an orphan VRegInst for
-    // such a class clobbers a live register at the preheader with no consumer.
-    //
-    // Keep only hoisted classes that are reachable from effectful-op operands
-    // via extraction.choices (i.e., classes the extracted IR actually uses).
-    let consumed = collect_consumed_class_ids(func, egraph, extraction);
-    let filtered_extra_roots: super::licm::ExtraRoots = extra_roots
-        .into_iter()
-        .map(|(idx, classes)| {
-            let kept: Vec<ClassId> = classes
-                .into_iter()
-                .filter(|cid| {
-                    let canon = egraph.unionfind.find_immutable(*cid);
-                    consumed.contains(&canon)
-                })
-                .collect();
-            (idx, kept)
-        })
-        .filter(|(_, classes)| !classes.is_empty())
-        .collect();
-
-    // Convert index-keyed extra_roots to BlockId-keyed.
-    let mut id_keyed: BTreeMap<BlockId, Vec<ClassId>> = BTreeMap::new();
-    for (&idx, roots) in &filtered_extra_roots {
-        debug_assert!(
-            idx < func.blocks.len(),
-            "extra_roots index {idx} out of bounds (blocks.len() = {})",
-            func.blocks.len()
-        );
-        if idx < func.blocks.len() {
-            id_keyed.insert(func.blocks[idx].id, roots.clone());
-        }
-    }
-
-    run_dce2_inner(func, egraph, extraction);
-
-    // Rebuild index-keyed map using post-DCE2 block order.
-    let mut rebuilt: BTreeMap<usize, Vec<ClassId>> = BTreeMap::new();
-    for (i, block) in func.blocks.iter().enumerate() {
-        if let Some(roots) = id_keyed.remove(&block.id) {
-            rebuilt.insert(i, roots);
-        }
-    }
-    rebuilt
 }

@@ -2295,12 +2295,12 @@ fn e2e_leaf_no_prologue() {
     assert!(
         !obj.code.starts_with(&[0x55]),
         "leaf function must not start with push rbp (0x55): {:?}",
-        &obj.code
+        obj.code
     );
     assert!(
         !obj.code.windows(3).any(|w| w == [0x48, 0x83, 0xec]),
         "leaf function must not contain sub rsp: {:?}",
-        &obj.code
+        obj.code
     );
 
     // Expected: mov rax, rdi (48 89 f8) then ret (c3).
@@ -2331,7 +2331,7 @@ fn e2e_frame_pointer_omission() {
     assert!(
         !obj.code.starts_with(&[0x55]),
         "fp omission: output must not start with push rbp (0x55): {:?}",
-        &obj.code
+        obj.code
     );
 }
 
@@ -2354,7 +2354,7 @@ fn e2e_force_frame_pointer() {
     assert!(
         obj.code.starts_with(&[0x55, 0x48, 0x89, 0xe5]),
         "force_frame_pointer: output must start with push rbp; mov rbp,rsp: {:?}",
-        &obj.code
+        obj.code
     );
 }
 

@@ -1080,41 +1080,40 @@ pub(super) fn lower_block_pure_ops(
     for inst in insts {
         // Handle stack-passed function parameters (7th+ args in SysV ABI).
         if let Op::Param(param_idx, ty) = &inst.op {
-            if !param_vreg_set.contains(&inst.dst) {
-                if let Some(dst_reg) = get_reg(inst.dst) {
-                    match arg_locs.get(*param_idx as usize) {
-                        Some(ArgLoc::Stack { offset }) => {
-                            let size = OpSize::from_int_type(ty);
-                            let offset = *offset;
-                            let addr = if frame_layout.uses_frame_pointer {
-                                Addr {
-                                    base: Some(Reg::RBP),
-                                    index: None,
-                                    scale: 1,
-                                    disp: 16 + offset,
-                                }
-                            } else {
-                                let n_callee = frame_layout.callee_saved.len() as i32;
-                                let disp =
-                                    n_callee * 8 + frame_layout.frame_size as i32 + 8 + offset;
-                                Addr {
-                                    base: Some(Reg::RSP),
-                                    index: None,
-                                    scale: 1,
-                                    disp,
-                                }
-                            };
-                            result.push(MachInst::MovRM {
-                                size,
-                                dst: Operand::Reg(dst_reg),
-                                addr,
-                            });
-                        }
-                        Some(ArgLoc::Reg(_)) => {
-                            // Handled by the early param mov emission above.
-                        }
-                        None => {}
+            if !param_vreg_set.contains(&inst.dst)
+                && let Some(dst_reg) = get_reg(inst.dst)
+            {
+                match arg_locs.get(*param_idx as usize) {
+                    Some(ArgLoc::Stack { offset }) => {
+                        let size = OpSize::from_int_type(ty);
+                        let offset = *offset;
+                        let addr = if frame_layout.uses_frame_pointer {
+                            Addr {
+                                base: Some(Reg::RBP),
+                                index: None,
+                                scale: 1,
+                                disp: 16 + offset,
+                            }
+                        } else {
+                            let n_callee = frame_layout.callee_saved.len() as i32;
+                            let disp = n_callee * 8 + frame_layout.frame_size as i32 + 8 + offset;
+                            Addr {
+                                base: Some(Reg::RSP),
+                                index: None,
+                                scale: 1,
+                                disp,
+                            }
+                        };
+                        result.push(MachInst::MovRM {
+                            size,
+                            dst: Operand::Reg(dst_reg),
+                            addr,
+                        });
                     }
+                    Some(ArgLoc::Reg(_)) => {
+                        // Handled by the early param mov emission above.
+                    }
+                    None => {}
                 }
             }
             continue;

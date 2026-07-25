@@ -534,7 +534,7 @@ pub fn extract_at_with_memo(
             };
             if best
                 .as_ref()
-                .map_or(true, |b: &ExtractedNode| own_cost < b.cost)
+                .is_none_or(|b: &ExtractedNode| own_cost < b.cost)
             {
                 best = Some(candidate);
             }
@@ -579,7 +579,7 @@ pub fn extract_at_with_memo(
             continue;
         }
 
-        let dominated = best.as_ref().map_or(true, |b| total < b.cost);
+        let dominated = best.as_ref().is_none_or(|b| total < b.cost);
         if dominated {
             best = Some(ExtractedNode {
                 op: node.op.clone(),
@@ -930,7 +930,7 @@ mod tests {
         let cm = CostModel::new(OptGoal::Balanced);
         let err = extract(&g, &[ir_add], &cm).expect_err("should fail");
         assert!(err.message.contains("no legal x86-64 lowering"));
-        assert!(err.ops.iter().any(|o| *o == Op::Add));
+        assert!(err.ops.contains(&Op::Add));
     }
 
     // 5.6: VReg linearization produces instructions in def-before-use order.
@@ -1027,7 +1027,7 @@ mod tests {
             let mut g = EGraph::new();
             let c = iconst(&mut g, 42);
             let result = extract(&g, &[c], &cm).expect("p1 ok");
-            for (_, ext) in &result.choices {
+            for ext in result.choices.values() {
                 assert!(ext.cost.is_finite(), "p1: infinite cost node chosen");
             }
             let insts = extraction_to_vreg_insts(&result, &[g.unionfind.find_immutable(c)]);
@@ -1042,7 +1042,7 @@ mod tests {
             let pair = x86add(&mut g, a, b);
             let p0 = proj0(&mut g, pair);
             let result = extract(&g, &[p0], &cm).expect("p2 ok");
-            for (_, ext) in &result.choices {
+            for ext in result.choices.values() {
                 assert!(ext.cost.is_finite(), "p2: infinite cost");
             }
             let insts = extraction_to_vreg_insts(&result, &[g.unionfind.find_immutable(p0)]);
@@ -1060,7 +1060,7 @@ mod tests {
             let outer_pair = x86add(&mut g, inner, c);
             let outer = proj0(&mut g, outer_pair);
             let result = extract(&g, &[outer], &cm).expect("p3 ok");
-            for (_, ext) in &result.choices {
+            for ext in result.choices.values() {
                 assert!(ext.cost.is_finite(), "p3: infinite cost");
             }
             let insts = extraction_to_vreg_insts(&result, &[g.unionfind.find_immutable(outer)]);
@@ -1081,7 +1081,7 @@ mod tests {
             g.rebuild();
             let flags_canon = g.unionfind.find_immutable(flags);
             let result = extract(&g, &[flags_canon], &cm).expect("p4 ok");
-            for (_, ext) in &result.choices {
+            for ext in result.choices.values() {
                 assert!(ext.cost.is_finite(), "p4: infinite cost");
             }
             let insts = extraction_to_vreg_insts(&result, &[flags_canon]);
@@ -1113,7 +1113,7 @@ mod tests {
                 "shared class present"
             );
 
-            for (_, ext) in &result.choices {
+            for ext in result.choices.values() {
                 assert!(ext.cost.is_finite(), "p5: infinite cost");
             }
             let insts = extraction_to_vreg_insts(&result, &[r1c, r2c]);

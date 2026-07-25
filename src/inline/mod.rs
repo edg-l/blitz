@@ -53,20 +53,20 @@ pub fn inline_module(functions: &mut Vec<Function>, opts: &CompileOptions, is_ex
             let mut found = None;
             for (block_idx, block) in functions[caller_idx].blocks.iter().enumerate() {
                 for (op_idx, op) in block.ops.iter().enumerate() {
-                    if let crate::ir::effectful::EffectfulOp::Call { func, .. } = op {
-                        if let Some(&callee_idx) = func_names.get(func) {
-                            if callee_idx == caller_idx {
-                                continue; // self-recursion
-                            }
-                            let callee = &functions[callee_idx];
-                            if is_recursive(&callee.name, &call_graph) {
-                                continue;
-                            }
-                            let caller_count = count_callers(&callee.name, &call_graph);
-                            if should_inline(callee, caller_count, opts) {
-                                found = Some((block_idx, op_idx, callee_idx));
-                                break;
-                            }
+                    if let crate::ir::effectful::EffectfulOp::Call { func, .. } = op
+                        && let Some(&callee_idx) = func_names.get(func)
+                    {
+                        if callee_idx == caller_idx {
+                            continue; // self-recursion
+                        }
+                        let callee = &functions[callee_idx];
+                        if is_recursive(&callee.name, &call_graph) {
+                            continue;
+                        }
+                        let caller_count = count_callers(&callee.name, &call_graph);
+                        if should_inline(callee, caller_count, opts) {
+                            found = Some((block_idx, op_idx, callee_idx));
+                            break;
                         }
                     }
                 }

@@ -257,10 +257,10 @@ mod tests {
             .iter()
             .flat_map(|c| {
                 c.nodes.iter().filter_map(|n| {
-                    if let Op::StackAddr(slot) = n.op {
-                        if slot >= caller_slots_before as u32 {
-                            return Some(slot);
-                        }
+                    if let Op::StackAddr(slot) = n.op
+                        && slot >= caller_slots_before as u32
+                    {
+                        return Some(slot);
                     }
                     None
                 })

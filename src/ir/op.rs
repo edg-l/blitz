@@ -306,7 +306,7 @@ impl Op {
                 assert_eq!(
                     &child_types[1], t,
                     "{self:?} operand type mismatch: {:?} vs {:?}",
-                    t, &child_types[1]
+                    t, child_types[1]
                 );
                 t.clone()
             }
@@ -322,7 +322,7 @@ impl Op {
                 assert_eq!(
                     &child_types[1], t,
                     "{self:?} operand type mismatch: {:?} vs {:?}",
-                    t, &child_types[1]
+                    t, child_types[1]
                 );
                 t.clone()
             }
@@ -418,7 +418,7 @@ impl Op {
                 assert_eq!(
                     &child_types[1], t,
                     "Icmp operand type mismatch: {:?} vs {:?}",
-                    t, &child_types[1]
+                    t, child_types[1]
                 );
                 Type::Flags
             }
@@ -429,7 +429,7 @@ impl Op {
                 assert_eq!(
                     &child_types[1], t,
                     "Fcmp operand type mismatch: {:?} vs {:?}",
-                    t, &child_types[1]
+                    t, child_types[1]
                 );
                 Type::Flags
             }
@@ -546,7 +546,7 @@ impl Op {
                 assert_eq!(
                     &child_types[1], t,
                     "{self:?} operand type mismatch: {:?} vs {:?}",
-                    t, &child_types[1]
+                    t, child_types[1]
                 );
                 Type::Pair(Box::new(t.clone()), Box::new(Type::Flags))
             }
@@ -624,7 +624,7 @@ impl Op {
                 assert_eq!(
                     &child_types[1], t,
                     "{self:?} operand type mismatch: {:?} vs {:?}",
-                    t, &child_types[1]
+                    t, child_types[1]
                 );
                 Type::Pair(Box::new(t.clone()), Box::new(t.clone()))
             }
@@ -641,7 +641,7 @@ impl Op {
                 assert_eq!(
                     &child_types[1], t,
                     "X86Imul3 operand type mismatch: {:?} vs {:?}",
-                    t, &child_types[1]
+                    t, child_types[1]
                 );
                 Type::Pair(Box::new(t.clone()), Box::new(Type::Flags))
             }
@@ -849,7 +849,7 @@ impl Op {
                 assert_eq!(
                     &child_types[0], from,
                     "X86Movsx child type mismatch: expected {from:?}, got {:?}",
-                    &child_types[0]
+                    child_types[0]
                 );
                 to.clone()
             }
@@ -858,7 +858,7 @@ impl Op {
                 assert_eq!(
                     &child_types[0], from,
                     "X86Movzx child type mismatch: expected {from:?}, got {:?}",
-                    &child_types[0]
+                    child_types[0]
                 );
                 to.clone()
             }
@@ -867,7 +867,7 @@ impl Op {
                 assert_eq!(
                     &child_types[0], from,
                     "X86Trunc child type mismatch: expected {from:?}, got {:?}",
-                    &child_types[0]
+                    child_types[0]
                 );
                 to.clone()
             }
@@ -876,7 +876,7 @@ impl Op {
                 assert_eq!(
                     &child_types[0], from,
                     "X86Bitcast child type mismatch: expected {from:?}, got {:?}",
-                    &child_types[0]
+                    child_types[0]
                 );
                 to.clone()
             }

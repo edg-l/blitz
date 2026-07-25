@@ -779,7 +779,7 @@ mod tests {
         assert!(result.vreg_to_reg.contains_key(&VReg(2)));
 
         // All assigned registers are valid GPRs and not RSP.
-        for (_, &reg) in &result.vreg_to_reg {
+        for &reg in result.vreg_to_reg.values() {
             assert!(reg.is_gpr(), "all allocated regs must be GPRs");
             assert_ne!(reg, Reg::RSP, "RSP must not be allocated");
         }

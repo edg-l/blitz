@@ -436,10 +436,10 @@ fn resolve_call_arg_regs_after_spilling(
     // Build spill slot -> original VReg mapping.
     let mut slot_to_original_vreg: BTreeMap<i64, VReg> = BTreeMap::new();
     for inst in schedule {
-        if let Op::SpillStore(slot) | Op::XmmSpillStore(slot) = &inst.op {
-            if let Some(&original_vreg) = inst.operands.first() {
-                slot_to_original_vreg.insert(*slot, original_vreg);
-            }
+        if let Op::SpillStore(slot) | Op::XmmSpillStore(slot) = &inst.op
+            && let Some(&original_vreg) = inst.operands.first()
+        {
+            slot_to_original_vreg.insert(*slot, original_vreg);
         }
     }
 
@@ -470,14 +470,13 @@ fn resolve_call_arg_regs_after_spilling(
         // Case 2: find SpillLoad for same slot.
         let mut found = false;
         for (&op_vreg, &def_inst) in &barrier_op_defs {
-            if let Op::SpillLoad(slot) | Op::XmmSpillLoad(slot) = &def_inst.op {
-                if let Some(&stored_vreg) = slot_to_original_vreg.get(slot) {
-                    if stored_vreg == original_vreg {
-                        original_to_replacement.insert(original_vreg, op_vreg);
-                        found = true;
-                        break;
-                    }
-                }
+            if let Op::SpillLoad(slot) | Op::XmmSpillLoad(slot) = &def_inst.op
+                && let Some(&stored_vreg) = slot_to_original_vreg.get(slot)
+                && stored_vreg == original_vreg
+            {
+                original_to_replacement.insert(original_vreg, op_vreg);
+                found = true;
+                break;
             }
         }
         if found {
@@ -548,10 +547,10 @@ fn resolve_store_val_reg_after_spilling(
     // the VReg whose value they reload.
     let mut slot_to_original_vreg: BTreeMap<i64, VReg> = BTreeMap::new();
     for inst in schedule {
-        if let Op::SpillStore(slot) | Op::XmmSpillStore(slot) = &inst.op {
-            if let Some(&original_vreg) = inst.operands.first() {
-                slot_to_original_vreg.insert(*slot, original_vreg);
-            }
+        if let Op::SpillStore(slot) | Op::XmmSpillStore(slot) = &inst.op
+            && let Some(&original_vreg) = inst.operands.first()
+        {
+            slot_to_original_vreg.insert(*slot, original_vreg);
         }
     }
 
@@ -562,10 +561,10 @@ fn resolve_store_val_reg_after_spilling(
 
     // A SpillLoad in the barrier operands that reloads val's slot.
     for (&op_vreg, def_inst) in &barrier_op_defs {
-        if let Op::SpillLoad(slot) | Op::XmmSpillLoad(slot) = &def_inst.op {
-            if slot_to_original_vreg.get(slot) == Some(&original_val_vreg) {
-                return regalloc.vreg_to_reg.get(&op_vreg).copied();
-            }
+        if let Op::SpillLoad(slot) | Op::XmmSpillLoad(slot) = &def_inst.op
+            && slot_to_original_vreg.get(slot) == Some(&original_val_vreg)
+        {
+            return regalloc.vreg_to_reg.get(&op_vreg).copied();
         }
     }
 

@@ -495,7 +495,7 @@ mod tests {
         // There should be a SpillStore after inst 0.
         let store_pos = insts
             .iter()
-            .position(|i| is_spill_store(i))
+            .position(is_spill_store)
             .expect("SpillStore must be present");
         let def_pos = insts
             .iter()
@@ -595,12 +595,12 @@ mod tests {
 
         // No SpillStore: constants are rematerializable.
         assert!(
-            !insts.iter().any(|i| is_spill_store(i)),
+            !insts.iter().any(is_spill_store),
             "no SpillStore for rematerializable Iconst"
         );
         // No SpillLoad either: replaced by re-emitted Iconst.
         assert!(
-            !insts.iter().any(|i| is_spill_load(i)),
+            !insts.iter().any(is_spill_load),
             "no SpillLoad for rematerializable Iconst"
         );
         // spill_slots unchanged.
@@ -647,11 +647,11 @@ mod tests {
 
         // There should be an XMM SpillStore (not a GPR SpillStore).
         assert!(
-            insts.iter().any(|i| is_xmm_spill_store(i)),
+            insts.iter().any(is_xmm_spill_store),
             "XMM VReg spill must produce XMM_SPILL_STORE_TYPE marker"
         );
         assert!(
-            !insts.iter().any(|i| is_spill_store(i)),
+            !insts.iter().any(is_spill_store),
             "XMM VReg spill must NOT produce GPR SPILL_STORE_TYPE marker"
         );
 
@@ -662,7 +662,7 @@ mod tests {
             "two XMM SpillLoads expected (one per use)"
         );
         assert!(
-            !insts.iter().any(|i| is_spill_load(i)),
+            !insts.iter().any(is_spill_load),
             "XMM VReg spill must NOT produce GPR SPILL_LOAD_TYPE marker"
         );
     }

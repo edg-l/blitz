@@ -461,9 +461,9 @@ fn apply_constant_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             Op::And => Some(lv & rv),
             Op::Or => Some(lv | rv),
             Op::Xor => Some(lv ^ rv),
-            Op::Shl if rv >= 0 && rv < 64 => Some(lv.wrapping_shl(rv as u32)),
-            Op::Shr if rv >= 0 && rv < 64 => Some(((lv as u64).wrapping_shr(rv as u32)) as i64),
-            Op::Sar if rv >= 0 && rv < 64 => Some(lv.wrapping_shr(rv as u32)),
+            Op::Shl if (0..64).contains(&rv) => Some(lv.wrapping_shl(rv as u32)),
+            Op::Shr if (0..64).contains(&rv) => Some(((lv as u64).wrapping_shr(rv as u32)) as i64),
+            Op::Sar if (0..64).contains(&rv) => Some(lv.wrapping_shr(rv as u32)),
             _ => None,
         };
 
@@ -753,24 +753,24 @@ fn apply_div_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                         egraph.merge(class_id, a);
                         changed = true;
                     }
-                } else if snap.op == Op::SDiv {
-                    if let Some((-1, _)) = egraph.get_constant(b) {
-                        // SDiv(a, -1) = Sub(0, a)
-                        let ty = egraph
-                            .class(egraph.unionfind.find_immutable(class_id))
-                            .ty
-                            .clone();
-                        let zero = make_iconst(egraph, 0, ty);
-                        let neg = egraph.add(ENode {
-                            op: Op::Sub,
-                            children: smallvec![zero, a],
-                        });
-                        let canon = egraph.unionfind.find_immutable(class_id);
-                        let neg_canon = egraph.unionfind.find_immutable(neg);
-                        if canon != neg_canon {
-                            egraph.merge(class_id, neg);
-                            changed = true;
-                        }
+                } else if snap.op == Op::SDiv
+                    && let Some((-1, _)) = egraph.get_constant(b)
+                {
+                    // SDiv(a, -1) = Sub(0, a)
+                    let ty = egraph
+                        .class(egraph.unionfind.find_immutable(class_id))
+                        .ty
+                        .clone();
+                    let zero = make_iconst(egraph, 0, ty);
+                    let neg = egraph.add(ENode {
+                        op: Op::Sub,
+                        children: smallvec![zero, a],
+                    });
+                    let canon = egraph.unionfind.find_immutable(class_id);
+                    let neg_canon = egraph.unionfind.find_immutable(neg);
+                    if canon != neg_canon {
+                        egraph.merge(class_id, neg);
+                        changed = true;
                     }
                 }
             }
