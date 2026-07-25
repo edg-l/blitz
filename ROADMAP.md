@@ -90,6 +90,28 @@ type handling** (the `X86CmpI` `ty` bug was exactly this class).
       leaving every consumer to canonicalize on read -- soundness-neutral until
       one forgets, which is what `ca2e400` was. `BLITZ_VERIFY=strict` is the
       standing acceptance test and is green.
+- [x] **Two overlapping live ranges must not share a register**
+      (`verify::verify_register_sharing`). Runs under `BLITZ_VERIFY` after
+      allocation, against liveness recomputed from the schedules **as emitted**;
+      asking the allocator's own interference graph would be circular. Silent on
+      all 400 lit tests and every unit test, and it flags 3 of 40 fuzz programs.
+      Making it mean anything required naming everything by its coalesce
+      representative, and canonicalising `phi_uses` the same way -- it is built
+      before coalescing, so a renamed VReg there is a use with no def, which
+      carried it to the function entry and produced 101 false reports.
+
+      What it found immediately: division quotients were pinned to RAX for their
+      whole live range, so two live quotients clobbered each other (fixed,
+      `1851865`). What it points at next: **the allocator's liveness disagrees
+      with the emitted code's.** `build_interference_into` adds an edge for every
+      simultaneously-live pair, so two VRegs could only share a register if the
+      allocator's liveness never had them live together -- while liveness
+      recomputed from the emitted schedules does. Neither VReg in the seed-20
+      report is pre-colored, so it is not a pre-coloring artifact.
+
+      Related hole worth an assertion regardless: `greedy_color` and
+      `interval_color` apply pre-colorings unconditionally, without checking that
+      two of them sharing a color do not interfere.
 - [~] **Machine-level verification.** Frame layout is covered: four properties
       (RSP 16-byte aligned at call sites, frame reserves spills + outgoing args,
       red-zone preconditions, spill area does not overlap outgoing args) are
