@@ -1,6 +1,7 @@
-# E-Graph Optimization Roadmap
+# E-Graph Rule Inventory
 
-Status of rewrite rules and e-class analyses in Blitz's e-graph.
+What rewrite rules and e-class analyses exist in Blitz's e-graph today.
+Planned work lives in `ROADMAP.md`, not here.
 
 ## Implemented
 
@@ -67,14 +68,9 @@ Status of rewrite rules and e-class analyses in Blitz's e-graph.
 - Negation distribution: `Sub(0, Add(a,b))=Add(Sub(0,a), Sub(0,b))`
 - Or annihilation: `Or(a,-1)=-1`
 
-## TODO
+## Not implemented
 
-### Additional Rules
-- [ ] Shift + mask optimization: `And(Shr(a,n), mask)` when shift zeroes masked bits
-
-### Type-Width Analysis
-- Domain: `(min_bits: u8, signed: bool)` per class
-- Enables: narrowing operations, avoiding unnecessary sign/zero extensions
+Tracked in `ROADMAP.md`: shift+mask folding (P2) and type-width analysis (P1).
 
 ## Algorithm Compliance (egg paper)
 

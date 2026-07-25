@@ -50,23 +50,39 @@ cc examples/main.c output.o -o test && ./test
 ## Architecture
 
 ```
-Source IR (FunctionBuilder API)
+Source IR (FunctionBuilder API, or C via the tinyc test frontend)
        |
        v
-  [ E-graph ]  -- algebraic simplification, strength reduction,
-       |           constant folding, commutativity
+  [ Inlining ]  -- cost-based, bottom-up
+       |
        v
-  [ E-graph ]  -- x86-64 instruction selection, addressing modes,
-       |           LEA formation, flag fusion
+  [ DCE 1 ]  -- unreachable block elimination
+       |
+       v
+  [ Memory ]  -- store-to-load / load-to-load forwarding, dead store
+       |          elimination (intra-block, alias-analysis driven)
+       v
+  [ LICM ]  -- loop detection, preheader insertion, invariant hoisting
+       |
+       v
+  [ E-graph ]  -- unified saturation: algebraic simplification, strength
+       |           reduction, constant folding, known-bits, distributivity,
+       |           x86-64 instruction selection, addressing modes, LEA
        v
   [ Extraction ]  -- cost-based bottom-up DAG extraction
+       |
+       v
+  [ DCE 2 ]  -- constant branch folding, unreachable blocks, dead loads
        |
        v
   [ Scheduling ]  -- list scheduler with register pressure heuristic
        |
        v
-  [ Register Allocation ]  -- per-block chordal coloring with
-       |                       cross-block live range splitting
+  [ Splitter ]  -- pressure-driven live-range splitting (remat / slot plan)
+       |
+       v
+  [ Register Allocation ]  -- function-scope Chaitin-Briggs coloring
+       |
        v
   [ Post-RA ]  -- phi elimination, peephole, NOP alignment,
        |           branch relaxation
@@ -80,20 +96,19 @@ Source IR (FunctionBuilder API)
 ## Testing
 
 ```sh
-cargo test
+cargo test --all-targets --workspace   # 887 tests
+bash tests/lit/run_tests.sh            # 382 tests
 ```
 
-315 tests covering:
-- 64 instruction encoding tests (byte-level verification)
-- 22+ end-to-end tests (compile -> link with C -> run -> verify results)
-- 10 miscompile regression tests (signed overflow, spill correctness, phi permutations, nested control flow)
-- Unit tests for every pipeline phase (e-graph, extraction, scheduling, regalloc, peephole, ELF)
+Coverage includes instruction encoding tests (byte-level verification), end-to-end tests (compile -> link with C -> run -> verify results), miscompile regression tests (signed overflow, spill correctness, phi permutations, nested control flow), unit tests for every pipeline phase, and FileCheck-style codegen tests over C sources in `tests/lit/`.
 
 End-to-end tests require `cc` (gcc/clang) on PATH. They skip gracefully if unavailable.
 
 ## Status
 
 The compiler produces correct code for integer arithmetic, floating-point (F32/F64 via SSE2), conditional branches, loops with block parameters, function calls with up to 6+ register args and stack args, memory loads/stores with addressing mode fusion, and programs requiring register spilling.
+
+`crates/tinyc` is a small C frontend used to feed the backend realistic input in tests. It is not a product; see [`ROADMAP.md`](ROADMAP.md) for the project's goal, priorities, and non-goals.
 
 ## License
 
