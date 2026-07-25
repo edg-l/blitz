@@ -320,83 +320,61 @@ pub fn emit_epilogue(encoder: &mut Encoder, layout: &FrameLayout) {
 // ── 8.6 Parallel copy sequentialization ──────────────────────────────────────
 
 /// Given a set of simultaneous register copies `(src, dst)`, produce a
-/// sequential ordering that is correct even when copies form cycles.
+/// sequential ordering with the same effect.
 ///
-/// Cycles are broken by routing through `temp`: the cycle head is saved to
-/// `temp`, the remaining copies proceed, and then `temp` is moved to the
-/// final destination.
-pub fn sequentialize_copies(copies: &[(Reg, Reg)], temp: Reg) -> Vec<(Reg, Reg)> {
-    // Build adjacency: dst_map[src] = dst
-    use std::collections::{BTreeMap, BTreeSet};
+/// Emits a copy as soon as its destination is not still needed as somebody
+/// else's source. When nothing is emittable, every pending destination is also a
+/// pending source, so one value is saved to `temp` and every pending copy that
+/// reads it is redirected there. That frees its register to be written, so each
+/// round either emits a copy or retires a source and the loop terminates.
+///
+/// Destinations must be distinct -- two values cannot land in one register --
+/// but a source may fan out to several destinations, and a copy may be a
+/// self-copy for a value already in place.
+///
+/// This used to walk cycles through a `src -> dst` map, which cannot represent a
+/// fan-out: a source with two destinations kept only one of them, so the other
+/// copy was dropped from the emitted sequence. A one-element cycle -- exactly
+/// what a self-copy looks like -- indexed `cycle[1]` and panicked.
+pub fn sequentialize_copies(copies: &[(Reg, Reg)], temp: Reg) -> Vec<Reg2Reg> {
+    use std::collections::BTreeSet;
 
-    let mut pending: Vec<(Reg, Reg)> = copies.to_vec();
-    let mut result: Vec<(Reg, Reg)> = Vec::new();
+    debug_assert!(
+        copies
+            .iter()
+            .map(|&(_, d)| d)
+            .collect::<BTreeSet<_>>()
+            .len()
+            == copies.len(),
+        "parallel copy has a repeated destination, so one value would be lost: {copies:?}"
+    );
 
-    loop {
-        if pending.is_empty() {
-            break;
-        }
+    // A self-copy moves a value to where it already is.
+    let mut pending: Vec<Reg2Reg> = copies.iter().copied().filter(|&(s, d)| s != d).collect();
+    let mut result: Vec<Reg2Reg> = Vec::new();
 
-        // Build a set of all sources.
+    while !pending.is_empty() {
         let srcs: BTreeSet<Reg> = pending.iter().map(|&(s, _)| s).collect();
-
-        // Find a copy whose dst is not a src of another pending copy
-        // (i.e., safe to emit without clobbering a needed value).
-        let safe_pos = pending.iter().position(|&(_, d)| !srcs.contains(&d));
-
-        if let Some(pos) = safe_pos {
-            let cp = pending.remove(pos);
-            result.push(cp);
-        } else {
-            // All remaining copies form cycles. Break the first cycle.
-            // Find cycle starting from pending[0].
-            let cycle_start_src = pending[0].0;
-
-            // Walk the cycle: build the chain src0->dst0->dst1->...
-            let dst_map: BTreeMap<Reg, Reg> = pending.iter().map(|&(s, d)| (s, d)).collect();
-
-            let mut cycle: Vec<Reg> = vec![cycle_start_src];
-            let mut cur = dst_map[&cycle_start_src];
-            while cur != cycle_start_src {
-                cycle.push(cur);
-                cur = dst_map[&cur];
+        if let Some(pos) = pending.iter().position(|&(_, d)| !srcs.contains(&d)) {
+            result.push(pending.remove(pos));
+            continue;
+        }
+        // Nothing is safe to write yet. Park one source in `temp` and point its
+        // readers at the copy.
+        let blocked = pending[0].0;
+        result.push((blocked, temp));
+        for (src, _) in pending.iter_mut() {
+            if *src == blocked {
+                *src = temp;
             }
-
-            // Remove cycle edges from pending.
-            for i in 0..cycle.len() {
-                let src = cycle[i];
-                let dst = cycle[(i + 1) % cycle.len()];
-                let pos = pending
-                    .iter()
-                    .position(|&(s, d)| s == src && d == dst)
-                    .unwrap();
-                pending.remove(pos);
-            }
-
-            // Break the cycle by saving cycle[0] into temp, then copying
-            // cycle[n-1]->cycle[0], cycle[n-2]->cycle[n-1], ..., temp->cycle[1].
-            //
-            // Example swap [A, B] (A->B, B->A):
-            //   cycle = [A, B]
-            //   (A, temp), (B, A), (temp, B)
-            //
-            // Example three-way [A, B, C] (A->B, B->C, C->A):
-            //   cycle = [A, B, C]
-            //   (A, temp), (C, A), (B, C), (temp, B)
-            // Save cycle[0] into temp, then unwind the cycle from the back.
-            // For cycle [A, B, C] (A->B, B->C, C->A):
-            //   (A, temp), (C, A), (B, C), (temp, B)
-            result.push((cycle_start_src, temp));
-            let n = cycle.len();
-            for i in (1..n).rev() {
-                result.push((cycle[i], cycle[(i + 1) % n]));
-            }
-            result.push((temp, cycle[1]));
         }
     }
 
     result
 }
+
+/// A single register-to-register copy, `(src, dst)`.
+pub type Reg2Reg = (Reg, Reg);
 
 // ── 8.6a Call site setup ──────────────────────────────────────────────────────
 
@@ -662,6 +640,66 @@ mod tests {
         assert_eq!(layout.frame_size, 40);
         assert_eq!(layout.spill_offset, -56);
         assert!(layout.uses_frame_pointer);
+    }
+
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// Simulate an emitted copy sequence and report what each register holds.
+    ///
+    /// Registers start holding a symbol naming themselves, so after a correct
+    /// sequence every destination holds the symbol of its original source.
+    fn simulate(seq: &[(Reg, Reg)], regs: &[Reg], temp: Reg) -> BTreeMap<Reg, Reg> {
+        let mut state: BTreeMap<Reg, Reg> = regs.iter().map(|&r| (r, r)).collect();
+        state.insert(temp, temp);
+        for &(src, dst) in seq {
+            let v = *state.get(&src).unwrap_or(&src);
+            state.insert(dst, v);
+        }
+        state
+    }
+
+    /// Every destination must end up holding the value its source held before
+    /// the parallel copy, for every shape of copy set: chains, cycles, and a
+    /// source fanning out to several destinations.
+    fn check_parallel_copy(copies: &[(Reg, Reg)]) {
+        let temp = Reg::R10;
+        let regs: Vec<Reg> = copies
+            .iter()
+            .flat_map(|&(s, d)| [s, d])
+            .filter(|&r| r != temp)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let seq = sequentialize_copies(copies, temp);
+        let state = simulate(&seq, &regs, temp);
+        for &(src, dst) in copies {
+            assert_eq!(
+                state[&dst], src,
+                "after {copies:?} sequentialized to {seq:?}, {dst:?} holds {:?} but should hold \
+                 the original {src:?}",
+                state[&dst],
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_copy_shapes_are_all_correct() {
+        use Reg::*;
+        // A source feeding two destinations. `dst_map` in the cycle breaker is
+        // keyed by source, so it keeps only one copy per source and any shape
+        // that reaches the cycle path with a fan-out loses the other.
+        check_parallel_copy(&[(RCX, R8), (RCX, R9)]);
+        check_parallel_copy(&[(RCX, R8), (RCX, R9), (R8, RCX)]);
+        check_parallel_copy(&[(RCX, R8), (RCX, R9), (R8, RCX), (R9, RDX)]);
+        // Chains and cycles, with and without fan-out.
+        check_parallel_copy(&[(RAX, RCX), (RCX, RDX)]);
+        check_parallel_copy(&[(RAX, RCX), (RCX, RAX)]);
+        check_parallel_copy(&[(RAX, RCX), (RCX, RDX), (RDX, RAX)]);
+        check_parallel_copy(&[(RAX, RCX), (RCX, RAX), (RDX, RSI), (RSI, RDX)]);
+        check_parallel_copy(&[(RAX, RCX), (RCX, RAX), (RAX, RDX)]);
+        check_parallel_copy(&[(RAX, RCX), (RCX, RDX), (RDX, RAX), (RAX, RSI), (RCX, RDI)]);
+        // Self-copies mixed in: a phi arg that is already in place.
+        check_parallel_copy(&[(RAX, RAX), (RCX, RDX), (RDX, RCX)]);
     }
 
     // ── sequentialize_copies ─────────────────────────────────────────────────

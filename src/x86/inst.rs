@@ -465,6 +465,32 @@ pub enum MachInst {
 ///   those registers hold something, so reading one is not a use-before-def
 ///   even though the value is the callee's.
 impl MachInst {
+    /// The memory operand this instruction reads from, if any.
+    ///
+    /// `Lea` is excluded deliberately: it computes an address and reads no
+    /// memory, so a `lea` naming a spill slot is not a reload of it.
+    pub fn mem_load_addr(&self) -> Option<&Addr> {
+        match self {
+            MachInst::MovRM { addr, .. }
+            | MachInst::AddRM { addr, .. }
+            | MachInst::MovzxBRM { addr, .. }
+            | MachInst::MovzxWRM { addr, .. }
+            | MachInst::MovsdRM { addr, .. }
+            | MachInst::MovssRM { addr, .. } => Some(addr),
+            _ => None,
+        }
+    }
+
+    /// The memory operand this instruction writes to, if any.
+    pub fn mem_store_addr(&self) -> Option<&Addr> {
+        match self {
+            MachInst::MovMR { addr, .. }
+            | MachInst::MovsdMR { addr, .. }
+            | MachInst::MovssMR { addr, .. } => Some(addr),
+            _ => None,
+        }
+    }
+
     /// Registers this instruction writes.
     pub fn defs(&self) -> Vec<Reg> {
         match self {

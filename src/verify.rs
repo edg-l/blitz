@@ -662,6 +662,101 @@ pub fn verify_machinsts(
     errors
 }
 
+/// Report every read of a spill slot that no store on some path to it has
+/// written.
+///
+/// Same forward dataflow as the register check, keyed by frame displacement
+/// instead: meet predecessors with intersection, so a slot written on one arm of
+/// a branch is not written at the join. A reload from a slot nothing wrote is a
+/// value the allocator believes it saved and did not, which no register-level
+/// check can see -- the register the reload writes is written, just with
+/// whatever the caller left on the stack.
+///
+/// Scoped to `[spill_lo, spill_hi)`, the slot region of the frame. The rest of
+/// the frame is off limits for this: user stack slots hold arrays and structs
+/// written through computed addresses this pass does not track, and the outgoing
+/// argument area and anything above the frame belong to the caller, which
+/// legitimately wrote them before the call.
+fn verify_spill_slots(
+    insts: &[MachInst],
+    labels: &BTreeMap<u32, usize>,
+    spill_base: Reg,
+    spill_lo: i32,
+    spill_hi: i32,
+) -> Vec<String> {
+    if spill_hi <= spill_lo {
+        return Vec::new();
+    }
+    // The frame displacement a memory operand names, when it is a plain
+    // `[spill_base + disp]` inside the slot region. An indexed address is not a
+    // slot reference: nothing addresses a spill slot that way.
+    let slot_of = |addr: &crate::x86::addr::Addr| -> Option<i32> {
+        if addr.base != Some(spill_base) || addr.index.is_some() {
+            return None;
+        }
+        (addr.disp >= spill_lo && addr.disp < spill_hi).then_some(addr.disp)
+    };
+
+    let leaders = block_leaders(insts, labels);
+    let (blocks, succs) = build_cfg(insts, labels, &leaders);
+    let mut entry_state: Vec<Option<BTreeSet<i32>>> = vec![None; blocks.len()];
+    if !blocks.is_empty() {
+        entry_state[0] = Some(BTreeSet::new());
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in 0..blocks.len() {
+            let Some(state) = entry_state[b].clone() else {
+                continue;
+            };
+            let mut out = state;
+            for i in blocks[b].clone() {
+                if let Some(addr) = insts[i].mem_store_addr()
+                    && let Some(slot) = slot_of(addr)
+                {
+                    out.insert(slot);
+                }
+            }
+            for &s in &succs[b] {
+                let merged = match &entry_state[s] {
+                    Some(existing) => existing.intersection(&out).copied().collect(),
+                    None => out.clone(),
+                };
+                if entry_state[s].as_ref() != Some(&merged) {
+                    entry_state[s] = Some(merged);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    let mut errors = Vec::new();
+    for (b, range) in blocks.iter().enumerate() {
+        let Some(state) = entry_state[b].clone() else {
+            continue;
+        };
+        let mut written = state;
+        for i in range.clone() {
+            if let Some(addr) = insts[i].mem_load_addr()
+                && let Some(slot) = slot_of(addr)
+                && !written.contains(&slot)
+            {
+                errors.push(format!(
+                    "inst {i}: reloads spill slot at {:?}{:+} on a path where nothing stored it: {:?}",
+                    spill_base, slot, insts[i]
+                ));
+            }
+            if let Some(addr) = insts[i].mem_store_addr()
+                && let Some(slot) = slot_of(addr)
+            {
+                written.insert(slot);
+            }
+        }
+    }
+    errors
+}
+
 /// Instruction indices that begin a basic block: the entry, every label, and
 /// whatever follows a branch or return.
 fn block_leaders(insts: &[MachInst], labels: &BTreeMap<u32, usize>) -> Vec<usize> {
@@ -740,12 +835,20 @@ pub fn verify_machinsts_stage(
     func_name: &str,
     insts: &[MachInst],
     labels: &BTreeMap<u32, usize>,
-    uses_frame_pointer: bool,
+    frame: &crate::x86::abi::FrameLayout,
+    spill_slots: u32,
 ) {
     if level() == VerifyLevel::Off {
         return;
     }
-    let errors = verify_machinsts(insts, labels, uses_frame_pointer);
+    let mut errors = verify_machinsts(insts, labels, frame.uses_frame_pointer);
+    errors.extend(verify_spill_slots(
+        insts,
+        labels,
+        frame.spill_base,
+        frame.spill_offset,
+        frame.spill_offset + (spill_slots as i32) * 8,
+    ));
     if !errors.is_empty() {
         panic!(
             "BLITZ_VERIFY: {} machine-level violation(s) in function '{}' after stage '{}':\n  - {}",

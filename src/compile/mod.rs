@@ -1796,15 +1796,17 @@ pub fn compile(
         crate::emit::relax::relax_branches(&flat_insts, &label_positions, &inst_size_for_relax);
 
     // Machine-level verification of the final stream: no surviving virtual
-    // register, and nothing reads a physical register the function never
-    // writes. This is the check that turns a wrong-code bug from "segfault
-    // somewhere in a large program" into a named instruction.
+    // register, nothing reads a physical register the function never writes, and
+    // no reload reads a spill slot nothing stored. This is the check that turns a
+    // wrong-code bug from "segfault somewhere in a large program" into a named
+    // instruction.
     crate::verify::verify_machinsts_stage(
         "encode",
         &func.name,
         &flat_insts,
         &label_positions,
-        frame_layout.uses_frame_pointer,
+        &frame_layout,
+        regalloc_result.spill_slots,
     );
 
     // Step 10c: Encode.
