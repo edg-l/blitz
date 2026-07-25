@@ -206,11 +206,20 @@ its first run. Both are in the register allocator, matching the standing prior
 that regalloc carries the highest bug density.
 
 - [ ] **Splitter does not converge on real register pressure.** Overshoots of
-      up to 18 GPR and 3 XMM colors reach phase 5, which then aborts
-      compilation. The recently fixed XMM call-crossing bug was one missed
-      value; this is the splitter not reducing pressure to the budget at all.
-      Suspect it splits only the single worst point per block per pass and
-      never re-measures.
+      up to 18 GPR colors reach phase 5, which aborts compilation. Every
+      remaining `run_fuzz.sh` failure is this one; no miscompiles are left in
+      the generated corpus.
+
+      Investigated: it does split only the worst point per block and never
+      re-measures. Making it iterate (recompute pressure, split again) does
+      help -- excess dropped 14 to 8 within a block -- but stalls, because
+      `SplitScope::PerBlock` only considers values defined in the block, and
+      these blocks are dominated by live-through values. Falling back to
+      `SplitScope::CrossBlock` when a round retires nothing regressed 4 lit
+      tests. Both experiments are reverted. The fix is not a local tweak: the
+      splitter needs to be able to spill a live-through value from an arbitrary
+      block, which means placing the store in the defining block and reloads at
+      every use, driven by a real iterate-to-fixpoint loop.
 - [ ] **Stack array access corrupts the frame**
       (`tests/fuzz/findings/array_spill_frame_corruption.c`, 12 lines; reduced
       from `seed5_miscompile.c`). Summing elements of an `int arr[8]`:
@@ -219,13 +228,18 @@ that regalloc carries the highest bug density.
       test: four defects compounded -- a stale addressing-mode fold, load/store
       addresses resolving to the pre-spill register, `return 0` dropped after a
       call, and a reload emitted ahead of the store to its slot.
-- [ ] **Rematerialized address emitted after the store that uses it**
-      (`tests/fuzz/findings/seed5_miscompile.c`). Reduced: `printf("%d",
-      arr[2])` in that file's context stores through `rdi` three instructions
-      before the `lea` that computes it. A remat lands in a later barrier group
-      than the barrier consuming it. Clamping barrier operands down to their
-      barrier group, and refusing replacements defined after the barrier, both
-      regressed `functions/linked_list.c` and were reverted.
+- [x] **Rematerialized address emitted after the store that uses it** -- fixed
+      in `f4d36ff`. The constraint-propagation fixpoint in
+      `assign_barrier_groups` did not mark itself changed when it *created* a
+      constraint, so propagation stopped one level short of the value that
+      needed it. `seed5_miscompile.c` prints 606 at -O1, matching gcc, clang
+      and the generator.
+- [ ] **seed5 still segfaults at -O0.** The reloads write RAX while the loads
+      read RCX:
+      `mov rax,[rsp+0x30]` / `mov ecx,[rcx]`. A reload's destination register
+      and the register its consumer reads have diverged. The equivalent -O1
+      path is fixed; the simple array case passes at -O0, so it needs the
+      doubles-and-calls shape to reproduce.
 
 ## Tech debt
 
