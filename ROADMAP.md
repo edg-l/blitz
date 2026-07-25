@@ -215,12 +215,14 @@ that regalloc carries the highest bug density.
       (`tests/fuzz/findings/array_spill_frame_corruption.c`, 12 lines; reduced
       from `seed5_miscompile.c`). Summing elements of an `int arr[8]`:
       5 elements is correct, 6 prints the right value but returns exit 2, and
-      7 or more segfaults. Right answer with a wrong exit code, escalating to a
-      clobbered return address, points at spilled values landing on top of the
-      user array -- `compute_frame_layout` places user stack slots above the
-      regalloc spill slots, so suspect the slot *indices* assigned into that
-      layout rather than the layout arithmetic, which the property tests in
-      `src/x86/abi.rs` already cover.
+      7 or more segfaults. Diagnosed: `build_mem_addr`
+      (`src/compile/effectful.rs`) folds an `Addr` node and re-resolves its
+      children's registers, but when the address vreg has been spilled the
+      offset register has already been reused, so the store is emitted as
+      `[rax+rax*1]` -- the array base as its own index -- writing far outside
+      the frame. Its existing guard asks whether an `Op::Addr` defines the addr
+      vreg, which stays true after a spill; it needs to ask whether the address
+      is still live in its original register at this point.
 
 ## Tech debt
 
