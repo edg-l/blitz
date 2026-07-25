@@ -1357,9 +1357,21 @@ pub fn compile(
                 }
                 // Then overlay the precise ranges. They nest inside the
                 // fallback, so `lookup` prefers them where they apply.
+                //
+                // Only where the aliased VReg is unambiguous. Coalescing merges
+                // copy-related VRegs, and a phi copy relates VRegs of two
+                // different classes, so one target can serve several classes.
+                // The inverse index holds one class per VReg and cannot express
+                // that; those classes keep the fallback, which names the shared
+                // register -- the right answer for a coalesced value anyway.
                 for (cid, vreg, start, end) in map.iter_segments() {
                     let aliased = coalesce_aliases.get(&vreg).copied().unwrap_or(vreg);
-                    if start.block != u32::MAX && end.block != u32::MAX {
+                    if start.block != u32::MAX
+                        && end.block != u32::MAX
+                        && aliased_map
+                            .registered_class(aliased)
+                            .is_none_or(|c| c == cid)
+                    {
                         aliased_map.insert_segment(cid, aliased, start, end);
                     }
                 }
@@ -1438,7 +1450,12 @@ pub fn compile(
         {
             let mut barrier_of_operand: BTreeMap<VReg, usize> = BTreeMap::new();
             let mut k = 0usize;
-            for inst in rewritten.iter() {
+            // The un-stripped schedule: `rewritten` has StoreBarrier and
+            // VoidCallBarrier filtered out, and those pseudo-ops are the only
+            // record of what a Store or a void call consumes. Scanning the
+            // stripped list saw a store's operands as consumed by nothing, and
+            // both the operand map and the barrier count `k` came out wrong.
+            for inst in full_schedule_for_barriers.iter() {
                 if matches!(
                     inst.op,
                     Op::CallResult(_, _)

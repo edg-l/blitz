@@ -181,6 +181,17 @@ impl ClassVRegMap {
         self.lookup_any(class)
     }
 
+    /// The class this VReg is registered under, ignoring ranges.
+    ///
+    /// The inverse index holds one class per VReg. After coalescing, one VReg
+    /// legitimately serves several classes, and a caller building such a map has
+    /// to notice rather than trip the `insert_segment` assertion.
+    pub fn registered_class(&self, vreg: VReg) -> Option<ClassId> {
+        self.vreg_to_class_segs
+            .get(&vreg)
+            .map(|&(class, _, _)| class)
+    }
+
     /// Inverse lookup: return the ClassId covering `vreg` at `point`, or `None`.
     ///
     /// Uses the eagerly-maintained inverse index for O(log n) lookup.

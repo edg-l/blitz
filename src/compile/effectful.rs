@@ -179,6 +179,47 @@ pub(super) fn lower_effectful_op(
         .or_else(|| get_reg(cid))
     };
 
+    // Under BLITZ_VERIFY, hold this seam to its own invariant: the register an
+    // effectful op reads must be one the barrier consuming that op declares as
+    // an operand. Every resolution path here -- the class map at a program
+    // point, the spill-slot trace, the remat match -- is a *reconstruction* of
+    // what the barrier already records, and the failure mode is silent: a
+    // plausible register holding some other value, which no def-before-use check
+    // can see. Seven wrong-code bugs came out of this seam; this catches the ones
+    // that resolve outside the operand list, such as an address resolving to the
+    // register it occupied before a spill.
+    //
+    // What it cannot catch: a resolution landing on the *wrong* barrier operand.
+    // `populate_effectful_operands` adds the folded `Addr`'s children next to the
+    // address and sorts by VReg index, so the barrier records a set of VRegs and
+    // not which one fills which role -- an address resolving to its own index
+    // constant passes this check. See `tests/fuzz/findings/
+    // seed4_load_addr_is_index.c`; role-tagged operands are the fix.
+    let check_barrier_operand = |what: &str, reg: Reg| {
+        if !crate::verify::is_enabled() {
+            return;
+        }
+        let Some(barrier) = barrier_pos.and_then(|p| schedule.get(p)) else {
+            return;
+        };
+        let declared: Vec<Reg> = barrier
+            .operands
+            .iter()
+            .filter_map(|v| regalloc.vreg_to_reg.get(v).copied())
+            .collect();
+        // An empty operand list means the barrier records nothing to check
+        // against (a load whose address is a block param, say).
+        if declared.is_empty() || declared.contains(&reg) {
+            return;
+        }
+        panic!(
+            "BLITZ_VERIFY: in function '{}', {what} resolved to {reg:?} at {point:?}, \
+             which the barrier {:?} does not declare. Barrier operands {:?} are in {declared:?}. \
+             The resolved register is not one this effectful op was scheduled to read.",
+            func.name, barrier.op, barrier.operands,
+        );
+    };
+
     match op {
         EffectfulOp::Load { addr, result, ty } => {
             let is_float = matches!(ty, Type::F32 | Type::F64);
@@ -196,6 +237,7 @@ pub(super) fn lower_effectful_op(
                     inst: None,
                 }),
             })?;
+            check_barrier_operand("Load address", addr_reg);
             let canon_result = uf.find_immutable(*result);
             let result_reg = class_to_vreg
                 .lookup(canon_result, point)
@@ -269,6 +311,7 @@ pub(super) fn lower_effectful_op(
                     inst: None,
                 }),
             })?;
+            check_barrier_operand("Store address", addr_reg);
             // If val was spilled, its original VReg has no register. Find the
             // StoreBarrier for this Store and read the (possibly renamed) val
             // operand from it — that VReg points at the reload/remat copy.

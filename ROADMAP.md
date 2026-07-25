@@ -236,13 +236,21 @@ VRegs where only one has the right register is the signature.
       Two ways to shorten those ranges were implemented and **both reverted**,
       failing on the same seam rather than on the policy:
 
-      1. A splitter pre-pass rematerializing constants at cross-block uses.
-         Green on lit for schedule-operand uses of `Iconst` (and it dropped the
-         -O1 overshoots from 14-18 to 7-13), but the `-O0`-vs-`-O1` differential
-         caught `control/compound_assign_complex.c`, and extending it to
-         terminator uses -- where the constants that matter actually are -- broke
-         96 lit tests. `StackAddr`/`GlobalAddr` remat segfaults 7 tests on its
-         own by defeating `build_mem_addr`'s folding check.
+      1. A splitter pre-pass rematerializing constants at cross-block uses of
+         `Iconst`, with the copies pinned to their consuming barrier's group.
+         Green on 392 lit, 264 differential and the unit tests, and it dropped
+         the -O1 overshoots from 14-18 to 10-15. **`BLITZ_VERIFY=strict`
+         rejects it**: `control/compound_assign_complex.c` emits
+         `MovMR { src: RAX }` where nothing writes RAX on the path. Segment
+         points are fixed against the post-split schedule, but coalescing and the
+         Phase 3 rebuild move instructions again, so by lowering the indices have
+         shifted a second time and the barrier resolves the value to a register
+         whose def is gone. That is the thing to fix; the pass itself is sound
+         and ~70 lines.
+         Not attempted: `StackAddr`/`GlobalAddr`, which segfault 7 lit tests on
+         their own by defeating `build_mem_addr`'s folding check, and terminator
+         uses -- where the constants that still defeat the allocator are -- which
+         need a copy at block end with a segment covering block exit.
       2. Re-emitting `Iconst` classes per block, reusing the mechanism that
          already does this for flags-typed classes. 62 lit failures.
 
@@ -250,18 +258,26 @@ VRegs where only one has the right register is the signature.
       Phase 7 resolves effectful-op operands and phi args through per-block
       snapshots of `class_to_vreg` taken during linearization and then patched
       three times over (split segments replayed, block-param overrides, coalesce
-      aliases). The coalesce-alias step rebuilds the map with `insert_single`,
-      collapsing every class to one VReg and discarding all ranges, so any class
-      with more than one copy resolves arbitrarily. Preserving the ranges there
-      breaks 106 lit tests, because terminator lookups at block exit currently
-      depend on that collapse landing on the coalesced VReg.
+      aliases), with every index measured against a schedule that later stages
+      keep editing. Two concrete defects remain:
 
-      Next step is therefore not another splitting heuristic. Give lowering a
-      single class-to-VReg map computed **once, from the final post-allocation
-      schedules**, instead of a pre-split snapshot patched after the fact. Then
-      either of the two experiments above lands, and so does allocator-level
-      spilling (`run_phase5` is an `Err(...)` today -- the global allocator has
-      no spill loop of its own, which is why the splitter has to be perfect).
+      - Segment points are stale by lowering time, as above.
+      - A barrier records a *set* of VRegs, not which one fills which role.
+        `populate_effectful_operands` adds the folded `Addr`'s children next to
+        the address and sorts by VReg index, so lowering has to guess which
+        operand is the address --- and `resolve_arg_regs_after_spilling` guesses
+        the index constant, giving `mov ecx,0x7` / `mov esi,[rcx]`
+        (`findings/seed4_load_addr_is_index.c`). Role-tagged barrier operands
+        (address / value / arg N) delete that guess and let
+        `resolve_arg_regs_after_spilling`, `resolve_store_val_reg_after_spilling`
+        and most of `build_mem_addr` go with it.
+
+      So: not another splitting heuristic. Give lowering a single class-to-VReg
+      map computed **once, from the final post-allocation schedules**, and give
+      barriers role-tagged operands. Then experiment 1 lands, and so does
+      allocator-level spilling (`run_phase5` is an `Err(...)` today -- the global
+      allocator has no spill loop of its own, which is why the splitter has to be
+      perfect).
 - [ ] **Stack array access corrupts the frame**
       (`tests/fuzz/findings/array_spill_frame_corruption.c`, 12 lines; reduced
       from `seed5_miscompile.c`). Summing elements of an `int arr[8]`:
@@ -305,10 +321,21 @@ VRegs where only one has the right register is the signature.
       and overwrites it three instructions early. The interference between a
       value live *through* both arms and one defined in the merge block is being
       missed. Smallest open miscompile -- start here.
+- [ ] **A Load resolves its address to an array index**
+      (`tests/fuzz/findings/seed4_load_addr_is_index.c`): `mov ecx,0x7` then
+      `mov esi,[rcx]`. Both the address and the index are declared operands of
+      the same LoadResult barrier, so lowering's guess passes every check.
+      Blocked on role-tagged barrier operands; see P0 above. Seeds 6 and 7 fail
+      the same way.
 - [ ] **seed6 truncated is still wrong at -O0**
-      (`tests/fuzz/findings/seed6_truncated_miscompile.c`, exit 104 vs 226).
-      Compiles only since `7d60eab`. Reducing it produced the two fixes above
-      and the finding above; at least one defect remains.
+      (`tests/fuzz/findings/seed6_truncated_miscompile.c`, exit 232 vs 226).
+      Reducing it produced the parameter and phi-arg fixes above and the XMM
+      finding; at least one defect remains.
+
+These last three reach codegen only because the splitter now clears the
+pressure that used to stop them. They were failing before as compile errors and
+are failing now as wrong code; `run_fuzz.sh` reports both, and a reproducer that
+gets as far as emitting instructions is the more useful one.
 
 ## Tooling to build next
 
@@ -330,6 +357,15 @@ generality.
       Restrict the slot check to the spill-slot range of the frame: user stack
       slots and the caller's outgoing-argument area are also RSP-relative and
       are legitimately read before this function writes them.
+- [x] **Effectful-operand resolution check** (`BLITZ_VERIFY`, in
+      `lower_effectful_op`). The register a Load or Store reads must be one the
+      barrier consuming it declares as an operand. Every resolution path in that
+      function reconstructs what the barrier already records, and the failure
+      mode is silent -- a plausible register holding some other value, which the
+      def-before-use check cannot see. Catches resolutions landing outside the
+      operand list, such as an address resolving to its pre-spill register (the
+      seed5 bug). Cannot catch landing on the *wrong* operand, because that list
+      is an unordered set; that needs the role tagging described in P0.
 - [x] **Splitter/allocator disagreement report** (`7d60eab`). When the coloring
       needs more colors than the budget, `BLITZ_DEBUG=split` prints each
       over-budget VReg with the op that defines it, whether it is precolored, its
