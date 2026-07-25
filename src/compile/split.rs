@@ -184,15 +184,33 @@ fn compute_local_liveness(
 /// count of live VRegs of the specified `class` at that position.
 fn compute_pressure_for_class(
     live_sets: &[BTreeSet<VReg>],
+    schedule: &[ScheduledInst],
     vreg_classes: &BTreeMap<VReg, RegClass>,
     class: RegClass,
 ) -> Vec<u32> {
     live_sets
         .iter()
-        .map(|live| {
-            live.iter()
+        .enumerate()
+        .map(|(i, live)| {
+            let mut n = live
+                .iter()
                 .filter(|&v| vreg_classes.get(v).copied() == Some(class))
-                .count() as u32
+                .count() as u32;
+            // Count the definition, not just what is live before it.
+            // `interference.rs` makes every def interfere with everything live
+            // before it, so the clique the allocator sees here is
+            // `live_before ∪ {dst}` -- one more than the live count. Measuring
+            // only the live count and testing `> budget` let a point with
+            // exactly `budget` live values through while the allocator needed
+            // `budget + 1` colors for it, which is the whole overshoot on most
+            // of the programs that fail to allocate.
+            if let Some(inst) = schedule.get(i)
+                && vreg_classes.get(&inst.dst).copied() == Some(class)
+                && !live.contains(&inst.dst)
+            {
+                n += 1;
+            }
+            n
         })
         .collect()
 }
@@ -630,8 +648,10 @@ pub fn plan_splits(
         let live_sets = compute_local_liveness(block_idx, schedule, live_out_seed);
 
         // Compute pressure per class.
-        let gpr_pressure = compute_pressure_for_class(&live_sets, vreg_classes, RegClass::GPR);
-        let xmm_pressure = compute_pressure_for_class(&live_sets, vreg_classes, RegClass::XMM);
+        let gpr_pressure =
+            compute_pressure_for_class(&live_sets, schedule, vreg_classes, RegClass::GPR);
+        let xmm_pressure =
+            compute_pressure_for_class(&live_sets, schedule, vreg_classes, RegClass::XMM);
 
         // Build def-site map and call-arg set once per block (shared by both paths).
         let def_inst_map: BTreeMap<VReg, usize> = schedule
