@@ -55,10 +55,29 @@ while [ "$seed" -le "$COUNT" ]; do
     want="$(sed -n 's|^// OUTPUT: ||p' "$src")"
 
     # A reference answer, when the reference compiler will take the program.
+    #
+    # If the reference build runs but does not finish, the program itself does
+    # not terminate and no oracle can say anything about it: blitz will time out
+    # too, and blaming blitz for that is a false positive. Skip the seed and say
+    # which one, because it means the generator emitted something it should not
+    # have -- that is how two nonterminating programs were chased as miscompiles.
     wantc=""
     if command -v "$CC" > /dev/null 2>&1 \
         && "$CC" -w -O0 -ffp-contract=off -x c "$src" -o "$WORK/ref" 2>/dev/null; then
-        wantc="$(timeout 20 "$WORK/ref" 2>/dev/null)" || wantc=""
+        # `|| refst=$?` rather than a bare assignment: `set -e` is on and the
+        # program under test may legitimately exit nonzero.
+        refst=0
+        refout="$(timeout 20 "$WORK/ref" 2>/dev/null)" || refst=$?
+        if [ "$refst" -eq 124 ]; then
+            skip=$((skip + 1))
+            printf "\nSKIP seed %s: does not terminate under %s either -- generator bug\n  %s\n" \
+                "$seed" "$CC" "$src"
+            seed=$((seed + 1))
+            continue
+        fi
+        if [ "$refst" -eq 0 ]; then
+            wantc="$refout"
+        fi
     fi
 
     # Check each level on its own, and keep going after a failure.

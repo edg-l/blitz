@@ -62,6 +62,21 @@ class Reject(Exception):
     """Raised during simulation when an operation would not be well-defined."""
 
 
+class Nonterminating(Reject):
+    """Raised when a loop exceeds `LOOP_STEP_CAP` iterations.
+
+    A program that does not finish is as useless as one with undefined
+    behavior: every compiler hangs on it, so no oracle can disagree, and the
+    harness has nothing to compare. Rejecting it here is the same contract as
+    `Reject` -- the seed is reported as ungeneratable and skipped.
+    """
+
+
+# Generated loops have trip counts of 1..6 and nothing writes to a counter, so
+# this is orders of magnitude above anything legitimate.
+LOOP_STEP_CAP = 10_000
+
+
 def ck(v):
     if not -SAFE_RANGE <= v <= SAFE_RANGE:
         raise Reject(v)
@@ -289,11 +304,36 @@ class For:
         return "\n".join(out)
 
     def exec(self, env):
-        for i in range(self.trips):
-            env[self.var] = i
+        # C semantics, not `range(trips)`: initialise once, test, run the body,
+        # increment whatever the body left behind. The old version re-assigned
+        # the counter at the top of every iteration and ran exactly `trips`
+        # times, so it silently disagreed with the emitted C the moment a body
+        # statement wrote to the counter -- `i24 = p2` with p2 == 0 never
+        # terminates in C while the interpreter happily predicted an answer.
+        # Loop counters are no longer assignment targets, so the two agree; this
+        # models C anyway, because an interpreter that cannot express the
+        # divergence cannot warn about it either.
+        #
+        # A loop variable name may repeat in a nested loop, where C shadows the
+        # outer one and restores it at the end of the inner scope. `env` is flat,
+        # so save and restore by hand.
+        missing = object()
+        saved = env.get(self.var, missing)
+        env[self.var] = 0
+        steps = 0
+        while env[self.var] < self.trips:
             for s in self.body:
                 s.exec(env)
-        env.pop(self.var, None)
+            env[self.var] = ck(env[self.var] + 1)
+            steps += 1
+            if steps > LOOP_STEP_CAP:
+                raise Nonterminating(
+                    f"loop on {self.var} ran {steps} iterations for trips={self.trips}"
+                )
+        if saved is missing:
+            env.pop(self.var, None)
+        else:
+            env[self.var] = saved
 
 
 class Func:
@@ -381,26 +421,41 @@ class Gen:
     def cond(self, names, depth):
         return Bin(self.rng.choice(CMP), self.expr(names, depth), self.expr(names, depth))
 
-    def stmts(self, names, arrays, n, depth, loop_ok=True):
+    def stmts(self, names, arrays, n, depth, loop_ok=True, assignable=None):
+        """`names` is readable; `assignable` is writable, and defaults to it.
+
+        The two differ inside a loop body: the counter is in scope to read but
+        must never be an assignment target. `i24 = p2` with `p2 == 0` resets the
+        counter every iteration, so the loop never terminates -- and a program
+        that does not terminate is one no oracle can check, which cost a session
+        chasing two "miscompiles" that hung under `cc` too (seeds 14 and 29).
+        Termination has to be unreachable-by-construction here, the same way
+        UB-freedom is.
+        """
         r = self.rng
+        if assignable is None:
+            assignable = names
         out = []
         for _ in range(n):
             pick = r.random()
-            if pick < 0.5 or not names:
-                out.append(Assign(r.choice(names), self.expr(names, depth, arrays)))
+            if pick < 0.5 or not assignable:
+                out.append(Assign(r.choice(assignable), self.expr(names, depth, arrays)))
             elif pick < 0.62 and arrays:
                 out.append(ArrAssign(r.choice(arrays), self.expr(names, 1),
                                      self.expr(names, depth, arrays)))
             elif pick < 0.8:
                 out.append(If(self.cond(names, depth - 1),
-                              self.stmts(names, arrays, r.randint(1, 2), depth - 1, loop_ok),
-                              self.stmts(names, arrays, r.randint(1, 2), depth - 1, loop_ok)))
+                              self.stmts(names, arrays, r.randint(1, 2), depth - 1,
+                                         loop_ok, assignable),
+                              self.stmts(names, arrays, r.randint(1, 2), depth - 1,
+                                         loop_ok, assignable)))
             elif loop_ok:
                 var = f"i{r.randint(0, 99)}"
-                body = self.stmts(names + [var], arrays, r.randint(1, 3), depth - 1, False)
+                body = self.stmts(names + [var], arrays, r.randint(1, 3), depth - 1,
+                                  False, assignable)
                 out.append(For(var, r.randint(1, 6), body))
             else:
-                out.append(Assign(r.choice(names), self.expr(names, depth, arrays)))
+                out.append(Assign(r.choice(assignable), self.expr(names, depth, arrays)))
         return out
 
     def wide_function(self, idx, scale=1.0):
