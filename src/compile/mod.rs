@@ -288,11 +288,14 @@ pub fn compile(
         .take()
         .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
 
+    crate::verify::verify_stage("compile-entry", &func, &egraph);
+
     // Store-to-load / load-to-load forwarding: intra-block, pre-LICM so
     // hoisting and saturation both benefit from fewer memory ops.
     if opts.enable_store_forwarding {
         let alias = AliasInfo::new();
         forward::run_forwarding(&mut func, &mut egraph, &alias);
+        crate::verify::verify_stage("forwarding", &func, &egraph);
     }
 
     // Dead store elimination: runs after forwarding (more forwarded loads =
@@ -300,11 +303,14 @@ pub fn compile(
     if opts.enable_dse {
         let alias = AliasInfo::new();
         dse::run_dse(&mut func, &egraph, &alias);
+        crate::verify::verify_stage("dse", &func, &egraph);
     }
 
     // LICM: detect loops, insert preheaders, identify invariant classes.
     let extra_roots = if opts.enable_licm {
-        licm::run_licm(&mut func, &mut egraph)
+        let roots = licm::run_licm(&mut func, &mut egraph);
+        crate::verify::verify_stage("licm", &func, &egraph);
+        roots
     } else {
         Default::default()
     };
@@ -312,6 +318,7 @@ pub fn compile(
     // Phases 1-2: E-graph rewrites and cost-based extraction.
     // Temporarily borrow func for extraction; DCE2 needs &mut func afterwards.
     let (block_param_map, extraction) = run_egraph_and_extract(&func, &mut egraph, opts)?;
+    crate::verify::verify_stage("saturation+extraction", &func, &egraph);
 
     if let Some(s) = sink.as_mut() {
         s.phase_stats(
@@ -331,7 +338,9 @@ pub fn compile(
     // DCE2: constant branch folding, unreachable block elimination, dead loads.
     // Must run BEFORE the immutable reborrow and before index structures are built.
     let extra_roots = if opts.enable_dce {
-        dce::run_dce2_with_extra_roots(&mut func, &egraph, &extraction, extra_roots)
+        let roots = dce::run_dce2_with_extra_roots(&mut func, &egraph, &extraction, extra_roots);
+        crate::verify::verify_stage("dce2", &func, &egraph);
+        roots
     } else {
         extra_roots
     };

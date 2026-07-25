@@ -64,11 +64,23 @@ type handling** (the `X86CmpI` `ty` bug was exactly this class).
       directly and compare against the compiled binary. Also lets a failure be
       attributed to a specific pass by re-running the interpreter on the IR
       after each stage.
-- [ ] **Per-pass IR verifier** behind `BLITZ_VERIFY=1`, run after every pass:
-      SSA/dominance well-formedness, block-param arity against every
-      predecessor, no use-before-def, e-class type agreement, and post-regalloc
-      checks (no vreg survives the rewrite, no overlapping live ranges share a
-      physical register, callee-saved actually preserved).
+- [x] **Per-pass IR verifier** behind `BLITZ_VERIFY=1` (`src/verify.rs`): block
+      shape, unique block ids, edge targets, block-param arity and types,
+      entry-block params, `Ret`/`Call` arity, and e-graph class resolvability.
+      Green across all tests and lit.
+- [ ] **Canonicalize CFG class references after every merging pass.** The
+      verifier's `BLITZ_VERIFY=strict` level fails today: forwarding and
+      saturation merge e-classes without rewriting the `ClassId`s already stored
+      in effectful ops, so the CFG holds pre-merge ids and every consumer has to
+      canonicalize on read. Soundness-neutral but it has miscompiled before
+      (`ca2e400`) and it costs precision, since `must_alias` is canonical
+      e-class equality and a stale id makes two identical addresses compare
+      unequal. Fix is a sweep over effectful op references; strict mode is the
+      acceptance test.
+- [ ] **Machine-level verifier**: no vreg survives the rewrite, no two
+      overlapping live ranges share a physical register, callee-saved actually
+      preserved, frame alignment at call sites. Not covered by `src/verify.rs`
+      yet, and it is where the historical bug density is highest.
 - [ ] **Rewrite-rule equivalence tests.** For each algebraic/strength rule,
       randomized equivalence check of LHS vs RHS over the operand space
       (including boundary values: 0, 1, -1, INT_MIN, INT_MAX, wraparound).

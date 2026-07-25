@@ -1,7 +1,21 @@
 use crate::emit::object::{FunctionInfo, ObjectFile};
 use crate::ir::function::Function;
+use crate::verify;
 
 use super::{CompileError, CompileOptions, compile};
+
+/// Verify every function in the module at a module-level pass boundary.
+/// No-op unless `BLITZ_VERIFY` is set.
+fn verify_all(stage: &str, functions: &[Function]) {
+    if !verify::is_enabled() {
+        return;
+    }
+    for func in functions {
+        if let Some(egraph) = func.egraph.as_ref() {
+            verify::verify_stage(stage, func, egraph);
+        }
+    }
+}
 
 /// Compile multiple functions into a single object file.
 ///
@@ -22,13 +36,18 @@ pub fn compile_module_with_globals(
     extern_globals: Vec<String>,
 ) -> Result<ObjectFile, CompileError> {
     let has_main = functions.iter().any(|f| f.name == "main");
+
+    verify_all("ir-construction", &functions);
+
     crate::inline::inline_module(&mut functions, opts, has_main);
+    verify_all("inlining", &functions);
 
     // DCE1: remove unreachable blocks created by inlining.
     if opts.enable_dce {
         for func in &mut functions {
             super::dce::run_dce1(func);
         }
+        verify_all("dce1", &functions);
     }
 
     // Collect global and rodata names so we can filter them from externals.

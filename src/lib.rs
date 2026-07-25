@@ -7,4 +7,5 @@ pub mod regalloc;
 pub mod schedule;
 pub mod test_utils;
 pub mod trace;
+pub mod verify;
 pub mod x86;

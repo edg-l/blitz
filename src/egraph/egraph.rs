@@ -285,6 +285,17 @@ impl EGraph {
         &self.classes[id.0 as usize]
     }
 
+    /// Find the canonical representative without path compression.
+    pub fn find_immutable(&self, id: ClassId) -> ClassId {
+        self.unionfind.find_immutable(id)
+    }
+
+    /// Size of the class arena, including classes that have been merged away.
+    /// This is the bound for a valid `ClassId`, unlike `class_count()`.
+    pub fn arena_len(&self) -> usize {
+        self.classes.len()
+    }
+
     /// Number of live e-classes (those where find(id) == id).
     pub fn class_count(&self) -> usize {
         (0..self.classes.len() as u32)
