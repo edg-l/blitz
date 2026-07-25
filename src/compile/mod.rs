@@ -1348,9 +1348,20 @@ pub fn compile(
             // another.
             if !coalesce_aliases.is_empty() {
                 let mut aliased_map = ClassVRegMap::new();
+                // The collapse first, as a full-range fallback per class: a
+                // lookup at a point no precise segment covers still resolves,
+                // which is the only reason collapsing ever worked.
                 for (cid, vreg) in map.iter() {
                     let aliased = coalesce_aliases.get(&vreg).copied().unwrap_or(vreg);
                     aliased_map.insert_single(cid, aliased);
+                }
+                // Then overlay the precise ranges. They nest inside the
+                // fallback, so `lookup` prefers them where they apply.
+                for (cid, vreg, start, end) in map.iter_segments() {
+                    let aliased = coalesce_aliases.get(&vreg).copied().unwrap_or(vreg);
+                    if start.block != u32::MAX && end.block != u32::MAX {
+                        aliased_map.insert_segment(cid, aliased, start, end);
+                    }
                 }
                 map = aliased_map;
             }
