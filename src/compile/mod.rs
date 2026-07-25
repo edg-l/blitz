@@ -1652,6 +1652,18 @@ pub fn compile(
     let (flat_insts, is_short) =
         crate::emit::relax::relax_branches(&flat_insts, &label_positions, &inst_size_for_relax);
 
+    // Machine-level verification of the final stream: no surviving virtual
+    // register, and nothing reads a physical register the function never
+    // writes. This is the check that turns a wrong-code bug from "segfault
+    // somewhere in a large program" into a named instruction.
+    crate::verify::verify_machinsts_stage(
+        "encode",
+        &func.name,
+        &flat_insts,
+        &label_positions,
+        frame_layout.uses_frame_pointer,
+    );
+
     // Step 10c: Encode.
     let mut encoder = Encoder::new();
     let func_start = encoder.buf.len();

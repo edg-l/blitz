@@ -38,9 +38,19 @@
 //! means a pass that reintroduces stale ids is caught immediately rather than
 //! waiting for a consumer to mishandle one.
 //!
-//! Machine-level invariants (no surviving vregs, no two overlapping live ranges
-//! in one physical register, callee-saved preservation) are not covered yet.
+//! # Machine level
+//!
+//! [`verify_machinsts`] checks the emitted instruction stream: no virtual
+//! register survives, and nothing reads a physical register that was never
+//! written. Every wrong-code bug found by the random generator was an instance
+//! of the second one -- a folded addressing mode using the array base as its
+//! own index, a load reading a register whose value had been spilled away, a
+//! store through a register the following `lea` had not written yet.
+//!
+//! Not covered yet: two overlapping live ranges sharing a register, and
+//! callee-saved preservation.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use crate::egraph::EGraph;
@@ -545,5 +555,404 @@ mod tests {
                 .any(|e| e.contains("has 2 args but 1 arg types")),
             "{errors:?}"
         );
+    }
+}
+
+// ── Machine level ────────────────────────────────────────────────────────────
+
+use crate::x86::inst::MachInst;
+use crate::x86::reg::Reg;
+
+/// Registers that already hold something on entry to a function: the stack and
+/// frame pointers, and the SysV argument registers. Reading one of these before
+/// the function writes it is normal.
+fn entry_live(uses_frame_pointer: bool) -> BTreeSet<Reg> {
+    use crate::x86::abi::{FP_ARG_REGS, GPR_ARG_REGS};
+    let mut set: BTreeSet<Reg> = GPR_ARG_REGS.iter().copied().collect();
+    set.extend(FP_ARG_REGS);
+    set.insert(Reg::RSP);
+    if uses_frame_pointer {
+        set.insert(Reg::RBP);
+    }
+    set
+}
+
+/// Check the emitted instruction stream for a function.
+///
+/// Returns one message per violation. `insts` is the final, fully lowered
+/// stream in emission order.
+///
+/// The use-before-def check is deliberately conservative about control flow.
+/// Reading a register that *no* instruction in the function writes is always a
+/// bug. Reading one before its first write in emission order is only reported
+/// when the function has no backward branch, because a loop can legitimately
+/// read on iteration two what the bottom of the body wrote on iteration one.
+pub fn verify_machinsts(
+    insts: &[MachInst],
+    labels: &BTreeMap<u32, usize>,
+    uses_frame_pointer: bool,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    for (i, inst) in insts.iter().enumerate() {
+        if has_vreg(inst) {
+            errors.push(format!(
+                "inst {i}: a virtual register survived register allocation: {inst:?}"
+            ));
+        }
+    }
+
+    // "Written on every path from entry" per instruction, by forward dataflow
+    // over the control-flow graph recovered from labels and branches. Meeting
+    // predecessors with intersection is what makes this sound: a register
+    // written on only one arm of a branch is not written at the join.
+    let live_in = entry_live(uses_frame_pointer);
+    let leaders = block_leaders(insts, labels);
+    let (blocks, succs) = build_cfg(insts, labels, &leaders);
+
+    let mut entry_state: Vec<Option<BTreeSet<Reg>>> = vec![None; blocks.len()];
+    if !blocks.is_empty() {
+        entry_state[0] = Some(live_in.clone());
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in 0..blocks.len() {
+            let Some(state) = entry_state[b].clone() else {
+                continue;
+            };
+            let mut out = state;
+            for i in blocks[b].clone() {
+                out.extend(insts[i].defs());
+            }
+            for &s in &succs[b] {
+                let merged = match &entry_state[s] {
+                    // Intersection: only registers written on *both* paths.
+                    Some(existing) => existing.intersection(&out).copied().collect(),
+                    None => out.clone(),
+                };
+                if entry_state[s].as_ref() != Some(&merged) {
+                    entry_state[s] = Some(merged);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    for (b, range) in blocks.iter().enumerate() {
+        // A block the dataflow never reached is unreachable code; nothing it
+        // reads can be executed, so there is nothing to check.
+        let Some(state) = entry_state[b].clone() else {
+            continue;
+        };
+        let mut written = state;
+        for i in range.clone() {
+            for r in insts[i].uses() {
+                if !written.contains(&r) {
+                    errors.push(format!(
+                        "inst {i}: reads {r:?} on a path where nothing writes it: {:?}",
+                        insts[i]
+                    ));
+                }
+            }
+            written.extend(insts[i].defs());
+        }
+    }
+
+    errors
+}
+
+/// Instruction indices that begin a basic block: the entry, every label, and
+/// whatever follows a branch or return.
+fn block_leaders(insts: &[MachInst], labels: &BTreeMap<u32, usize>) -> Vec<usize> {
+    let mut set: BTreeSet<usize> = BTreeSet::new();
+    if !insts.is_empty() {
+        set.insert(0);
+    }
+    for &pos in labels.values() {
+        if pos < insts.len() {
+            set.insert(pos);
+        }
+    }
+    for (i, inst) in insts.iter().enumerate() {
+        if matches!(
+            inst,
+            MachInst::Jmp { .. } | MachInst::Jcc { .. } | MachInst::Ret
+        ) && i + 1 < insts.len()
+        {
+            set.insert(i + 1);
+        }
+    }
+    set.into_iter().collect()
+}
+
+type Cfg = (Vec<std::ops::Range<usize>>, Vec<Vec<usize>>);
+
+/// Basic block ranges and their successor lists.
+fn build_cfg(insts: &[MachInst], labels: &BTreeMap<u32, usize>, leaders: &[usize]) -> Cfg {
+    let mut blocks: Vec<std::ops::Range<usize>> = Vec::new();
+    for (n, &start) in leaders.iter().enumerate() {
+        let end = leaders.get(n + 1).copied().unwrap_or(insts.len());
+        blocks.push(start..end);
+    }
+    let block_of = |i: usize| blocks.iter().position(|r| r.contains(&i));
+    let mut succs = vec![Vec::new(); blocks.len()];
+    for (b, range) in blocks.iter().enumerate() {
+        let Some(last) = range.clone().last() else {
+            continue;
+        };
+        match &insts[last] {
+            MachInst::Jmp { target } => {
+                if let Some(t) = labels.get(target).and_then(|&p| block_of(p)) {
+                    succs[b].push(t);
+                }
+            }
+            MachInst::Jcc { target, .. } => {
+                if let Some(t) = labels.get(target).and_then(|&p| block_of(p)) {
+                    succs[b].push(t);
+                }
+                if b + 1 < blocks.len() {
+                    succs[b].push(b + 1);
+                }
+            }
+            MachInst::Ret => {}
+            _ => {
+                if b + 1 < blocks.len() {
+                    succs[b].push(b + 1);
+                }
+            }
+        }
+    }
+    (blocks, succs)
+}
+
+fn has_vreg(inst: &MachInst) -> bool {
+    // Operands are not enumerable without another exhaustive match, and the
+    // Debug form names the variant, so match on the rendered text. This runs
+    // only under BLITZ_VERIFY.
+    format!("{inst:?}").contains("VReg(")
+}
+
+/// Verify an emitted function and panic on any violation. No-op unless
+/// `BLITZ_VERIFY` is set.
+pub fn verify_machinsts_stage(
+    stage: &str,
+    func_name: &str,
+    insts: &[MachInst],
+    labels: &BTreeMap<u32, usize>,
+    uses_frame_pointer: bool,
+) {
+    if level() == VerifyLevel::Off {
+        return;
+    }
+    let errors = verify_machinsts(insts, labels, uses_frame_pointer);
+    if !errors.is_empty() {
+        panic!(
+            "BLITZ_VERIFY: {} machine-level violation(s) in function '{}' after stage '{}':\n  - {}",
+            errors.len(),
+            func_name,
+            stage,
+            errors.join("\n  - ")
+        );
+    }
+}
+
+#[cfg(test)]
+mod machine_tests {
+    use super::*;
+    use crate::x86::addr::Addr;
+    use crate::x86::inst::{MachInst, OpSize, Operand};
+    use crate::x86::reg::Reg;
+
+    fn reg(r: Reg) -> Operand {
+        Operand::Reg(r)
+    }
+
+    fn at(base: Reg) -> Addr {
+        Addr {
+            base: Some(base),
+            index: None,
+            scale: 1,
+            disp: 0,
+        }
+    }
+
+    fn verify(insts: &[MachInst]) -> Vec<String> {
+        verify_machinsts(insts, &BTreeMap::new(), false)
+    }
+
+    #[test]
+    fn clean_stream_verifies() {
+        // rdi is an argument register, so reading it needs no local write.
+        let insts = vec![
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RDI),
+            },
+            MachInst::Ret,
+        ];
+        assert_eq!(verify(&insts), Vec::<String>::new());
+    }
+
+    /// The shape of the reload-before-store bug: a store through a register
+    /// nothing ever writes.
+    #[test]
+    fn detects_read_of_never_written_register() {
+        let insts = vec![
+            MachInst::MovMR {
+                size: OpSize::S32,
+                addr: at(Reg::R15),
+                src: reg(Reg::RDI),
+            },
+            MachInst::Ret,
+        ];
+        let errors = verify(&insts);
+        assert!(errors.iter().any(|e| e.contains("R15")), "{errors:?}");
+    }
+
+    /// The shape of the barrier-ordering bug: the address computation emitted
+    /// after the store that uses it.
+    #[test]
+    fn detects_use_before_def_in_order() {
+        let insts = vec![
+            MachInst::MovMR {
+                size: OpSize::S32,
+                addr: at(Reg::RBX),
+                src: reg(Reg::RDI),
+            },
+            MachInst::Lea {
+                size: OpSize::S64,
+                dst: reg(Reg::RBX),
+                addr: at(Reg::RDI),
+            },
+            MachInst::Ret,
+        ];
+        let errors = verify(&insts);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("inst 0") && e.contains("RBX")),
+            "{errors:?}"
+        );
+    }
+
+    /// Written on one arm of a branch only: not written at the join, so the
+    /// meet has to be intersection rather than union.
+    #[test]
+    fn detects_register_written_on_only_one_path() {
+        let mut labels = BTreeMap::new();
+        labels.insert(1u32, 3usize); // join block starts at inst 3
+        let insts = vec![
+            MachInst::Jcc {
+                cc: crate::ir::condcode::CondCode::Eq,
+                target: 1,
+            },
+            MachInst::MovRI {
+                size: OpSize::S64,
+                dst: reg(Reg::RBX),
+                imm: 7,
+            },
+            MachInst::Jmp { target: 1 },
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RBX),
+            },
+            MachInst::Ret,
+        ];
+        let errors = verify_machinsts(&insts, &labels, false);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("inst 3") && e.contains("RBX")),
+            "{errors:?}"
+        );
+    }
+
+    /// The same shape, but written on both arms of a real diamond: no
+    /// violation, which is what keeps the check from crying wolf on every
+    /// if/else.
+    #[test]
+    fn accepts_register_written_on_all_paths() {
+        let mut labels = BTreeMap::new();
+        labels.insert(1u32, 3usize); // taken arm
+        labels.insert(2u32, 4usize); // join
+        let insts = vec![
+            MachInst::Jcc {
+                cc: crate::ir::condcode::CondCode::Eq,
+                target: 1,
+            },
+            MachInst::MovRI {
+                size: OpSize::S64,
+                dst: reg(Reg::RBX),
+                imm: 7,
+            },
+            MachInst::Jmp { target: 2 },
+            MachInst::MovRI {
+                size: OpSize::S64,
+                dst: reg(Reg::RBX),
+                imm: 9,
+            },
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RBX),
+            },
+            MachInst::Ret,
+        ];
+        assert_eq!(
+            verify_machinsts(&insts, &labels, false),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn zeroing_idiom_is_not_a_read() {
+        let insts = vec![
+            MachInst::XorRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RAX),
+            },
+            MachInst::Ret,
+        ];
+        assert_eq!(verify(&insts), Vec::<String>::new());
+    }
+
+    #[test]
+    fn detects_surviving_vreg() {
+        let insts = vec![
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: Operand::VReg(crate::egraph::extract::VReg(7)),
+                src: reg(Reg::RDI),
+            },
+            MachInst::Ret,
+        ];
+        let errors = verify(&insts);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("virtual register survived")),
+            "{errors:?}"
+        );
+    }
+
+    /// A call leaves its result in RAX, so reading RAX afterwards is fine.
+    #[test]
+    fn call_defines_caller_saved_registers() {
+        let insts = vec![
+            MachInst::CallDirect {
+                target: "f".to_string(),
+            },
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RBX),
+                src: reg(Reg::RAX),
+            },
+            MachInst::Ret,
+        ];
+        assert_eq!(verify(&insts), Vec::<String>::new());
     }
 }

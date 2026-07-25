@@ -29,7 +29,7 @@ fn build_mem_addr(
     addr_reg: Reg,
     block_idx: usize,
     barrier_pos: Option<usize>,
-    extraction: &ExtractionResult,
+    _extraction: &ExtractionResult,
     class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
     conflict_reg: Option<Reg>,
