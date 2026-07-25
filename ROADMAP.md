@@ -32,18 +32,16 @@ rather than overhead against it.
 
 ## Current state (2026-07-25)
 
-- 905 Rust tests + 390 lit tests. All green except one committed KNOWN FAILING
-  lit test (see Known bugs). `cargo fmt` clean.
+- 905 Rust tests + 390 lit tests, all green. `cargo fmt` clean. No known bugs.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 262 O0-vs-O1 comparisons, no skips, one
-  difference (the same known-failing test).
+- `bash tests/lit/run_diff.sh`: 262 O0-vs-O1 comparisons, no skips, no
+  differences.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
   e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> DAG
   schedule -> live-range splitter -> function-scope Chaitin-Briggs regalloc ->
   terminator lowering -> MachInst lowering -> branch relaxation -> ELF.
 - Implemented e-graph rules: see `docs/egraph-optimization-roadmap.md`.
 - Splitter design: see `docs/split-pass-plan.md`.
-- ~80 accumulated clippy warnings, all cosmetic.
 
 ## Priorities
 
@@ -194,18 +192,6 @@ isel patterns; we should beat it on the ones we implement.
       INTEGER/SSE/MEMORY classification and hidden-pointer return.
 - [ ] Error recovery: emit a diagnostic instead of panicking on internal errors.
 
-## Known bugs
-
-- [ ] **Splitter misses XMM values live across a call** —
-      `tests/lit/regalloc/xmm_pressure_mixed_calls.c` (committed KNOWN FAILING).
-      Compilation aborts with an XMM pressure overshoot on three live values
-      against 16 registers. `src/compile/split.rs` models call-crossing
-      pressure for GPRs only; all XMM registers are caller-saved, so the XMM
-      budget is zero and any XMM value live across a call needs a slot. Adding
-      the missing check alone regressed 6 lit tests: victim selection also has
-      to handle a value that is live *through* the block containing the call,
-      with no def or use there to rewrite. Full diagnosis in the test file.
-
 ## Tech debt
 
 - [ ] `docs/split-pass-plan.md` Phase 8 and Final Audit are unchecked. The audit
@@ -214,7 +200,7 @@ isel patterns; we should beat it on the ones we implement.
       `compile/mod.rs`. Decide whether it is now load-bearing, then finish or
       amend the plan.
 - [ ] `src/compile/mod.rs` is ~1600 lines; split it.
-- [ ] Clear the clippy backlog (~80 cosmetic warnings).
+- [ ] Clear the remaining clippy backlog (~29 warnings, cosmetic).
 - [ ] `README.md` says 315 tests and omits forwarding/DSE/splitter from the
       pipeline diagram.
 - [ ] Handoffs live in gitignored `.claude/handoff/` and are not in Engram, so
