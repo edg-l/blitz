@@ -3,7 +3,8 @@
 //! Controlled by two environment variables:
 //!
 //! - `BLITZ_DEBUG`: comma-separated list of categories to enable.
-//!   Categories: `sched`, `liveness`, `regalloc`, `asm`, `licm`, `egraph`, `dce`, `alias`, `all`.
+//!   Categories: `sched`, `liveness`, `regalloc`, `asm`, `licm`, `egraph`, `dce`, `alias`,
+//!   `split`, `all`.
 //!
 //! - `BLITZ_DEBUG_FN`: optional substring filter on function names.
 //!   When set, only functions whose name contains this string produce output.
@@ -30,6 +31,11 @@ struct BlitzDebugConfig {
     fn_filter: Option<String>,
 }
 
+/// Every valid `BLITZ_DEBUG` category. `all` enables the lot.
+const CATEGORIES: [&str; 9] = [
+    "sched", "liveness", "regalloc", "asm", "licm", "egraph", "dce", "alias", "split",
+];
+
 fn start_time() -> &'static Instant {
     START.get_or_init(Instant::now)
 }
@@ -42,39 +48,17 @@ fn config() -> &'static BlitzDebugConfig {
                 for part in val.split(',') {
                     let part = part.trim().to_ascii_lowercase();
                     match part.as_str() {
-                        "all" => {
-                            set.extend([
-                                "sched", "liveness", "regalloc", "asm", "licm", "egraph", "dce",
-                                "alias",
-                            ]);
-                        }
-                        "sched"
-                        | "liveness"
-                        | "regalloc"
-                        | "asm"
-                        | "licm"
-                        | "egraph"
-                        | "dce"
-                        | "alias" => {
-                            set.insert(match part.as_str() {
-                                "sched" => "sched",
-                                "liveness" => "liveness",
-                                "regalloc" => "regalloc",
-                                "asm" => "asm",
-                                "licm" => "licm",
-                                "egraph" => "egraph",
-                                "dce" => "dce",
-                                "alias" => "alias",
-                                _ => unreachable!(),
-                            });
-                        }
+                        "all" => set.extend(CATEGORIES),
                         "" => {}
-                        other => {
-                            eprintln!(
-                                "warning: unknown BLITZ_DEBUG category '{other}', \
-                                 valid: sched, liveness, regalloc, asm, licm, egraph, dce, alias, all"
-                            );
-                        }
+                        other => match CATEGORIES.iter().find(|c| **c == other) {
+                            Some(&known) => {
+                                set.insert(known);
+                            }
+                            None => eprintln!(
+                                "warning: unknown BLITZ_DEBUG category '{other}', valid: {}, all",
+                                CATEGORIES.join(", ")
+                            ),
+                        },
                     }
                 }
                 set

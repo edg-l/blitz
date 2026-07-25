@@ -18,6 +18,16 @@ pub struct Segment {
     pub end: ProgramPoint,
 }
 
+/// Whether `inner` lies strictly within `outer`.
+///
+/// Strict on at least one side, so two segments with the same range nest in
+/// neither direction and stay ambiguous.
+fn nests(inner: &Segment, outer: &Segment) -> bool {
+    outer.start <= inner.start
+        && inner.end <= outer.end
+        && (outer.start < inner.start || inner.end < outer.end)
+}
+
 /// Range-keyed map from e-class IDs to virtual registers.
 ///
 /// Each class may have multiple non-overlapping segments once the pressure
@@ -111,27 +121,45 @@ impl ClassVRegMap {
 
     /// Return the VReg covering `point` for `class`, or `None`.
     ///
-    /// In `debug_assertions` builds, panics if more than one segment covers
-    /// the same point (invariant violation: segments must be non-overlapping).
+    /// When several segments cover the point, the narrowest one wins. Segments
+    /// nest rather than tile: a value spilled to a slot keeps its own segment
+    /// (it may still be live-out, and the allocator keeps its register for that
+    /// reason), while each reload the splitter inserts covers only the few
+    /// instructions from its own def to its use. Inside that window the reload
+    /// register is the one holding the value, so the more specific segment is
+    /// the answer.
+    ///
+    /// In `debug_assertions` builds, panics when two covering segments merely
+    /// *cross* (neither contains the other) or share a range, which is
+    /// genuinely ambiguous rather than a nesting.
     pub fn lookup(&self, class: ClassId, point: ProgramPoint) -> Option<VReg> {
         let segs = self.segments.get(&class)?;
-        let mut found: Option<VReg> = None;
+        let mut found: Option<&Segment> = None;
         for seg in segs.iter() {
-            if seg.start <= point && point <= seg.end {
-                debug_assert!(
-                    found.is_none(),
-                    "ClassVRegMap: class {:?} has overlapping segments at point {:?}",
-                    class,
-                    point
-                );
-                found = Some(seg.vreg);
-                #[cfg(not(debug_assertions))]
-                {
-                    return found;
+            if seg.start > point || point > seg.end {
+                continue;
+            }
+            match found {
+                None => found = Some(seg),
+                Some(best) => {
+                    debug_assert!(
+                        nests(seg, best) || nests(best, seg),
+                        "ClassVRegMap: class {class:?} has overlapping segments at point \
+                         {point:?} that do not nest: v{} [{:?}..{:?}] and v{} [{:?}..{:?}]",
+                        best.vreg.0,
+                        best.start,
+                        best.end,
+                        seg.vreg.0,
+                        seg.start,
+                        seg.end,
+                    );
+                    if nests(seg, best) {
+                        found = Some(seg);
+                    }
                 }
             }
         }
-        found
+        found.map(|s| s.vreg)
     }
 
     /// Return ANY VReg for `class`, or `None`.

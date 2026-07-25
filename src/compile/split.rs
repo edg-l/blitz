@@ -504,6 +504,7 @@ pub fn plan_splits(
     loop_depths: &BTreeMap<VReg, u32>,
     func: &Function,
 ) -> SplitPlan {
+    let trace = crate::trace::is_enabled("split") && crate::trace::fn_matches(&func.name);
     let n_blocks = block_schedules.len();
     let mut per_block_insertions: Vec<Vec<(usize, ScheduledInst)>> = vec![Vec::new(); n_blocks];
     let mut new_segments: Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)> = Vec::new();
@@ -632,7 +633,24 @@ pub fn plan_splits(
             }
         };
 
+        if trace {
+            tracing::debug!(
+                target: "blitz::split",
+                "[{}] block {block_idx}: gpr_budget={gpr_budget} xmm_budget={xmm_budget} \
+                 callee_saved_budget={callee_saved_budget}\n{}",
+                func.name,
+                format_pressure(schedule, &gpr_pressure, &xmm_pressure, &live_sets, vreg_classes),
+            );
+        }
+
         if let Some((inst_idx, class, excess)) = standard_overshoot {
+            if trace {
+                tracing::debug!(
+                    target: "blitz::split",
+                    "[{}] block {block_idx}: standard overshoot at [{inst_idx}] class={class:?} excess={excess}",
+                    func.name,
+                );
+            }
             apply_splits_for_overshoot(
                 block_idx,
                 inst_idx,
@@ -679,6 +697,13 @@ pub fn plan_splits(
             &call_arg_vregs,
         );
         if let Some((call_inst_idx, excess)) = call_crossing {
+            if trace {
+                tracing::debug!(
+                    target: "blitz::split",
+                    "[{}] block {block_idx}: GPR call-crossing overshoot at [{call_inst_idx}] excess={excess}",
+                    func.name,
+                );
+            }
             apply_splits_for_overshoot(
                 block_idx,
                 call_inst_idx,
@@ -727,6 +752,13 @@ pub fn plan_splits(
             &call_arg_vregs,
         );
         if let Some((call_inst_idx, excess)) = xmm_call_crossing {
+            if trace {
+                tracing::debug!(
+                    target: "blitz::split",
+                    "[{}] block {block_idx}: XMM call-crossing overshoot at [{call_inst_idx}] excess={excess}",
+                    func.name,
+                );
+            }
             apply_splits_for_overshoot(
                 block_idx,
                 call_inst_idx,
@@ -756,7 +788,7 @@ pub fn plan_splits(
         }
     }
 
-    SplitPlan {
+    let plan = SplitPlan {
         per_block_insertions,
         new_segments,
         operand_rewrites,
@@ -764,7 +796,113 @@ pub fn plan_splits(
         segment_end_truncations,
         slots_allocated: new_slot_count,
         end_of_block_spill_vregs,
+    };
+    if trace {
+        tracing::debug!(
+            target: "blitz::split",
+            "[{}] plan:\n{}", func.name, format_plan(&plan),
+        );
     }
+    plan
+}
+
+// ── Trace formatting (`BLITZ_DEBUG=split`) ───────────────────────────────────
+
+/// Format a block's per-instruction pressure next to the live sets that produced
+/// it, so a disagreement with the allocator's chromatic number can be read off
+/// directly instead of re-derived.
+fn format_pressure(
+    schedule: &[ScheduledInst],
+    gpr_pressure: &[u32],
+    xmm_pressure: &[u32],
+    live_sets: &[BTreeSet<VReg>],
+    vreg_classes: &BTreeMap<VReg, RegClass>,
+) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for i in 0..=schedule.len() {
+        let (gpr, xmm) = (
+            gpr_pressure.get(i).copied().unwrap_or(0),
+            xmm_pressure.get(i).copied().unwrap_or(0),
+        );
+        let live = live_sets.get(i).map(|s| {
+            let mut v: Vec<String> = s
+                .iter()
+                .map(|r| match vreg_classes.get(r) {
+                    Some(RegClass::XMM) => format!("v{}x", r.0),
+                    _ => format!("v{}", r.0),
+                })
+                .collect();
+            v.sort();
+            v.join(",")
+        });
+        match schedule.get(i) {
+            Some(inst) => {
+                let ops: Vec<u32> = inst.operands.iter().map(|v| v.0).collect();
+                writeln!(
+                    out,
+                    "  [{i:>3}] gpr={gpr:>2} xmm={xmm:>2} | v{} = {:?}({ops:?}) live_before={{{}}}",
+                    inst.dst.0,
+                    inst.op,
+                    live.unwrap_or_default(),
+                )
+            }
+            None => writeln!(
+                out,
+                "  [exit] gpr={gpr:>2} xmm={xmm:>2} | live_out={{{}}}",
+                live.unwrap_or_default(),
+            ),
+        }
+        .unwrap();
+    }
+    out
+}
+
+/// Format the split plan: what got inserted where, and how operands moved.
+fn format_plan(plan: &SplitPlan) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for (bi, insertions) in plan.per_block_insertions.iter().enumerate() {
+        for (at, inst) in insertions {
+            let ops: Vec<u32> = inst.operands.iter().map(|v| v.0).collect();
+            writeln!(
+                out,
+                "  insert b{bi} before [{at}]: v{} = {:?}({ops:?})",
+                inst.dst.0, inst.op
+            )
+            .unwrap();
+        }
+    }
+    for (bi, ii, oi, new_vreg) in &plan.operand_rewrites {
+        writeln!(out, "  rewrite b{bi}[{ii}].op{oi} -> v{}", new_vreg.0).unwrap();
+    }
+    for (cid, vreg, start, end) in &plan.new_segments {
+        writeln!(
+            out,
+            "  segment c{} -> v{} [{start:?}..{end:?}]",
+            cid.0, vreg.0
+        )
+        .unwrap();
+    }
+    for (vreg, at) in &plan.segment_end_truncations {
+        writeln!(out, "  truncate v{} end at {at:?}", vreg.0).unwrap();
+    }
+    for ((bid, pidx), info) in &plan.slot_spilled_params {
+        writeln!(
+            out,
+            "  slot-spilled param b{bid}#{pidx}: v{} slot={} {:?}",
+            info.vreg.0, info.slot, info.reg_class
+        )
+        .unwrap();
+    }
+    let eob: Vec<u32> = plan.end_of_block_spill_vregs.iter().map(|v| v.0).collect();
+    writeln!(
+        out,
+        "  slots_allocated={} end_of_block_spill_vregs={eob:?}",
+        plan.slots_allocated
+    )
+    .unwrap();
+    out
 }
 
 // ── Block-param call-crossing detection (Phase 6) ───────────────────────────
@@ -1001,8 +1139,11 @@ fn apply_cross_block_slot_spill(
             victim_class = class_to_vreg.vreg_to_class(victim, entry_point);
 
             if let Some(class) = victim_class {
+                // The store's dummy dst gets no segment: it names a pseudo-op
+                // rather than a value, holds no register, and its point is
+                // already covered by the victim's segment (truncated to end
+                // exactly here in step 3).
                 let store_point = ProgramPoint::inst_point(bi, def_pos + 1);
-                new_segments.push((class, store_vreg, store_point, store_point));
 
                 // Step 2: SpillLoad at end of def block (position n_insts).
                 // This creates a reload VReg that covers the block_exit point,
@@ -1187,13 +1328,11 @@ fn apply_split_planned(
                 }
             }
 
-            // Register the store dummy VReg's segment (just for bookkeeping).
-            if let Some(class) = victim_class
-                && let Some(dp) = def_pos
-            {
-                let point = ProgramPoint::inst_point(block_idx, dp + 1);
-                new_segments.push((class, store_dummy_vreg, point, point));
-            }
+            // No segment is registered for the store's dummy dst. It names a
+            // pseudo-op, not a value: it gets no register, so a lookup landing
+            // on it reports "no register" for a class that is perfectly live.
+            // The victim's own segment already covers the store point.
+            let _ = store_dummy_vreg;
         }
     }
 }
@@ -1212,7 +1351,7 @@ pub fn apply_plan_to(
     class_to_vreg: &mut ClassVRegMap,
     next_vreg: &mut u32,
     plan: SplitPlan,
-) {
+) -> AppliedSplits {
     // Apply operand rewrites first (before inserting instructions shifts indices).
     // We collect rewrites per block and apply them before insertions.
     let mut per_block_rewrites: BTreeMap<usize, Vec<(usize, usize, VReg)>> = BTreeMap::new();
@@ -1260,9 +1399,30 @@ pub fn apply_plan_to(
         }
     }
 
-    // Register new segments in class_to_vreg.
+    // Register new segments in class_to_vreg, in FINAL schedule coordinates.
+    //
+    // Every index the plan recorded was measured against the pre-insertion
+    // schedule, and goes stale the moment an earlier insertion shifts the
+    // block: a use planned at index 5 with three insertions ahead of it now
+    // sits at 8. `lookup` matches points exactly, so a stale point misses
+    // silently -- and lowering then falls back to the register the value
+    // occupied *before* it was spilled, making a load read a register the
+    // reload never wrote.
+    //
+    // The final schedule is the authority: a VReg's segment runs from its def
+    // to its last reference. Segments the plan marked as reaching block exit
+    // keep that end, since `compute_phi_uses` resolves terminator args there.
+    let refs = VRegRefs::of(block_schedules);
+    let mut committed_segments: Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)> =
+        Vec::with_capacity(plan.new_segments.len());
     for (class, vreg, start, end) in plan.new_segments {
+        let (start, end) = match refs.range_of(vreg) {
+            Some((s, _)) if end.inst == u32::MAX => (s, ProgramPoint::block_exit(refs.block(vreg))),
+            Some(range) => range,
+            None => (start, end),
+        };
         class_to_vreg.insert_segment(class, vreg, start, end);
+        committed_segments.push((class, vreg, start, end));
     }
 
     // Phase 6: Truncate block-param segments so they start AFTER block entry.
@@ -1287,8 +1447,16 @@ pub fn apply_plan_to(
     // After truncation, class_to_vreg.lookup(class, block_exit) returns the
     // end-of-block reload VReg (whose segment was registered above), enabling
     // compute_phi_uses to route the terminator through the reload VReg instead.
-    for (vreg, new_end) in plan.segment_end_truncations {
+    //
+    // The new end is recomputed from the final schedule for the same reason the
+    // segments above are: the spilled VReg's last reference is its SpillStore,
+    // and insertions moved it.
+    let mut committed_truncations: Vec<(VReg, ProgramPoint)> =
+        Vec::with_capacity(plan.segment_end_truncations.len());
+    for (vreg, planned_end) in plan.segment_end_truncations {
+        let new_end = refs.range_of(vreg).map(|(_, e)| e).unwrap_or(planned_end);
         class_to_vreg.truncate_segment_end(vreg, new_end);
+        committed_truncations.push((vreg, new_end));
     }
 
     // Advance next_vreg to the highest freshly-allocated VReg + 1.
@@ -1305,6 +1473,85 @@ pub fn apply_plan_to(
 
     // Bump split_generation to mark that splitter output has been committed.
     class_to_vreg.split_generation += 1;
+
+    AppliedSplits {
+        segments: committed_segments,
+        truncations: committed_truncations,
+    }
+}
+
+/// The segment edits `apply_plan_to` committed, in final schedule coordinates.
+///
+/// Phase 7 lowering resolves effectful-op operands through per-block snapshots
+/// of `class_to_vreg` taken during linearization, long before the splitter runs.
+/// Replaying these onto each snapshot is what keeps a spilled address resolving
+/// to its reload instead of its pre-spill register.
+pub struct AppliedSplits {
+    pub segments: Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
+    pub truncations: Vec<(VReg, ProgramPoint)>,
+}
+
+impl AppliedSplits {
+    /// Replay the committed edits onto a snapshot taken before the split.
+    ///
+    /// Truncations run first: an untruncated original segment would otherwise
+    /// overlap the reload segment that replaces its tail.
+    pub fn replay_onto(&self, snapshot: &mut ClassVRegMap) {
+        for &(vreg, new_end) in &self.truncations {
+            snapshot.truncate_segment_end(vreg, new_end);
+        }
+        for &(class, vreg, start, end) in &self.segments {
+            snapshot.insert_segment(class, vreg, start, end);
+        }
+    }
+}
+
+/// Where each VReg is defined and last referenced in the final schedules.
+struct VRegRefs {
+    /// vreg -> (block index, def index, last reference index).
+    entries: BTreeMap<VReg, (usize, usize, usize)>,
+}
+
+impl VRegRefs {
+    fn of(block_schedules: &[Vec<ScheduledInst>]) -> Self {
+        let mut entries: BTreeMap<VReg, (usize, usize, usize)> = BTreeMap::new();
+        for (bi, schedule) in block_schedules.iter().enumerate() {
+            for (idx, inst) in schedule.iter().enumerate() {
+                entries.entry(inst.dst).or_insert((bi, idx, idx));
+            }
+            // A reference only extends the range when it sits in the defining
+            // block: segments are per-block, and a cross-block use is served by
+            // its own reload segment.
+            for (idx, inst) in schedule.iter().enumerate() {
+                for op in &inst.operands {
+                    if let Some(entry) = entries.get_mut(op)
+                        && entry.0 == bi
+                    {
+                        entry.2 = entry.2.max(idx);
+                    }
+                }
+            }
+        }
+        VRegRefs { entries }
+    }
+
+    fn block(&self, vreg: VReg) -> usize {
+        self.entries.get(&vreg).map(|e| e.0).unwrap_or(0)
+    }
+
+    /// The `[def .. last reference]` program-point range for `vreg`, or `None`
+    /// if it is defined by no instruction in any schedule.
+    ///
+    /// Index 0 is clamped to 1: `inst = 0` is the `BLOCK_ENTRY` sentinel, so a
+    /// reload landing at the top of a block shares a point with the instruction
+    /// that consumes it, which is the point lowering asks about anyway.
+    fn range_of(&self, vreg: VReg) -> Option<(ProgramPoint, ProgramPoint)> {
+        let &(bi, def, last) = self.entries.get(&vreg)?;
+        Some((
+            ProgramPoint::inst_point(bi, def.max(1)),
+            ProgramPoint::inst_point(bi, last.max(1)),
+        ))
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

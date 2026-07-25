@@ -185,7 +185,11 @@ pub(super) fn lower_effectful_op(
             let canon_addr = uf.find_immutable(*addr);
             let addr_reg = resolve_addr(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
-                message: "Load: no register for addr".into(),
+                message: format!(
+                    "Load: no register for addr class {canon_addr:?} at {point:?} \
+                     (resolved to {:?})",
+                    class_to_vreg.lookup(canon_addr, point)
+                ),
                 location: Some(IrLocation {
                     function: func.name.clone(),
                     block: None,
@@ -254,7 +258,11 @@ pub(super) fn lower_effectful_op(
             let canon_addr = uf.find_immutable(*addr);
             let addr_reg = resolve_addr(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
-                message: "Store: no register for addr".into(),
+                message: format!(
+                    "Store: no register for addr class {canon_addr:?} at {point:?} \
+                     (resolved to {:?})",
+                    class_to_vreg.lookup(canon_addr, point)
+                ),
                 location: Some(IrLocation {
                     function: func.name.clone(),
                     block: None,
