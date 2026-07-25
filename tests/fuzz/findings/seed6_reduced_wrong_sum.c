@@ -10,27 +10,41 @@
 // comparison against cc would have been meaningless. With every element written
 // the divergence stands, and cc -O0 and cc -O2 agree.
 //
-// The final sum is wrong while every one of its eighteen terms is right on its
-// own -- each term printed alone matches cc. blitz's answer, 25, is exactly
-// arr[6] + arr[7], the last two terms, which are the only two still in registers
-// rather than reloaded from spill slots. So the accumulator arrives at the last
-// two adds holding zero.
+// WHAT IS WRONG, established by perturbing one term at a time by +1000 and
+// checking that cc's answer moves by exactly +1000 (so the perturbation is
+// linear and the probe is valid):
 //
-// Ruled out:
-//   * A reload from a slot nothing stored. The BLITZ_VERIFY spill-slot check
-//     added alongside this file is clean here, and every slot the chain reads
-//     has a store.
-//   * The address resolution seam. Barrier operands are positional now, and
-//     the addresses in this chain are read correctly.
-//   * Parallel-copy sequentialization. Fixed separately in the same session and
+//   * All eight `arr[i]` terms contribute correctly.
+//   * All ten `vN` terms contribute NOTHING. blitz's answer does not move at
+//     all when any of them changes.
+//
+// So the integer half of the sum is a constant, -3, unrelated to its inputs,
+// and 25 is that plus the array half. Every `vN` is a compile-time constant
+// here, and they reach the sum as block params of b4 (see --emit-ir: v91, v93,
+// v98..v105), passed across the edge through spill slots.
+//
+// RULED OUT, each checked rather than argued:
+//   * A reload from a slot nothing stored -- the BLITZ_VERIFY spill-slot check
+//     is clean on this program.
+//   * Two values sharing a slot -- no slot receives stores from two different
+//     VRegs.
+//   * A dropped phi copy -- `build_phi_copies` drops none here.
+//   * The address-resolution seam -- barrier operands are positional now.
+//   * Parallel-copy sequentialization -- fixed in the same session, and fixing
 //     it changes nothing here.
 //
-// Next: find which slot's *contents* are wrong, i.e. whether two values share a
-// slot. Slots are handed out by a single counter, so a collision would have to
-// come from the numbering seams -- `pre_spill_slots`, the splitter's per-round
-// `first_slot`, and the global allocator's shift, which distinguishes its own
-// slots from the splitter's by number range in `compile/mod.rs`. That last one
-// is only safe because `run_phase5` never actually allocates a slot today.
+// So the copies are emitted, the slots are unique, and each is written; the
+// values written are wrong. The next step is to name the edge into b4 and check,
+// for each of its arguments, the register the copy reads against the register
+// holding that constant at the end of the predecessor -- i.e. whether
+// `build_phi_copies` resolves the argument classes to the right VRegs. Note that
+// it resolves the argument through the per-block map but the destination param
+// through the *global* `class_to_vreg` (terminator.rs), and mixing the two is
+// what three separate bugs in this seam turned out to be.
+//
+// Also worth confirming: several `vN` share a value (-42 appears twice), so they
+// share an e-class and legitimately resolve to one VReg. Two phi copies reading
+// the same source register is expected here, not a bug.
 //
 extern int printf(char* fmt, int x);
 int f0(double p0, double p1, double p2, double p3, int p4, int p5, int p6) {

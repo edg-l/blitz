@@ -331,22 +331,41 @@ VRegs where only one has the right register is the signature.
       and overwrites it three instructions early. The interference between a
       value live *through* both arms and one defined in the merge block is being
       missed. Smallest open miscompile -- start here.
-- [ ] **A register is clobbered between its def and its use because the
-      compiler groups instructions twice**
-      (`tests/fuzz/findings/seed4_load_addr_is_index.c`; the filename records the
-      original diagnosis, fixed in `437fd60`). The allocator measures liveness on
-      the pre-allocation, group-ordered schedule; Phase 7 re-groups the
-      post-allocation schedule and emits in that order. See P0 for the fix.
-      Seeds 6 and 7 fail the same way.
-- [ ] **seed6 truncated is still wrong at -O0**
-      (`tests/fuzz/findings/seed6_truncated_miscompile.c`, exit 232 vs 226).
-      Reducing it produced the parameter and phi-arg fixes above and the XMM
-      finding; at least one defect remains.
+- [x] **A register clobbered between its def and its use because the compiler
+      grouped instructions twice** -- fixed in `ae55ce9`. The schedule is ordered
+      by barrier group before allocation and the allocator measures liveness on
+      that order; Phase 7 was computing a second grouping on the post-allocation
+      schedule and emitting in that one. It now emits in schedule order, with each
+      barrier instruction standing in for its effectful op.
+- [x] **A block param was not live from block entry** -- fixed in `dee0768`, test
+      `tests/lit/regalloc/blockparam_live_from_block_entry.c`. A `BlockParam`
+      computes nothing, but its pseudo-op sat wherever scheduling left it and
+      liveness reads a def position as the start of a live range, so a param
+      whose pseudo-op the backward pass pulled down next to its use looked dead
+      over the earlier part of its own block.
+- [x] **Parallel copy sequentialization dropped copies and panicked** -- fixed in
+      `12719c3`. It walked cycles through a `src -> dst` map, which cannot
+      represent a source fanning out to two destinations, and a one-element cycle
+      (a self-copy) indexed past the end. Now driven by the invariant rather than
+      the cycle shape, with a property test that simulates the emitted sequence
+      over ten copy shapes.
+- [ ] **The integer half of a long sum is a constant unrelated to its inputs**
+      (`tests/fuzz/findings/seed6_reduced_wrong_sum.c`, 64 lines, UB-free, blitz
+      25 against cc -134). Seeds 4 and 7 fail the same way. The finding records
+      what one-term perturbation established and what has been ruled out by
+      measurement rather than argument: not a reload from an unwritten slot, not
+      two values sharing a slot, not a dropped phi copy, not the address
+      resolution seam, not copy sequentialization. The values reach the sum as
+      block params passed through slots, so the next step is checking whether
+      `build_phi_copies` resolves each argument class to the right VReg -- it
+      resolves arguments through the per-block map and destinations through the
+      global one, and mixing those two is what three earlier bugs in this seam
+      were.
 
-These last three reach codegen only because the splitter now clears the
-pressure that used to stop them. They were failing before as compile errors and
-are failing now as wrong code; `run_fuzz.sh` reports both, and a reproducer that
-gets as far as emitting instructions is the more useful one.
+Seeds 4, 6 and 7 reach codegen only because the splitter now clears the pressure
+that used to stop them. They were failing before as compile errors and are
+failing now as wrong code; `run_fuzz.sh` reports both, and a reproducer that gets
+as far as emitting instructions is the more useful one.
 
 ## Tooling to build next
 
@@ -362,12 +381,17 @@ generality.
       Known limit: it cannot see a register that holds the *wrong* value, which
       is what seed5 does at -O0. Value errors stay the differential harness's
       job.
-- [ ] **Extend it to spill slots and callee-saved registers**: a reload must
-      not read a slot never stored (same dataflow, keyed by frame offset), and
-      a callee-saved register written in the body must be saved and restored.
-      Restrict the slot check to the spill-slot range of the frame: user stack
-      slots and the caller's outgoing-argument area are also RSP-relative and
-      are legitimately read before this function writes them.
+- [x] **Spill-slot check** (`12719c3`). A reload must not read a slot nothing
+      stored: same forward dataflow, keyed by frame displacement, scoped to the
+      slot region of the frame (user stack slots are written through computed
+      addresses this does not track, and the outgoing-argument area belongs to
+      the caller). Green everywhere including the open findings, which is itself
+      evidence about where those bugs are not.
+- [ ] **Callee-saved preservation**: a callee-saved register written in the body
+      must be saved and restored.
+- [ ] **Two live ranges in one register.** The def-before-use check cannot see
+      it, and it is what three of this session's bugs came down to. Needs the
+      allocator's own liveness at hand to compare against the emitted stream.
 - [x] **Effectful-operand resolution check** (`BLITZ_VERIFY`, in
       `lower_effectful_op`). The register a Load or Store reads must be one the
       barrier consuming it declares as an operand. Kept as a backstop now that
@@ -390,10 +414,18 @@ generality.
       and the schedules after it. `BLITZ_DEBUG=regalloc` also dumps the final
       function-wide VReg-to-register assignment, which the global allocator
       never printed.
-- [ ] **Delta-debugging in the fuzzer.** Failures arrive at 40-3000 lines and
-      were reduced by hand twice. The generator can re-simulate any candidate
-      to confirm it is still UB-free and still failing, which is exactly what
-      automated shrinking needs.
+- [x] **Delta debugger** (`tests/fuzz/reduce.py`, `12719c3`). Line-based; keeps a
+      deletion when the reference compiler still accepts the program, `cc -O0`
+      and `cc -O2` still agree (the cheap check that the reduction has not
+      introduced undefined behaviour and started comparing against noise), blitz
+      still compiles it, and blitz still disagrees. That third condition is
+      load-bearing: without it the search drifts onto any panic it can reach, and
+      the first run turned a wrong-value bug into a missing-return crash in nine
+      steps. Cut seed 6 from 120 lines to 64.
+      It does not know about UB the reference compilers agree on by luck -- it
+      deleted the array initialisers and had to be corrected by hand. A stronger
+      guard (a third compiler, or the generator re-simulating the candidate)
+      would help.
 
 ## Tech debt
 
