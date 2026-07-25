@@ -971,8 +971,13 @@ pub fn compile(
         // Pressure-driven splitter.
         // CRITICAL ORDER: apply_plan_to must run BEFORE collect_block_param_vregs_per_block.
         // The splitter may truncate segments, which affects what block params are found.
-        let splitter_slots_allocated: u32;
-        {
+        let mut splitter_slots_allocated: u32 = pre_spill_slots;
+        // One round of splitting only lowers pressure at the points it looked
+        // at, and the reloads it inserts are themselves live somewhere. Re-plan
+        // against the rewritten schedules until no overshoot is left or a round
+        // finds nothing to do -- a single pass leaves the allocator facing an
+        // overshoot it can only report as a failure.
+        for _round in 0..split::MAX_SPLIT_ROUNDS {
             use crate::regalloc::coloring::{AVAILABLE_XMM_COLORS, available_gpr_colors};
 
             let gpr_budget = available_gpr_colors(opts.force_frame_pointer);
@@ -996,16 +1001,23 @@ pub fn compile(
                 gpr_budget,
                 xmm_budget,
                 next_vreg,
-                pre_spill_slots,
+                splitter_slots_allocated,
                 &loop_depths,
                 func,
+                &slot_spilled_params,
             );
-            // Extract slot_spilled_params, slots_allocated, and end_of_block_spill_vregs
-            // before consuming the plan.
-            slot_spilled_params = std::mem::take(&mut plan.slot_spilled_params);
+            // An empty plan still goes through `apply_plan_to`: that is what
+            // bumps `split_generation`, and `collect_block_param_vregs_per_block`
+            // asserts the splitter has committed at least once.
+            let converged = plan.is_empty();
+            // Copy out slots_allocated and the accumulating maps. The plan keeps
+            // its `slot_spilled_params`: `apply_plan_to` reads them to truncate
+            // each param's segment past block entry, which is what stops a
+            // register being allocated to a value that lives in a slot.
+            slot_spilled_params.extend(plan.slot_spilled_params.clone());
             splitter_slots_allocated = plan.slots_allocated;
-            end_of_block_spill_vregs_for_lowering =
-                std::mem::take(&mut plan.end_of_block_spill_vregs);
+            end_of_block_spill_vregs_for_lowering
+                .extend(std::mem::take(&mut plan.end_of_block_spill_vregs));
 
             // Build old→new VReg remap restricted to CALL-ARG positions so we
             // can update call_arg_precolors after apply_plan_to. The precolors
@@ -1110,6 +1122,10 @@ pub fn compile(
                         phi_set.remove(&ov);
                     }
                 }
+            }
+
+            if converged {
+                break;
             }
         }
 
@@ -1323,6 +1339,13 @@ pub fn compile(
             // never points at a stale pre-coalesce VReg that has no register
             // assignment. The alias map is from `allocate_global`'s result
             // and is constant across blocks.
+            //
+            // Each segment keeps its range. Rebuilding this as one VReg per
+            // class discards everything the splitter recorded: with a class
+            // holding a value plus a reload or a rematerialised copy per block,
+            // whichever segment happened to be visited last won every lookup,
+            // and a phi copy in one block would read the copy belonging to
+            // another.
             if !coalesce_aliases.is_empty() {
                 let mut aliased_map = ClassVRegMap::new();
                 for (cid, vreg) in map.iter() {

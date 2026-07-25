@@ -97,6 +97,28 @@ pub struct SplitPlan {
     pub end_of_block_spill_vregs: BTreeSet<VReg>,
 }
 
+impl SplitPlan {
+    /// Whether the plan would change nothing.
+    ///
+    /// The caller re-plans until this holds, so "nothing to do" has to mean
+    /// exactly that: an empty plan applied in a loop would never terminate.
+    pub fn is_empty(&self) -> bool {
+        self.per_block_insertions.iter().all(|b| b.is_empty())
+            && self.slot_spilled_params.is_empty()
+            && self.operand_rewrites.is_empty()
+            && self.new_segments.is_empty()
+            && self.segment_end_truncations.is_empty()
+    }
+}
+
+/// How many times the caller re-plans splits before giving up.
+///
+/// Each round removes at least one value from the worst pressure point in some
+/// block, so the bound only has to exceed the deepest overshoot seen in
+/// practice (18 GPR colors); it exists to turn a splitter that fails to
+/// converge into a diagnosable error rather than a hang.
+pub const MAX_SPLIT_ROUNDS: usize = 48;
+
 /// Cost above which we prefer SlotSpill over Remat.
 ///
 /// If `CostModel::cost(op) * loop_depth_penalty > SLOT_STORE_LOAD_COST`,
@@ -503,6 +525,7 @@ pub fn plan_splits(
     first_slot: u32,
     loop_depths: &BTreeMap<VReg, u32>,
     func: &Function,
+    already_slot_spilled: &BlockParamSlotMap,
 ) -> SplitPlan {
     let trace = crate::trace::is_enabled("split") && crate::trace::fn_matches(&func.name);
     let n_blocks = block_schedules.len();
@@ -557,6 +580,7 @@ pub fn plan_splits(
         &mut operand_rewrites,
         &mut slot_spilled_params,
         &mut planned_victims,
+        already_slot_spilled,
     );
 
     for block_idx in 0..n_blocks {
@@ -939,6 +963,7 @@ fn detect_blockparam_call_crossings(
     operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
     slot_spilled_params: &mut BTreeMap<(BlockId, u32), SlotSpilledParamInfo>,
     planned_victims: &mut BTreeSet<VReg>,
+    already_slot_spilled: &BlockParamSlotMap,
 ) {
     let n_blocks = block_schedules.len();
 
@@ -968,6 +993,14 @@ fn detect_blockparam_call_crossings(
         for pidx in 0..block.param_types.len() as u32 {
             // Only handle XMM (float) params.
             if !block.param_types[pidx as usize].is_float() {
+                continue;
+            }
+
+            // Already routed through a slot by an earlier round. Spilling it
+            // again would allocate a second slot, and only the newer entry
+            // survives in `slot_spilled_params` -- so predecessors would store
+            // to one slot while the earlier round's reloads read the other.
+            if already_slot_spilled.contains_key(&(block.id, pidx)) {
                 continue;
             }
 
@@ -1644,6 +1677,7 @@ mod tests {
             0, // first_slot
             &loop_depths,
             &func,
+            &BlockParamSlotMap::new(),
         );
 
         assert!(
@@ -1692,6 +1726,7 @@ mod tests {
             0, // first_slot
             &loop_depths,
             &func,
+            &BlockParamSlotMap::new(),
         );
 
         // Should have planned at least one split (insertions or rewrites).
@@ -1887,6 +1922,7 @@ mod tests {
             &mut operand_rewrites,
             &mut slot_spilled_params,
             &mut BTreeSet::new(),
+            &BlockParamSlotMap::new(),
         );
 
         assert_eq!(new_slot_count, 1, "one slot should be allocated");
@@ -1964,6 +2000,7 @@ mod tests {
             &mut operand_rewrites,
             &mut slot_spilled_params,
             &mut BTreeSet::new(),
+            &BlockParamSlotMap::new(),
         );
 
         let b1_id = func.blocks[block1_idx].id;
@@ -2023,6 +2060,7 @@ mod tests {
             &mut operand_rewrites,
             &mut slot_spilled_params,
             &mut BTreeSet::new(),
+            &BlockParamSlotMap::new(),
         );
 
         // Two uses → two XmmSpillLoad insertions in block1.
@@ -2117,6 +2155,7 @@ mod tests {
             &mut operand_rewrites,
             &mut slot_spilled_params,
             &mut BTreeSet::new(),
+            &BlockParamSlotMap::new(),
         );
 
         // One slot allocated for the F64 param.

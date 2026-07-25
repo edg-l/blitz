@@ -1035,6 +1035,15 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
     let gpr_overshoot = gpr_chromatic.saturating_sub(gpr_budget);
     let xmm_overshoot = xmm_chromatic.saturating_sub(xmm_budget);
 
+    if (gpr_overshoot > 0 || xmm_overshoot > 0) && crate::trace::is_enabled("split") {
+        tracing::debug!(
+            target: "blitz::split",
+            "allocator disagrees with the splitter: gpr_chromatic={gpr_chromatic} \
+             (budget {gpr_budget}), xmm_chromatic={xmm_chromatic} (budget {xmm_budget})\n{}",
+            format_overshoot(&phase3, &coloring, gpr_budget, xmm_budget),
+        );
+    }
+
     // Task 4.5: map colors to physical registers per class.
     //
     // Build a `BTreeMap<usize, Reg>` precoloring (vreg_idx -> Reg) for each
@@ -1275,6 +1284,72 @@ pub(crate) fn run_phase5(
          all register pressure before phase 5.",
         phase4.gpr_overshoot, phase4.xmm_overshoot,
     ))
+}
+
+/// Describe why the coloring needed more colors than the budget.
+///
+/// The splitter's job is to bring pressure within budget before this point, so
+/// an overshoot here means the two models disagree. Max live values is a lower
+/// bound on colors, not the count: precolored ABI nodes and clobber phantoms
+/// constrain *which* color each neighbour may take, so a set of values that fits
+/// in the budget by pressure can still fail to color. This prints each
+/// over-budget VReg with the op that defines it and the colors its neighbours
+/// already hold, which separates the two causes: a full low-color set means real
+/// clique pressure the splitter missed, gaps mean a precolor or ordering
+/// artifact.
+fn format_overshoot(
+    phase3: &Phase3State,
+    coloring: &super::coloring::ColoringResult,
+    gpr_budget: u32,
+    xmm_budget: u32,
+) -> String {
+    use std::fmt::Write;
+
+    // VReg index -> defining op, for naming the offenders.
+    let mut def_op: BTreeMap<u32, String> = BTreeMap::new();
+    for (bi, insts) in phase3.per_block_insts.iter().enumerate() {
+        for inst in insts {
+            def_op
+                .entry(inst.dst.0)
+                .or_insert_with(|| format!("b{bi} {:?}", inst.op));
+        }
+    }
+
+    let mut out = String::new();
+    for (idx, &color) in coloring.colors.iter().enumerate() {
+        let Some(color) = color else { continue };
+        if idx >= phase3.graph.num_vregs {
+            continue;
+        }
+        let class = phase3.graph.reg_class[idx];
+        let budget = match class {
+            RegClass::GPR => gpr_budget,
+            RegClass::XMM => xmm_budget,
+        };
+        if color < budget {
+            continue;
+        }
+        let mut neighbor_colors: Vec<u32> = phase3.graph.adj[idx]
+            .iter()
+            .filter(|&&n| phase3.graph.reg_class[n] == class)
+            .filter_map(|&n| coloring.colors[n])
+            .collect();
+        neighbor_colors.sort_unstable();
+        neighbor_colors.dedup();
+        let precolored = phase3.pre_coloring_colors.contains_key(&idx);
+        writeln!(
+            out,
+            "  v{idx} {class:?} color={color} precolored={precolored} degree={} \
+             neighbor_colors={neighbor_colors:?} def={}",
+            phase3.graph.adj[idx].len(),
+            def_op
+                .get(&(idx as u32))
+                .map(String::as_str)
+                .unwrap_or("<phantom or coalesced away>"),
+        )
+        .unwrap();
+    }
+    out
 }
 
 /// Compute (gpr_overshoot, xmm_overshoot) from graph and precoloring.
