@@ -65,7 +65,7 @@ use super::GlobalRegAllocResult;
 use super::build_vreg_classes_from_all_blocks;
 use super::coalesce::coalesce;
 use super::coloring::{allocatable_gpr_order, allocatable_xmm_order};
-use super::interference::{InterferenceGraph, build_interference_into};
+use super::interference::{InterferenceGraph, build_interference_into, dying_clobber_operands};
 use super::liveness::{LivenessInfo, compute_liveness};
 use super::rewrite::apply_coalescing;
 
@@ -327,37 +327,15 @@ fn add_shift_precolors_global(insts: &[ScheduledInst], precolors: &mut Vec<(VReg
     }
 }
 
-/// Pre-color division projections to RAX (quotient).
-///
-/// The dividend is NOT pre-colored: `lower::X86Idiv` emits `mov rax, <dividend>`
-/// when needed. Precoloring the dividend would force its VReg to live in RAX
-/// across the entire live range, which breaks when the dividend is also used
-/// after the idiv (idiv clobbers RAX with the quotient).
-///
-/// Proj1 (remainder) is also not pre-colored; the lowering emits `mov dst, rdx`
-/// so the remainder can live in any register (see `lower::Proj1` for
-/// X86Idiv/X86Div sources).
-fn add_div_precolors_global(insts: &[ScheduledInst], precolors: &mut Vec<(VReg, Reg)>) {
-    let mut div_dst_vregs: BTreeSet<VReg> = BTreeSet::new();
-    for inst in insts {
-        if matches!(inst.op, Op::X86Idiv | Op::X86Div) {
-            div_dst_vregs.insert(inst.dst);
-        }
-    }
-    // Pre-color Proj0 nodes that project from a div result to RAX (quotient).
-    for inst in insts {
-        if inst.op == Op::Proj0
-            && let Some(&src) = inst.operands.first()
-            && div_dst_vregs.contains(&src)
-            && !precolors.iter().any(|&(v, _)| v == inst.dst)
-        {
-            precolors.push((inst.dst, Reg::RAX));
-        }
-    }
-}
-
-/// Build a function-wide precoloring list covering params, shifts, divs, and
+/// Build a function-wide precoloring list covering params, shifts, and
 /// caller-supplied call-argument/return-value VRegs.
+///
+/// Division contributes nothing. Neither operand nor projection is pinned: the
+/// lowering emits `mov rax, <dividend>`, `mov dst, rax` and `mov dst, rdx`
+/// around the instruction, and coalescing removes each copy when the register
+/// is free. The quotient used to be pinned to RAX here, and in
+/// `compile/precolor.rs` until it was removed there; two quotients live at once
+/// both got RAX and the second division destroyed the first.
 ///
 /// `call_arg_precolors` must be computed by the caller BEFORE
 /// `populate_effectful_operands` sorts the barrier operands by VReg index
@@ -387,7 +365,6 @@ fn build_function_wide_precoloring(
     // Merge shift and div precolors from all blocks' schedules.
     for sched in block_schedules {
         add_shift_precolors_global(sched, &mut precolors);
-        add_div_precolors_global(sched, &mut precolors);
     }
 
     // Merge caller-supplied call-arg precolors. These were computed from IR
@@ -490,8 +467,6 @@ struct GlobalClobberConfig<'a> {
     reg_class: RegClass,
     /// Ordered register list used to assign stable color numbers to phantoms.
     ordered_regs: Vec<Reg>,
-    /// When true, exclude call-arg VRegs that die at the call from interference.
-    exclude_call_args: bool,
     /// When true, skip points where no live VReg of `reg_class` exists.
     skip_if_no_live: bool,
 }
@@ -535,40 +510,28 @@ fn add_clobber_interferences_global(
             &liveness.live_out
         };
 
-        // Collect call-arg vregs if exclusion is enabled. Only exclude args
-        // that are NOT live after the call — an arg that survives past its
-        // call must still interfere with caller-saved clobber phantoms.
-        let call_arg_vregs: BTreeSet<usize> = if config.exclude_call_args {
-            if inst_idx < sched.len() {
-                let inst = &sched[inst_idx];
-                if matches!(inst.op, Op::CallResult(_, _) | Op::VoidCallBarrier) {
-                    let live_after: &BTreeSet<VReg> = if inst_idx + 1 < n {
-                        &liveness.live_at[inst_idx + 1]
-                    } else {
-                        &liveness.live_out
-                    };
-                    inst.operands
-                        .iter()
-                        .filter(|v| !live_after.contains(v))
-                        .map(|v| v.0 as usize)
-                        .collect()
-                } else {
-                    BTreeSet::new()
-                }
+        // Operands the clobbering instruction itself consumes, which are in the
+        // clobbered register on purpose. Only those that do not survive the
+        // point: an argument live past its call must still interfere.
+        let consumed: BTreeSet<usize> = if inst_idx < sched.len() {
+            let live_after: &BTreeSet<VReg> = if inst_idx + 1 < n {
+                &liveness.live_at[inst_idx + 1]
             } else {
-                BTreeSet::new()
-            }
+                &liveness.live_out
+            };
+            dying_clobber_operands(&sched[inst_idx], live_after)
         } else {
             BTreeSet::new()
         };
 
-        // Early-out: skip if no non-call-arg VRegs of the target class are live.
+        // Early-out: skip if no VRegs of the target class are live besides the
+        // instruction's own operands.
         if config.skip_if_no_live {
             let has_live = live_at_cp.iter().any(|v| {
                 let idx = v.0 as usize;
                 idx < graph.num_vregs
                     && graph.reg_class[idx] == config.reg_class
-                    && !call_arg_vregs.contains(&idx)
+                    && !consumed.contains(&idx)
             });
             if !has_live {
                 continue;
@@ -597,7 +560,7 @@ fn add_clobber_interferences_global(
                 let live_idx = live_v.0 as usize;
                 if live_idx < graph.num_vregs
                     && graph.reg_class[live_idx] == config.reg_class
-                    && !call_arg_vregs.contains(&live_idx)
+                    && !consumed.contains(&live_idx)
                 {
                     graph.add_edge(phantom_idx, live_idx);
                 }
@@ -641,7 +604,6 @@ fn inject_clobber_phantoms(
             clobbered_regs: &gpr_clobbers,
             reg_class: RegClass::GPR,
             ordered_regs: allocatable_gpr_order(uses_frame_pointer),
-            exclude_call_args: true,
             skip_if_no_live: false,
         },
         next_vreg,
@@ -656,7 +618,6 @@ fn inject_clobber_phantoms(
             clobbered_regs: &CALLER_SAVED_XMM,
             reg_class: RegClass::XMM,
             ordered_regs: allocatable_xmm_order(),
-            exclude_call_args: true,
             skip_if_no_live: true,
         },
         next_vreg,
@@ -671,7 +632,6 @@ fn inject_clobber_phantoms(
             clobbered_regs: &[Reg::RAX, Reg::RDX],
             reg_class: RegClass::GPR,
             ordered_regs: allocatable_gpr_order(uses_frame_pointer),
-            exclude_call_args: false,
             skip_if_no_live: false,
         },
         next_vreg,
@@ -684,10 +644,18 @@ fn inject_clobber_phantoms(
 
 /// Merge phantom precolorings with param precolorings into one map.
 ///
-/// When a param VReg is precolored to the same color as a GPR call phantom
-/// AND the graph has an interference edge between them, the param precoloring
-/// is dropped (the param will receive a free callee-saved register). The
-/// dropped pairs are appended to `unprecolored_params`.
+/// When a VReg is precolored to the same color as a clobber phantom AND the
+/// graph has an interference edge between them, its precoloring is dropped (it
+/// will receive a free register instead). Dropped params are appended to
+/// `unprecolored_params` so the lowering emits an entry move.
+///
+/// Every phantom is checked, not only the call ones. A phantom stands for a
+/// register the hardware overwrites at a point some value is live across, and
+/// a division clobbers RAX and RDX exactly as a call clobbers the caller-saved
+/// set. Checking calls alone left a parameter pinned to RDX holding that
+/// register across an `idiv` that overwrites it -- three of forty generated
+/// programs, reported by `check_precolorings` as two interfering VRegs
+/// pre-colored alike.
 ///
 /// Mirrors `merge_precolorings` from `allocator.rs` but operates at function
 /// scope with the global `param_vreg_to_reg` map and `unprecolored_params`.
@@ -703,17 +671,21 @@ fn merge_precolorings_global(
 ) -> BTreeMap<usize, u32> {
     let mut merged = param_color_map.clone();
 
-    // For each GPR call phantom, check if any precoloring conflicts (same
-    // color + interference edge). Drop conflicting precolorings: the VReg
-    // will get a callee-saved register, and the lowering will emit a mov to
-    // the ABI register at the use site (call arg setup or function prologue).
+    // For each phantom, check if any precoloring conflicts (same color +
+    // interference edge). Drop conflicting precolorings: the VReg will get a
+    // free register, and the lowering will emit a mov to the ABI register at
+    // the use site (call arg setup or function prologue).
     //
     // This covers both function params AND call-arg VRegs: a call-arg VReg
     // whose value is live across OTHER calls that clobber the target register
     // cannot be precolored to that register, or its value is destroyed by the
     // intervening call. The `setup_call_args` lowering handles non-precolored
     // arg VRegs by emitting `mov rdi, <arg_reg>` before the call.
-    for (&phantom_vreg, &phantom_color) in gpr_call_phantoms {
+    let phantoms = gpr_call_phantoms
+        .iter()
+        .chain(xmm_call_phantoms)
+        .chain(div_phantoms);
+    for (&phantom_vreg, &phantom_color) in phantoms {
         let conflicting: Vec<usize> = merged
             .iter()
             .filter(|&(&pv, &pc)| {

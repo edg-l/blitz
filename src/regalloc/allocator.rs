@@ -12,7 +12,7 @@ use super::coloring::{
     AVAILABLE_XMM_COLORS, allocatable_gpr_order, allocatable_xmm_order, available_gpr_colors,
     greedy_color, interval_color, map_colors_to_regs, mcs_ordering,
 };
-use super::interference::{InterferenceGraph, build_interference};
+use super::interference::{InterferenceGraph, build_interference, dying_clobber_operands};
 use super::liveness::{LivenessInfo, compute_liveness};
 use super::rewrite::apply_coalescing;
 use super::spill::{insert_spills, select_spill, select_spill_for_class};
@@ -298,7 +298,6 @@ struct ClobberConfig<'a> {
     clobbered_regs: &'a [Reg],
     reg_class: RegClass,
     ordered_regs: Vec<Reg>,
-    exclude_call_args: bool,
     skip_if_no_live: bool,
     insts: Option<&'a [ScheduledInst]>,
 }
@@ -337,44 +336,29 @@ fn add_clobber_interferences(
             &liveness.live_out
         };
 
-        // Collect call-arg vregs if exclusion is enabled.
-        // Only exclude args that are NOT live after the call -- an arg that survives
-        // past its call must still interfere with caller-saved clobber phantoms.
-        let call_arg_vregs: BTreeSet<usize> = if config.exclude_call_args {
-            if let Some(insts) = config.insts {
-                if cp < insts.len() {
-                    let inst = &insts[cp];
-                    if matches!(inst.op, Op::CallResult(_, _) | Op::VoidCallBarrier) {
-                        let live_after: &std::collections::BTreeSet<VReg> = if cp + 1 < n {
-                            &liveness.live_at[cp + 1]
-                        } else {
-                            &liveness.live_out
-                        };
-                        inst.operands
-                            .iter()
-                            .filter(|v| !live_after.contains(v))
-                            .map(|v| v.0 as usize)
-                            .collect()
-                    } else {
-                        BTreeSet::new()
-                    }
+        // Operands the clobbering instruction itself consumes, which are in the
+        // clobbered register on purpose. Only those that do not survive the
+        // point: an argument live past its call must still interfere.
+        let consumed: BTreeSet<usize> = match config.insts {
+            Some(insts) if cp < insts.len() => {
+                let live_after: &std::collections::BTreeSet<VReg> = if cp + 1 < n {
+                    &liveness.live_at[cp + 1]
                 } else {
-                    BTreeSet::new()
-                }
-            } else {
-                BTreeSet::new()
+                    &liveness.live_out
+                };
+                dying_clobber_operands(&insts[cp], live_after)
             }
-        } else {
-            BTreeSet::new()
+            _ => BTreeSet::new(),
         };
 
-        // Early-out: skip if no non-call-arg vregs of the target class are live.
+        // Early-out: skip if no VRegs of the target class are live besides the
+        // instruction's own operands.
         if config.skip_if_no_live {
             let has_live = live_at_cp.iter().any(|v| {
                 let idx = v.0 as usize;
                 idx < graph.num_vregs
                     && graph.reg_class[idx] == config.reg_class
-                    && !call_arg_vregs.contains(&idx)
+                    && !consumed.contains(&idx)
             });
             if !has_live {
                 continue;
@@ -403,7 +387,7 @@ fn add_clobber_interferences(
                 let live_idx = live_v.0 as usize;
                 if live_idx < graph.num_vregs
                     && graph.reg_class[live_idx] == config.reg_class
-                    && !call_arg_vregs.contains(&live_idx)
+                    && !consumed.contains(&live_idx)
                 {
                     graph.add_edge(phantom_idx, live_idx);
                 }
@@ -505,7 +489,6 @@ fn build_interference_with_clobbers(
             clobbered_regs: &gpr_clobbers,
             reg_class: RegClass::GPR,
             ordered_regs: allocatable_gpr_order(uses_frame_pointer),
-            exclude_call_args: true,
             skip_if_no_live: false,
             insts: Some(insts),
         },
@@ -519,7 +502,6 @@ fn build_interference_with_clobbers(
             clobbered_regs: &CALLER_SAVED_XMM,
             reg_class: RegClass::XMM,
             ordered_regs: allocatable_xmm_order(),
-            exclude_call_args: true,
             skip_if_no_live: true,
             insts: Some(insts),
         },
@@ -533,9 +515,10 @@ fn build_interference_with_clobbers(
             clobbered_regs: &[Reg::RAX, Reg::RDX],
             reg_class: RegClass::GPR,
             ordered_regs: allocatable_gpr_order(uses_frame_pointer),
-            exclude_call_args: false,
             skip_if_no_live: false,
-            insts: None,
+            // Needed to reach the dividend: it is pinned to RAX here and dies
+            // at the division, so the RAX phantom must not interfere with it.
+            insts: Some(insts),
         },
         next_vreg,
     );
@@ -563,8 +546,16 @@ fn merge_precolorings(
     // cannot be changed. If a param precoloring conflicts with a phantom
     // (same color + interference edge), remove the param precoloring --
     // the param will get a free register from the coloring instead.
+    //
+    // Every phantom is checked, not only the call ones: a division clobbers
+    // RAX and RDX exactly as a call clobbers the caller-saved set, and a param
+    // pinned to one of them and live across the division loses its value.
     let mut merged = pre_coloring_colors.clone();
-    for (&phantom_vreg, &phantom_color) in phantom_precolors {
+    for (&phantom_vreg, &phantom_color) in phantom_precolors
+        .iter()
+        .chain(div_phantom)
+        .chain(xmm_phantom)
+    {
         // Find and remove any param precoloring that conflicts.
         let conflicting: Vec<usize> = merged
             .iter()

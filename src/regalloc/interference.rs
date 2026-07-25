@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
+use crate::ir::op::Op;
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::reg::RegClass;
 
@@ -64,6 +65,42 @@ pub fn build_interference_into(
             }
         }
     }
+}
+
+/// The operands a clobbering instruction consumes and that die at it, which
+/// its clobber phantoms must therefore *not* interfere with.
+///
+/// A phantom says "this register is overwritten here, so nothing living across
+/// this point may hold it". An operand the instruction reads and that dies
+/// there is not living across it: it is supposed to be in the clobbered
+/// register. Excluding it removes an edge that is not real, and a spurious edge
+/// against a pre-colored operand is unresolvable -- the colorer honours both
+/// pre-colorings and the conflict passes silently into the assignment.
+///
+/// Which operands qualify depends on the instruction:
+///
+/// - a call consumes every argument in its ABI register, so all dying operands
+///   qualify;
+/// - a division consumes only the dividend (operand 0) in RAX. The divisor is
+///   *not* excluded even though it usually dies there too: `cqo` writes RDX and
+///   `idiv` writes both RAX and RDX before reading the divisor is finished, so
+///   a divisor in either register is destroyed mid-instruction.
+///
+/// `live_after` is the live set at the following program point.
+pub fn dying_clobber_operands(
+    inst: &ScheduledInst,
+    live_after: &BTreeSet<VReg>,
+) -> BTreeSet<usize> {
+    let operands: &[VReg] = match inst.op {
+        Op::CallResult(_, _) | Op::VoidCallBarrier => &inst.operands,
+        Op::X86Idiv | Op::X86Div => &inst.operands[..inst.operands.len().min(1)],
+        _ => &[],
+    };
+    operands
+        .iter()
+        .filter(|v| !live_after.contains(v))
+        .map(|v| v.0 as usize)
+        .collect()
 }
 
 /// Build an interference graph from liveness information.

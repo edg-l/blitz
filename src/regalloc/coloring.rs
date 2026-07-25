@@ -55,6 +55,36 @@ pub struct ColoringResult {
     pub chromatic_number: u32,
 }
 
+/// Panic when two interfering VRegs are pre-colored to the same color.
+///
+/// A pre-coloring is applied unconditionally -- it is a constraint the colorer
+/// obeys, not a preference it weighs -- so a conflicting pair is a decision made
+/// before coloring and cannot be recovered from afterwards. Without this the
+/// pair leaves coloring looking well-formed and only surfaces much later, as a
+/// register holding the wrong value.
+///
+/// Runs under `BLITZ_VERIFY` only: the scan is quadratic in the pre-colored set.
+fn check_precolorings(graph: &InterferenceGraph, pre_coloring: &BTreeMap<usize, u32>, n: usize) {
+    if !crate::verify::is_enabled() {
+        return;
+    }
+    let by_color: Vec<(usize, u32)> = pre_coloring
+        .iter()
+        .filter(|&(&v, _)| v < n)
+        .map(|(&v, &c)| (v, c))
+        .collect();
+    for (i, &(va, ca)) in by_color.iter().enumerate() {
+        for &(vb, cb) in &by_color[i + 1..] {
+            if ca == cb && graph.adj[va].contains(&vb) {
+                panic!(
+                    "BLITZ_VERIFY: VReg {va} and VReg {vb} interfere but are both \
+                     pre-colored to color {ca}"
+                );
+            }
+        }
+    }
+}
+
 /// Greedy graph coloring in reverse MCS order.
 ///
 /// Colors VRegs with the smallest available color not used by any
@@ -73,6 +103,7 @@ pub fn greedy_color(
             colors[vreg] = Some(color);
         }
     }
+    check_precolorings(graph, pre_coloring, n);
 
     // Color in reverse MCS order (gives optimal coloring on chordal graphs).
     for &v in ordering.iter().rev() {
