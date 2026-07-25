@@ -111,6 +111,14 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
         continue
     fi
 
+    # A test pinned to one optimization level by `// FLAGS:` has nothing to say
+    # about the other: it is committed at the level whose behavior it asserts
+    # precisely because the other level does something else. Comparing the two
+    # would report the known failure this harness cannot act on.
+    if sed -n 's|.*// FLAGS: *||p' "$file" | grep -q '\-O[0-9]'; then
+        continue
+    fi
+
     # Multi-file tests need their companion sources on the command line.
     extras=""
     file_dir="$(dirname "$file")"

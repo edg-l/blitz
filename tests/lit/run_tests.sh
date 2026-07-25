@@ -127,6 +127,7 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
 
     extra_files=""
     check_flags=""
+    run_flags=""
     file_dir="$(dirname "$file")"
 
     while IFS= read -r line; do
@@ -154,6 +155,13 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
                 ef="$(echo "$line" | sed 's/.*\/\/ EXTRA_FILE: *//')"
                 extra_files="$extra_files $file_dir/$ef"
                 ;;
+            *"// FLAGS:"*)
+                # Compiler flags for the EXIT/OUTPUT runs. `// RUN:` carries them
+                # for CHECK tests, but a behavioural test had no way to ask for
+                # an opt level, so one that only holds at -O0 could not be
+                # committed at all.
+                run_flags="$(echo "$line" | sed 's/.*\/\/ FLAGS: *//')"
+                ;;
         esac
     done < "$file"
 
@@ -161,10 +169,10 @@ for file in $(find "$SCRIPT_DIR" -name '*.c' | sort); do
         run_check_test "$file" "$mode" "$check_flags"
     fi
     if [ "$has_exit" = true ]; then
-        run_exit_test "$file" "$exit_code" $extra_files
+        run_exit_test "$file" "$exit_code" $run_flags $extra_files
     fi
     if [ "$has_output" = true ]; then
-        run_output_test "$file" $extra_files
+        run_output_test "$file" $run_flags $extra_files
     fi
 done
 

@@ -18,7 +18,8 @@
 #   shape   mixed | args | pressure  (default mixed)
 #
 # Failing programs are left in the work directory and the path is printed.
-# Honors BLITZ_VERIFY and CC.
+# Honors BLITZ_VERIFY, CC, and COMPILE_TIMEOUT (seconds per compile before it is
+# reported as a hang; default 60).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -28,6 +29,8 @@ TINYC="${TINYC:-$ROOT/target/debug/tinyc}"
 CC="${CC:-cc}"
 COUNT="${1:-20}"
 SHAPE="${2:-mixed}"
+# Seconds any single compile may take before it counts as a hang.
+COMPILE_TIMEOUT="${COMPILE_TIMEOUT:-60}"
 
 if [ ! -x "$TINYC" ]; then
     echo "error: tinyc not found at $TINYC (run 'cargo build -p tinyc' first)" >&2
@@ -69,10 +72,21 @@ while [ "$seed" -le "$COUNT" ]; do
     o0_out=""; o0_ok=0
     o1_out=""; o1_ok=0
     for level in -O0 -O1; do
-        if ! "$TINYC" "$src" "$level" -o "$WORK/o" > "$WORK/log" 2>&1; then
+        # Compilation is under a timeout of its own. A compiler that loops
+        # forever otherwise absorbs the entire run: one hang in the parallel-copy
+        # sequentializer ate a 40-program sweep before anyone noticed the harness
+        # was not merely slow. A hang is a finding, and reported as one.
+        if ! timeout "$COMPILE_TIMEOUT" "$TINYC" "$src" "$level" -o "$WORK/o" \
+            > "$WORK/log" 2>&1; then
+            st=$?
             seed_failed=1
-            printf "\nFAIL seed %s: blitz %s did not compile\n  %s\n" "$seed" "$level" "$src"
-            head -2 "$WORK/log" | sed 's/^/  /'
+            if [ "$st" -eq 124 ]; then
+                printf "\nFAIL seed %s: blitz %s HUNG (over %ss)\n  %s\n" \
+                    "$seed" "$level" "$COMPILE_TIMEOUT" "$src"
+            else
+                printf "\nFAIL seed %s: blitz %s did not compile\n  %s\n" "$seed" "$level" "$src"
+                head -2 "$WORK/log" | sed 's/^/  /'
+            fi
             continue
         fi
         # `set -e` is on, and a program under test may legitimately exit
