@@ -13,6 +13,11 @@ is fair game here.
 The measure of success is code quality against `gcc -O2` / `clang -O2` on the
 same input: fewer instructions, fewer bytes, fewer spills, better loops.
 
+Correctness is a precondition, not a tradeoff against that. An aggressive
+single-target optimizer has more room to be subtly wrong than a conservative
+portable one, so the correctness infrastructure in P0 is part of the goal
+rather than overhead against it.
+
 ## Non-goals
 
 - **tinyc is not a product.** It exists to feed the backend real-ish input and
@@ -38,6 +43,48 @@ same input: fewer instructions, fewer bytes, fewer spills, better loops.
 - ~80 accumulated clippy warnings, all cosmetic.
 
 ## Priorities
+
+### P0 -- Correctness
+
+A fast wrong answer is worthless, and an optimizer this size certainly has
+subtle bugs left. Every miscompile found so far was found by a hand-written
+test that happened to hit the right shape (see the 04-18 regalloc fix wave,
+`2c6cc8d`, `752ed7e`, `78850a2`). Hand-written tests are a weak oracle. The
+priors on where bugs live: **regalloc** (splitting, coalescing, spill/remat,
+cross-block liveness) first by a wide margin, then the **memory passes**
+(forwarding/DSE resting on a conservative alias model), then **isel width and
+type handling** (the `X86CmpI` `ty` bug was exactly this class).
+
+- [ ] **Random IR generator + differential execution.** Generate random
+      well-typed functions via `FunctionBuilder`, compile at O0 and O1, run
+      both, compare results. Self-consistency needs no external oracle and
+      catches any pass that changes observable behavior. Shrink failures to a
+      minimal reproducer and auto-file them as lit tests.
+- [ ] **Reference IR interpreter.** The stronger oracle: execute the IR
+      directly and compare against the compiled binary. Also lets a failure be
+      attributed to a specific pass by re-running the interpreter on the IR
+      after each stage.
+- [ ] **Per-pass IR verifier** behind `BLITZ_VERIFY=1`, run after every pass:
+      SSA/dominance well-formedness, block-param arity against every
+      predecessor, no use-before-def, e-class type agreement, and post-regalloc
+      checks (no vreg survives the rewrite, no overlapping live ranges share a
+      physical register, callee-saved actually preserved).
+- [ ] **Rewrite-rule equivalence tests.** For each algebraic/strength rule,
+      randomized equivalence check of LHS vs RHS over the operand space
+      (including boundary values: 0, 1, -1, INT_MIN, INT_MAX, wraparound).
+      Cheap, and it is the only systematic defense against a rule that is right
+      for most inputs. The two rejected signed-ordering rewrites are the
+      cautionary example.
+- [ ] **Regalloc stress mode.** Generate programs with tunable register
+      pressure, live-range-crossing-call density, and phi-heavy control flow,
+      then differential-execute. Aim it at the code with the worst historical
+      bug rate.
+- [ ] **csmith-lite for tinyc**: random C restricted to the parseable subset,
+      differential against `gcc -O0`/`clang -O0` on the same source. Covers the
+      frontend-to-backend seam that IR-level fuzzing skips.
+- [ ] **Failures become tests, permanently.** Every fuzz find lands as a lit
+      test. Per `CLAUDE.md`, a committed failing test that reproduces a real bug
+      is more valuable than a green suite.
 
 ### P0 -- Measurement
 
