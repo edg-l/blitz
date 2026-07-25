@@ -1747,7 +1747,7 @@ mod tests {
 
         let mut egraph = EGraph::new();
         let fconst_cid = egraph.add(ENode {
-            op: Op::Fconst(3.14f64.to_bits(), Type::F64),
+            op: Op::Fconst(2.5f64.to_bits(), Type::F64),
             children: smallvec::smallvec![],
         });
         let cost_model = CostModel::new(OptGoal::Balanced);

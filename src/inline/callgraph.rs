@@ -58,12 +58,9 @@ pub fn inline_cost(callee: &Function) -> u32 {
     // E-graph node costs (pure ops)
     if let Some(egraph) = &callee.egraph {
         for eclass in &egraph.classes {
-            if eclass.nodes.is_empty() {
-                continue; // merged away
-            }
-            for enode in &eclass.nodes {
+            // One representative node per class; an empty class was merged away.
+            if let Some(enode) = eclass.nodes.first() {
                 cost += op_cost(&enode.op);
-                break; // only count one representative node per class
             }
         }
     }
