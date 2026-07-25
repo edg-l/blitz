@@ -52,12 +52,47 @@
 //   * The shape of the sum. All 18 terms are present in the emitted chain,
 //     eight from spill slots and two from registers.
 //
-// NEXT PROBE: the faulty terms are v0..v8, which reach the accumulator chain in
-// registers rather than through slots. Trace r13d/r10d/edi/edx/esi/r8d/eax/ecx
-// at the head of the chain (around 0x413 in the -O0 asm) back to their defining
-// instructions and find which two hold the same value. The duplication pattern
-// -- one value twice, another three times, three values absent -- points at
-// several e-classes resolving to one VReg rather than at the allocator.
+// MECHANISM, now PROVEN rather than suspected. The four faulty vN terms are
+// block params of block 7 that COALESCING MERGED ONTO A VREG WHOSE REGISTER IS
+// ALREADY STALE. Tracing the alias chain and the final assignment:
+//
+//   v103 -> v43 -> R13      v104 -> v3  -> R10
+//   v105 -> v6  -> RDI      v106 -> v7  -> RDX
+//
+// Take v103, the param carrying v0. It coalesces onto v43 = Iconst(7), which
+// the allocator put in R13. But v43 has exactly ONE use in the whole schedule,
+// `SpillStore(15)([43])`: the splitter slot-spilled it, so from that store on
+// the value lives in slot 15 and R13 is free. The allocator reuses R13 twice
+// (`mov r13,[rsp+0x30]`, `mov r13d,r12d`) and the sum then reads it:
+//
+//   1a0: mov r13d,0x7          ; v43 = 7
+//   ...: mov [rsp+..],r13      ; SpillStore(15) -- value now lives in the slot
+//   206: mov r13,[rsp+0x30]    ; R13 reused, legally: v43 is dead
+//   20b: mov r13d,r12d         ; reused again
+//   413: mov r14d,r13d         ; the sum reads R13 as v0. Stale.
+//
+// Nothing writes R13 with v0's value before the sum, because the phi copy that
+// would have done so was elided: source and destination coalesced to the same
+// VReg, so it looked redundant. It was not -- the source's REGISTER no longer
+// holds the value, only its slot does.
+//
+// This is the P0 landmine in ROADMAP.md: the coalesce-alias step collapses a
+// class to one VReg and discards the ranges, so a class whose value has moved
+// to a slot still resolves to the register it used to occupy. Note it needs no
+// overlapping live ranges, which is why `verify_register_sharing` is silent:
+// the fault is a consumer naming a register that is dead, not two live values
+// sharing one.
+//
+// RULED OUT as the fix: excluding every slot-spilled VReg from coalescing
+// (filter `copy_pairs` on the operands of SpillStore/XmmSpillStore before
+// `allocate_global`). It moves this program from 15 to -3 -- most of the
+// corruption gone, one term still wrong -- but over the 40-seed corpus it is a
+// net LOSS: five seed/level pairs go from correct to wrong against two fixed,
+// because dropping that much coalescing reshuffles allocation everywhere. Too
+// blunt. A narrower rule would have to spare a phi source only where the copy
+// is emitted before the SpillStore, and the real fix is the P0 refactor:
+// build the class-to-VReg map for lowering ONCE from the final post-allocation
+// schedules instead of patching a pre-split snapshot three times.
 //
 // FLAGS: -O0
 // OUTPUT: -4
