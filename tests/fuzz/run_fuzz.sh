@@ -51,57 +51,66 @@ while [ "$seed" -le "$COUNT" ]; do
 
     want="$(sed -n 's|^// OUTPUT: ||p' "$src")"
 
-    if ! "$TINYC" "$src" -O1 -o "$WORK/o1" > "$WORK/log" 2>&1; then
-        fail=$((fail + 1))
-        printf "\nFAIL seed %s: blitz -O1 did not compile\n  %s\n" "$seed" "$src"
-        head -2 "$WORK/log" | sed 's/^/  /'
-        seed=$((seed + 1))
-        continue
-    fi
-    if ! "$TINYC" "$src" -O0 -o "$WORK/o0" > "$WORK/log" 2>&1; then
-        fail=$((fail + 1))
-        printf "\nFAIL seed %s: blitz -O0 did not compile\n  %s\n" "$seed" "$src"
-        head -2 "$WORK/log" | sed 's/^/  /'
-        seed=$((seed + 1))
-        continue
+    # A reference answer, when the reference compiler will take the program.
+    wantc=""
+    if command -v "$CC" > /dev/null 2>&1 \
+        && "$CC" -w -O0 -ffp-contract=off -x c "$src" -o "$WORK/ref" 2>/dev/null; then
+        wantc="$(timeout 20 "$WORK/ref" 2>/dev/null)" || wantc=""
     fi
 
-    got1="$(timeout 20 "$WORK/o1" 2>/dev/null)"; st1=$?
-    got0="$(timeout 20 "$WORK/o0" 2>/dev/null)"; st0=$?
-
-    if [ "$st1" -ne 0 ] || [ "$st0" -ne 0 ]; then
-        fail=$((fail + 1))
-        printf "\nFAIL seed %s: nonzero exit (-O0 %s, -O1 %s)\n  %s\n" \
-            "$seed" "$st0" "$st1" "$src"
-        seed=$((seed + 1))
-        continue
-    fi
-    if [ "$got0" != "$got1" ]; then
-        fail=$((fail + 1))
-        printf "\nFAIL seed %s: -O0 printed %s, -O1 printed %s\n  %s\n" \
-            "$seed" "$got0" "$got1" "$src"
-        seed=$((seed + 1))
-        continue
-    fi
-    if [ "$got1" != "$want" ]; then
-        fail=$((fail + 1))
-        printf "\nFAIL seed %s: blitz printed %s, generator predicted %s\n  %s\n" \
-            "$seed" "$got1" "$want" "$src"
-        seed=$((seed + 1))
-        continue
-    fi
-
-    if command -v "$CC" > /dev/null 2>&1; then
-        if "$CC" -w -O0 -ffp-contract=off -x c "$src" -o "$WORK/ref" 2>/dev/null; then
-            gotc="$(timeout 20 "$WORK/ref" 2>/dev/null)"
-            if [ "$gotc" != "$got1" ]; then
-                fail=$((fail + 1))
-                printf "\nFAIL seed %s: blitz printed %s, %s printed %s\n  %s\n" \
-                    "$seed" "$got1" "$CC" "$gotc" "$src"
-                seed=$((seed + 1))
-                continue
-            fi
+    # Check each level on its own, and keep going after a failure.
+    #
+    # These used to short-circuit: -O1 was compiled first and a failure there
+    # skipped the seed entirely. A level that cannot allocate registers then hid
+    # whatever the other level did, and three -O0 miscompiles sat behind -O1
+    # compile errors for a whole session. A compile error at one level says
+    # nothing about the other.
+    seed_failed=0
+    o0_out=""; o0_ok=0
+    o1_out=""; o1_ok=0
+    for level in -O0 -O1; do
+        if ! "$TINYC" "$src" "$level" -o "$WORK/o" > "$WORK/log" 2>&1; then
+            seed_failed=1
+            printf "\nFAIL seed %s: blitz %s did not compile\n  %s\n" "$seed" "$level" "$src"
+            head -2 "$WORK/log" | sed 's/^/  /'
+            continue
         fi
+        # `set -e` is on, and a program under test may legitimately exit
+        # nonzero -- that is a finding, not a reason to abandon the run. The
+        # original code had the same shape and aborted the whole harness the
+        # first time a compiled program returned nonzero.
+        if out="$(timeout 20 "$WORK/o" 2>/dev/null)"; then st=0; else st=$?; fi
+        if [ "$level" = "-O0" ]; then o0_out="$out"; o0_ok=1; else o1_out="$out"; o1_ok=1; fi
+        if [ "$st" -ne 0 ]; then
+            seed_failed=1
+            printf "\nFAIL seed %s: blitz %s exited %s\n  %s\n" "$seed" "$level" "$st" "$src"
+            continue
+        fi
+        if [ -n "$want" ] && [ "$out" != "$want" ]; then
+            seed_failed=1
+            printf "\nFAIL seed %s: blitz %s printed %s, generator predicted %s\n  %s\n" \
+                "$seed" "$level" "$out" "$want" "$src"
+            continue
+        fi
+        if [ -n "$wantc" ] && [ "$out" != "$wantc" ]; then
+            seed_failed=1
+            printf "\nFAIL seed %s: blitz %s printed %s, %s printed %s\n  %s\n" \
+                "$seed" "$level" "$out" "$CC" "$wantc" "$src"
+        fi
+    done
+
+    # -O0-vs-O1 self-consistency, when both levels produced a program. This
+    # catches a pass that changes behaviour even where no oracle disagrees.
+    if [ "$o0_ok" = 1 ] && [ "$o1_ok" = 1 ] && [ "$o0_out" != "$o1_out" ]; then
+        seed_failed=1
+        printf "\nFAIL seed %s: -O0 printed %s, -O1 printed %s\n  %s\n" \
+            "$seed" "$o0_out" "$o1_out" "$src"
+    fi
+
+    if [ "$seed_failed" = 1 ]; then
+        fail=$((fail + 1))
+        seed=$((seed + 1))
+        continue
     fi
 
     pass=$((pass + 1))
