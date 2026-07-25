@@ -30,9 +30,19 @@ int main() {
     (*p)--;
     if (val != 10) { return 8; }
 
-    // Multiple increments in one expression
+    // Multiple increments feeding one sum.
+    //
+    // Deliberately sequenced through temporaries rather than written as
+    // `++c + ++c`: that modifies c twice with no sequence point between them,
+    // which is undefined behavior (C11 6.5p2), and the operands may be
+    // evaluated in either order. gcc increments twice and computes 3 + 3 = 6
+    // where blitz computes 2 + 3 = 5, and both are correct. Asserting either
+    // answer would make this test a false positive in the reference-compiler
+    // leg of tests/lit/run_diff.sh.
     int c = 1;
-    int d = ++c + ++c;  // c becomes 2, then 3; d = 2 + 3 = 5
+    int c1 = ++c;  // 2
+    int c2 = ++c;  // 3
+    int d = c1 + c2;
     if (c != 3) { return 9; }
     if (d != 5) { return 10; }
 
