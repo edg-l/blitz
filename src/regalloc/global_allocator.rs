@@ -980,7 +980,32 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
     let ordering = mcs_ordering(&phase3.graph);
 
     // Task 4.2: greedy coloring with merged precoloring from Phase 3.
-    let coloring = greedy_color(&phase3.graph, &ordering, &phase3.pre_coloring_colors);
+    let mut coloring = greedy_color(&phase3.graph, &ordering, &phase3.pre_coloring_colors);
+
+    // Reverse MCS order is optimal on chordal graphs, and a single block's
+    // interference graph is one. A function-scope graph is not: a value live
+    // through several blocks interferes with values that never coexist, and the
+    // result has cycles no elimination order makes simplicial. Greedy then
+    // overshoots by a color or two on graphs that are colorable within budget --
+    // the signature is one VReg of very high degree whose neighbours happen to
+    // occupy every color below the budget.
+    //
+    // Retry in descending-degree order when that happens, and keep whichever
+    // coloring is better. This runs only on the path that would otherwise fail
+    // allocation outright, so it costs nothing on programs that already fit.
+    let gpr_budget_for_retry = available_gpr_colors(uses_frame_pointer);
+    if exceeds_budget(&coloring, &phase3.graph, gpr_budget_for_retry) {
+        let mut by_degree: Vec<usize> = (0..phase3.graph.num_vregs).collect();
+        by_degree.sort_by_key(|&v| std::cmp::Reverse(phase3.graph.adj[v].len()));
+        // `greedy_color` walks its ordering in reverse, so hand it the ascending
+        // list to have it colour the highest-degree nodes first.
+        by_degree.reverse();
+        let retry = greedy_color(&phase3.graph, &by_degree, &phase3.pre_coloring_colors);
+        if retry.chromatic_number < coloring.chromatic_number {
+            coloring = retry;
+        }
+    }
+    let coloring = coloring;
 
     // Build a flat color map: VReg index -> color (from the ColoringResult vec).
     let color_map: BTreeMap<usize, u32> = coloring
@@ -1272,6 +1297,27 @@ pub(crate) fn run_phase5(
          all register pressure before phase 5.",
         phase4.gpr_overshoot, phase4.xmm_overshoot,
     ))
+}
+
+/// Whether any VReg of either class took a color its budget does not have.
+fn exceeds_budget(
+    coloring: &super::coloring::ColoringResult,
+    graph: &InterferenceGraph,
+    gpr_budget: u32,
+) -> bool {
+    coloring
+        .colors
+        .iter()
+        .enumerate()
+        .take(graph.num_vregs)
+        .any(|(idx, &c)| {
+            let Some(color) = c else { return false };
+            let budget = match graph.reg_class[idx] {
+                RegClass::GPR => gpr_budget,
+                RegClass::XMM => super::coloring::AVAILABLE_XMM_COLORS,
+            };
+            color >= budget
+        })
 }
 
 /// Describe why the coloring needed more colors than the budget.
