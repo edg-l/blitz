@@ -32,10 +32,12 @@ rather than overhead against it.
 
 ## Current state (2026-07-25)
 
-- 905 Rust tests + 390 lit tests, all green. `cargo fmt` clean.
-- Two open bugs from the random generator, both in regalloc (see Known bugs).
+- 916 Rust tests + 398 lit tests, all green. `cargo fmt` clean.
+- One open finding from the random generator, and it is register pressure
+  rather than wrong code (see Known bugs); the fuzzer still finds wrong
+  answers on generated programs that are not yet reduced.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 262 tests compared O0-vs-O1 and against a
+- `bash tests/lit/run_diff.sh`: 267 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
   e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> DAG
@@ -262,34 +264,28 @@ VRegs where only one has the right register is the signature.
       `resolve_store_val_reg_after_spilling` (-180 lines) and closed the
       wrong-operand half of the seam.
 
-      **One defect remains, and it is now the whole blocker: the compiler groups
-      instructions twice and the two answers disagree.** During linearization the
-      schedule is reordered by barrier group and the allocator measures liveness
-      on that order. Phase 7 then computes a *second* group assignment on the
-      post-allocation schedule and emits in that order. Where the two disagree, a
-      value is emitted somewhere its interference was never measured, and a
-      register is clobbered between a def and its use:
+      The double-grouping defect this item used to name as the whole blocker is
+      **fixed** (`ae55ce9`): Phase 7 emits in schedule order and places each
+      effectful op at its own barrier instruction, instead of computing a second
+      barrier-group assignment on the post-allocation schedule. That was what
+      experiment 1's `BLITZ_VERIFY=strict` failure was, seen from the other end,
+      so **that experiment is unblocked and worth redoing**.
 
-      ```text
-        mov  ecx,0x7                 ; an index constant
-        mov  QWORD PTR [rsp+..],rcx  ; spill it
-        mov  DWORD PTR [rcx],edi     ; store through RCX, which held the address
-      ```
+      Where it stands, measured over 40 `run_fuzz.sh` mixed programs: 28 fail to
+      allocate at -O0 and 37 at -O1. That is now the dominant failure mode by a
+      wide margin -- more than four times the wrong-answer count -- and the
+      offenders are still long-lived constants.
 
-      Fix: stop grouping twice. The schedule handed to the allocator is already
-      ordered by barrier group, and the splitter inserts at positions within it,
-      so schedule order *is* the intended emission order. Phase 7 should emit in
-      it and place each effectful op at its own barrier instruction rather than
-      re-partitioning. That also removes the two reload-pinning rules in
-      `compile/mod.rs`, which exist only to repair this divergence, and it is what
-      experiment 1 above is waiting on -- its `BLITZ_VERIFY=strict` failure is the
-      same divergence seen from the other end.
+      Reserving R11 as the compiler's scratch (`SCRATCH_GPR`) cost a color, 15
+      down to 14, and moved that count by nothing: 28 before and after. Pressure
+      here is not a matter of one or two registers.
 
       Then allocator-level spilling becomes possible too (`run_phase5` is an
       `Err(...)` today -- the global allocator has no spill loop of its own, which
-      is why the splitter has to be perfect).
+      is why the splitter has to be perfect, and why an overshoot is a compile
+      error rather than a spill).
 - [ ] **Stack array access corrupts the frame**
-      (`tests/fuzz/findings/array_spill_frame_corruption.c`, 12 lines; reduced
+      (`tests/lit/regalloc/array_spill_frame_corruption.c`; reduced
       from `seed5_miscompile.c`). Summing elements of an `int arr[8]`:
       5 elements is correct, 6 prints the right value but returns exit 2, and
       **Fixed** (`8acd79b`, `350d36a`, `386116e`) and now a live regression
@@ -349,23 +345,33 @@ VRegs where only one has the right register is the signature.
       (a self-copy) indexed past the end. Now driven by the invariant rather than
       the cycle shape, with a property test that simulates the emitted sequence
       over ten copy shapes.
-- [ ] **The integer half of a long sum is a constant unrelated to its inputs**
-      (`tests/fuzz/findings/seed6_reduced_wrong_sum.c`, 64 lines, UB-free, blitz
-      25 against cc -134). Seeds 4 and 7 fail the same way. The finding records
-      what one-term perturbation established and what has been ruled out by
-      measurement rather than argument: not a reload from an unwritten slot, not
-      two values sharing a slot, not a dropped phi copy, not the address
-      resolution seam, not copy sequentialization. The values reach the sum as
-      block params passed through slots, so the next step is checking whether
-      `build_phi_copies` resolves each argument class to the right VReg -- it
-      resolves arguments through the per-block map and destinations through the
-      global one, and mixing those two is what three earlier bugs in this seam
-      were.
+- [x] **The integer half of a long sum was a constant unrelated to its inputs**
+      -- fixed, and now `tests/lit/regalloc/loop_latch_param_passthrough.c`
+      (blitz printed 25 against cc's -134). One-term perturbation located it:
+      all eight array terms contributed correctly and all ten integer terms
+      contributed nothing. Two seams disagreed about where a block param lives at
+      the exit of a latch that hands every param back to its header. Liveness
+      resolved the arg class at the latch's exit, which nothing covers once the
+      header spills the param, so the value looked dead over the loop body and
+      the allocator gave its register to the latch's counter increment. Emission
+      resolved the same class through the coalesce-alias fallback, which was
+      built one `insert_single` per segment and so answered with whichever
+      segment came last -- a reload from an unrelated block, sharing one scratch
+      register with every other reload.
+- [x] **The scratch register was allocatable.** Lowering used R11 for the
+      three-address fixup, 64-bit constant materialisation and parallel-copy
+      cycle breaking while `allocatable_gpr_order` still handed it out, so a
+      value living there was clobbered by any of them. A phi copy that *read*
+      R11 inside a cycle hung the compiler outright: parking the scratch in
+      itself rewrites nothing, so `sequentialize_copies` spun on an unchanged
+      worklist. `SCRATCH_GPR` is excluded from allocation now, which is what
+      makes all of those sound. Found only because a fuzz sweep sat at 99.9% CPU;
+      `run_fuzz.sh` times each compile out and reports a hang as one.
 
-Seeds 4, 6 and 7 reach codegen only because the splitter now clears the pressure
-that used to stop them. They were failing before as compile errors and are
-failing now as wrong code; `run_fuzz.sh` reports both, and a reproducer that gets
-as far as emitting instructions is the more useful one.
+Over 40 mixed fuzz programs, wrong answers went from 9 to 6 and three more seeds
+pass. What remains at -O0: seed 12 prints a wrong value, seeds 23 and 29 exit
+nonzero (29 by looping forever, so a loop condition is miscompiled), and seed 7
+now fails to allocate rather than printing 7180.
 
 ## Tooling to build next
 
