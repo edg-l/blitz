@@ -248,13 +248,18 @@ that regalloc carries the highest bug density.
 Ranked by what actually cost time while fixing the six bugs above, not by
 generality.
 
-- [ ] **Machine-level verifier over the final MachInst stream.** Def-before-use
-      on physical registers would have caught every one of those six at compile
-      time, naming the instruction, instead of hand-reading asm and running
-      gdb. Also: a reload must not read a slot never stored, and callee-saved
-      registers must be preserved. Needs `defs()`/`uses()` on `MachInst`
-      (~70 variants, mechanical). Runs over all lit tests and every fuzz
-      program.
+- [x] **Machine-level verifier over the final MachInst stream** (`8d99493`).
+      `MachInst::defs()`/`uses()` for all 79 variants, plus forward dataflow
+      over the CFG recovered from labels and branches, meeting predecessors
+      with intersection. Reports a read of a register not written on some path
+      to it, and any surviving virtual register. Runs under `BLITZ_VERIFY`
+      after branch relaxation; green everywhere.
+      Known limit: it cannot see a register that holds the *wrong* value, which
+      is what seed5 does at -O0. Value errors stay the differential harness's
+      job.
+- [ ] **Extend it to spill slots and callee-saved registers**: a reload must
+      not read a slot never stored (same dataflow, keyed by frame offset), and
+      a callee-saved register written in the body must be saved and restored.
 - [ ] **Splitter/allocator agreement assertion.** Assert the splitter's
       post-plan pressure matches the allocator's chromatic number and dump the
       disagreeing point. These two already disagreed silently once
