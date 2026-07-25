@@ -8,25 +8,31 @@
 // rule started scanning the un-stripped schedule; before that the splitter left
 // an overshoot the allocator rejected, so this never compiled.
 //
-// A Load resolves its address to a register holding an array INDEX:
+// The name is now historical. It first failed because a Load resolved its
+// address to the register holding its own array index -- barrier operands were
+// an unordered set and lowering had to guess which member was the address.
+// 437fd60 made the leading operands positional, so the address is read
+// correctly, and what remains is the *other* defect in the same seam:
 //
-//   b9 07 00 00 00    mov  ecx,0x7          ; the index 7
-//   8b 31             mov  esi,DWORD PTR [rcx]   ; load from address 7
+//   b9 07 00 00 00    mov  ecx,0x7                ; an index constant
+//   48 89 8c ...      mov  QWORD PTR [rsp+..],rcx ; spill it
+//   89 39             mov  DWORD PTR [rcx],edi    ; store through RCX
 //
-// So the address ClassId resolved to the VReg of the index constant. Both are
-// declared as operands of the same LoadResult barrier, because
-// `populate_effectful_operands` adds the folded `Addr`'s children alongside the
-// address itself and then sorts the list by VReg index -- the barrier records a
-// SET of VRegs, not which one fills which role. Lowering therefore has to guess
-// which operand is the address, and `resolve_arg_regs_after_spilling`'s
-// remat-matching case is where it guesses wrong.
+// RCX held the store's address and is overwritten before the store reads it.
+// The allocator did not see the two ranges interfere because it measured
+// liveness on the schedule as ordered before allocation, while Phase 7 computes
+// a *second* barrier-group assignment on the post-allocation schedule and emits
+// in that order instead. Where the two groupings disagree, a value is emitted
+// somewhere its interference was never measured.
 //
-// This is why the BLITZ_VERIFY check added alongside this file cannot catch it:
-// the wrong register IS a declared barrier operand. Fixing it properly means
-// giving barrier instructions role-tagged operands (address / value / arg N) so
-// lowering reads the address instead of reconstructing it. See ROADMAP P0.
+// The fix is to stop grouping twice. The schedule handed to the allocator is
+// already ordered by barrier group, and the splitter inserts at positions within
+// it, so schedule order *is* the intended emission order: Phase 7 should emit in
+// it and place each effectful op at its own barrier instruction, rather than
+// re-partitioning. That also removes the reload-pinning rules in
+// `compile/mod.rs`, which exist only to repair the divergence.
 //
-// tests/fuzz/findings/seed6_truncated_miscompile.c and seed 7 fail the same way.
+// findings/seed6_truncated_miscompile.c and seed 7 fail the same way.
 //
 // OUTPUT: 303
 extern int printf(char* fmt, int x);

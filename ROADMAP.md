@@ -254,30 +254,40 @@ VRegs where only one has the right register is the signature.
       2. Re-emitting `Iconst` classes per block, reusing the mechanism that
          already does this for flags-typed classes. 62 lit failures.
 
-      **The blocker is the class-to-VReg resolution model, not the policy.**
-      Phase 7 resolves effectful-op operands and phi args through per-block
-      snapshots of `class_to_vreg` taken during linearization and then patched
-      three times over (split segments replayed, block-param overrides, coalesce
-      aliases), with every index measured against a schedule that later stages
-      keep editing. Two concrete defects remain:
+      **The blocker is not the policy.** Role-tagged barrier operands landed in
+      `437fd60`: the leading operands of a barrier are now the address, the
+      value, or the arguments in ABI order, and Phase 7 reads operand `i` off
+      the post-coalesce schedule instead of reconstructing which VReg holds a
+      class. That deleted `resolve_arg_regs_after_spilling` and
+      `resolve_store_val_reg_after_spilling` (-180 lines) and closed the
+      wrong-operand half of the seam.
 
-      - Segment points are stale by lowering time, as above.
-      - A barrier records a *set* of VRegs, not which one fills which role.
-        `populate_effectful_operands` adds the folded `Addr`'s children next to
-        the address and sorts by VReg index, so lowering has to guess which
-        operand is the address --- and `resolve_arg_regs_after_spilling` guesses
-        the index constant, giving `mov ecx,0x7` / `mov esi,[rcx]`
-        (`findings/seed4_load_addr_is_index.c`). Role-tagged barrier operands
-        (address / value / arg N) delete that guess and let
-        `resolve_arg_regs_after_spilling`, `resolve_store_val_reg_after_spilling`
-        and most of `build_mem_addr` go with it.
+      **One defect remains, and it is now the whole blocker: the compiler groups
+      instructions twice and the two answers disagree.** During linearization the
+      schedule is reordered by barrier group and the allocator measures liveness
+      on that order. Phase 7 then computes a *second* group assignment on the
+      post-allocation schedule and emits in that order. Where the two disagree, a
+      value is emitted somewhere its interference was never measured, and a
+      register is clobbered between a def and its use:
 
-      So: not another splitting heuristic. Give lowering a single class-to-VReg
-      map computed **once, from the final post-allocation schedules**, and give
-      barriers role-tagged operands. Then experiment 1 lands, and so does
-      allocator-level spilling (`run_phase5` is an `Err(...)` today -- the global
-      allocator has no spill loop of its own, which is why the splitter has to be
-      perfect).
+      ```text
+        mov  ecx,0x7                 ; an index constant
+        mov  QWORD PTR [rsp+..],rcx  ; spill it
+        mov  DWORD PTR [rcx],edi     ; store through RCX, which held the address
+      ```
+
+      Fix: stop grouping twice. The schedule handed to the allocator is already
+      ordered by barrier group, and the splitter inserts at positions within it,
+      so schedule order *is* the intended emission order. Phase 7 should emit in
+      it and place each effectful op at its own barrier instruction rather than
+      re-partitioning. That also removes the two reload-pinning rules in
+      `compile/mod.rs`, which exist only to repair this divergence, and it is what
+      experiment 1 above is waiting on -- its `BLITZ_VERIFY=strict` failure is the
+      same divergence seen from the other end.
+
+      Then allocator-level spilling becomes possible too (`run_phase5` is an
+      `Err(...)` today -- the global allocator has no spill loop of its own, which
+      is why the splitter has to be perfect).
 - [ ] **Stack array access corrupts the frame**
       (`tests/fuzz/findings/array_spill_frame_corruption.c`, 12 lines; reduced
       from `seed5_miscompile.c`). Summing elements of an `int arr[8]`:
@@ -321,12 +331,13 @@ VRegs where only one has the right register is the signature.
       and overwrites it three instructions early. The interference between a
       value live *through* both arms and one defined in the merge block is being
       missed. Smallest open miscompile -- start here.
-- [ ] **A Load resolves its address to an array index**
-      (`tests/fuzz/findings/seed4_load_addr_is_index.c`): `mov ecx,0x7` then
-      `mov esi,[rcx]`. Both the address and the index are declared operands of
-      the same LoadResult barrier, so lowering's guess passes every check.
-      Blocked on role-tagged barrier operands; see P0 above. Seeds 6 and 7 fail
-      the same way.
+- [ ] **A register is clobbered between its def and its use because the
+      compiler groups instructions twice**
+      (`tests/fuzz/findings/seed4_load_addr_is_index.c`; the filename records the
+      original diagnosis, fixed in `437fd60`). The allocator measures liveness on
+      the pre-allocation, group-ordered schedule; Phase 7 re-groups the
+      post-allocation schedule and emits in that order. See P0 for the fix.
+      Seeds 6 and 7 fail the same way.
 - [ ] **seed6 truncated is still wrong at -O0**
       (`tests/fuzz/findings/seed6_truncated_miscompile.c`, exit 232 vs 226).
       Reducing it produced the parameter and phi-arg fixes above and the XMM
@@ -359,13 +370,12 @@ generality.
       are legitimately read before this function writes them.
 - [x] **Effectful-operand resolution check** (`BLITZ_VERIFY`, in
       `lower_effectful_op`). The register a Load or Store reads must be one the
-      barrier consuming it declares as an operand. Every resolution path in that
-      function reconstructs what the barrier already records, and the failure
-      mode is silent -- a plausible register holding some other value, which the
-      def-before-use check cannot see. Catches resolutions landing outside the
-      operand list, such as an address resolving to its pre-spill register (the
-      seed5 bug). Cannot catch landing on the *wrong* operand, because that list
-      is an unordered set; that needs the role tagging described in P0.
+      barrier consuming it declares as an operand. Kept as a backstop now that
+      `437fd60` reads roles positionally: the fallback to the class map is still
+      there for a barrier that records nothing, and this catches it resolving
+      outside the operand list, which is what the seed5 bug did. It cannot see a
+      register that holds the wrong *value* -- that stays the differential
+      harness's job.
 - [x] **Splitter/allocator disagreement report** (`7d60eab`). When the coloring
       needs more colors than the budget, `BLITZ_DEBUG=split` prints each
       over-budget VReg with the op that defines it, whether it is precolored, its
