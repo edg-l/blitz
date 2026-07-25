@@ -948,12 +948,20 @@ pub fn compile(
         // BEFORE global liveness, so compute_global_liveness sees them as regular
         // instruction operands and includes them in cross-block liveness.
         // This MUST happen AFTER call_arg_precolors collection (Task 6.1a).
+        //
+        // Resolved through each block's own snapshot, not the global map. A class
+        // re-emitted per block has one VReg per block and the global map holds
+        // whichever was restored last, so an `if`/`else` pair that both call
+        // `printf("%d\n", ...)` would record the other arm's VReg for the format
+        // string -- and since Phase 7 now trusts these operands as the record of
+        // what each op reads, that names a register holding something else.
         for (block_idx, block) in func.blocks.iter().enumerate() {
             let non_term_count = block.non_term_count();
             if non_term_count > 0 {
                 let non_term_ops = &block.ops[..non_term_count];
+                let block_map = &block_class_to_vreg_snapshot[block_idx];
                 let (result_map, arg_map) =
-                    build_barrier_context(block, block_idx, &egraph, &class_to_vreg);
+                    build_barrier_context(block, block_idx, &egraph, block_map);
                 let mut vreg_group =
                     assign_barrier_groups(&block_schedules[block_idx], &result_map, &arg_map);
                 populate_effectful_operands(
@@ -961,7 +969,7 @@ pub fn compile(
                     non_term_ops,
                     block_idx,
                     &egraph,
-                    &class_to_vreg,
+                    block_map,
                     &mut vreg_group,
                     &mut next_vreg,
                 );

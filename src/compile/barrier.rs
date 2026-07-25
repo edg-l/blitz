@@ -355,16 +355,58 @@ pub(super) fn insert_early_barrier_spills(
     }
 }
 
+/// How many leading barrier operands carry a role, for this effectful op.
+///
+/// The layout `populate_effectful_operands` writes, and which every later pass
+/// preserves:
+///
+/// | op            | operand 0 | operand 1 | operand `n..`       |
+/// |---------------|-----------|-----------|---------------------|
+/// | `Load`        | address   |           | folded Addr children |
+/// | `Store`       | address   | value     | folded Addr children |
+/// | `Call`        | arg 0 in ABI order, arg 1, ...  | folded Addr children |
+///
+/// A role operand is absent only when its class had no VReg at the barrier
+/// point, in which case the whole list is shorter -- so a reader must bound-check
+/// rather than assume the slot exists.
+pub(super) fn role_operand_count(op: &EffectfulOp) -> usize {
+    match op {
+        EffectfulOp::Load { .. } => 1,
+        EffectfulOp::Store { .. } => 2,
+        EffectfulOp::Call { args, .. } => args.len(),
+        EffectfulOp::Branch { .. } | EffectfulOp::Jump { .. } | EffectfulOp::Ret { .. } => 0,
+    }
+}
+
 /// Populate effectful-op operands directly onto barrier instructions in the schedule.
 ///
-/// For Load: appends addr VReg + Addr children to the existing `LoadResult` instruction.
-/// For Call with results: appends arg VRegs + Addr children to the existing `CallResult`.
-/// For void Call: inserts a `VoidCallBarrier` pseudo-instruction with arg VRegs.
-/// For Store: inserts a `StoreBarrier` pseudo-instruction with addr/val VRegs.
+/// For Load: addr VReg, then Addr children, on the existing `LoadResult`.
+/// For Call with results: arg VRegs in ABI order, then Addr children, on the
+/// existing `CallResult`.
+/// For void Call: inserts a `VoidCallBarrier` with the arg VRegs.
+/// For Store: inserts a `StoreBarrier` with addr, val, then Addr children.
 ///
-/// This replaces `insert_effectful_use_markers`: instead of separate EffectfulUse
-/// pseudo-ops, the operands live directly on the barrier instruction itself, so
-/// liveness analysis naturally sees them.
+/// Operands live directly on the barrier instruction so liveness analysis sees
+/// them without separate pseudo-ops.
+///
+/// # The leading operands are positional, and that is load-bearing
+///
+/// `role_operand_count` names how many leading operands carry a role: the
+/// address of a Load, the address and value of a Store, the arguments of a Call
+/// in ABI order. Anything after them (the children of a folded `Addr`) is there
+/// only to keep liveness honest.
+///
+/// This order is never disturbed. It used to be: operands were sorted by VReg
+/// index and deduped, which made the list a *set* and left Phase 7 to work out
+/// which member was the address. Every heuristic that did so was a wrong-code
+/// bug -- most recently a Load resolving its address to the register holding its
+/// own index, `mov ecx,0x7` then `mov esi,[rcx]`. Position survives what
+/// reconstruction cannot: the splitter rewrites operands by index, and
+/// coalescing renames them in place, so both preserve roles for free.
+///
+/// Duplicates are removed only from the trailing liveness operands. A role
+/// operand keeps its slot even when the same VReg fills two roles, as in
+/// `*p = p`.
 pub(super) fn populate_effectful_operands(
     schedule: &mut Vec<ScheduledInst>,
     non_term_ops: &[EffectfulOp],
@@ -392,27 +434,60 @@ pub(super) fn populate_effectful_operands(
 
     // Collect markers to insert (for Store and void Call only).
     let mut markers: Vec<(usize, ScheduledInst)> = Vec::new();
+    debug_assert!(
+        non_term_ops.iter().all(|op| role_operand_count(op) > 0
+            || matches!(op, EffectfulOp::Call { args, .. } if args.is_empty())),
+        "every non-terminator effectful op must declare its role operand count"
+    );
 
     for (barrier_k, op) in non_term_ops.iter().enumerate() {
         // Program point for this barrier: used for point-aware VReg lookup.
         let barrier_pt = ProgramPoint::barrier_point(block_idx, barrier_k, schedule);
 
-        // Resolve ClassIds to VRegs with Addr children, dedup.
+        // Resolve the role ClassIds to VRegs, in order, then append the Addr
+        // children they need kept alive. Roles stay at their own index; only the
+        // trailing liveness operands are deduped.
         let resolve_vregs = |cids: &[ClassId], point: ProgramPoint| -> Vec<VReg> {
-            let mut vregs = Vec::new();
+            let mut roles = Vec::with_capacity(cids.len());
             for &cid in cids {
                 let canon = egraph.unionfind.find_immutable(cid);
                 let Some(vreg) = class_to_vreg.lookup(canon, point) else {
+                    // Dropping a role shifts every later one down an index, and
+                    // Phase 7 reads roles by index -- a Store would take its
+                    // value as its address. Every class reaching here has a VReg
+                    // at the barrier point in practice; if that ever stops being
+                    // true, this has to pad rather than skip.
+                    debug_assert!(
+                        false,
+                        "barrier role for class {canon:?} has no VReg at {point:?};                          skipping it would shift the remaining roles"
+                    );
                     continue;
                 };
-                vregs.push(vreg);
-                if let Some(children) = addr_children.get(&vreg) {
-                    vregs.extend_from_slice(children);
+                roles.push(vreg);
+            }
+            let mut vregs = roles.clone();
+            for role in &roles {
+                if let Some(children) = addr_children.get(role) {
+                    for &child in children {
+                        if !vregs.contains(&child) {
+                            vregs.push(child);
+                        }
+                    }
                 }
             }
-            vregs.sort_by_key(|v| v.0);
-            vregs.dedup();
             vregs
+        };
+
+        // Append role-first operands to an existing barrier result instruction,
+        // keeping the role prefix contiguous at the front.
+        let append_operands = |inst: &mut ScheduledInst, vregs: Vec<VReg>| {
+            let mut merged = vregs;
+            for &existing in &inst.operands {
+                if !merged.contains(&existing) {
+                    merged.push(existing);
+                }
+            }
+            inst.operands = merged;
         };
 
         match op {
@@ -428,10 +503,7 @@ pub(super) fn populate_effectful_operands(
                     continue;
                 };
                 if let Some(inst) = schedule.iter_mut().find(|i| i.dst == result_vreg) {
-                    inst.operands.extend(vregs);
-                    // Dedup after extending (in case of overlap with existing operands).
-                    inst.operands.sort_by_key(|v| v.0);
-                    inst.operands.dedup();
+                    append_operands(inst, vregs);
                 }
             }
             EffectfulOp::Call { args, results, .. } => {
@@ -446,9 +518,7 @@ pub(super) fn populate_effectful_operands(
                         continue;
                     };
                     if let Some(inst) = schedule.iter_mut().find(|i| i.dst == result_vreg) {
-                        inst.operands.extend(vregs);
-                        inst.operands.sort_by_key(|v| v.0);
-                        inst.operands.dedup();
+                        append_operands(inst, vregs);
                     }
                 } else {
                     // Void call: always insert VoidCallBarrier, even with no
