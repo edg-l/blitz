@@ -32,7 +32,8 @@ rather than overhead against it.
 
 ## Current state (2026-07-25)
 
-- 905 Rust tests + 390 lit tests, all green. `cargo fmt` clean. No known bugs.
+- 905 Rust tests + 390 lit tests, all green. `cargo fmt` clean.
+- Two open bugs from the random generator, both in regalloc (see Known bugs).
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
 - `bash tests/lit/run_diff.sh`: 262 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
@@ -60,10 +61,15 @@ type handling** (the `X86CmpI` `ty` bug was exactly this class).
       Compiles every runnable lit test at -O0 and -O1 and compares exit status
       and stdout; no expected output needed, only that optimization preserve
       behavior. Found a wrong-code bug on its first run.
-- [ ] **Random IR generator** feeding the same differential comparison.
-      Generate random well-typed functions via `FunctionBuilder` instead of
-      relying on the hand-written corpus, and shrink failures to a minimal
-      reproducer that lands as a lit test.
+- [x] **Random program generator** (`tests/fuzz/gen_c.py`, `run_fuzz.sh`).
+      UB-free by construction, interprets as it generates so the expected
+      output is known, and aims at what the corpus misses: 7-12 parameter
+      functions past the argument registers, interleaved int/double
+      signatures, and more live values than registers. Checks blitz against
+      its own prediction, -O0 vs -O1, and `cc`.
+- [ ] **Shrinking.** Failures currently come out at 40-3000 lines; reducing
+      them to a minimal lit test is manual. Delta-debugging over the AST is
+      the natural fit since the generator can re-simulate any candidate.
 - [x] **A gcc/clang oracle in the harness.** O0-vs-O1 self-consistency cannot
       see a bug that is equally wrong at both levels -- exactly how the
       `cvtsi2sd` REX.W bug and the missing variadic `AL` survived.
@@ -192,6 +198,24 @@ isel patterns; we should beat it on the ones we implement.
       (`src/x86/abi.rs:112`) `unreachable!()`s on non-int/float; needs
       INTEGER/SSE/MEMORY classification and hidden-pointer return.
 - [ ] Error recovery: emit a diagnostic instead of panicking on internal errors.
+
+## Known bugs
+
+Both found by `bash tests/fuzz/run_fuzz.sh`, which failed 8 of 8 programs on
+its first run. Both are in the register allocator, matching the standing prior
+that regalloc carries the highest bug density.
+
+- [ ] **Splitter does not converge on real register pressure.** Overshoots of
+      up to 18 GPR and 3 XMM colors reach phase 5, which then aborts
+      compilation. The recently fixed XMM call-crossing bug was one missed
+      value; this is the splitter not reducing pressure to the budget at all.
+      Suspect it splits only the single worst point per block per pass and
+      never re-measures.
+- [ ] **Silent miscompile plus a segfault**
+      (`tests/fuzz/findings/seed5_miscompile.c`, 43 lines). The generator's
+      interpreter, gcc and clang all produce 606; blitz -O1 produces 610 and
+      blitz -O0 segfaults. The program is UB-free by construction, so this is
+      not a case of two legal answers.
 
 ## Tech debt
 
