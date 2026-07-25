@@ -451,10 +451,18 @@ fn apply_splits_for_overshoot(
                     .map(|cid| egraph.class(egraph.find_immutable(cid)).ty.clone());
                 !matches!(ty, Some(Type::Flags))
             } else {
-                // VReg defined in a predecessor block.
-                // For CrossBlock scope, these are valid victims.
-                // For PerBlock scope, skip them (no local def to split at).
-                matches!(scope, SplitScope::CrossBlock)
+                // Defined in another block: a value flowing through this one.
+                // Valid in both scopes -- `apply_cross_block_slot_spill` stores
+                // it in its own defining block and reloads it at each use, which
+                // needs no local def here.
+                //
+                // The standard path used to skip these, and at the peak-pressure
+                // point of a typical failing function only one or two of thirteen
+                // live values had a local def: everything else was a loop-carried
+                // block param passing through. With nothing eligible the pass
+                // returned having planned nothing, and `plan.is_empty()` reads as
+                // convergence, so the overshoot went to the allocator untouched.
+                true
             }
         })
         .copied()
@@ -485,7 +493,15 @@ fn apply_splits_for_overshoot(
 
     for &victim in victims {
         planned_victims.insert(victim);
-        match scope {
+        // The scope is per victim, not per call site. A victim with no def in
+        // this block has nothing to split at locally, whichever path found it,
+        // so it goes through the cross-block spill either way.
+        let victim_scope = if def_inst_map.contains_key(&victim) {
+            scope
+        } else {
+            SplitScope::CrossBlock
+        };
+        match victim_scope {
             SplitScope::PerBlock => {
                 let loop_depth = loop_depths.get(&victim).copied().unwrap_or(0);
                 let victim_class = class_to_vreg.vreg_to_class(victim, use_point);
