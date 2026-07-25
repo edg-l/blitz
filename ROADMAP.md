@@ -34,8 +34,8 @@ rather than overhead against it.
 
 - 905 Rust tests + 390 lit tests, all green. `cargo fmt` clean. No known bugs.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 262 O0-vs-O1 comparisons, no skips, no
-  differences.
+- `bash tests/lit/run_diff.sh`: 262 tests compared O0-vs-O1 and against a
+  reference compiler; no skips, no differences under gcc or clang.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
   e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> DAG
   schedule -> live-range splitter -> function-scope Chaitin-Briggs regalloc ->
@@ -64,10 +64,11 @@ type handling** (the `X86CmpI` `ty` bug was exactly this class).
       Generate random well-typed functions via `FunctionBuilder` instead of
       relying on the hand-written corpus, and shrink failures to a minimal
       reproducer that lands as a lit test.
-- [ ] **A gcc/clang oracle in the harness.** O0-vs-O1 self-consistency cannot
+- [x] **A gcc/clang oracle in the harness.** O0-vs-O1 self-consistency cannot
       see a bug that is equally wrong at both levels -- exactly how the
-      `cvtsi2sd` REX.W bug and the missing variadic `AL` survived. Compare
-      against a reference compiler on every runnable test.
+      `cvtsi2sd` REX.W bug and the missing variadic `AL` survived.
+      `run_diff.sh` now also compiles with `cc` and compares. Clean against
+      both gcc and clang over 262 tests.
 - [ ] **Reference IR interpreter.** The stronger oracle: execute the IR
       directly and compare against the compiled binary. Also lets a failure be
       attributed to a specific pass by re-running the interpreter on the IR
