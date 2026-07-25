@@ -201,25 +201,67 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-Both found by `bash tests/fuzz/run_fuzz.sh`, which failed 8 of 8 programs on
-its first run. Both are in the register allocator, matching the standing prior
-that regalloc carries the highest bug density.
+All found by `bash tests/fuzz/run_fuzz.sh` and the `-O0`-vs-`-O1` differential,
+and all in the register allocator or the class-to-VReg plumbing feeding it,
+matching the standing prior that regalloc carries the highest bug density.
 
-- [ ] **Splitter does not converge on real register pressure.** Overshoots of
-      up to 18 GPR colors reach phase 5, which aborts compilation. Every
-      remaining `run_fuzz.sh` failure is this one; no miscompiles are left in
-      the generated corpus.
+Three of the four fixed this session were the same shape: **a block resolved an
+e-class to the wrong VReg.** Check that first on any new wrong-value bug --
+`BLITZ_DEBUG=regalloc` dumps the final assignment, and a value with several
+VRegs where only one has the right register is the signature.
 
-      Investigated: it does split only the worst point per block and never
-      re-measures. Making it iterate (recompute pressure, split again) does
-      help -- excess dropped 14 to 8 within a block -- but stalls, because
-      `SplitScope::PerBlock` only considers values defined in the block, and
-      these blocks are dominated by live-through values. Falling back to
-      `SplitScope::CrossBlock` when a round retires nothing regressed 4 lit
-      tests. Both experiments are reverted. The fix is not a local tweak: the
-      splitter needs to be able to spill a live-through value from an arbitrary
-      block, which means placing the store in the defining block and reloads at
-      every use, driven by a real iterate-to-fixpoint loop.
+- [ ] **The allocator cannot resolve the pressure the splitter leaves.**
+      Overshoots reach phase 5, which aborts compilation. Every `run_fuzz.sh`
+      failure is this one.
+
+      The iterate-to-fixpoint loop is now in (`7d60eab`): the caller re-plans
+      until a round finds nothing to do. It compiles three of the fuzzer's 16
+      failing configurations that could not compile before and drives every XMM
+      call-crossing overshoot to zero. It does not close the gap, and the reason
+      is now measured rather than guessed: **the splitter converges** -- it
+      reports no overshoot -- **while the allocator still needs more colors.**
+      Max live values is a lower bound on colors, not the count; precolored ABI
+      nodes and clobber phantoms constrain which color each neighbour may take,
+      so a value set that fits by pressure can still fail to color.
+      `BLITZ_DEBUG=split` prints the disagreement with each over-budget VReg,
+      the op that defines it, and its neighbours' colors.
+
+      On every remaining case the offenders are long-lived hash-consed
+      constants: one `Iconst(3)` serves `arr[3]`'s index in the entry block and
+      a `+ 3` twenty blocks later, so it holds a register in between. In one
+      fuzzer function ~100 of them are simultaneously live and the graph needs
+      117 colors. `mov reg, imm` is one instruction with no memory traffic, so
+      the register is never worth keeping.
+
+      Two ways to shorten those ranges were implemented and **both reverted**,
+      failing on the same seam rather than on the policy:
+
+      1. A splitter pre-pass rematerializing constants at cross-block uses.
+         Green on lit for schedule-operand uses of `Iconst` (and it dropped the
+         -O1 overshoots from 14-18 to 7-13), but the `-O0`-vs-`-O1` differential
+         caught `control/compound_assign_complex.c`, and extending it to
+         terminator uses -- where the constants that matter actually are -- broke
+         96 lit tests. `StackAddr`/`GlobalAddr` remat segfaults 7 tests on its
+         own by defeating `build_mem_addr`'s folding check.
+      2. Re-emitting `Iconst` classes per block, reusing the mechanism that
+         already does this for flags-typed classes. 62 lit failures.
+
+      **The blocker is the class-to-VReg resolution model, not the policy.**
+      Phase 7 resolves effectful-op operands and phi args through per-block
+      snapshots of `class_to_vreg` taken during linearization and then patched
+      three times over (split segments replayed, block-param overrides, coalesce
+      aliases). The coalesce-alias step rebuilds the map with `insert_single`,
+      collapsing every class to one VReg and discarding all ranges, so any class
+      with more than one copy resolves arbitrarily. Preserving the ranges there
+      breaks 106 lit tests, because terminator lookups at block exit currently
+      depend on that collapse landing on the coalesced VReg.
+
+      Next step is therefore not another splitting heuristic. Give lowering a
+      single class-to-VReg map computed **once, from the final post-allocation
+      schedules**, instead of a pre-split snapshot patched after the fact. Then
+      either of the two experiments above lands, and so does allocator-level
+      spilling (`run_phase5` is an `Err(...)` today -- the global allocator has
+      no spill loop of its own, which is why the splitter has to be perfect).
 - [ ] **Stack array access corrupts the frame**
       (`tests/fuzz/findings/array_spill_frame_corruption.c`, 12 lines; reduced
       from `seed5_miscompile.c`). Summing elements of an `int arr[8]`:
@@ -234,18 +276,43 @@ that regalloc carries the highest bug density.
       constraint, so propagation stopped one level short of the value that
       needed it. `seed5_miscompile.c` prints 606 at -O1, matching gcc, clang
       and the generator.
-- [ ] **seed5 still segfaults at -O0.** The reloads write RAX while the loads
-      read RCX: `mov rax,[rsp+0x30]` / `mov ecx,[rcx]`. A reload's destination
-      register and the register its consumer reads have diverged. The -O1 path
-      is fixed and the plain array case passes at -O0.
-      Narrowed by pass bisection: `-O0 --enable-inlining` **passes**, every
-      other single pass still fails. So it needs `f0` to remain a real call --
-      mixed int/double arguments with values live across it -- rather than
-      being inlined away.
+- [x] **seed5 segfaulted at -O0** -- fixed in `c0da070`, now a live regression
+      test at `tests/lit/regalloc/cross_block_spill_addr_reload.c`. The reloads
+      wrote RAX while the loads read RCX. Lowering resolves a Load's address
+      through a ClassId, which no operand rewrite reaches, against a per-block
+      snapshot of the class map taken before the splitter ran; without the
+      splitter's segments the address resolved to the pre-spill register.
+      `apply_plan_to` now returns what it committed and the caller replays it
+      onto every snapshot, in coordinates recomputed against the final
+      schedules -- the plan measures indices before insertion, and every
+      insertion shifts what follows.
+- [x] **A parameter re-emitted in sibling blocks lost its ABI register** --
+      fixed in `438bdc4`, test
+      `tests/lit/functions/param_reemitted_in_sibling_blocks.c`. A Param op
+      names a value the ABI already placed in a register. Emitted lazily in the
+      first block that reads it, a parameter read by both arms of a branch got
+      one VReg per arm and only one carried the precolor, so a phi copy read a
+      parameter out of a register that never held it.
+- [x] **Phi args resolved through the global class map** -- fixed in `ccc64b7`.
+      A class re-emitted per block has one VReg per block; the global map holds
+      whichever was restored last, so a block's own copies had no recorded use,
+      the allocator called them dead and gave them all one register, and every
+      phi copy read the last constant computed.
+- [ ] **A live XMM parameter is clobbered by an intermediate in the merge
+      block** (`tests/fuzz/findings/xmm_param_clobbered_at_merge.c`, 20 lines).
+      Wrong at -O0, right at -O1, pre-existing at `a6a4494`. Parameter 4 lives
+      in XMM3 until the last add; the merge block's `x + y` is given XMM3 too
+      and overwrites it three instructions early. The interference between a
+      value live *through* both arms and one defined in the merge block is being
+      missed. Smallest open miscompile -- start here.
+- [ ] **seed6 truncated is still wrong at -O0**
+      (`tests/fuzz/findings/seed6_truncated_miscompile.c`, exit 104 vs 226).
+      Compiles only since `7d60eab`. Reducing it produced the two fixes above
+      and the finding above; at least one defect remains.
 
 ## Tooling to build next
 
-Ranked by what actually cost time while fixing the six bugs above, not by
+Ranked by what actually cost time while fixing the bugs above, not by
 generality.
 
 - [x] **Machine-level verifier over the final MachInst stream** (`8d99493`).
@@ -260,13 +327,23 @@ generality.
 - [ ] **Extend it to spill slots and callee-saved registers**: a reload must
       not read a slot never stored (same dataflow, keyed by frame offset), and
       a callee-saved register written in the body must be saved and restored.
-- [ ] **Splitter/allocator agreement assertion.** Assert the splitter's
-      post-plan pressure matches the allocator's chromatic number and dump the
-      disagreeing point. These two already disagreed silently once
-      (per-block vs function-wide `vreg_classes`) and that was a real bug.
-- [ ] **`BLITZ_DEBUG=split`.** Promised in `docs/split-pass-plan.md`, never
-      implemented; the split plan (victims, slots, insertion points, segments)
-      had to be re-derived with throwaway `eprintln!`s four separate times.
+      Restrict the slot check to the spill-slot range of the frame: user stack
+      slots and the caller's outgoing-argument area are also RSP-relative and
+      are legitimately read before this function writes them.
+- [x] **Splitter/allocator disagreement report** (`7d60eab`). When the coloring
+      needs more colors than the budget, `BLITZ_DEBUG=split` prints each
+      over-budget VReg with the op that defines it, whether it is precolored, its
+      degree, and the colors its neighbours hold -- which separates real clique
+      pressure from a precolor or ordering artifact. This is what identified
+      long-lived constants as the whole remaining overshoot. Not an assertion:
+      the two models legitimately differ (pressure bounds colors from below), so
+      the useful artifact is the explanation, not equality.
+- [x] **`BLITZ_DEBUG=split`** (`7d60eab`). Per-instruction pressure beside the
+      live sets that produced it, every overshoot the splitter acts on, the plan
+      it commits (insertions, operand rewrites, segments, truncations, slots),
+      and the schedules after it. `BLITZ_DEBUG=regalloc` also dumps the final
+      function-wide VReg-to-register assignment, which the global allocator
+      never printed.
 - [ ] **Delta-debugging in the fuzzer.** Failures arrive at 40-3000 lines and
       were reduced by hand twice. The generator can re-simulate any candidate
       to confirm it is still UB-free and still failing, which is exactly what
