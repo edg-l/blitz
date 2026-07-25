@@ -13,18 +13,19 @@
 //    holding a 32-bit value. SysV leaves those high bits undefined, so
 //    negative ints came back as large positives: g(-5) gave 4294967291.0.
 //
-// The int+double mixed-argument case belongs here too, but combining it with
-// the char conversion below trips an unrelated splitter bug; it lives in
-// tests/lit/regalloc/xmm_pressure_mixed_calls.c until that is fixed.
-//
 // OUTPUT: from_param: 10.000000
 // OUTPUT: negative: -5.000000
 // OUTPUT: from_char: -5.000000
+// OUTPUT: from_long: 5000000000.000000
 // EXIT: 0
 
 extern int printf(char* fmt, double x);
 
 double from_param(int n) {
+    return n;
+}
+
+double from_long(long n) {
     return n;
 }
 
@@ -37,5 +38,6 @@ int main() {
     double d;
     d = c;
     printf("from_char: %f\n", d);
+    printf("from_long: %f\n", from_long(5000000000));
     return 0;
 }

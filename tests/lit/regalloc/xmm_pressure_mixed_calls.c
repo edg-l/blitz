@@ -1,49 +1,31 @@
-// KNOWN FAILING -- regression target for a real bug. Do not "fix" by
-// weakening the test.
+// Regression: an XMM value live across a call must be routed through a slot.
 //
-// Compilation aborts in the register allocator:
+// Compilation used to abort in the register allocator:
 //
-//   phase 'regalloc': global regalloc: register pressure overshoot for
-//   function 'main' (gpr_overshoot=0, xmm_overshoot=1). The split pass
-//   should have resolved all register pressure before phase 5.
+//   phase 'regalloc': register pressure overshoot for function 'main'
+//   (gpr_overshoot=0, xmm_overshoot=1). The split pass should have resolved
+//   all register pressure before phase 5.
 //
-// The splitter is supposed to have driven pressure below the register budget
-// before the allocator runs, so reaching phase 5 over budget means the split
-// pass missed a live range. Only 16 XMM registers exist and nothing here is
-// remotely close to that, so this is a splitter defect, not real pressure.
+// Only 16 XMM registers exist and nothing here is close to that, so it was
+// never real pressure. Three defects compounded:
 //
-// ── Diagnosis ────────────────────────────────────────────────────────────────
+// 1. The splitter built its VReg -> RegClass map per block, from that block's
+//    instructions alone. Here the double is defined in block1, used in block3,
+//    and merely passes through block2 which holds a call -- so it appears in no
+//    block2 instruction, had no entry in block2's map, and every pressure count
+//    silently skipped it. The allocator uses a function-wide map and saw it
+//    interfering with the call-clobber phantoms. The splitter was measuring a
+//    different graph than the one being colored.
 //
-// Two gaps compound. In the IR for main (`--emit-ir`), the double produced in
-// block1 is used in block3 and is live *through* block2, which contains a call:
+// 2. split.rs modelled call-crossing pressure for GPRs only. Every XMM register
+//    is caller-saved, so the callee-saved budget for that class is zero and any
+//    XMM value still live after a call needs a slot.
 //
-//   block1:  v1 = x86_cvtsi2sd(I32)(v0)
-//   block2:  call printf(v2, v3)          <- v1 live across this call
-//   block3:  v7 = x86_addsd(v1, v6)
+// 3. Victim selection called op.result_type(&[]) to test for a Flags-typed def,
+//    which asserts arity and panicked on any FP or ALU def (fixed in a90f86d).
 //
-// 1. src/compile/split.rs models call-crossing pressure for GPRs only:
-//    `callee_saved_budget = gpr_budget - CALLER_SAVED_GPR.len()`, then
-//    `find_call_crossing_overshoot(.., callee_saved_budget)` hardcoded to
-//    RegClass::GPR. Every XMM register is caller-saved, so the XMM budget is
-//    zero -- any XMM value live across a call must go through a slot -- but no
-//    XMM equivalent of that check exists. Only XMM *block params* are handled,
-//    by detect_blockparam_call_crossings (Phase 6).
-//
-// 2. Adding the missing XMM check is not sufficient on its own (tried: it
-//    regressed 6 lit tests). Victim selection works within the block holding
-//    the overshoot, and v1 has neither a def nor a use in block2, so there is
-//    nothing there to rewrite. The fix has to place the spill store in the
-//    defining block and the reload in each using block, which is what
-//    SplitScope::CrossBlock is for -- so the gap is in how victims are chosen
-//    for a live-through value, not just in the pressure count.
-//
-// The allocator models the constraint correctly (clobber phantoms pre-colored
-// to all 16 XMM registers at each call point, see add_clobber_interferences in
-// src/regalloc/allocator.rs), which is why the chromatic number comes out at
-// 17 against a budget of 16.
-//
-// Minimal: it needs all three XMM-producing shapes at once. Any two of them
-// compile fine:
+// Minimal: it needs all three XMM-producing shapes at once. Any two compile
+// even with the bugs present:
 //   - a call returning double whose argument is an int  (from_param)
 //   - a call returning double taking mixed int/double   (mixed)
 //   - an in-line char -> double conversion              (d = c)

@@ -272,21 +272,33 @@ fn find_call_crossing_overshoot(
     live_sets: &[BTreeSet<VReg>],
     schedule: &[ScheduledInst],
     vreg_classes: &BTreeMap<VReg, RegClass>,
+    class: RegClass,
     callee_saved_budget: u32,
+    call_arg_vregs: &BTreeSet<VReg>,
 ) -> Option<(usize, u32)> {
     let mut worst: Option<(usize, u32)> = None;
     for (inst_idx, inst) in schedule.iter().enumerate() {
         if !matches!(inst.op, Op::CallResult(..) | Op::VoidCallBarrier) {
             continue;
         }
-        // Count GPR values live before this call instruction.
+        // Count values of `class` live before this call instruction.
+        //
+        // Arguments to this call are excluded when they die at it: they must
+        // occupy their ABI register at the call, so they are not candidates for
+        // being kept anywhere else, and counting them would demand a spill that
+        // cannot help. This mirrors `exclude_call_args` in the allocator's
+        // `add_clobber_interferences`.
+        let live_after: Option<&BTreeSet<VReg>> = live_sets.get(inst_idx + 1);
         let live_before = &live_sets[inst_idx];
-        let gpr_live: u32 = live_before
+        let live_count: u32 = live_before
             .iter()
-            .filter(|&&v| vreg_classes.get(&v).copied() == Some(RegClass::GPR))
+            .filter(|&&v| vreg_classes.get(&v).copied() == Some(class))
+            .filter(|&&v| {
+                !call_arg_vregs.contains(&v) || live_after.is_some_and(|la| la.contains(&v))
+            })
             .count() as u32;
-        if gpr_live > callee_saved_budget {
-            let excess = gpr_live - callee_saved_budget;
+        if live_count > callee_saved_budget {
+            let excess = live_count - callee_saved_budget;
             match worst {
                 None => worst = Some((inst_idx, excess)),
                 Some((_, worst_excess)) => {
@@ -513,6 +525,39 @@ pub fn plan_splits(
     // even when raw pressure is below gpr_budget.
     let callee_saved_budget = gpr_budget.saturating_sub(CALLER_SAVED_GPR.len() as u32);
 
+    // Function-wide VReg -> RegClass. Must match what the allocator uses, or
+    // the splitter measures a different graph than the one being colored.
+    let function_vreg_classes =
+        crate::regalloc::build_vreg_classes_from_all_blocks(block_schedules);
+
+    // Block-param split strategy (Phase 6).
+    //
+    // Scan each block for block param VRegs that are live across a call in the
+    // same block. Since all XMM registers are caller-saved, a block param that
+    // is live-in AND there is a call in the block will collide with the call's
+    // clobber set, forcing the allocator into an infeasible coloring. We fix
+    // this by routing the block param's phi copy to a slot in predecessors and
+    // inserting SpillLoad at each use in the block.
+    //
+    // Runs before the pressure loop below and claims what it handles in
+    // `planned_victims`: block params need slot routing through their
+    // predecessors' phi copies, which the generic pressure paths cannot
+    // express, so whatever this plans has to win.
+    detect_blockparam_call_crossings(
+        func,
+        egraph,
+        block_schedules,
+        class_to_vreg,
+        global_liveness,
+        &mut new_slot_count,
+        &mut next_vreg,
+        &mut per_block_insertions,
+        &mut new_segments,
+        &mut operand_rewrites,
+        &mut slot_spilled_params,
+        &mut planned_victims,
+    );
+
     for block_idx in 0..n_blocks {
         let schedule = &block_schedules[block_idx];
         if schedule.is_empty() {
@@ -531,15 +576,22 @@ pub fn plan_splits(
             continue;
         }
 
-        // Build VReg -> RegClass map for this block.
-        let vreg_classes = crate::regalloc::build_vreg_classes_from_insts(schedule);
+        // VReg -> RegClass, built from EVERY block rather than just this one.
+        //
+        // A value that is live *through* this block appears in no instruction
+        // here, so a per-block map has no entry for it and every pressure count
+        // silently skips it -- while the allocator, which uses a function-wide
+        // map, sees it interfering with the call-clobber phantoms. That
+        // disagreement is what let an XMM value live across a call reach the
+        // allocator unsplit.
+        let vreg_classes = &function_vreg_classes;
 
         // Compute per-instruction live-before sets.
         let live_sets = compute_local_liveness(block_idx, schedule, live_out_seed);
 
         // Compute pressure per class.
-        let gpr_pressure = compute_pressure_for_class(&live_sets, &vreg_classes, RegClass::GPR);
-        let xmm_pressure = compute_pressure_for_class(&live_sets, &vreg_classes, RegClass::XMM);
+        let gpr_pressure = compute_pressure_for_class(&live_sets, vreg_classes, RegClass::GPR);
+        let xmm_pressure = compute_pressure_for_class(&live_sets, vreg_classes, RegClass::XMM);
 
         // Build def-site map and call-arg set once per block (shared by both paths).
         let def_inst_map: BTreeMap<VReg, usize> = schedule
@@ -589,7 +641,7 @@ pub fn plan_splits(
                 SplitScope::PerBlock,
                 &live_sets,
                 block_schedules,
-                &vreg_classes,
+                vreg_classes,
                 &call_arg_vregs,
                 &def_inst_map,
                 &range_lengths,
@@ -618,8 +670,14 @@ pub fn plan_splits(
         // Victims that have no local uses (defined here, consumed in successors)
         // require cross-block spilling: SpillStore in this block, SpillLoad in
         // each use block.
-        let call_crossing =
-            find_call_crossing_overshoot(&live_sets, schedule, &vreg_classes, callee_saved_budget);
+        let call_crossing = find_call_crossing_overshoot(
+            &live_sets,
+            schedule,
+            vreg_classes,
+            RegClass::GPR,
+            callee_saved_budget,
+            &call_arg_vregs,
+        );
         if let Some((call_inst_idx, excess)) = call_crossing {
             apply_splits_for_overshoot(
                 block_idx,
@@ -629,7 +687,55 @@ pub fn plan_splits(
                 SplitScope::CrossBlock,
                 &live_sets,
                 block_schedules,
-                &vreg_classes,
+                vreg_classes,
+                &call_arg_vregs,
+                &def_inst_map,
+                &range_lengths,
+                loop_depths,
+                class_to_vreg,
+                egraph,
+                cost_model,
+                extraction,
+                &mut next_vreg,
+                &mut new_slot_count,
+                &mut per_block_insertions,
+                &mut new_segments,
+                &mut operand_rewrites,
+                &mut segment_end_truncations,
+                &mut end_of_block_spill_vregs,
+                &mut planned_victims,
+            );
+        }
+
+        // ── XMM call-crossing pressure path ──────────────────────────────────
+        //
+        // Every XMM register is caller-saved, so the callee-saved budget for
+        // this class is zero: any XMM value still live after a call must go
+        // through a slot. The allocator models exactly this with clobber
+        // phantoms pre-colored to all 16 XMM registers at each call point
+        // (`add_clobber_interferences`), which makes such a value uncolorable
+        // and reports a chromatic overshoot.
+        //
+        // Block params are excluded via `planned_victims`, which the block-param
+        // strategy above has already populated.
+        let xmm_call_crossing = find_call_crossing_overshoot(
+            &live_sets,
+            schedule,
+            vreg_classes,
+            RegClass::XMM,
+            0, // no callee-saved XMM registers exist
+            &call_arg_vregs,
+        );
+        if let Some((call_inst_idx, excess)) = xmm_call_crossing {
+            apply_splits_for_overshoot(
+                block_idx,
+                call_inst_idx,
+                RegClass::XMM,
+                excess,
+                SplitScope::CrossBlock,
+                &live_sets,
+                block_schedules,
+                vreg_classes,
                 &call_arg_vregs,
                 &def_inst_map,
                 &range_lengths,
@@ -649,28 +755,6 @@ pub fn plan_splits(
             );
         }
     }
-
-    // Phase 6: Block-param split strategy.
-    //
-    // Scan each block for block param VRegs that are live across a call in the
-    // same block. Since all XMM registers are caller-saved, a block param that
-    // is live-in AND there is a call in the block will collide with the call's
-    // clobber set, forcing the allocator into an infeasible coloring. We fix
-    // this by routing the block param's phi copy to a slot in predecessors and
-    // inserting SpillLoad at each use in the block.
-    detect_blockparam_call_crossings(
-        func,
-        egraph,
-        block_schedules,
-        class_to_vreg,
-        global_liveness,
-        &mut new_slot_count,
-        &mut next_vreg,
-        &mut per_block_insertions,
-        &mut new_segments,
-        &mut operand_rewrites,
-        &mut slot_spilled_params,
-    );
 
     SplitPlan {
         per_block_insertions,
@@ -716,6 +800,7 @@ fn detect_blockparam_call_crossings(
     new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
     operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
     slot_spilled_params: &mut BTreeMap<(BlockId, u32), SlotSpilledParamInfo>,
+    planned_victims: &mut BTreeSet<VReg>,
 ) {
     let n_blocks = block_schedules.len();
 
@@ -838,6 +923,10 @@ fn detect_blockparam_call_crossings(
                     block_idx,
                 },
             );
+
+            // This param is now slot-routed. Claim it so the pressure paths do
+            // not plan a second, conflicting spill for the same value.
+            planned_victims.insert(param_vreg);
         }
     }
 }
@@ -1550,6 +1639,7 @@ mod tests {
             &mut new_segments,
             &mut operand_rewrites,
             &mut slot_spilled_params,
+            &mut BTreeSet::new(),
         );
 
         assert_eq!(new_slot_count, 1, "one slot should be allocated");
@@ -1626,6 +1716,7 @@ mod tests {
             &mut new_segments,
             &mut operand_rewrites,
             &mut slot_spilled_params,
+            &mut BTreeSet::new(),
         );
 
         let b1_id = func.blocks[block1_idx].id;
@@ -1684,6 +1775,7 @@ mod tests {
             &mut new_segments,
             &mut operand_rewrites,
             &mut slot_spilled_params,
+            &mut BTreeSet::new(),
         );
 
         // Two uses → two XmmSpillLoad insertions in block1.
@@ -1777,6 +1869,7 @@ mod tests {
             &mut new_segments,
             &mut operand_rewrites,
             &mut slot_spilled_params,
+            &mut BTreeSet::new(),
         );
 
         // One slot allocated for the F64 param.
@@ -2226,24 +2319,24 @@ mod tests {
 
         // SpillStore must be in block 0.
         assert!(
-            all_block_schedules[0].iter().any(|i| is_spill_store(i)),
+            all_block_schedules[0].iter().any(is_spill_store),
             "SpillStore must appear in block 0 (def block)"
         );
         assert!(
-            !all_block_schedules[1].iter().any(|i| is_spill_store(i)),
+            !all_block_schedules[1].iter().any(is_spill_store),
             "SpillStore must NOT appear in block 1 (use block)"
         );
 
         // SpillLoad must be in block 1.
         assert!(
-            all_block_schedules[1].iter().any(|i| is_spill_load(i)),
+            all_block_schedules[1].iter().any(is_spill_load),
             "SpillLoad must appear in block 1 (use block)"
         );
 
         // SpillStore in block 0 must come AFTER v0's def.
         let b0 = &all_block_schedules[0];
         let def_pos = b0.iter().position(|i| i.dst == VReg(0)).unwrap();
-        let store_pos = b0.iter().position(|i| is_spill_store(i)).unwrap();
+        let store_pos = b0.iter().position(is_spill_store).unwrap();
         assert!(
             store_pos > def_pos,
             "SpillStore (pos {store_pos}) must come after v0's def (pos {def_pos})"
@@ -2297,12 +2390,12 @@ mod tests {
 
         // SpillStore in block 0.
         assert!(
-            all_block_schedules[0].iter().any(|i| is_spill_store(i)),
+            all_block_schedules[0].iter().any(is_spill_store),
             "SpillStore must appear in block 0 (def block)"
         );
         // SpillLoad in block 1.
         assert!(
-            all_block_schedules[1].iter().any(|i| is_spill_load(i)),
+            all_block_schedules[1].iter().any(is_spill_load),
             "SpillLoad must appear in block 1 (use block)"
         );
         // Operand of block 1's use instruction rewritten to reload VReg.
