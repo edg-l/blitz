@@ -435,6 +435,23 @@ pub fn compile(
     // outer and inner loop header params into the same register.
     let mut block_param_vreg_overrides: BTreeMap<(BlockId, u32), VReg> = BTreeMap::new();
 
+    // Every block param's VReg, recorded as linearization decides it -- both the
+    // fresh ones above and the ones that reuse an inst already in the block.
+    //
+    // `build_phi_copies` needs the destination of each phi copy, and re-deriving
+    // it from `class_to_vreg` at the target's entry does not survive the
+    // splitter: a cross-block slot spill truncates the class's segment to the
+    // defining block, and every later block that carries the class as a param
+    // then resolves to nothing ("param class ... not in class_to_vreg", 9 of 40
+    // generated programs at -O1). The decision is made here and only here, so
+    // it is recorded here rather than reconstructed downstream.
+    //
+    // Deliberately NOT folded into `block_param_vreg_overrides`: that map also
+    // feeds an `insert_single` into each block's snapshot, which would collapse
+    // a class's segments to one full-range entry and discard what the splitter
+    // recorded.
+    let mut block_param_vregs: BTreeMap<(BlockId, u32), VReg> = BTreeMap::new();
+
     let idom = compute_idom(func, &rpo_order);
     let mut class_emitted_in: BTreeMap<ClassId, usize> = BTreeMap::new();
 
@@ -533,6 +550,7 @@ pub fn compile(
                             block.param_types[pidx as usize].clone(),
                         );
                         inst.operands.clear();
+                        block_param_vregs.insert((block_id, pidx), vreg);
                     } else if pre_emission.contains(&canon) && block_preds[block_idx].len() <= 1 {
                         // Pass-through: the canonical class was already emitted
                         // in a dominating block (survived this block's filter)
@@ -550,6 +568,13 @@ pub fn compile(
                         // a distinct value via phi copy into a shared storage
                         // slot, so a fresh VReg local to this block is
                         // required.
+                        //
+                        // The param still needs a recorded VReg even though it
+                        // gets no BlockParam of its own: it is the dominating
+                        // definition's, and once the splitter truncates that
+                        // VReg's segment to its defining block, nothing else
+                        // can name it here.
+                        block_param_vregs.insert((block_id, pidx), vreg);
                         continue;
                     } else {
                         // The VReg was emitted by a non-dominating prior block.
@@ -577,6 +602,7 @@ pub fn compile(
                             operands: vec![],
                         });
                         block_param_vreg_overrides.insert((block_id, pidx), fresh_vreg);
+                        block_param_vregs.insert((block_id, pidx), fresh_vreg);
                     }
                 }
             }
@@ -1776,6 +1802,7 @@ pub fn compile(
             &block_class_to_vreg,
             &block_param_map,
             &block_param_vreg_overrides,
+            &block_param_vregs,
             &coalesce_aliases,
             &regalloc_result,
             func,

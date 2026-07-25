@@ -201,6 +201,7 @@ pub(super) fn lower_terminator(
     ret_class_to_vreg: &ClassVRegMap,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
+    block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
@@ -291,6 +292,7 @@ pub(super) fn lower_terminator(
                 ret_class_to_vreg,
                 block_param_map,
                 param_vreg_overrides,
+                block_param_vregs,
                 coalesce_aliases,
                 regalloc,
                 func,
@@ -329,6 +331,7 @@ pub(super) fn lower_terminator(
                 ret_class_to_vreg,
                 block_param_map,
                 param_vreg_overrides,
+                block_param_vregs,
                 coalesce_aliases,
                 regalloc,
                 func,
@@ -343,6 +346,7 @@ pub(super) fn lower_terminator(
                 ret_class_to_vreg,
                 block_param_map,
                 param_vreg_overrides,
+                block_param_vregs,
                 coalesce_aliases,
                 regalloc,
                 func,
@@ -422,6 +426,7 @@ fn build_phi_copies(
     block_class_to_vreg: &ClassVRegMap,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
+    block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
@@ -539,13 +544,34 @@ fn build_phi_copies(
             continue;
         }
 
+        // `class_to_vreg` is asked first, after the overrides, because it is the
+        // splitter-aware answer: where a reload covers the target's entry, that
+        // reload is the VReg the target block actually reads.
+        //
+        // `block_param_vregs` backs it up with what linearization decided. A
+        // param that passes a dominating definition straight through gets no
+        // BlockParam of its own, so once the splitter cross-block-spills that
+        // definition and truncates its segment to the defining block, nothing
+        // else names the value here -- 9 of 40 generated programs failed to
+        // compile at -O1 on exactly that.
         let mut param_vreg = param_vreg_overrides
             .get(&(target, param_idx as u32))
             .copied()
             .or_else(|| class_to_vreg.lookup(param_cid, tgt_entry))
+            .or_else(|| block_param_vregs.get(&(target, param_idx as u32)).copied())
             .ok_or_else(|| CompileError {
                 phase: "phi-elim".into(),
-                message: format!("param class {:?} not in class_to_vreg", param_cid),
+                message: format!(
+                    "param class {param_cid:?} of ({target}, {param_idx}) not in \
+                     class_to_vreg at {tgt_entry:?}, jumping from block \
+                     {src_block_idx}; segments for the class: [{}]",
+                    class_to_vreg
+                        .iter_segments()
+                        .filter(|&(c, _, _, _)| c == param_cid)
+                        .map(|(_, v, s, e)| format!("{v:?} {s:?}..={e:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 location: None,
             })?;
         // Apply coalesce aliases so a dest VReg merged away by Phase 3 resolves
