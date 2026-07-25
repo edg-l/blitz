@@ -721,11 +721,24 @@ pub fn compile(
         }
     }
 
-    // Hoist Param ops to the front of the entry block's schedule.
-    if !block_schedules.is_empty() {
-        let sched = &mut block_schedules[0];
+    // Hoist Param and BlockParam ops to the front of their block's schedule.
+    //
+    // Neither computes anything: the value is already in its register when the
+    // block starts, put there by the ABI or by a predecessor's phi copy. Their
+    // pseudo-ops are still where scheduling left them, though, and liveness reads
+    // a def position as the start of a live range -- so a block param whose
+    // pseudo-op the backward pass pulled down next to its use looked dead over
+    // the earlier part of its own block, and the allocator handed its register to
+    // something defined there:
+    //
+    //   movsd xmm3,xmm4     ; x + y, into the register holding param 4
+    //   ...
+    //   addsd xmm1,xmm3     ; wanted param 4, reads x + y
+    //
+    // Hoisting makes the def position match where the value actually arrives.
+    for sched in block_schedules.iter_mut() {
         sched.sort_by_key(|inst| {
-            if matches!(inst.op, Op::Param(_, _)) {
+            if matches!(inst.op, Op::Param(_, _) | Op::BlockParam(_, _, _)) {
                 0u8
             } else {
                 1
