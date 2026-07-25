@@ -1572,63 +1572,82 @@ pub fn compile(
             }
         }
 
-        let lower_group = |group: &[&ScheduledInst],
-                           regalloc_result: &RegAllocResult,
-                           func: &Function,
-                           param_vreg_set: &BTreeSet<VReg>,
-                           frame_layout: &crate::x86::abi::FrameLayout,
-                           vreg_types: &BTreeMap<VReg, Type>|
-         -> Result<Vec<MachInst>, CompileError> {
-            lower_block_pure_ops(
-                &group.iter().map(|&i| i.clone()).collect::<Vec<_>>(),
-                regalloc_result,
+        // Emit in schedule order.
+        //
+        // The schedule was ordered by barrier group during linearization, before
+        // register allocation, and the splitter inserts at positions inside it.
+        // So this order is both the intended emission order and -- the part that
+        // matters -- the order the allocator measured liveness on.
+        //
+        // Assigning barrier groups a second time here and emitting in *that*
+        // answer is what let a register be clobbered between a def and its use:
+        // wherever the two groupings disagreed, a value was emitted somewhere its
+        // interference had never been measured, and no amount of pinning
+        // individual VRegs back into place fixed the general case.
+        //
+        // A barrier instruction stands in for its effectful op. Emit the load,
+        // store or call at the barrier's own position and no code for the
+        // pseudo-op itself; everything else lowers as a pure op.
+        let lower_pending = |pending: &mut Vec<ScheduledInst>,
+                             out: &mut Vec<MachInst>|
+         -> Result<(), CompileError> {
+            if pending.is_empty() {
+                return Ok(());
+            }
+            out.extend(lower_block_pure_ops(
+                pending,
+                &regalloc_result,
                 func,
-                param_vreg_set,
-                frame_layout,
-                vreg_types,
+                &param_vreg_set,
+                &frame_layout,
+                &vreg_types,
                 arg_locs,
-            )
+            )?);
+            pending.clear();
+            Ok(())
         };
 
-        for (barrier_k, op) in non_term_ops.iter().enumerate() {
-            // Emit pure ops for group[barrier_k] before this barrier.
-            let pre_insts = lower_group(
-                &groups[barrier_k],
-                &regalloc_result,
-                func,
-                &param_vreg_set,
-                &frame_layout,
-                &vreg_types,
-            )?;
-            all_insts.extend(pre_insts);
-            // Emit the barrier (load/store/call).
-            let extra = lower_effectful_op(
-                op,
-                block_idx,
-                barrier_k,
-                &block_class_to_vreg,
-                &regalloc_result,
-                &extraction,
-                func,
-                &egraph.unionfind,
-                full_schedule_for_barriers,
-            )?;
-            all_insts.extend(extra);
+        let mut pending: Vec<ScheduledInst> = Vec::new();
+        let mut barrier_k = 0usize;
+        for inst in full_schedule_for_barriers.iter() {
+            if !matches!(
+                inst.op,
+                Op::CallResult(_, _)
+                    | Op::LoadResult(_, _)
+                    | Op::VoidCallBarrier
+                    | Op::StoreBarrier
+            ) {
+                pending.push(inst.clone());
+                continue;
+            }
+            lower_pending(&mut pending, &mut all_insts)?;
+            // Barrier instructions appear in effectful-op order, which is what
+            // makes counting them the barrier index.
+            if let Some(op) = non_term_ops.get(barrier_k) {
+                all_insts.extend(lower_effectful_op(
+                    op,
+                    block_idx,
+                    barrier_k,
+                    &block_class_to_vreg,
+                    &regalloc_result,
+                    &extraction,
+                    func,
+                    &egraph.unionfind,
+                    full_schedule_for_barriers,
+                )?);
+            }
+            barrier_k += 1;
         }
-        // Emit trailing pure ops (group[num_barriers]).
-        // When num_barriers == 0 this is group[0] containing all pure ops.
-        // When num_barriers > 0 this is the group after the last barrier.
-        {
-            let post_insts = lower_group(
-                &groups[num_barriers],
-                &regalloc_result,
-                func,
-                &param_vreg_set,
-                &frame_layout,
-                &vreg_types,
-            )?;
-            all_insts.extend(post_insts);
-        }
+        lower_pending(&mut pending, &mut all_insts)?;
+        debug_assert_eq!(
+            barrier_k,
+            non_term_ops.len(),
+            "block {} of '{}' has {} barrier instructions for {} effectful ops",
+            block_idx,
+            func.name,
+            barrier_k,
+            non_term_ops.len(),
+        );
 
         // Task 6.3 debug asserts: after the global allocator cutover, every
         // VReg that appears in a terminator (Ret value) must have a physical
