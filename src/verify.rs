@@ -47,8 +47,14 @@
 //! own index, a load reading a register whose value had been spilled away, a
 //! store through a register the following `lea` had not written yet.
 //!
-//! Not covered yet: two overlapping live ranges sharing a register, and
-//! callee-saved preservation.
+//! [`verify_register_sharing`] adds the check that two VRegs live at once must
+//! not hold the same register, which it does against liveness recomputed from
+//! the schedules as emitted rather than against the allocator's own graph.
+//!
+//! Not covered yet: callee-saved preservation, and a value that is wrong rather
+//! than absent -- the register is written on every path to the read, just with
+//! somebody else's value. Emission-order divergences of that shape stay the
+//! differential harness's job.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -560,6 +566,8 @@ mod tests {
 
 // ── Machine level ────────────────────────────────────────────────────────────
 
+use crate::egraph::extract::VReg;
+use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::inst::MachInst;
 use crate::x86::reg::Reg;
 
@@ -665,6 +673,144 @@ pub fn verify_machinsts(
 /// Report every read of a spill slot that no store on some path to it has
 /// written.
 ///
+/// Two VRegs live at the same program point must not hold the same physical
+/// register. One of them would be reading the other's value.
+///
+/// This is the invariant a graph colorer exists to maintain, so checking it
+/// against the allocator's own interference graph would be circular and always
+/// pass. Liveness is therefore recomputed here from the schedules **as emitted**
+/// -- after splitting, after coalescing, in final order -- and compared against
+/// the final assignment. What it catches is precisely a divergence between the
+/// liveness the allocator colored and the code that came out:
+///
+/// - a value emitted somewhere its interference was never measured, which is one
+///   of the two shapes nearly every wrong-code bug in this backend has had;
+/// - a VReg whose live range has a *hole* -- the splitter truncates a segment at
+///   its SpillStore -- coalesced with a later VReg, so the merged value is valid
+///   over only part of its own range while the allocator fills the hole with
+///   something else.
+///
+/// The machine-level checks cannot see either: the register is written on every
+/// path to the read, just with the wrong value.
+///
+/// VRegs absent from `vreg_to_reg` are skipped. They hold no register to share:
+/// spill pseudo-op destinations are dummies, and a coalesced-away VReg no longer
+/// appears in the emitted operands at all.
+pub fn verify_register_sharing(
+    block_schedules: &[Vec<ScheduledInst>],
+    phi_uses: &[std::collections::BTreeSet<VReg>],
+    cfg_succs: &[Vec<usize>],
+    vreg_to_reg: &BTreeMap<VReg, Reg>,
+    coalesce_aliases: &BTreeMap<VReg, VReg>,
+    copy_pairs: &[(VReg, VReg)],
+) -> Vec<String> {
+    use crate::regalloc::global_liveness::compute_global_liveness;
+
+    let mut errors = Vec::new();
+    if block_schedules.len() != phi_uses.len() || block_schedules.len() != cfg_succs.len() {
+        return errors;
+    }
+
+    // Everything is named by its coalesce representative, which is what the
+    // emitted code uses. Two things need it. A schedule operand naming a VReg
+    // coalescing merged away has no register of its own, and skipping it would
+    // skip the interesting case, since the emitted code reads the *alias's*
+    // register. And `phi_uses` was built before coalescing, so a renamed VReg
+    // there is a use with no def in any schedule -- liveness would carry it back
+    // to the function entry and report a clash at every point on the way.
+    let canon = |mut v: VReg| -> VReg {
+        for _ in 0..coalesce_aliases.len() + 1 {
+            match coalesce_aliases.get(&v) {
+                Some(&next) if next != v => v = next,
+                _ => break,
+            }
+        }
+        v
+    };
+    let phi_uses_canon: Vec<std::collections::BTreeSet<VReg>> = phi_uses
+        .iter()
+        .map(|set| set.iter().map(|&v| canon(v)).collect())
+        .collect();
+    let schedules_canon: Vec<Vec<ScheduledInst>> = block_schedules
+        .iter()
+        .map(|sched| {
+            sched
+                .iter()
+                .map(|inst| ScheduledInst {
+                    op: inst.op.clone(),
+                    dst: canon(inst.dst),
+                    operands: inst.operands.iter().map(|&v| canon(v)).collect(),
+                })
+                .collect()
+        })
+        .collect();
+    let liveness = compute_global_liveness(&schedules_canon, cfg_succs, &phi_uses_canon);
+
+    // A phi copy's source and destination hold the SAME value, so sharing a
+    // register is not a clash -- it is what coalescing the pair achieves, and
+    // both are live at the copy point by construction. Only directly related
+    // pairs are exempt: two different arguments of one target block are two
+    // distinct values, and a source coalesced transitively onto some later
+    // value is the bug this check exists to find.
+    let phi_related: BTreeSet<(VReg, VReg)> = copy_pairs
+        .iter()
+        .map(|&(a, b)| (a.min(b), a.max(b)))
+        .collect();
+
+    // One report per (register, lower VReg, higher VReg): the same clash is live
+    // over a range of points and would otherwise be reported at each of them.
+    let mut seen: BTreeSet<(Reg, VReg, VReg)> = BTreeSet::new();
+
+    let mut check = |live: &std::collections::BTreeSet<VReg>,
+                     where_: &str,
+                     errors: &mut Vec<String>,
+                     seen: &mut BTreeSet<(Reg, VReg, VReg)>| {
+        let mut by_reg: BTreeMap<Reg, VReg> = BTreeMap::new();
+        for &v in live {
+            let Some(&reg) = vreg_to_reg.get(&v) else {
+                continue;
+            };
+            match by_reg.get(&reg) {
+                None => {
+                    by_reg.insert(reg, v);
+                }
+                Some(&other) => {
+                    let key = (reg, other.min(v), other.max(v));
+                    if phi_related.contains(&(key.1, key.2)) {
+                        continue;
+                    }
+                    if seen.insert(key) {
+                        errors.push(format!(
+                            "{where_}: VReg {} and VReg {} are both live and both hold {:?}",
+                            key.1.0, key.2.0, reg,
+                        ));
+                    }
+                }
+            }
+        }
+    };
+
+    for (b, schedule) in schedules_canon.iter().enumerate() {
+        // Backward walk, so `live` is the live-before set of each instruction.
+        let mut live = liveness.live_out[b].clone();
+        check(&live, &format!("block {b} exit"), &mut errors, &mut seen);
+        for (i, inst) in schedule.iter().enumerate().rev() {
+            live.remove(&inst.dst);
+            for &op in &inst.operands {
+                live.insert(op);
+            }
+            check(
+                &live,
+                &format!("block {b} before [{i}] {:?}", inst.op),
+                &mut errors,
+                &mut seen,
+            );
+        }
+    }
+
+    errors
+}
+
 /// Same forward dataflow as the register check, keyed by frame displacement
 /// instead: meet predecessors with intersection, so a slot written on one arm of
 /// a branch is not written at the join. A reload from a slot nothing wrote is a

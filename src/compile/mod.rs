@@ -786,6 +786,11 @@ pub fn compile(
     // calls in their block (preventing loads from uninitialized stack slots).
     let mut end_of_block_spill_vregs_for_lowering: BTreeSet<VReg> = BTreeSet::new();
 
+    // The final `phi_uses`, kept for `verify::verify_register_sharing` after
+    // allocation: it is the terminator half of liveness, and the check needs the
+    // same one the allocator was given.
+    let mut verify_phi_uses: Vec<BTreeSet<VReg>> = Vec::new();
+
     // Single-block fast path skips global liveness.
     let (regalloc_result, block_rewritten, coalesce_aliases) = if func.blocks.len() == 1 {
         // --- Single-block fast path ---
@@ -1187,6 +1192,7 @@ pub fn compile(
         // `phi_uses` already includes Ret values (compute_phi_uses covers Ret
         // val, Jump args, Branch args), so the allocator has the full set of
         // terminator-consumed VRegs for liveness + end-of-block reload logic.
+        verify_phi_uses = phi_uses.clone();
         let global_result = allocate_global(
             &block_schedules,
             &param_vregs,
@@ -1291,6 +1297,31 @@ pub fn compile(
             regalloc_result.spill_slots,
             crate::trace::format_vreg_to_reg(&regalloc_result.vreg_to_reg),
         );
+    }
+
+    // Two VRegs live at once must not share a register. Checked here rather than
+    // at machine level because it needs the VRegs, which the rewrite ahead
+    // erases, and liveness recomputed from the schedules as emitted -- asking the
+    // allocator's own interference graph would be circular.
+    if crate::verify::is_enabled() && func.blocks.len() > 1 {
+        let succs = crate::regalloc::global_liveness::cfg_successors(func);
+        let errors = crate::verify::verify_register_sharing(
+            &block_rewritten,
+            &verify_phi_uses,
+            &succs,
+            &regalloc_result.vreg_to_reg,
+            &coalesce_aliases,
+            &copy_pairs,
+        );
+        if !errors.is_empty() {
+            panic!(
+                "BLITZ_VERIFY: {} register-sharing violation(s) in function '{}' after \
+                 register allocation:\n  - {}",
+                errors.len(),
+                func.name,
+                errors.join("\n  - ")
+            );
+        }
     }
 
     // Build the set of param VRegs so lowering can skip their Iconst sentinels.
