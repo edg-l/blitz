@@ -1331,11 +1331,81 @@ pub fn compile(
         }
 
         // Partition scheduled pure insts into groups relative to barriers.
-        let vreg_group = assign_barrier_groups(
+        let mut vreg_group = assign_barrier_groups(
             rewritten,
             &vreg_to_result_of_barrier,
             &vreg_to_arg_of_barrier,
         );
+
+        // Pin each reload to the barrier that consumes it.
+        //
+        // A reload the splitter created for an effectful op's operand is absent
+        // from `vreg_to_arg_of_barrier`, which was built from the pre-splitter
+        // class map, and the transitive propagation inside
+        // `assign_barrier_groups` takes a minimum, so it lands in group 0 --
+        // emitted at the top of the function, reading a slot the spill store
+        // has not written yet. The barrier's own operand list is the authority
+        // on what it consumes, so read the answer from there.
+        //
+        // Only reloads are pinned. Ordinary values may legitimately be computed
+        // early; a reload may not precede its store.
+        {
+            let mut barrier_of_operand: BTreeMap<VReg, usize> = BTreeMap::new();
+            let mut k = 0usize;
+            for inst in rewritten.iter() {
+                if matches!(
+                    inst.op,
+                    Op::CallResult(_, _)
+                        | Op::LoadResult(_, _)
+                        | Op::VoidCallBarrier
+                        | Op::StoreBarrier
+                ) {
+                    for &operand in &inst.operands {
+                        // A value feeding several barriers must be ready for
+                        // the earliest of them.
+                        barrier_of_operand
+                            .entry(operand)
+                            .and_modify(|e| *e = (*e).min(k))
+                            .or_insert(k);
+                    }
+                    k += 1;
+                }
+            }
+            for inst in rewritten.iter() {
+                if matches!(inst.op, Op::SpillLoad(_) | Op::XmmSpillLoad(_))
+                    && let Some(&k) = barrier_of_operand.get(&inst.dst)
+                    && vreg_group.get(&inst.dst).is_some_and(|&g| g < k)
+                {
+                    vreg_group.insert(inst.dst, k);
+                }
+            }
+
+            // A reload must never be emitted before the store to its slot,
+            // whatever consumes it. The rule above only covers reloads a
+            // barrier reads; one with no barrier consumer keeps its
+            // forward-pass group, which for a fresh VReg with no scheduled
+            // consumer is 0 -- the top of the function, where the slot still
+            // holds whatever the caller left. Anything that then resolves an
+            // address to that VReg reads garbage.
+            let mut store_group: BTreeMap<i64, usize> = BTreeMap::new();
+            for inst in rewritten.iter() {
+                if let Op::SpillStore(slot) | Op::XmmSpillStore(slot) = inst.op {
+                    let g = vreg_group.get(&inst.dst).copied().unwrap_or(0);
+                    store_group
+                        .entry(slot)
+                        .and_modify(|e| *e = (*e).max(g))
+                        .or_insert(g);
+                }
+            }
+            for inst in rewritten.iter() {
+                if let Op::SpillLoad(slot) | Op::XmmSpillLoad(slot) = inst.op
+                    && let Some(&sg) = store_group.get(&slot)
+                    && vreg_group.get(&inst.dst).is_some_and(|&g| g < sg)
+                {
+                    vreg_group.insert(inst.dst, sg);
+                }
+            }
+        }
         let mut groups: Vec<Vec<&ScheduledInst>> = vec![Vec::new(); num_barriers + 1];
         for inst in rewritten.iter() {
             let g = *vreg_group.get(&inst.dst).unwrap_or(&0);

@@ -10,27 +10,20 @@
 //   6          correct value, exit 2      exit 0     <- return path clobbered
 //   >= 7       SIGSEGV (exit 139)         correct    <- return address clobbered
 //
-// ── Status ─────────────────────────────────────────────────────────────────
+// ── Fixed ───────────────────────────────────────────────────────────────────
 //
-// Three of the four defects behind this are fixed (8acd79b, 350d36a): the
-// addressing-mode fold reading a stale index register, load/store addresses
-// resolving to the pre-spill register, and `return 0` being dropped after a
-// call. Five and six elements now match gcc exactly.
+// Four defects compounded here, all fixed (8acd79b, 350d36a, and the reload
+// ordering below). This file now matches gcc and is a live regression test.
 //
-// Seven or more still segfaults, for a remaining splitter defect. The address
-// of arr[6] is spilled:
-//
-//   lea  r14,[rax+r13*1]     ; r14 = &arr[6]
-//   mov  [rsp], r14          ; spilled
-//   mov  DWORD PTR [r15], r13d   ; <-- r15 never written
-//
-// The splitter rewrote the store barrier's operand from VReg(19) to a reload
-// VReg it created, but never emitted the reload instruction ahead of the use:
-// the barrier's operands are [VReg(1), VReg(90), VReg(111), VReg(20)] and
-// VReg(19) is absent, while nothing loads [rsp] back before the store. The
-// reload is inserted for a later consumer instead. So the plan is right and
-// the insertion point is wrong -- a bug in where the splitter places reloads
-// for effectful-op operands, not in how lowering resolves them.
+//   1. build_mem_addr folded an addressing mode using registers re-resolved
+//      through the class map, picking a VReg the LEA had not used.
+//   2. A load or store whose address had been spilled resolved to the
+//      pre-spill register instead of the reload.
+//   3. `return 0` after a call emitted nothing, because the constant resolved
+//      to RAX -- which held the callee's return value.
+//   4. A reload could be emitted in group 0, ahead of the store to its slot,
+//      so it loaded whatever the caller had left on the stack. Reloads are now
+//      pinned after the store to their slot.
 //
 // OUTPUT: 28
 // EXIT: 0
