@@ -259,8 +259,23 @@ fn choose_split_kind(
             &extraction.choices,
         )
     {
+        // Cheap is not the same as recomputable. `BlockParam`, `Param`,
+        // `CallResult` and `LoadResult` are all leaves of cost ~0, so cost alone
+        // waved them through -- but they compute nothing. Their value is
+        // *already* in a register at one particular point, put there by a
+        // predecessor's phi copy, by the caller, or by the instruction before.
+        // Re-emitting the pseudo-op mints a VReg that no instruction ever
+        // writes, and the allocator hands it a register nothing initialises.
+        // A `BlockParam(1, 0)` re-emitted mid-block got RAX, which still held
+        // the phi *source*, so a `for (i = 0; i < 5; i++)` loop tested a copy of
+        // the counter that the latch never incremented and never terminated
+        // (findings/seed34_loop_never_terminates.c).
+        //
+        // `Op::is_rematerializable` is the existing answer to this question --
+        // `Iconst`, `StackAddr`, `GlobalAddr`, the three that genuinely
+        // recompute from nothing -- and the splitter simply never asked it.
         let penalty = LOOP_DEPTH_PENALTY_BASE.saturating_pow(loop_depth).max(1) as f64;
-        if extracted.cost * penalty <= SLOT_STORE_LOAD_COST {
+        if extracted.op.is_rematerializable() && extracted.cost * penalty <= SLOT_STORE_LOAD_COST {
             return SplitKind::Remat(extracted.op);
         }
     }

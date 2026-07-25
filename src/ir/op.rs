@@ -980,11 +980,22 @@ impl Op {
     }
 
     /// Returns true if this op can be cheaply recomputed instead of spilled.
-    /// These ops have no dependencies and produce a constant value or address.
+    ///
+    /// These ops take no operands and recompute their value from nothing, so a
+    /// copy of one is as good as the original wherever it is placed. `Fconst`
+    /// costs two instructions (`movabs` into the scratch GPR, then `movq` into
+    /// an XMM) and still qualifies.
+    ///
+    /// Cheapness is NOT the test, which is the mistake this predicate exists to
+    /// prevent. `BlockParam`, `Param`, `CallResult` and `LoadResult` are leaves
+    /// of cost ~0, but their value is already in a register at one particular
+    /// point -- put there by a predecessor's phi copy, by the caller, or by the
+    /// instruction before -- and re-emitting the pseudo-op mints a VReg that no
+    /// instruction ever writes.
     pub fn is_rematerializable(&self) -> bool {
         matches!(
             self,
-            Op::Iconst(_, _) | Op::StackAddr(_) | Op::GlobalAddr(_)
+            Op::Iconst(_, _) | Op::Fconst(_, _) | Op::StackAddr(_) | Op::GlobalAddr(_)
         )
     }
 }
