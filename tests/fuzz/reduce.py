@@ -31,6 +31,7 @@ class Oracle:
     def __init__(self, cc, blitz, opt, want_compile_failure=False):
         self.cc, self.blitz, self.opt = cc, blitz, opt
         self.want_compile_failure = want_compile_failure
+        self.ub_check = False
         self.dir = tempfile.mkdtemp(prefix="reduce_")
 
     def _build_run(self, compiler_cmd, binary):
@@ -39,10 +40,63 @@ class Oracle:
         p = run([binary])
         return (p.returncode, p.stdout)
 
+    # Reductions that fall off the end of a non-void function, or read a local
+    # the reducer just stopped initialising, are undefined -- and both are
+    # exactly what deleting lines produces. `cc -O0` and `cc -O2` agreeing does
+    # not catch them: an uninitialised read usually lands on the same garbage at
+    # both levels, and a missing return usually leaves the same register alone.
+    # Two reductions were chased as miscompiles before this check existed, and a
+    # third the first time this script was pointed at a program with an array.
+    #
+    # These warnings are conservative in the right direction: a candidate the
+    # compiler is unsure about is one the oracle cannot vouch for either.
+    # The generator's own `extern int printf(char*, int)` conflicts with the
+    # builtin, which is unrelated to anything a reduction can introduce.
+    UB_WARNINGS = [
+        "-Wno-builtin-declaration-mismatch",
+        "-Werror=return-type",
+        "-Werror=uninitialized",
+        "-Werror=maybe-uninitialized",
+    ]
+
+    def _is_well_defined(self, src):
+        # The build commands pass -w, which silences everything, so ask
+        # separately and only about the constructs deleting a line introduces.
+        #
+        # This must be a real -O2 compile, not -fsyntax-only: reaching the end
+        # of a non-void function and reading an uninitialised local are both
+        # found by the optimiser's dataflow, and neither is reported without it.
+        # With -fsyntax-only this check passed a reduction that had lost two
+        # `return`s and seven of eight array initialisers.
+        if not self.ub_check:
+            return True
+        cmd = [self.cc, "-O2", "-c", "-o", os.devnull] + self.UB_WARNINGS + [src]
+        return run(cmd).returncode == 0
+
+    def calibrate_ub_check(self, text):
+        """Enable the UB check only if the starting program passes it.
+
+        The flag set is not portable -- gcc and clang disagree about which
+        -W names exist -- and a compiler that rejects an option rejects the
+        whole invocation, which would read as "every candidate is undefined"
+        and reduce nothing. Anchoring on the input means the check can only
+        ever reject candidates the original did not have.
+        """
+        src = os.path.join(self.dir, "cal.c")
+        with open(src, "w") as f:
+            f.write(text)
+        self.ub_check = True
+        if not self._is_well_defined(src):
+            self.ub_check = False
+            print("note: UB warning check unavailable, reductions may introduce UB",
+                  file=sys.stderr)
+
     def fails(self, text):
         src = os.path.join(self.dir, "c.c")
         with open(src, "w") as f:
             f.write(text)
+        if not self._is_well_defined(src):
+            return False
         ref0 = os.path.join(self.dir, "ref0")
         ref2 = os.path.join(self.dir, "ref2")
         r0 = self._build_run([self.cc, "-w", "-O0", src, "-o", ref0], ref0)
@@ -97,6 +151,7 @@ def main():
     oracle = Oracle(
         args.cc, os.path.abspath(args.blitz), args.opt, args.want_compile_failure
     )
+    oracle.calibrate_ub_check(text)
     if not oracle.fails(text):
         print("input does not fail the oracle; nothing to reduce", file=sys.stderr)
         return 1
