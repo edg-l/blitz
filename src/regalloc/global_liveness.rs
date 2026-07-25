@@ -159,12 +159,19 @@ pub fn compute_global_liveness_with_block_params(
     GlobalLiveness { live_in, live_out }
 }
 
-/// Apply block-param-override renames to the phi_uses sets.
+/// Point back-edge phi uses at the target block param's own VReg.
 ///
-/// When a back-edge terminator arg's e-class matches a target block param that
-/// has an override VReg (created to break SSA cycles), this function replaces
-/// the global VReg with the override VReg in `phi_uses[block_idx]`. This keeps
-/// the override VReg alive across the back edge so liveness is correct.
+/// When a back-edge terminator arg's e-class matches the target's block param
+/// class, the copy that edge emits is a self-copy and the param's VReg is the
+/// storage the value occupies for the whole loop. This replaces whatever the
+/// latch's exit resolved to with that param VReg -- the override VReg when
+/// linearization made one to break an SSA cycle, otherwise the param's own --
+/// so the value stays live across the loop body.
+///
+/// Without it the class resolves at the latch's exit to nothing at all once the
+/// header spills the param (the original segment is truncated there), the value
+/// looks dead over the loop body, and the allocator gives its register to the
+/// latch's own code while the header keeps re-spilling from it.
 ///
 /// Only back edges (source RPO position >= target RPO position) are processed;
 /// forward edges use the original VReg.
@@ -202,23 +209,44 @@ pub fn apply_block_param_overrides_to_phi_uses(
                 if src_pos < tgt_pos {
                     return; // Forward edge: use the original VReg.
                 }
+                let Some(target_idx) = func.blocks.iter().position(|b| b.id == target) else {
+                    return;
+                };
                 for (pidx, &arg_cid) in args.iter().enumerate() {
-                    if let Some(&fresh_vreg) =
-                        block_param_vreg_overrides.get(&(target, pidx as u32))
-                        && let Some(&param_cid) = block_param_map.get(&(target, pidx as u32))
-                    {
-                        let canon_arg = unionfind.find_immutable(arg_cid);
-                        let canon_param = unionfind.find_immutable(param_cid);
-                        if canon_arg == canon_param {
-                            // Replace the global VReg with the override.
-                            if let Some(old_vreg) =
-                                class_to_vreg.lookup(canon_arg, ProgramPoint::block_exit(block_idx))
-                            {
-                                phi_uses[block_idx].remove(&old_vreg);
-                            }
-                            phi_uses[block_idx].insert(fresh_vreg);
-                        }
+                    let Some(&param_cid) = block_param_map.get(&(target, pidx as u32)) else {
+                        continue;
+                    };
+                    let canon_arg = unionfind.find_immutable(arg_cid);
+                    let canon_param = unionfind.find_immutable(param_cid);
+                    if canon_arg != canon_param {
+                        continue;
                     }
+                    // The arg and the param are one class, so the copy this
+                    // back edge emits is a self-copy and the param's own VReg is
+                    // what stays live around the loop. Name it here: the param
+                    // is the value's storage for the whole loop, and the latch
+                    // has no VReg of its own for it. Resolving the class at the
+                    // latch's exit instead finds nothing once the header spills
+                    // the param -- the value then looks dead over the loop body,
+                    // the allocator hands its register to the latch's own code,
+                    // and the header re-spills the clobbered register on the
+                    // next iteration (findings/seed6_reduced_wrong_sum.c).
+                    let param_vreg = block_param_vreg_overrides
+                        .get(&(target, pidx as u32))
+                        .copied()
+                        .or_else(|| {
+                            class_to_vreg.lookup(canon_param, ProgramPoint::block_entry(target_idx))
+                        });
+                    let Some(param_vreg) = param_vreg else {
+                        continue;
+                    };
+                    if let Some(old_vreg) =
+                        class_to_vreg.lookup(canon_arg, ProgramPoint::block_exit(block_idx))
+                        && old_vreg != param_vreg
+                    {
+                        phi_uses[block_idx].remove(&old_vreg);
+                    }
+                    phi_uses[block_idx].insert(param_vreg);
                 }
             };
             match term {

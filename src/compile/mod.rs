@@ -1372,8 +1372,43 @@ pub fn compile(
                 // The collapse first, as a full-range fallback per class: a
                 // lookup at a point no precise segment covers still resolves,
                 // which is the only reason collapsing ever worked.
-                for (cid, vreg) in map.iter() {
+                //
+                // One fallback per CLASS, chosen deliberately. `insert_single`
+                // replaces the whole class, so iterating segments and inserting
+                // each in turn left whichever segment came last as the fallback
+                // -- typically a reload the splitter appended in some unrelated
+                // block, sharing one scratch register with every other reload.
+                // Every lookup at an uncovered point then named that scratch:
+                // ten back-edge phi copies all read RAX and the loop overwrote
+                // its own block params (findings/seed6_reduced_wrong_sum.c).
+                //
+                // Prefer the widest segment -- the original value's own range,
+                // which the splitter only ever truncates -- and among those
+                // prefer one that actually holds a register, since a fallback
+                // with no register resolves to nothing at all.
+                // Ranked: has a register first, then earliest start, then latest
+                // end, then VReg for determinism. The minimum is the widest
+                // segment that resolves to something.
+                type FallbackKey = (bool, ProgramPoint, std::cmp::Reverse<ProgramPoint>, VReg);
+                let mut fallbacks: BTreeMap<ClassId, FallbackKey> = BTreeMap::new();
+                for (cid, vreg, start, end) in map.iter_segments() {
                     let aliased = coalesce_aliases.get(&vreg).copied().unwrap_or(vreg);
+                    let key: FallbackKey = (
+                        !regalloc_result.vreg_to_reg.contains_key(&aliased),
+                        start,
+                        std::cmp::Reverse(end),
+                        aliased,
+                    );
+                    fallbacks
+                        .entry(cid)
+                        .and_modify(|best| {
+                            if key < *best {
+                                *best = key;
+                            }
+                        })
+                        .or_insert(key);
+                }
+                for (cid, (_, _, _, aliased)) in fallbacks {
                     aliased_map.insert_single(cid, aliased);
                 }
                 // Then overlay the precise ranges. They nest inside the

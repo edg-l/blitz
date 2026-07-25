@@ -448,6 +448,8 @@ fn build_phi_copies(
     let src_exit = ProgramPoint::block_exit(src_block_idx);
     let tgt_entry = ProgramPoint::block_entry(target_block_idx);
 
+    let trace = crate::trace::is_enabled("phi") && crate::trace::fn_matches(&func.name);
+
     let mut copies = Vec::new();
     for (param_idx, &arg_cid) in args.iter().enumerate() {
         let param_cid = block_param_map
@@ -469,12 +471,27 @@ fn build_phi_copies(
                 message: format!("arg class {:?} not in class_to_vreg", canon_arg),
                 location: None,
             })?;
+        // `k=<n>` is the argument class's constant value when it has one. Two
+        // params with different `k` reading the same `src` is the signature of
+        // an argument resolved to the wrong VReg.
+        let arg_const = match egraph.get_constant(canon_arg) {
+            Some((v, _)) => format!(" k={v}"),
+            None => String::new(),
+        };
         let src_reg = match regalloc.vreg_to_reg.get(&arg_vreg).copied() {
             Some(r) => r,
             None => {
                 // XMM values that flow through cross-block spill slots
                 // are not assigned registers. Skip the phi copy; the
                 // successor will load from the spill slot at block entry.
+                if trace {
+                    tracing::debug!(
+                        target: "blitz::phi",
+                        "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
+                         {arg_vreg:?} has no register -- SKIPPED",
+                        func.name,
+                    );
+                }
                 continue;
             }
         };
@@ -499,6 +516,16 @@ fn build_phi_copies(
         // Skip the store; re-storing from an incorrect register would clobber it.
         if let Some(info) = slot_spilled_params.get(&(target, param_idx as u32)) {
             let canon_param = egraph.unionfind.find_immutable(param_cid);
+            if trace {
+                tracing::debug!(
+                    target: "blitz::phi",
+                    "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
+                     {arg_vreg:?} src={src_reg:?} -> slot {} {}",
+                    func.name,
+                    info.slot,
+                    if canon_arg == canon_param { "(skipped: back-edge identity)" } else { "" },
+                );
+            }
             if canon_arg != canon_param {
                 // Arg differs from param: emit slot store with current src_reg.
                 copies.push(PhiCopy::Slot {
@@ -535,11 +562,27 @@ fn build_phi_copies(
 
         match regalloc.vreg_to_reg.get(&param_vreg).copied() {
             Some(dst_reg) => {
+                if trace {
+                    tracing::debug!(
+                        target: "blitz::phi",
+                        "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
+                         {arg_vreg:?} src={src_reg:?} -> param {param_cid:?} {param_vreg:?} dst={dst_reg:?}",
+                        func.name,
+                    );
+                }
                 copies.push(PhiCopy::Reg(src_reg, dst_reg, size));
             }
             None => {
                 // Legacy path: param flows through cross-block spill slot.
                 // Skip; the successor reloads at block entry.
+                if trace {
+                    tracing::debug!(
+                        target: "blitz::phi",
+                        "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
+                         {arg_vreg:?} src={src_reg:?} -> param {param_cid:?} {param_vreg:?} has no register -- SKIPPED",
+                        func.name,
+                    );
+                }
             }
         }
     }

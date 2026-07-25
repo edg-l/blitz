@@ -1,50 +1,51 @@
-// KNOWN FAILING -- reproducer for a real bug. Do not "fix" by weakening it.
+// Regression test: a loop latch handing every block param straight back to its
+// header, while the header spills those params to slots.
 //
-//   cc -O0 and cc -O2   -134
-//   blitz -O0            25
-//   blitz -O1            cannot allocate registers (see ROADMAP P0)
+// blitz printed 25 where cc prints -134 at both -O0 and -O2. Perturbing one term
+// of the sum at a time by +1000, and requiring cc's answer to move by exactly
+// +1000 so the probe is known linear, showed all eight `arr[i]` terms
+// contributing correctly and all ten `vN` terms contributing NOTHING: the
+// integer half of the sum was the constant -3, unrelated to its inputs. Every
+// `vN` is a compile-time constant that reaches the sum as a block param of b4.
+//
+// Two seams disagreed about where those params live at the latch's exit, and
+// each was wrong on its own.
+//
+// Liveness (`compute_phi_uses`) resolved the arg class at the latch's exit,
+// which nothing covers once the header spills the param: the splitter truncates
+// the original segment at its SpillStore, and only the reloads it inserts
+// elsewhere have segments. The class resolved to no VReg at all, so the value
+// looked dead over the loop body, and the allocator gave RCX -- block param 15's
+// register -- to the latch's own loop-counter increment. The header then
+// re-spilled the clobbered register on the second iteration.
+//
+// Emission (`build_phi_copies`) resolved the same class through the
+// coalesce-alias fallback in the per-block map. That fallback was built by
+// calling `insert_single` once per segment, which replaces the whole class, so
+// the surviving answer was whichever segment came last: a reload from an
+// unrelated block, sharing one scratch register with every other reload. Ten
+// phi copies all read RAX.
+//
+// Fixing the first exposed a third bug: the copies it then produced included a
+// swap through R11, which was both the hard-coded parallel-copy scratch and an
+// allocatable register, and `sequentialize_copies` spun forever trying to park
+// R11 in itself.
 //
 // tests/fuzz/gen_c.py seed 6, reduced from 120 lines to 64 by
 // tests/fuzz/reduce.py and then re-initialised by hand: the reducer had deleted
 // the `arr[i] = ...` stores, and reading them uninitialised is undefined, so the
-// comparison against cc would have been meaningless. With every element written
-// the divergence stands, and cc -O0 and cc -O2 agree.
+// comparison against cc would have been meaningless.
 //
-// WHAT IS WRONG, established by perturbing one term at a time by +1000 and
-// checking that cc's answer moves by exactly +1000 (so the perturbation is
-// linear and the probe is valid):
+// Note that several `vN` share a value (-42 appears twice), so they share an
+// e-class and legitimately resolve to one VReg. Two phi copies reading the same
+// source register is expected here, not a bug.
 //
-//   * All eight `arr[i]` terms contribute correctly.
-//   * All ten `vN` terms contribute NOTHING. blitz's answer does not move at
-//     all when any of them changes.
+// Pinned to -O0: blitz -O1 still cannot allocate registers for this program
+// (ROADMAP P0), which is a separate failure from the one under test here.
 //
-// So the integer half of the sum is a constant, -3, unrelated to its inputs,
-// and 25 is that plus the array half. Every `vN` is a compile-time constant
-// here, and they reach the sum as block params of b4 (see --emit-ir: v91, v93,
-// v98..v105), passed across the edge through spill slots.
-//
-// RULED OUT, each checked rather than argued:
-//   * A reload from a slot nothing stored -- the BLITZ_VERIFY spill-slot check
-//     is clean on this program.
-//   * Two values sharing a slot -- no slot receives stores from two different
-//     VRegs.
-//   * A dropped phi copy -- `build_phi_copies` drops none here.
-//   * The address-resolution seam -- barrier operands are positional now.
-//   * Parallel-copy sequentialization -- fixed in the same session, and fixing
-//     it changes nothing here.
-//
-// So the copies are emitted, the slots are unique, and each is written; the
-// values written are wrong. The next step is to name the edge into b4 and check,
-// for each of its arguments, the register the copy reads against the register
-// holding that constant at the end of the predecessor -- i.e. whether
-// `build_phi_copies` resolves the argument classes to the right VRegs. Note that
-// it resolves the argument through the per-block map but the destination param
-// through the *global* `class_to_vreg` (terminator.rs), and mixing the two is
-// what three separate bugs in this seam turned out to be.
-//
-// Also worth confirming: several `vN` share a value (-42 appears twice), so they
-// share an e-class and legitimately resolve to one VReg. Two phi copies reading
-// the same source register is expected here, not a bug.
+// FLAGS: -O0
+// OUTPUT: -134
+// EXIT: 0
 //
 extern int printf(char* fmt, int x);
 int f0(double p0, double p1, double p2, double p3, int p4, int p5, int p6) {
