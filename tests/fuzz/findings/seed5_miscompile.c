@@ -8,6 +8,25 @@
 //   blitz -O1               610      <- silent wrong answer
 //   blitz -O0               SIGSEGV  <- exit 139
 //
+// STILL FAILING, but no longer for the reason the reduced case
+// (array_spill_frame_corruption.c) captured -- that one is fixed and passes.
+// What remains here is narrower: reducing this file to a single element read,
+// `printf("%d\n", arr[2])`, still segfaults, and the asm shows the address
+// computation emitted AFTER the store that uses it:
+//
+//   mov  DWORD PTR [rdi],ecx   ; arr[2] = -1, rdi not yet written
+//   mov  esi,0x2
+//   movsxd r8,esi
+//   lea  rdi,[r9+r8*4]         ; &arr[2], too late
+//
+// So a rematerialized address lands in a later barrier group than the barrier
+// consuming it. Two fixes were tried and reverted for regressing other tests:
+// clamping every barrier operand's group down to its barrier (with a fixpoint
+// dragging its inputs along), and refusing replacement VRegs defined after the
+// barrier in resolve_arg_regs_after_spilling. Both are principled and both
+// broke functions/linked_list.c, so the ordering constraint interacts with
+// something else -- likely the remat's own operands needing to stay live.
+//
 // The program is free of undefined behavior by construction, so all three
 // oracles agreeing on 606 makes this a blitz bug rather than a program that
 // was entitled to more than one answer.

@@ -215,12 +215,17 @@ that regalloc carries the highest bug density.
       (`tests/fuzz/findings/array_spill_frame_corruption.c`, 12 lines; reduced
       from `seed5_miscompile.c`). Summing elements of an `int arr[8]`:
       5 elements is correct, 6 prints the right value but returns exit 2, and
-      7 or more segfaults. Three of the four causes are fixed (`8acd79b`,
-      `350d36a`) and 5-6 elements now match gcc. What remains: the splitter
-      rewrites a store barrier's address operand to a reload VReg it created
-      but never emits the reload before the use, so the store reads a register
-      nothing wrote. The reload is placed for a later consumer instead, making
-      this an insertion-point bug rather than a planning one.
+      **Fixed** (`8acd79b`, `350d36a`, `386116e`) and now a live regression
+      test: four defects compounded -- a stale addressing-mode fold, load/store
+      addresses resolving to the pre-spill register, `return 0` dropped after a
+      call, and a reload emitted ahead of the store to its slot.
+- [ ] **Rematerialized address emitted after the store that uses it**
+      (`tests/fuzz/findings/seed5_miscompile.c`). Reduced: `printf("%d",
+      arr[2])` in that file's context stores through `rdi` three instructions
+      before the `lea` that computes it. A remat lands in a later barrier group
+      than the barrier consuming it. Clamping barrier operands down to their
+      barrier group, and refusing replacements defined after the barrier, both
+      regressed `functions/linked_list.c` and were reverted.
 
 ## Tech debt
 
