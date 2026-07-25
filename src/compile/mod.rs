@@ -491,6 +491,24 @@ pub fn compile(
         if let Some(hoisted) = extra_roots.get(&block_idx) {
             all_roots.extend(hoisted.iter().copied());
         }
+        // Every parameter is a root of the entry block, whether or not the entry
+        // block uses it.
+        //
+        // A Param op names a value the ABI already placed in a register; it
+        // computes nothing. Emitted lazily in the first block that happens to
+        // use it, a param that two sibling branches both read gets re-emitted in
+        // each -- neither emitter dominates the other -- and only one of the two
+        // VRegs carries the ABI precolor. The other is free to land anywhere, so
+        // `movsd xmm0,xmm1` would "copy" a parameter out of a register that
+        // never held it. Emitting at entry, which dominates everything, leaves
+        // exactly one VReg per parameter.
+        if block_idx == 0 {
+            all_roots.extend(
+                func.param_class_ids
+                    .iter()
+                    .map(|&cid| egraph.unionfind.find_immutable(cid)),
+            );
+        }
         all_roots.sort_by_key(|c| c.0);
         all_roots.dedup();
         let pre_emission: BTreeSet<ClassId> = class_to_vreg.keys().collect();
