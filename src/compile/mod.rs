@@ -874,7 +874,7 @@ pub fn compile(
         let mut phi_uses = crate::regalloc::global_liveness::compute_phi_uses(
             func,
             &egraph.unionfind,
-            &class_to_vreg,
+            &block_class_to_vreg_snapshot,
         );
 
         // Post-process phi_uses: replace back-edge terminator VRegs with their
@@ -1085,7 +1085,7 @@ pub fn compile(
             phi_uses = crate::regalloc::global_liveness::compute_phi_uses(
                 func,
                 &egraph.unionfind,
-                &class_to_vreg,
+                &block_class_to_vreg_snapshot,
             );
             crate::regalloc::global_liveness::apply_block_param_overrides_to_phi_uses(
                 func,

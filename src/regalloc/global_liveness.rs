@@ -285,19 +285,31 @@ pub fn cfg_successors(func: &Function) -> Vec<Vec<usize>> {
 /// Collect VRegs used in each block's terminator args (phi sources) that are
 /// not already captured by the scheduled instructions.
 ///
-/// For each block, scans the terminator (Jump/Branch args) and maps
-/// ClassIds to VRegs using `class_to_vreg`. The resulting VRegs must be
-/// included in the global liveness upward-exposed use sets.
+/// For each block, scans the terminator (Jump/Branch args) and maps ClassIds to
+/// VRegs. The resulting VRegs must be included in the global liveness
+/// upward-exposed use sets.
+///
+/// `block_class_to_vreg` holds one map per block: the block-local view captured
+/// during linearization. A block-local view is required, not the global map. A
+/// class re-emitted in several blocks -- which is how a value whose emitter does
+/// not dominate a use is handled -- has one VReg per block, and the global map
+/// holds whichever was restored last. Resolving a terminator arg through that
+/// names another block's VReg, leaving this block's own copy with no recorded
+/// use: the allocator then sees a dead value, hands every such copy the same
+/// register, and the phi copies all read whichever constant was computed last.
 pub fn compute_phi_uses(
     func: &Function,
     egraph_unionfind: &crate::egraph::unionfind::UnionFind,
-    class_to_vreg: &ClassVRegMap,
+    block_class_to_vreg: &[ClassVRegMap],
 ) -> Vec<BTreeSet<VReg>> {
     let n = func.blocks.len();
     let mut phi_uses: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
         let exit_point = ProgramPoint::block_exit(block_idx);
+        let Some(class_to_vreg) = block_class_to_vreg.get(block_idx) else {
+            continue;
+        };
         if let Some(term) = block.ops.last() {
             let mut add_vreg = |cid: ClassId| {
                 let canon = egraph_unionfind.find_immutable(cid);
