@@ -30,10 +30,13 @@ rather than overhead against it.
   atomics, sanitizers, LTO, PGO. These are what a *shipping* compiler needs, not
   what a *good* optimizer needs. Revisit only if one blocks measurement.
 
-## Current state (2026-04-23, verified 2026-07-25)
+## Current state (2026-07-25)
 
-- 887 Rust tests + 382 lit tests, all passing. `cargo fmt` clean. Working tree
-  clean, `origin/master` in sync.
+- 905 Rust tests + 390 lit tests. All green except one committed KNOWN FAILING
+  lit test (see Known bugs). `cargo fmt` clean.
+- `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
+- `bash tests/lit/run_diff.sh`: 262 O0-vs-O1 comparisons, no skips, one
+  difference (the same known-failing test).
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
   e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> DAG
   schedule -> live-range splitter -> function-scope Chaitin-Briggs regalloc ->
@@ -55,11 +58,18 @@ cross-block liveness) first by a wide margin, then the **memory passes**
 (forwarding/DSE resting on a conservative alias model), then **isel width and
 type handling** (the `X86CmpI` `ty` bug was exactly this class).
 
-- [ ] **Random IR generator + differential execution.** Generate random
-      well-typed functions via `FunctionBuilder`, compile at O0 and O1, run
-      both, compare results. Self-consistency needs no external oracle and
-      catches any pass that changes observable behavior. Shrink failures to a
-      minimal reproducer and auto-file them as lit tests.
+- [x] **Differential execution over the lit corpus** (`tests/lit/run_diff.sh`).
+      Compiles every runnable lit test at -O0 and -O1 and compares exit status
+      and stdout; no expected output needed, only that optimization preserve
+      behavior. Found a wrong-code bug on its first run.
+- [ ] **Random IR generator** feeding the same differential comparison.
+      Generate random well-typed functions via `FunctionBuilder` instead of
+      relying on the hand-written corpus, and shrink failures to a minimal
+      reproducer that lands as a lit test.
+- [ ] **A gcc/clang oracle in the harness.** O0-vs-O1 self-consistency cannot
+      see a bug that is equally wrong at both levels -- exactly how the
+      `cvtsi2sd` REX.W bug and the missing variadic `AL` survived. Compare
+      against a reference compiler on every runnable test.
 - [ ] **Reference IR interpreter.** The stronger oracle: execute the IR
       directly and compare against the compiled binary. Also lets a failure be
       attributed to a specific pass by re-running the interpreter on the IR
@@ -73,10 +83,13 @@ type handling** (the `X86CmpI` `ty` bug was exactly this class).
       leaving every consumer to canonicalize on read -- soundness-neutral until
       one forgets, which is what `ca2e400` was. `BLITZ_VERIFY=strict` is the
       standing acceptance test and is green.
-- [ ] **Machine-level verifier**: no vreg survives the rewrite, no two
-      overlapping live ranges share a physical register, callee-saved actually
-      preserved, frame alignment at call sites. Not covered by `src/verify.rs`
-      yet, and it is where the historical bug density is highest.
+- [~] **Machine-level verification.** Frame layout is covered: four properties
+      (RSP 16-byte aligned at call sites, frame reserves spills + outgoing args,
+      red-zone preconditions, spill area does not overlap outgoing args) are
+      checked exhaustively over 12k configurations in `src/x86/abi.rs`. Still
+      missing, and needing a `defs()`/`uses()` on `MachInst` first: no vreg
+      survives the rewrite, no two overlapping live ranges share a physical
+      register, callee-saved actually preserved.
 - [ ] **Rewrite-rule equivalence tests.** For each algebraic/strength rule,
       randomized equivalence check of LHS vs RHS over the operand space
       (including boundary values: 0, 1, -1, INT_MIN, INT_MAX, wraparound).
@@ -181,6 +194,18 @@ isel patterns; we should beat it on the ones we implement.
       INTEGER/SSE/MEMORY classification and hidden-pointer return.
 - [ ] Error recovery: emit a diagnostic instead of panicking on internal errors.
 
+## Known bugs
+
+- [ ] **Splitter misses XMM values live across a call** —
+      `tests/lit/regalloc/xmm_pressure_mixed_calls.c` (committed KNOWN FAILING).
+      Compilation aborts with an XMM pressure overshoot on three live values
+      against 16 registers. `src/compile/split.rs` models call-crossing
+      pressure for GPRs only; all XMM registers are caller-saved, so the XMM
+      budget is zero and any XMM value live across a call needs a slot. Adding
+      the missing check alone regressed 6 lit tests: victim selection also has
+      to handle a value that is live *through* the block containing the call,
+      with no def or use there to rewrite. Full diagnosis in the test file.
+
 ## Tech debt
 
 - [ ] `docs/split-pass-plan.md` Phase 8 and Final Audit are unchecked. The audit
@@ -213,7 +238,3 @@ isel patterns; we should beat it on the ones we implement.
 - **Forwarding runs pre-LICM; DSE runs post-forwarding.** Order is load-bearing.
 - **Cost-based extraction picks the instruction form.** Isel rules add every
   legal alternative to the class and let cost decide; no manual selection logic.
-
-## Known bugs
-
-None currently.

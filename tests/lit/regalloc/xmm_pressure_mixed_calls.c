@@ -12,6 +12,36 @@
 // pass missed a live range. Only 16 XMM registers exist and nothing here is
 // remotely close to that, so this is a splitter defect, not real pressure.
 //
+// ── Diagnosis ────────────────────────────────────────────────────────────────
+//
+// Two gaps compound. In the IR for main (`--emit-ir`), the double produced in
+// block1 is used in block3 and is live *through* block2, which contains a call:
+//
+//   block1:  v1 = x86_cvtsi2sd(I32)(v0)
+//   block2:  call printf(v2, v3)          <- v1 live across this call
+//   block3:  v7 = x86_addsd(v1, v6)
+//
+// 1. src/compile/split.rs models call-crossing pressure for GPRs only:
+//    `callee_saved_budget = gpr_budget - CALLER_SAVED_GPR.len()`, then
+//    `find_call_crossing_overshoot(.., callee_saved_budget)` hardcoded to
+//    RegClass::GPR. Every XMM register is caller-saved, so the XMM budget is
+//    zero -- any XMM value live across a call must go through a slot -- but no
+//    XMM equivalent of that check exists. Only XMM *block params* are handled,
+//    by detect_blockparam_call_crossings (Phase 6).
+//
+// 2. Adding the missing XMM check is not sufficient on its own (tried: it
+//    regressed 6 lit tests). Victim selection works within the block holding
+//    the overshoot, and v1 has neither a def nor a use in block2, so there is
+//    nothing there to rewrite. The fix has to place the spill store in the
+//    defining block and the reload in each using block, which is what
+//    SplitScope::CrossBlock is for -- so the gap is in how victims are chosen
+//    for a live-through value, not just in the pressure count.
+//
+// The allocator models the constraint correctly (clobber phantoms pre-colored
+// to all 16 XMM registers at each call point, see add_clobber_interferences in
+// src/regalloc/allocator.rs), which is why the chromatic number comes out at
+// 17 against a budget of 16.
+//
 // Minimal: it needs all three XMM-producing shapes at once. Any two of them
 // compile fine:
 //   - a call returning double whose argument is an int  (from_param)
