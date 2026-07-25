@@ -6,7 +6,7 @@ use crate::schedule::scheduler::{ScheduleDag, ScheduledInst, schedule};
 
 use super::barrier::{assign_barrier_groups, build_barrier_context};
 use super::cfg::{collect_block_roots, compute_rpo};
-use super::{CompileError, CompileOptions, run_egraph_and_extract};
+use super::{CompileError, CompileOptions, IrPasses, run_ir_passes};
 
 pub fn compile_to_ir_string(
     mut func: Function,
@@ -19,34 +19,11 @@ pub fn compile_to_ir_string(
         .take()
         .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
 
-    // Store-to-load / load-to-load forwarding.
-    if opts.enable_store_forwarding {
-        let alias = super::alias::AliasInfo::new();
-        super::forward::run_forwarding(&mut func, &mut egraph, &alias);
-    }
-
-    // Dead store elimination.
-    if opts.enable_dse {
-        let alias = super::alias::AliasInfo::new();
-        super::dse::run_dse(&mut func, &egraph, &alias);
-    }
-
-    // LICM: detect loops, insert preheaders, identify invariant classes.
-    let extra_roots = if opts.enable_licm {
-        super::licm::run_licm(&mut func, &mut egraph)
-    } else {
-        Default::default()
-    };
-
-    // Extract before freeze so DCE2 can mutate func.
-    let (block_param_map, extraction) = run_egraph_and_extract(&func, &mut egraph, opts)?;
-
-    // DCE2: constant branch folding + unreachable blocks + dead loads.
-    let extra_roots = if opts.enable_dce {
-        super::dce::run_dce2_with_extra_roots(&mut func, &egraph, &extraction, extra_roots)
-    } else {
-        extra_roots
-    };
+    let IrPasses {
+        extra_roots,
+        block_param_map,
+        extraction,
+    } = run_ir_passes(&mut func, &mut egraph, opts, &mut None)?;
 
     let func = &func;
 

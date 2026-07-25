@@ -7,10 +7,11 @@
 //!
 //! # Levels
 //!
-//! - `BLITZ_VERIFY=1` (also `on`, `normal`): invariants the pipeline currently
-//!   guarantees. This must stay green; a failure here is a bug.
+//! - `BLITZ_VERIFY=1` (also `on`, `normal`): structural invariants.
 //! - `BLITZ_VERIFY=strict`: additionally requires every `ClassId` the CFG holds
-//!   to be canonical. **This does not pass today**, by design -- see below.
+//!   to be canonical.
+//!
+//! Both must stay green; a failure at either level is a bug.
 //!
 //! # Scope
 //!
@@ -27,22 +28,15 @@
 //! - every `ClassId` an effectful op references resolves to a real class
 //! - (strict) those `ClassId`s are canonical
 //!
-//! # Why canonicality is strict-only
+//! # Why canonicality is a separate level
 //!
-//! Passes that merge e-classes (forwarding, saturation) do not rewrite the
-//! `ClassId`s already stored in the CFG, so effectful ops routinely hold
-//! pre-merge ids and every consumer canonicalizes on read. That is
-//! soundness-neutral but hazardous:
-//!
-//! - it has miscompiled before (`ca2e400`, LICM scanning non-canonical classes
-//!   for loop block params)
-//! - it costs precision: `must_alias` is canonical-e-class equality, so a stale
-//!   id makes two identical addresses compare unequal and silently drops a
-//!   forwarding opportunity
-//!
-//! Making strict mode green needs a canonicalization sweep over effectful op
-//! references after every merging pass. Until that lands, strict mode documents
-//! the gap instead of hiding it.
+//! Passes that merge e-classes used to leave pre-merge `ClassId`s in the CFG,
+//! with every consumer compensating via `find_immutable` on read. That is
+//! soundness-neutral until one consumer forgets, which is what `ca2e400` (a
+//! LICM miscompile) was. `compile::canon::canonicalize_class_refs` now runs
+//! after each merging pass, so strict mode passes; keeping it a distinct level
+//! means a pass that reintroduces stale ids is caught immediately rather than
+//! waiting for a consumer to mishandle one.
 //!
 //! Machine-level invariants (no surviving vregs, no two overlapping live ranges
 //! in one physical register, callee-saved preservation) are not covered yet.
@@ -64,8 +58,7 @@ pub enum VerifyLevel {
     Off,
     /// Invariants the pipeline guarantees today.
     Normal,
-    /// Also requires canonical `ClassId`s in the CFG. Known to fail; see the
-    /// module docs.
+    /// Also requires canonical `ClassId`s in the CFG.
     Strict,
 }
 

@@ -68,15 +68,11 @@ type handling** (the `X86CmpI` `ty` bug was exactly this class).
       shape, unique block ids, edge targets, block-param arity and types,
       entry-block params, `Ret`/`Call` arity, and e-graph class resolvability.
       Green across all tests and lit.
-- [ ] **Canonicalize CFG class references after every merging pass.** The
-      verifier's `BLITZ_VERIFY=strict` level fails today: forwarding and
-      saturation merge e-classes without rewriting the `ClassId`s already stored
-      in effectful ops, so the CFG holds pre-merge ids and every consumer has to
-      canonicalize on read. Soundness-neutral but it has miscompiled before
-      (`ca2e400`) and it costs precision, since `must_alias` is canonical
-      e-class equality and a stale id makes two identical addresses compare
-      unequal. Fix is a sweep over effectful op references; strict mode is the
-      acceptance test.
+- [x] **Canonicalize CFG class references after every merging pass**
+      (`src/compile/canon.rs`). Effectful ops used to keep pre-merge `ClassId`s,
+      leaving every consumer to canonicalize on read -- soundness-neutral until
+      one forgets, which is what `ca2e400` was. `BLITZ_VERIFY=strict` is the
+      standing acceptance test and is green.
 - [ ] **Machine-level verifier**: no vreg survives the rewrite, no two
       overlapping live ranges share a physical register, callee-saved actually
       preserved, frame alignment at call sites. Not covered by `src/verify.rs`

@@ -41,6 +41,8 @@ use barrier::{
     populate_effectful_operands,
 };
 use program_point::ProgramPoint;
+mod canon;
+use canon::canonicalize_class_refs;
 mod cfg;
 use cfg::{
     build_block_param_class_map, collect_block_roots, collect_externals, collect_phi_source_vregs,
@@ -268,6 +270,93 @@ pub(super) fn run_egraph_and_extract(
     Ok((block_param_map, extraction))
 }
 
+/// What the IR-level passes hand to the machine-level half of the pipeline.
+pub(super) struct IrPasses {
+    pub extra_roots: licm::ExtraRoots,
+    pub block_param_map: BTreeMap<(BlockId, u32), ClassId>,
+    pub extraction: ExtractionResult,
+}
+
+/// Run every IR-level pass: forwarding, DSE, LICM, saturation + extraction, DCE2.
+///
+/// Shared by `compile()` and `compile_to_ir_string()` so an `--emit-ir` dump
+/// always reflects the IR a real compile would produce.
+///
+/// Each merging pass is followed by [`canonicalize_class_refs`], and each pass
+/// boundary by a `BLITZ_VERIFY` check naming that stage.
+pub(super) fn run_ir_passes(
+    func: &mut Function,
+    egraph: &mut EGraph,
+    opts: &CompileOptions,
+    sink: &mut Option<&mut dyn DiagnosticSink>,
+) -> Result<IrPasses, CompileError> {
+    crate::verify::verify_stage("ir-entry", func, egraph);
+
+    // Store-to-load / load-to-load forwarding: intra-block, pre-LICM so
+    // hoisting and saturation both benefit from fewer memory ops.
+    if opts.enable_store_forwarding {
+        let alias = AliasInfo::new();
+        forward::run_forwarding(func, egraph, &alias);
+        canonicalize_class_refs(func, egraph);
+        crate::verify::verify_stage("forwarding", func, egraph);
+    }
+
+    // Dead store elimination: runs after forwarding (more forwarded loads =
+    // fewer pending-store "observed by load" cancellations = more kills).
+    if opts.enable_dse {
+        let alias = AliasInfo::new();
+        dse::run_dse(func, egraph, &alias);
+        crate::verify::verify_stage("dse", func, egraph);
+    }
+
+    // LICM: detect loops, insert preheaders, identify invariant classes.
+    let extra_roots = if opts.enable_licm {
+        let roots = licm::run_licm(func, egraph);
+        canonicalize_class_refs(func, egraph);
+        crate::verify::verify_stage("licm", func, egraph);
+        roots
+    } else {
+        Default::default()
+    };
+
+    // Phases 1-2: E-graph rewrites and cost-based extraction.
+    // Extraction only reads `func`; DCE2 below needs it mutable again.
+    let (block_param_map, extraction) = run_egraph_and_extract(func, egraph, opts)?;
+    canonicalize_class_refs(func, egraph);
+    crate::verify::verify_stage("saturation+extraction", func, egraph);
+
+    if let Some(s) = sink.as_mut() {
+        s.phase_stats(
+            "egraph",
+            &format!(
+                "classes={}, nodes={}",
+                egraph.class_count(),
+                egraph.node_count()
+            ),
+        );
+        s.phase_stats(
+            "extraction",
+            &format!("classes_extracted={}", extraction.choices.len()),
+        );
+    }
+
+    // DCE2: constant branch folding, unreachable block elimination, dead loads.
+    // Must run before the caller freezes `func` and builds index-keyed structures.
+    let extra_roots = if opts.enable_dce {
+        let roots = dce::run_dce2_with_extra_roots(func, egraph, &extraction, extra_roots);
+        crate::verify::verify_stage("dce2", func, egraph);
+        roots
+    } else {
+        extra_roots
+    };
+
+    Ok(IrPasses {
+        extra_roots,
+        block_param_map,
+        extraction,
+    })
+}
+
 // ── compile() ────────────────────────────────────────────────────────────────
 
 /// Compile a single function to an object file.
@@ -288,62 +377,11 @@ pub fn compile(
         .take()
         .expect("Function must contain an EGraph; use FunctionBuilder::finalize()");
 
-    crate::verify::verify_stage("compile-entry", &func, &egraph);
-
-    // Store-to-load / load-to-load forwarding: intra-block, pre-LICM so
-    // hoisting and saturation both benefit from fewer memory ops.
-    if opts.enable_store_forwarding {
-        let alias = AliasInfo::new();
-        forward::run_forwarding(&mut func, &mut egraph, &alias);
-        crate::verify::verify_stage("forwarding", &func, &egraph);
-    }
-
-    // Dead store elimination: runs after forwarding (more forwarded loads =
-    // fewer pending-store "observed by load" cancellations = more kills).
-    if opts.enable_dse {
-        let alias = AliasInfo::new();
-        dse::run_dse(&mut func, &egraph, &alias);
-        crate::verify::verify_stage("dse", &func, &egraph);
-    }
-
-    // LICM: detect loops, insert preheaders, identify invariant classes.
-    let extra_roots = if opts.enable_licm {
-        let roots = licm::run_licm(&mut func, &mut egraph);
-        crate::verify::verify_stage("licm", &func, &egraph);
-        roots
-    } else {
-        Default::default()
-    };
-
-    // Phases 1-2: E-graph rewrites and cost-based extraction.
-    // Temporarily borrow func for extraction; DCE2 needs &mut func afterwards.
-    let (block_param_map, extraction) = run_egraph_and_extract(&func, &mut egraph, opts)?;
-    crate::verify::verify_stage("saturation+extraction", &func, &egraph);
-
-    if let Some(s) = sink.as_mut() {
-        s.phase_stats(
-            "egraph",
-            &format!(
-                "classes={}, nodes={}",
-                egraph.class_count(),
-                egraph.node_count()
-            ),
-        );
-        s.phase_stats(
-            "extraction",
-            &format!("classes_extracted={}", extraction.choices.len()),
-        );
-    }
-
-    // DCE2: constant branch folding, unreachable block elimination, dead loads.
-    // Must run BEFORE the immutable reborrow and before index structures are built.
-    let extra_roots = if opts.enable_dce {
-        let roots = dce::run_dce2_with_extra_roots(&mut func, &egraph, &extraction, extra_roots);
-        crate::verify::verify_stage("dce2", &func, &egraph);
-        roots
-    } else {
-        extra_roots
-    };
+    let IrPasses {
+        extra_roots,
+        block_param_map,
+        extraction,
+    } = run_ir_passes(&mut func, &mut egraph, opts, &mut sink)?;
 
     // NOW freeze func for the rest of the pipeline.
     let func = &func;

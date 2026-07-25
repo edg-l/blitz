@@ -200,36 +200,7 @@ pub(super) fn dominates(a: usize, b: usize, idom: &[Option<usize>]) -> bool {
 /// Collect all ClassIds that are roots for extraction (used by effectful ops).
 fn push_block_class_ids(block: &BasicBlock, out: &mut Vec<ClassId>) {
     for op in &block.ops {
-        match op {
-            EffectfulOp::Load { addr, result, .. } => {
-                out.push(*addr);
-                out.push(*result);
-            }
-            EffectfulOp::Store { addr, val, .. } => {
-                out.push(*addr);
-                out.push(*val);
-            }
-            EffectfulOp::Call { args, results, .. } => {
-                out.extend_from_slice(args);
-                out.extend_from_slice(results);
-            }
-            EffectfulOp::Branch {
-                cond,
-                true_args,
-                false_args,
-                ..
-            } => {
-                out.push(*cond);
-                out.extend_from_slice(true_args);
-                out.extend_from_slice(false_args);
-            }
-            EffectfulOp::Jump { args, .. } => out.extend_from_slice(args),
-            EffectfulOp::Ret { val } => {
-                if let Some(v) = val {
-                    out.push(*v);
-                }
-            }
-        }
+        op.for_each_class_id(|c| out.push(c));
     }
 }
 

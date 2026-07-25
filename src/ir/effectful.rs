@@ -60,6 +60,80 @@ pub enum EffectfulOp {
 }
 
 impl EffectfulOp {
+    /// Visit every `ClassId` this op references, in operand order.
+    ///
+    /// Exhaustive over the enum on purpose: a new variant, or a new `ClassId`
+    /// field on an existing one, must fail to compile here rather than be
+    /// silently skipped by every walker in the pipeline.
+    pub fn for_each_class_id(&self, mut f: impl FnMut(ClassId)) {
+        match self {
+            EffectfulOp::Load { addr, result, .. } => {
+                f(*addr);
+                f(*result);
+            }
+            EffectfulOp::Store { addr, val, .. } => {
+                f(*addr);
+                f(*val);
+            }
+            EffectfulOp::Call { args, results, .. } => {
+                args.iter().copied().for_each(&mut f);
+                results.iter().copied().for_each(&mut f);
+            }
+            EffectfulOp::Branch {
+                cond,
+                true_args,
+                false_args,
+                ..
+            } => {
+                f(*cond);
+                true_args.iter().copied().for_each(&mut f);
+                false_args.iter().copied().for_each(&mut f);
+            }
+            EffectfulOp::Jump { args, .. } => args.iter().copied().for_each(&mut f),
+            EffectfulOp::Ret { val } => {
+                if let Some(v) = val {
+                    f(*v);
+                }
+            }
+        }
+    }
+
+    /// Visit every `ClassId` this op references, allowing rewrites.
+    ///
+    /// Same exhaustiveness rationale as [`Self::for_each_class_id`].
+    pub fn for_each_class_id_mut(&mut self, mut f: impl FnMut(&mut ClassId)) {
+        match self {
+            EffectfulOp::Load { addr, result, .. } => {
+                f(addr);
+                f(result);
+            }
+            EffectfulOp::Store { addr, val, .. } => {
+                f(addr);
+                f(val);
+            }
+            EffectfulOp::Call { args, results, .. } => {
+                args.iter_mut().for_each(&mut f);
+                results.iter_mut().for_each(&mut f);
+            }
+            EffectfulOp::Branch {
+                cond,
+                true_args,
+                false_args,
+                ..
+            } => {
+                f(cond);
+                true_args.iter_mut().for_each(&mut f);
+                false_args.iter_mut().for_each(&mut f);
+            }
+            EffectfulOp::Jump { args, .. } => args.iter_mut().for_each(&mut f),
+            EffectfulOp::Ret { val } => {
+                if let Some(v) = val {
+                    f(v);
+                }
+            }
+        }
+    }
+
     /// Returns `true` if this operation is a block terminator.
     pub fn is_terminator(&self) -> bool {
         matches!(
