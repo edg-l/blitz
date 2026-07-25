@@ -28,6 +28,7 @@ fn build_mem_addr(
     addr_cid: ClassId,
     addr_reg: Reg,
     block_idx: usize,
+    barrier_pos: Option<usize>,
     extraction: &ExtractionResult,
     class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
@@ -39,33 +40,53 @@ fn build_mem_addr(
     // When it's a SpillLoad, BlockParam, or other non-Addr op, the extraction
     // may show an Addr node for the class, but the children's registers aren't
     // guaranteed live at the load/store point.
+    // Fold only when the Addr's own scheduled instruction is available: its
+    // operands are the VRegs the LEA would have used, which is what the folded
+    // addressing mode has to reproduce.
+    //
+    // Re-resolving `ext.children` through the class map instead is what
+    // produced `mov [rax+rax*1]`: the map returned a VReg for the index class
+    // that the allocator had placed in RAX, while the instruction that computed
+    // the address had used a different VReg in R13. One class can have several
+    // VRegs once values are rematerialized, and only the instruction knows
+    // which one it read.
     let addr_vreg = class_to_vreg.lookup(addr_cid, point);
-    let is_addr_inst = addr_vreg.is_some_and(|v| {
+    let addr_inst = addr_vreg.and_then(|v| {
         schedule
             .iter()
-            .any(|inst| inst.dst == v && matches!(inst.op, Op::Addr { .. }))
+            .enumerate()
+            .find(|(_, inst)| inst.dst == v && matches!(inst.op, Op::Addr { .. }))
     });
 
-    if is_addr_inst
-        && let Some(ext) = extraction.choices.get(&addr_cid)
-        && let Op::Addr { scale, disp } = &ext.op
+    if let Some((addr_pos, inst)) = addr_inst
+        && let Op::Addr { scale, disp } = &inst.op
     {
-        // children[0] = base ClassId, children[1] = index ClassId (may be NONE).
-        let base_reg = ext
-            .children
-            .first()
-            .and_then(|&c| class_to_vreg.lookup(c, point))
-            .and_then(|v| regalloc.vreg_to_reg.get(&v).copied());
-        let index_reg = ext
-            .children
+        let reg_of = |v: VReg| regalloc.vreg_to_reg.get(&v).copied();
+        let base_reg = inst.operands.first().copied().and_then(reg_of);
+        let index_reg = inst
+            .operands
             .get(1)
-            .filter(|&&c| c != ClassId::NONE)
-            .and_then(|&c| class_to_vreg.lookup(c, point))
-            .and_then(|v| regalloc.vreg_to_reg.get(&v).copied());
-        if let Some(base) = base_reg {
-            // If the folded base or index register conflicts with an
-            // operand that is read simultaneously (e.g. the Store value),
-            // fall back to the pre-computed addr_reg to avoid clobbering.
+            .copied()
+            .filter(|_| *scale != 0)
+            .and_then(reg_of);
+
+        // Those registers only still hold the address components if nothing
+        // between the Addr and this access overwrote them. The allocator is
+        // free to reuse them as soon as the components die, which they do
+        // immediately: the Addr was their only consumer.
+        let clobbered = barrier_pos.is_none_or(|end| {
+            addr_pos >= end
+                || schedule[addr_pos + 1..end].iter().any(|between| {
+                    reg_of(between.dst).is_some_and(|r| Some(r) == base_reg || Some(r) == index_reg)
+                })
+        });
+
+        if let Some(base) = base_reg
+            && !clobbered
+        {
+            // If the folded base or index register conflicts with an operand
+            // read simultaneously (e.g. the Store value), fall back to the
+            // pre-computed addr_reg to avoid clobbering.
             if let Some(cr) = conflict_reg
                 && (base == cr || index_reg == Some(cr))
             {
@@ -96,6 +117,7 @@ fn build_mem_addr(
 pub(super) fn lower_effectful_op(
     op: &EffectfulOp,
     block_idx: usize,
+    barrier_idx: usize,
     class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
     extraction: &ExtractionResult,
@@ -103,7 +125,32 @@ pub(super) fn lower_effectful_op(
     uf: &UnionFind,
     schedule: &[ScheduledInst],
 ) -> Result<Vec<MachInst>, CompileError> {
-    let point = ProgramPoint::block_exit(block_idx);
+    // Schedule position of this barrier, used both to resolve operands at the
+    // right point and to bound the clobber scan in `build_mem_addr`.
+    let barrier_pos = schedule
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| {
+            matches!(
+                i.op,
+                Op::CallResult(_, _)
+                    | Op::LoadResult(_, _)
+                    | Op::VoidCallBarrier
+                    | Op::StoreBarrier
+            )
+        })
+        .map(|(idx, _)| idx)
+        .nth(barrier_idx);
+    // Resolve at this barrier's own program point, not the block exit. Once the
+    // splitter has divided a live range, a class maps to different VRegs at
+    // different points, and a block-exit lookup hands back the register the
+    // value occupied before it was spilled -- so a load reads the stale
+    // register instead of the reload.
+    let point = match barrier_pos {
+        Some(pos) if pos > 0 => ProgramPoint::inst_point(block_idx, pos),
+        Some(_) => ProgramPoint::block_entry(block_idx),
+        None => ProgramPoint::block_exit(block_idx),
+    };
     let get_reg = |cid: ClassId| -> Option<Reg> {
         let canon = uf.find_immutable(cid);
         class_to_vreg
@@ -111,11 +158,32 @@ pub(super) fn lower_effectful_op(
             .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
     };
 
+    // The address of a load or store is a ClassId in the CFG, not a VReg in the
+    // schedule, so the splitter's operand rewriting never reaches it. When the
+    // address has been spilled, resolving the class gives the register it lived
+    // in *before* the spill while the reload sits in a different one. Go
+    // through the barrier's operands, which the splitter does rewrite.
+    let resolve_addr = |cid: ClassId| -> Option<Reg> {
+        resolve_arg_regs_after_spilling(
+            &[cid],
+            barrier_pos.and_then(|p| schedule.get(p)),
+            point,
+            class_to_vreg,
+            regalloc,
+            uf,
+            schedule,
+        )
+        .first()
+        .copied()
+        .flatten()
+        .or_else(|| get_reg(cid))
+    };
+
     match op {
         EffectfulOp::Load { addr, result, ty } => {
             let is_float = matches!(ty, Type::F32 | Type::F64);
             let canon_addr = uf.find_immutable(*addr);
-            let addr_reg = get_reg(canon_addr).ok_or_else(|| CompileError {
+            let addr_reg = resolve_addr(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
                 message: "Load: no register for addr".into(),
                 location: Some(IrLocation {
@@ -141,6 +209,7 @@ pub(super) fn lower_effectful_op(
                 canon_addr,
                 addr_reg,
                 block_idx,
+                barrier_pos,
                 extraction,
                 class_to_vreg,
                 regalloc,
@@ -183,7 +252,7 @@ pub(super) fn lower_effectful_op(
         EffectfulOp::Store { addr, val, ty } => {
             let is_float = matches!(ty, Type::F32 | Type::F64);
             let canon_addr = uf.find_immutable(*addr);
-            let addr_reg = get_reg(canon_addr).ok_or_else(|| CompileError {
+            let addr_reg = resolve_addr(canon_addr).ok_or_else(|| CompileError {
                 phase: "lowering".into(),
                 message: "Store: no register for addr".into(),
                 location: Some(IrLocation {
@@ -221,6 +290,7 @@ pub(super) fn lower_effectful_op(
                 canon_addr,
                 addr_reg,
                 block_idx,
+                barrier_pos,
                 extraction,
                 class_to_vreg,
                 regalloc,
@@ -259,10 +329,10 @@ pub(super) fn lower_effectful_op(
             // (their defs are short-lived after the spill store). The actual
             // values at the call point live in SpillLoad vregs, which have
             // distinct registers. Find those registers by tracing spill slots.
-            let spill_reload_regs = resolve_call_arg_regs_after_spilling(
+            let spill_reload_regs = resolve_arg_regs_after_spilling(
                 args,
-                results,
-                block_idx,
+                barrier_pos.and_then(|p| schedule.get(p)),
+                point,
                 class_to_vreg,
                 regalloc,
                 uf,
@@ -381,49 +451,28 @@ pub(super) fn lower_effectful_op(
 /// registers.
 ///
 /// Returns a Vec with one Option<Reg> per arg.
-fn resolve_call_arg_regs_after_spilling(
+fn resolve_arg_regs_after_spilling(
     args: &[ClassId],
-    results: &[ClassId],
-    block_idx: usize,
+    barrier: Option<&ScheduledInst>,
+    point: ProgramPoint,
     class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
     uf: &UnionFind,
     schedule: &[ScheduledInst],
 ) -> Vec<Option<Reg>> {
-    let point = ProgramPoint::block_exit(block_idx);
-    // Find the barrier instruction (CallResult or VoidCallBarrier).
-    let barrier_inst = if let Some(&first_result_cid) = results.first() {
-        let canon = uf.find_immutable(first_result_cid);
-        class_to_vreg.lookup(canon, point).and_then(|result_vreg| {
-            schedule
-                .iter()
-                .find(|inst| inst.dst == result_vreg && matches!(inst.op, Op::CallResult(_, _)))
-        })
-    } else {
-        let arg_vregs: Vec<VReg> = args
-            .iter()
-            .filter_map(|&cid| {
-                let canon = uf.find_immutable(cid);
-                class_to_vreg.lookup(canon, point)
-            })
-            .collect();
-        schedule.iter().find(|inst| {
-            matches!(inst.op, Op::VoidCallBarrier)
-                && arg_vregs.iter().all(|v| inst.operands.contains(v))
-        })
-    };
-
-    let Some(barrier) = barrier_inst else {
-        // No barrier found; fall back to original VReg registers.
-        return args
-            .iter()
+    let fallback = || -> Vec<Option<Reg>> {
+        args.iter()
             .map(|&cid| {
                 let canon = uf.find_immutable(cid);
                 class_to_vreg
                     .lookup(canon, point)
                     .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
             })
-            .collect();
+            .collect()
+    };
+
+    let Some(barrier) = barrier else {
+        return fallback();
     };
 
     // Build a lookup from VReg -> defining instruction op for barrier operands.

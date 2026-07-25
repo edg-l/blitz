@@ -1424,6 +1424,7 @@ pub fn compile(
             let extra = lower_effectful_op(
                 op,
                 block_idx,
+                barrier_k,
                 &block_class_to_vreg,
                 &regalloc_result,
                 &extraction,
