@@ -66,13 +66,23 @@ pub(super) fn add_shift_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec
     }
 }
 
-/// Pre-color division operands and projections to RAX/RDX.
+/// Pre-color division operands to RAX.
 ///
-/// - For each X86Idiv/X86Div in the schedule: operand 0 (dividend) → RAX.
-/// - For each Proj0 projecting from an X86Idiv/X86Div VReg: Proj0 dst → RAX (quotient).
-/// - Proj1 (remainder) is NOT pre-colored; the lowering emits `mov dst, rdx`
-///   so the remainder can live in any register.
+/// - For each X86Idiv/X86Div in the schedule: operand 0 (dividend) → RAX,
+///   which the instruction requires.
+/// - NEITHER projection is pre-colored. The lowering emits `mov dst, rax` for
+///   the quotient and `mov dst, rdx` for the remainder, so both can live
+///   anywhere.
 /// - The X86Idiv/X86Div Pair node itself is NOT pre-colored.
+///
+/// The quotient used to be pinned to RAX, unconditionally and for its whole
+/// live range. Two quotients live at once therefore both got RAX, and the
+/// second division destroyed the first -- `verify_register_sharing` reports it
+/// as two VRegs live in one register, and it was reachable on generated
+/// programs. Pinning it bought nothing: the copy out of RAX is emitted whenever
+/// the quotient lands elsewhere, and coalescing removes it when RAX is free.
+/// Proj1 was already left free for the same reason, so this makes the two
+/// projections consistent.
 pub(super) fn add_div_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(VReg, Reg)>) {
     // Collect VRegs defined by X86Idiv/X86Div instructions.
     let mut div_dst_vregs: BTreeSet<VReg> = BTreeSet::new();
@@ -86,20 +96,6 @@ pub(super) fn add_div_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(
             && !param_vregs.iter().any(|&(v, _)| v == dividend)
         {
             param_vregs.push((dividend, Reg::RAX));
-        }
-    }
-
-    // Pre-color Proj0 nodes that project from a div result to RAX (quotient).
-    // Proj1 (remainder) is NOT pre-colored to RDX: the lowering emits
-    // `mov dst, rdx` so the remainder can live in any register, which avoids
-    // conflicts when the remainder flows into a loop back edge as a divisor.
-    for inst in insts {
-        if inst.op == Op::Proj0
-            && let Some(&src) = inst.operands.first()
-            && div_dst_vregs.contains(&src)
-            && !param_vregs.iter().any(|&(v, _)| v == inst.dst)
-        {
-            param_vregs.push((inst.dst, Reg::RAX));
         }
     }
 }
