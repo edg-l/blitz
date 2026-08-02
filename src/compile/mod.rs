@@ -810,7 +810,6 @@ pub fn compile(
     // End-of-block SpillLoad VRegs inserted by cross-block spills. The lowering
     // pass forces these into the trailing barrier group so they execute after all
     // calls in their block (preventing loads from uninitialized stack slots).
-    let mut end_of_block_spill_vregs_for_lowering: BTreeSet<VReg> = BTreeSet::new();
 
     // The final `phi_uses`, kept for `verify::verify_register_sharing` after
     // allocation: it is the terminator half of liveness, and the check needs the
@@ -1121,7 +1120,7 @@ pub fn compile(
             );
 
             let split_cost_model = CostModel::new(opts.opt_goal);
-            let mut plan = split::plan_splits(
+            let plan = split::plan_splits(
                 &block_schedules,
                 &class_to_vreg,
                 &extraction,
@@ -1146,8 +1145,6 @@ pub fn compile(
             // register being allocated to a value that lives in a slot.
             slot_spilled_params.extend(plan.slot_spilled_params.clone());
             splitter_slots_allocated = plan.slots_allocated;
-            end_of_block_spill_vregs_for_lowering
-                .extend(std::mem::take(&mut plan.end_of_block_spill_vregs));
 
             // Build old→new VReg remap restricted to CALL-ARG positions so we
             // can update call_arg_precolors after apply_plan_to. The precolors
@@ -1592,18 +1589,6 @@ pub fn compile(
         }
 
         let num_barriers = non_term_ops.len();
-
-        // Force end-of-block SpillLoad VRegs (cross-block spills) into the
-        // trailing group (num_barriers). These have no scheduled consumers so
-        // assign_barrier_groups would place them in group 0, causing them to
-        // load from the stack before any calls have stored to it.
-        for inst in rewritten.iter() {
-            if end_of_block_spill_vregs_for_lowering.contains(&inst.dst) {
-                vreg_to_arg_of_barrier
-                    .entry(inst.dst)
-                    .or_insert(num_barriers);
-            }
-        }
 
         // Partition scheduled pure insts into groups relative to barriers.
         let mut vreg_group = assign_barrier_groups(

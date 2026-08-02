@@ -88,13 +88,6 @@ pub struct SplitPlan {
     /// Total number of spill slots allocated by the splitter. The caller must
     /// include this in the function's stack frame size calculation.
     pub slots_allocated: u32,
-    /// VRegs that are end-of-block SpillLoad/XmmSpillLoad defs inserted by
-    /// cross-block slot spills. These have no scheduled consumers (only used by
-    /// the block terminator via class_to_vreg lookup), so assign_barrier_groups
-    /// would normally place them in group 0. The lowering pass must force them
-    /// into the trailing group (after all calls) to avoid loading from
-    /// uninitialized stack slots before calls execute.
-    pub end_of_block_spill_vregs: BTreeSet<VReg>,
 }
 
 impl SplitPlan {
@@ -407,7 +400,6 @@ fn apply_splits_for_overshoot(
     new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
     operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
     segment_end_truncations: &mut Vec<(VReg, ProgramPoint)>,
-    end_of_block_spill_vregs: &mut BTreeSet<VReg>,
     planned_victims: &mut BTreeSet<VReg>,
 ) {
     let block_schedule = &all_block_schedules[block_idx];
@@ -540,7 +532,6 @@ fn apply_splits_for_overshoot(
                     new_segments,
                     operand_rewrites,
                     segment_end_truncations,
-                    end_of_block_spill_vregs,
                     class_to_vreg,
                 );
             }
@@ -587,7 +578,6 @@ pub fn plan_splits(
     // End-of-block SpillLoad VRegs inserted by cross-block spills.
     // The lowering pass forces these into the trailing barrier group so they
     // execute after all calls in the block (not before them).
-    let mut end_of_block_spill_vregs: BTreeSet<VReg> = BTreeSet::new();
     // Deduplication set: VRegs already planned for spill by either path.
     // Prevents the same VReg from being spilled twice when standard pressure
     // and call-crossing pressure both select it as a victim.
@@ -749,7 +739,6 @@ pub fn plan_splits(
                 &mut new_segments,
                 &mut operand_rewrites,
                 &mut segment_end_truncations,
-                &mut end_of_block_spill_vregs,
                 &mut planned_victims,
             );
         }
@@ -802,7 +791,6 @@ pub fn plan_splits(
                 &mut new_segments,
                 &mut operand_rewrites,
                 &mut segment_end_truncations,
-                &mut end_of_block_spill_vregs,
                 &mut planned_victims,
             );
         }
@@ -857,7 +845,6 @@ pub fn plan_splits(
                 &mut new_segments,
                 &mut operand_rewrites,
                 &mut segment_end_truncations,
-                &mut end_of_block_spill_vregs,
                 &mut planned_victims,
             );
         }
@@ -870,7 +857,6 @@ pub fn plan_splits(
         slot_spilled_params,
         segment_end_truncations,
         slots_allocated: new_slot_count,
-        end_of_block_spill_vregs,
     };
     if trace {
         tracing::debug!(
@@ -970,13 +956,7 @@ fn format_plan(plan: &SplitPlan) -> String {
         )
         .unwrap();
     }
-    let eob: Vec<u32> = plan.end_of_block_spill_vregs.iter().map(|v| v.0).collect();
-    writeln!(
-        out,
-        "  slots_allocated={} end_of_block_spill_vregs={eob:?}",
-        plan.slots_allocated
-    )
-    .unwrap();
+    writeln!(out, "  slots_allocated={}", plan.slots_allocated).unwrap();
     out
 }
 
@@ -1182,7 +1162,6 @@ fn apply_cross_block_slot_spill(
     new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
     operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
     segment_end_truncations: &mut Vec<(VReg, ProgramPoint)>,
-    end_of_block_spill_vregs: &mut BTreeSet<VReg>,
     class_to_vreg: &ClassVRegMap,
 ) {
     // Allocate a spill slot.
@@ -1200,14 +1179,11 @@ fn apply_cross_block_slot_spill(
         Op::SpillStore(slot)
     };
 
-    // Find the def block, insert SpillStore after the def, and insert a
-    // SpillLoad at the END of the def block (before the terminator).
+    // Find the def block and insert the SpillStore after the def.
     let mut victim_class: Option<ClassId> = None;
     let mut def_block_idx: Option<usize> = None;
     for (bi, block_sched) in all_block_schedules.iter().enumerate() {
         if let Some(def_pos) = block_sched.iter().position(|i| i.dst == victim) {
-            let n_insts = block_sched.len();
-
             // Step 1: SpillStore after def.
             let store_vreg = VReg(*next_vreg);
             *next_vreg += 1;
@@ -1222,38 +1198,25 @@ fn apply_cross_block_slot_spill(
             let entry_point = ProgramPoint::block_entry(bi);
             victim_class = class_to_vreg.vreg_to_class(victim, entry_point);
 
-            if let Some(class) = victim_class {
+            if victim_class.is_some() {
                 // The store's dummy dst gets no segment: it names a pseudo-op
                 // rather than a value, holds no register, and its point is
-                // already covered by the victim's segment (truncated to end
-                // exactly here in step 3).
+                // already covered by the victim's segment, truncated to end
+                // exactly here.
                 let store_point = ProgramPoint::inst_point(bi, def_pos + 1);
 
-                // Step 2: SpillLoad at end of def block (position n_insts).
-                // This creates a reload VReg that covers the block_exit point,
-                // so that compute_phi_uses (recomputed post-split) finds the
-                // reload VReg instead of the original when looking up the class
-                // at block_exit(bi).
-                let end_reload_vreg = VReg(*next_vreg);
-                *next_vreg += 1;
-                let end_load_inst = ScheduledInst {
-                    op: load_op.clone(),
-                    dst: end_reload_vreg,
-                    operands: vec![],
-                };
-                // Insert at n_insts: this is AFTER all current instructions, just before
-                // the terminator. After insertion, this instruction sits at the end.
-                per_block_insertions[bi].push((n_insts, end_load_inst));
-                // Register the reload segment covering block_exit.
-                let exit_point = ProgramPoint::block_exit(bi);
-                new_segments.push((class, end_reload_vreg, exit_point, exit_point));
-                // Mark this VReg so the lowering pass can force it into the
-                // trailing barrier group (after all calls).
-                end_of_block_spill_vregs.insert(end_reload_vreg);
-
-                // Step 3: Truncate the original VReg's segment to end at store_point.
-                // After apply_plan_to calls truncate_segment_end(victim, store_point),
-                // class_to_vreg.lookup(class, block_exit) returns end_reload_vreg.
+                // Step 2: truncate the original VReg's segment to end at
+                // store_point, so nothing downstream resolves the class to a
+                // register the store has already given up.
+                //
+                // The terminator's own use of the victim needs no special
+                // handling: it is an operand of `Op::TerminatorArgs`, so step 3
+                // reloads before it like any other use. This used to insert a
+                // second reload at the very end of the block purely so that a
+                // re-resolved `class_to_vreg` lookup at the block exit would
+                // find something -- a value live from there to the terminator,
+                // costing a register in the block whose pressure this call is
+                // trying to relieve.
                 segment_end_truncations.push((victim, store_point));
             }
 
@@ -1990,7 +1953,6 @@ mod tests {
             slot_spilled_params: slot_spilled_params.clone(),
             segment_end_truncations: Vec::new(),
             slots_allocated: 0,
-            end_of_block_spill_vregs: BTreeSet::new(),
         };
         let mut block_schedules_mut = vec![vec![], vec![call_result_inst(1, vec![0])]];
         let mut next_vreg2 = next_vreg;
@@ -2546,7 +2508,6 @@ mod tests {
         let mut new_segments = vec![];
         let mut operand_rewrites = vec![];
         let mut segment_end_truncations = vec![];
-        let mut end_of_block_spill_vregs = BTreeSet::new();
         let mut next_vreg = 20u32;
         let mut new_slot_count = 0u32;
 
@@ -2560,7 +2521,6 @@ mod tests {
             &mut new_segments,
             &mut operand_rewrites,
             &mut segment_end_truncations,
-            &mut end_of_block_spill_vregs,
             &class_to_vreg,
         );
 
@@ -2627,7 +2587,6 @@ mod tests {
         let mut new_segments = vec![];
         let mut operand_rewrites = vec![];
         let mut segment_end_truncations = vec![];
-        let mut end_of_block_spill_vregs = BTreeSet::new();
         let mut next_vreg = 10u32;
         let mut new_slot_count = 0u32;
 
@@ -2641,7 +2600,6 @@ mod tests {
             &mut new_segments,
             &mut operand_rewrites,
             &mut segment_end_truncations,
-            &mut end_of_block_spill_vregs,
             &class_to_vreg,
         );
 
@@ -2696,7 +2654,6 @@ mod tests {
         let mut new_segments = vec![];
         let mut operand_rewrites = vec![];
         let mut segment_end_truncations = vec![];
-        let mut end_of_block_spill_vregs = BTreeSet::new();
         let mut next_vreg = 10u32;
         let mut new_slot_count = 0u32;
 
@@ -2710,7 +2667,6 @@ mod tests {
             &mut new_segments,
             &mut operand_rewrites,
             &mut segment_end_truncations,
-            &mut end_of_block_spill_vregs,
             &class_to_vreg,
         );
 
@@ -2843,7 +2799,6 @@ mod tests {
         let mut new_segments = vec![];
         let mut operand_rewrites = vec![];
         let mut segment_end_truncations = vec![];
-        let mut end_of_block_spill_vregs = BTreeSet::new();
         let mut next_vreg = 10u32;
         let mut new_slot_count = 0u32;
 
@@ -2857,7 +2812,6 @@ mod tests {
             &mut new_segments,
             &mut operand_rewrites,
             &mut segment_end_truncations,
-            &mut end_of_block_spill_vregs,
             &class_to_vreg,
         );
 
@@ -2918,7 +2872,6 @@ mod tests {
         let mut new_segments = vec![];
         let mut operand_rewrites = vec![];
         let mut segment_end_truncations = vec![];
-        let mut end_of_block_spill_vregs = BTreeSet::new();
         let mut next_vreg = 10u32;
         let mut new_slot_count = 0u32;
 
@@ -2932,7 +2885,6 @@ mod tests {
             &mut new_segments,
             &mut operand_rewrites,
             &mut segment_end_truncations,
-            &mut end_of_block_spill_vregs,
             &class_to_vreg,
         );
 
@@ -2970,7 +2922,6 @@ mod tests {
             slot_spilled_params: BTreeMap::new(),
             segment_end_truncations: Vec::new(),
             slots_allocated: 0,
-            end_of_block_spill_vregs: BTreeSet::new(),
         };
 
         let mut block_schedules: Vec<Vec<ScheduledInst>> = vec![vec![]];
