@@ -287,6 +287,34 @@ pub enum Op {
     /// Carries call-arg VRegs as operands so regalloc sees correct liveness.
     /// Skipped during lowering.
     VoidCallBarrier,
+
+    /// Pseudo-instruction carrying the block terminator's arguments as operands.
+    /// At most one per block, always its last instruction, skipped during
+    /// lowering.
+    ///
+    /// The payload names which terminator argument each operand is: operand `j`
+    /// carries argument `arg_indices[j]`. Arguments are numbered in a single
+    /// sequence per terminator -- a Jump's args in order, a Branch's `true_args`
+    /// followed by its `false_args`, a Ret's value as argument 0. The indices are
+    /// explicit rather than implied by position because an argument can carry no
+    /// operand at all: see [`Op::TerminatorArgs`] users for slot-routed
+    /// parameters, which are passed in memory and hold no register here.
+    ///
+    /// This exists for the same reason the barrier pseudo-ops do, and closes the
+    /// same hole one level further along. Everything else a block computes flows
+    /// as a VReg that the splitter rewrites, coalescing renames and liveness
+    /// sees. A terminator's arguments were `ClassId`s in the CFG that no operand
+    /// rewrite reached, so three passes each re-derived them from
+    /// `class_to_vreg` -- one for liveness, one for emission, and the splitter,
+    /// which had no operand to act on at all and could only hope a recomputed
+    /// use set happened to route through its reload segments. Whenever those
+    /// derivations disagreed, a terminator read a register that no longer held
+    /// the value.
+    ///
+    /// As a real operand list the splitter can see a terminator use, spill and
+    /// reload against it, and both other passes read the answer instead of
+    /// recomputing it.
+    TerminatorArgs(Vec<u32>),
 }
 
 impl Op {
@@ -887,7 +915,7 @@ impl Op {
                 unreachable!("spill pseudo-ops have no result_type")
             }
 
-            Op::StoreBarrier | Op::VoidCallBarrier => Type::I64,
+            Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_) => Type::I64,
         }
     }
 

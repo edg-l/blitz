@@ -202,6 +202,7 @@ pub(super) fn lower_terminator(
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
+    term_args: &BTreeMap<u32, VReg>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
@@ -289,10 +290,11 @@ pub(super) fn lower_terminator(
                 block_idx,
                 egraph,
                 class_to_vreg,
-                ret_class_to_vreg,
                 block_param_map,
                 param_vreg_overrides,
                 block_param_vregs,
+                term_args,
+                0,
                 coalesce_aliases,
                 regalloc,
                 func,
@@ -328,10 +330,11 @@ pub(super) fn lower_terminator(
                 block_idx,
                 egraph,
                 class_to_vreg,
-                ret_class_to_vreg,
                 block_param_map,
                 param_vreg_overrides,
                 block_param_vregs,
+                term_args,
+                0,
                 coalesce_aliases,
                 regalloc,
                 func,
@@ -343,10 +346,11 @@ pub(super) fn lower_terminator(
                 block_idx,
                 egraph,
                 class_to_vreg,
-                ret_class_to_vreg,
                 block_param_map,
                 param_vreg_overrides,
                 block_param_vregs,
+                term_args,
+                true_args.len(),
                 coalesce_aliases,
                 regalloc,
                 func,
@@ -417,16 +421,24 @@ pub(super) fn lower_terminator(
 /// - If the param VReg has NO register BUT `slot_spilled_params` has an entry
 ///   for `(target, param_idx)`, emit `PhiCopy::Slot` (store arg reg to slot).
 /// - Otherwise skip (legacy: "flow through cross-block spill slots" path).
+///
+/// `term_args` maps a terminator argument index to the VReg the schedule
+/// carries for it, and `arg_base` is where this edge's arguments start in that
+/// numbering -- 0 for a Jump or a Branch's true edge, `true_args.len()` for a
+/// Branch's false edge. An argument with no entry was routed through a stack
+/// slot and needs no copy.
+#[allow(clippy::too_many_arguments)]
 fn build_phi_copies(
     target: BlockId,
     args: &[ClassId],
     src_block_idx: usize,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
-    block_class_to_vreg: &ClassVRegMap,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
+    term_args: &BTreeMap<u32, VReg>,
+    arg_base: usize,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
     regalloc: &RegAllocResult,
     func: &Function,
@@ -450,7 +462,6 @@ fn build_phi_copies(
         return Ok(vec![]);
     }
 
-    let src_exit = ProgramPoint::block_exit(src_block_idx);
     let tgt_entry = ProgramPoint::block_entry(target_block_idx);
 
     let trace = crate::trace::is_enabled("phi") && crate::trace::fn_matches(&func.name);
@@ -469,13 +480,29 @@ fn build_phi_copies(
             })?;
 
         let canon_arg = egraph.unionfind.find_immutable(arg_cid);
-        let arg_vreg = block_class_to_vreg
-            .lookup(canon_arg, src_exit)
-            .ok_or_else(|| CompileError {
-                phase: "phi-elim".into(),
-                message: format!("arg class {:?} not in class_to_vreg", canon_arg),
-                location: None,
-            })?;
+        // The operand the schedule carries is the answer, not a hint. It is the
+        // one the splitter rewrote and coalescing renamed, so it names the VReg
+        // that actually holds the value at this point; re-resolving the class
+        // through a map those passes mutated is what produced the wrong answers
+        // this op exists to stop.
+        //
+        // No operand means the argument travels through a stack slot, and the
+        // slot store the splitter placed in this block already wrote it.
+        let Some(&arg_vreg) = term_args.get(&((arg_base + param_idx) as u32)) else {
+            continue;
+        };
+        // Chase the alias chain, exactly as the destination side below does.
+        // `apply_coalescing` renamed the schedule one step, but the map from
+        // Phase 3 is transitive; without this the register lookup misses and the
+        // copy is silently dropped -- which is a dropped back edge, so the loop
+        // never terminates.
+        let mut arg_vreg = arg_vreg;
+        while let Some(&aliased) = coalesce_aliases.get(&arg_vreg) {
+            if aliased == arg_vreg {
+                break;
+            }
+            arg_vreg = aliased;
+        }
         // `k=<n>` is the argument class's constant value when it has one. Two
         // params with different `k` reading the same `src` is the signature of
         // an argument resolved to the wrong VReg.
@@ -577,8 +604,7 @@ fn build_phi_copies(
         // Apply coalesce aliases so a dest VReg merged away by Phase 3 resolves
         // to its canonical. Without this, vreg_to_reg lookup fails and the copy
         // is silently dropped, dropping the back-edge and miscompiling loops.
-        // Source-side aliasing is already done via block_class_to_vreg (see
-        // compile/mod.rs:963-1004); this is the symmetric fix for the dest side.
+        // The source side chases the same chain above.
         while let Some(&aliased) = coalesce_aliases.get(&param_vreg) {
             if aliased == param_vreg {
                 break;

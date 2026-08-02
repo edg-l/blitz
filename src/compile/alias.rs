@@ -253,7 +253,7 @@ impl AliasInfo {
             }
 
             // Barrier pseudo-ops
-            Op::StoreBarrier | Op::VoidCallBarrier => AddrBase::Unknown,
+            Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_) => AddrBase::Unknown,
         }
     }
 

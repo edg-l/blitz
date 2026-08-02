@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
-use crate::ir::effectful::EffectfulOp;
+use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::BasicBlock;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
@@ -572,4 +572,169 @@ pub(super) fn populate_effectful_operands(
         vreg_group.insert(marker.dst, barrier_k);
         schedule.insert(insert_pos, marker);
     }
+}
+
+/// The successor edges a terminator has, each with the arguments it passes.
+pub(crate) fn terminator_edges(terminator: &EffectfulOp) -> Vec<(BlockId, &[ClassId])> {
+    match terminator {
+        EffectfulOp::Jump { target, args } => vec![(*target, args.as_slice())],
+        EffectfulOp::Branch {
+            bb_true,
+            bb_false,
+            true_args,
+            false_args,
+            ..
+        } => vec![
+            (*bb_true, true_args.as_slice()),
+            (*bb_false, false_args.as_slice()),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// The `ClassId`s a terminator passes to its successors, in argument order.
+///
+/// One flat sequence per terminator: a Jump's args, a Branch's `true_args`
+/// followed by its `false_args`, a Ret's value alone. Every pass that indexes
+/// terminator arguments -- the pseudo-op builder here, the splitter, and
+/// lowering -- numbers them through this one function, so an argument index
+/// means the same thing everywhere.
+pub(crate) fn terminator_arg_classes(terminator: &EffectfulOp) -> Vec<ClassId> {
+    match terminator {
+        EffectfulOp::Jump { args, .. } => args.clone(),
+        EffectfulOp::Branch {
+            true_args,
+            false_args,
+            ..
+        } => true_args.iter().chain(false_args.iter()).copied().collect(),
+        EffectfulOp::Ret { val: Some(cid) } => vec![*cid],
+        _ => Vec::new(),
+    }
+}
+
+/// Append the block's terminator arguments to its schedule as a single
+/// [`Op::TerminatorArgs`] pseudo-instruction.
+///
+/// ONE OP CARRYING ALL ARGUMENTS, not one op per argument. Lowering emits an
+/// edge's phi copies as a parallel copy (`sequentialize_copies`), which really
+/// does need every source readable at one point, so a single op is what the
+/// emitted code does. One op per argument instead says argument k dies at its
+/// own pseudo-op; the allocator then reuses the registers and the copies read
+/// stale values.
+///
+/// The clique a single op creates is therefore real, and the way to break it is
+/// to take an argument out of the register file rather than to lie about
+/// liveness: `SplitPlan::operand_removals` drops the operand for an argument
+/// that travels through a stack slot instead.
+///
+/// This must run at the same point as [`populate_effectful_operands`] -- after
+/// scheduling, before the splitter -- so that the splitter's operand rewriting
+/// and coalescing's renaming both reach these operands. That is the entire
+/// point: before this existed the terminator's arguments were `ClassId`s that
+/// no rewrite touched, and three separate passes re-derived them from
+/// `class_to_vreg`.
+///
+/// `param_override_vregs` maps a canonical class to the VReg linearization gave
+/// this block's own parameter, for the parameters where it minted a fresh one. A
+/// back edge passing a parameter straight through resolves to that VReg and to
+/// nothing in the snapshot, so it has to be consulted here for the same reason
+/// lowering consults it.
+pub(super) fn append_terminator_args(
+    schedule: &mut Vec<ScheduledInst>,
+    terminator: &EffectfulOp,
+    block_idx: usize,
+    egraph: &EGraph,
+    class_to_vreg: &ClassVRegMap,
+    param_override_vregs: &BTreeMap<ClassId, VReg>,
+    next_vreg: &mut u32,
+) -> Result<(), String> {
+    let classes = terminator_arg_classes(terminator);
+    if classes.is_empty() {
+        return Ok(());
+    }
+
+    let exit_point = ProgramPoint::block_exit(block_idx);
+    let mut arg_indices: Vec<u32> = Vec::with_capacity(classes.len());
+    let mut operands: Vec<VReg> = Vec::with_capacity(classes.len());
+    for (arg_idx, &cid) in classes.iter().enumerate() {
+        let canon = egraph.unionfind.find_immutable(cid);
+        // An argument with no VReg at the block exit has nothing for the copy to
+        // read, wherever the question is asked. Reporting it here names the
+        // argument; skipping it silently is how the old derivations came to
+        // disagree about which argument was which.
+        let vreg = param_override_vregs
+            .get(&canon)
+            .copied()
+            .or_else(|| class_to_vreg.lookup(canon, exit_point))
+            .ok_or_else(|| {
+                format!("terminator arg {arg_idx} class {canon:?} has no VReg at block exit")
+            })?;
+        arg_indices.push(arg_idx as u32);
+        operands.push(vreg);
+    }
+
+    let dst = VReg(*next_vreg);
+    *next_vreg += 1;
+    schedule.push(ScheduledInst {
+        op: Op::TerminatorArgs(arg_indices),
+        dst,
+        operands,
+    });
+    Ok(())
+}
+
+/// The terminator arguments a block's schedule carries, as `(arg_idx, vreg)`
+/// pairs in argument order.
+///
+/// Empty for a block whose terminator takes no arguments, and missing an entry
+/// for any argument the splitter routed through a stack slot -- so read it by
+/// argument index, never by position.
+/// Drop the terminator arguments whose operand names one of `vregs`, keeping the
+/// argument indices of the survivors.
+///
+/// A value routed through a stack slot holds no register, so naming it as an
+/// operand would ask the allocator for one and put an unwritten register into
+/// liveness. Removing the operand is how an argument leaves the register file
+/// without anything else having to pretend it was never an argument: it keeps
+/// its index, and lowering finds no operand under that index and emits the slot
+/// access instead.
+pub(crate) fn remove_terminator_arg_operands(
+    schedule: &mut [ScheduledInst],
+    vregs: &BTreeSet<VReg>,
+) {
+    for inst in schedule.iter_mut() {
+        let Op::TerminatorArgs(arg_indices) = &mut inst.op else {
+            continue;
+        };
+        let keep: Vec<bool> = inst.operands.iter().map(|v| !vregs.contains(v)).collect();
+        if keep.iter().all(|&k| k) {
+            continue;
+        }
+        let mut i = 0;
+        inst.operands.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
+        let mut i = 0;
+        arg_indices.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
+    }
+}
+
+pub(crate) fn terminator_arg_operands(schedule: &[ScheduledInst]) -> Vec<(u32, VReg)> {
+    schedule
+        .iter()
+        .find_map(|inst| match &inst.op {
+            Op::TerminatorArgs(arg_indices) => Some(
+                arg_indices
+                    .iter()
+                    .copied()
+                    .zip(inst.operands.iter().copied()),
+            ),
+            _ => None,
+        })
+        .map(|pairs| pairs.collect())
+        .unwrap_or_default()
 }

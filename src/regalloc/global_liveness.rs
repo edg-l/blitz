@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::extract::{ClassVRegMap, VReg};
-use crate::egraph::unionfind::UnionFind;
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 use crate::schedule::scheduler::ScheduledInst;
@@ -159,116 +158,6 @@ pub fn compute_global_liveness_with_block_params(
     GlobalLiveness { live_in, live_out }
 }
 
-/// Point back-edge phi uses at the target block param's own VReg.
-///
-/// When a back-edge terminator arg's e-class matches the target's block param
-/// class, the copy that edge emits is a self-copy and the param's VReg is the
-/// storage the value occupies for the whole loop. This replaces whatever the
-/// latch's exit resolved to with that param VReg -- the override VReg when
-/// linearization made one to break an SSA cycle, otherwise the param's own --
-/// so the value stays live across the loop body.
-///
-/// Without it the class resolves at the latch's exit to nothing at all once the
-/// header spills the param (the original segment is truncated there), the value
-/// looks dead over the loop body, and the allocator gives its register to the
-/// latch's own code while the header keeps re-spilling from it.
-///
-/// Only back edges (source RPO position >= target RPO position) are processed;
-/// forward edges use the original VReg.
-///
-/// # Arguments
-///
-/// * `func` - The function whose blocks are scanned.
-/// * `unionfind` - E-graph union-find for canonical class lookup.
-/// * `block_param_vreg_overrides` - Map of `(BlockId, param_idx) -> override VReg`
-///   produced during VReg linearization for back-edge block params.
-/// * `block_param_map` - Map of `(BlockId, param_idx) -> ClassId` built from the e-graph.
-/// * `class_to_vreg` - Map from canonical ClassId to the assigned VReg.
-/// * `rpo_order` - Block indices in reverse post-order; used to compute RPO positions.
-/// * `phi_uses` - Per-block sets of VRegs referenced in terminators; mutated in-place.
-pub fn apply_block_param_overrides_to_phi_uses(
-    func: &Function,
-    unionfind: &UnionFind,
-    block_param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
-    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
-    class_to_vreg: &ClassVRegMap,
-    rpo_order: &[usize],
-    phi_uses: &mut [BTreeSet<VReg>],
-) {
-    let rpo_pos: BTreeMap<BlockId, usize> = rpo_order
-        .iter()
-        .enumerate()
-        .map(|(pos, &idx)| (func.blocks[idx].id, pos))
-        .collect();
-
-    for (block_idx, block) in func.blocks.iter().enumerate() {
-        if let Some(term) = block.ops.last() {
-            let src_pos = rpo_pos.get(&block.id).copied().unwrap_or(0);
-            let mut process_args = |target: BlockId, args: &[ClassId]| {
-                let tgt_pos = rpo_pos.get(&target).copied().unwrap_or(0);
-                if src_pos < tgt_pos {
-                    return; // Forward edge: use the original VReg.
-                }
-                let Some(target_idx) = func.blocks.iter().position(|b| b.id == target) else {
-                    return;
-                };
-                for (pidx, &arg_cid) in args.iter().enumerate() {
-                    let Some(&param_cid) = block_param_map.get(&(target, pidx as u32)) else {
-                        continue;
-                    };
-                    let canon_arg = unionfind.find_immutable(arg_cid);
-                    let canon_param = unionfind.find_immutable(param_cid);
-                    if canon_arg != canon_param {
-                        continue;
-                    }
-                    // The arg and the param are one class, so the copy this
-                    // back edge emits is a self-copy and the param's own VReg is
-                    // what stays live around the loop. Name it here: the param
-                    // is the value's storage for the whole loop, and the latch
-                    // has no VReg of its own for it. Resolving the class at the
-                    // latch's exit instead finds nothing once the header spills
-                    // the param -- the value then looks dead over the loop body,
-                    // the allocator hands its register to the latch's own code,
-                    // and the header re-spills the clobbered register on the
-                    // next iteration (findings/seed6_reduced_wrong_sum.c).
-                    let param_vreg = block_param_vreg_overrides
-                        .get(&(target, pidx as u32))
-                        .copied()
-                        .or_else(|| {
-                            class_to_vreg.lookup(canon_param, ProgramPoint::block_entry(target_idx))
-                        });
-                    let Some(param_vreg) = param_vreg else {
-                        continue;
-                    };
-                    if let Some(old_vreg) =
-                        class_to_vreg.lookup(canon_arg, ProgramPoint::block_exit(block_idx))
-                        && old_vreg != param_vreg
-                    {
-                        phi_uses[block_idx].remove(&old_vreg);
-                    }
-                    phi_uses[block_idx].insert(param_vreg);
-                }
-            };
-            match term {
-                EffectfulOp::Jump { target, args } => {
-                    process_args(*target, args);
-                }
-                EffectfulOp::Branch {
-                    bb_true,
-                    bb_false,
-                    true_args,
-                    false_args,
-                    ..
-                } => {
-                    process_args(*bb_true, true_args);
-                    process_args(*bb_false, false_args);
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
 /// Extract CFG successor block indices from each block's terminator.
 ///
 /// Returns `successors[i]` = list of block indices that block `i` can jump to.
@@ -308,75 +197,6 @@ pub fn cfg_successors(func: &Function) -> Vec<Vec<usize>> {
             succs
         })
         .collect()
-}
-
-/// Collect VRegs used in each block's terminator args (phi sources) that are
-/// not already captured by the scheduled instructions.
-///
-/// For each block, scans the terminator (Jump/Branch args) and maps ClassIds to
-/// VRegs. The resulting VRegs must be included in the global liveness
-/// upward-exposed use sets.
-///
-/// `block_class_to_vreg` holds one map per block: the block-local view captured
-/// during linearization. A block-local view is required, not the global map. A
-/// class re-emitted in several blocks -- which is how a value whose emitter does
-/// not dominate a use is handled -- has one VReg per block, and the global map
-/// holds whichever was restored last. Resolving a terminator arg through that
-/// names another block's VReg, leaving this block's own copy with no recorded
-/// use: the allocator then sees a dead value, hands every such copy the same
-/// register, and the phi copies all read whichever constant was computed last.
-pub fn compute_phi_uses(
-    func: &Function,
-    egraph_unionfind: &crate::egraph::unionfind::UnionFind,
-    block_class_to_vreg: &[ClassVRegMap],
-) -> Vec<BTreeSet<VReg>> {
-    let n = func.blocks.len();
-    let mut phi_uses: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
-
-    for (block_idx, block) in func.blocks.iter().enumerate() {
-        let exit_point = ProgramPoint::block_exit(block_idx);
-        let Some(class_to_vreg) = block_class_to_vreg.get(block_idx) else {
-            continue;
-        };
-        if let Some(term) = block.ops.last() {
-            let mut add_vreg = |cid: ClassId| {
-                let canon = egraph_unionfind.find_immutable(cid);
-                if let Some(v) = class_to_vreg.lookup(canon, exit_point) {
-                    phi_uses[block_idx].insert(v);
-                }
-            };
-            match term {
-                EffectfulOp::Jump { args, .. } => {
-                    for &cid in args {
-                        add_vreg(cid);
-                    }
-                }
-                EffectfulOp::Branch {
-                    true_args,
-                    false_args,
-                    ..
-                } => {
-                    for &cid in true_args.iter().chain(false_args.iter()) {
-                        add_vreg(cid);
-                    }
-                }
-                EffectfulOp::Ret { val: Some(cid) } => {
-                    // Ret values are also terminator-consumed VRegs. Including
-                    // them in phi_uses keeps their live range extended to the
-                    // Ret block's end so the function-scope allocator assigns a
-                    // register (or triggers an end-of-block reload if spilled).
-                    // The older per-block allocator excluded Ret values from
-                    // phi_uses because adding them caused spurious cross-block
-                    // spill slots under its split-based liveness; the global
-                    // allocator has no such constraint.
-                    add_vreg(*cid);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    phi_uses
 }
 
 /// Collect the set of VRegs that are block parameters for each block.

@@ -148,6 +148,7 @@ pub fn fmt_op(op: &Op) -> String {
 
         // Barrier pseudo-ops
         Op::StoreBarrier => "store_barrier".into(),
+        Op::TerminatorArgs(_) => "terminator_args".into(),
         Op::VoidCallBarrier => "void_call_barrier".into(),
     }
 }
@@ -287,7 +288,10 @@ pub fn print_function_ir(
         for (k, group) in block.groups.iter().enumerate() {
             // Pure ops (skip barrier pseudo-ops)
             for inst in &group.pure_ops {
-                if matches!(inst.op, Op::StoreBarrier | Op::VoidCallBarrier) {
+                if matches!(
+                    inst.op,
+                    Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_)
+                ) {
                     continue;
                 }
                 let op_text = fmt_op(&inst.op);

@@ -1041,7 +1041,7 @@ fn lower_op(
             unreachable!("spill pseudo-ops are handled before lower_inst")
         }
 
-        Op::StoreBarrier | Op::VoidCallBarrier => {
+        Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_) => {
             unreachable!("barrier pseudo-ops are skipped by lower_block_pure_ops")
         }
     }
@@ -1139,7 +1139,10 @@ pub(super) fn lower_block_pure_ops(
             continue;
         }
         // Skip barrier pseudo-ops: they exist only for regalloc liveness.
-        if matches!(inst.op, Op::StoreBarrier | Op::VoidCallBarrier) {
+        if matches!(
+            inst.op,
+            Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_)
+        ) {
             continue;
         }
 

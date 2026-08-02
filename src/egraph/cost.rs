@@ -317,7 +317,7 @@ impl CostModel {
                 unreachable!("spill pseudo-ops are not part of the e-graph")
             }
 
-            Op::StoreBarrier | Op::VoidCallBarrier => {
+            Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_) => {
                 unreachable!("barrier pseudo-ops are not part of the e-graph")
             }
         }

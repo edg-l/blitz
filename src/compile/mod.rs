@@ -913,25 +913,9 @@ pub fn compile(
     } else {
         // --- Multi-block path: global register allocator (Phase 6 cutover) ---
 
-        // Step 1: Compute CFG successors and phi uses per block.
+        // Step 1: Compute CFG successors. Terminator uses come from the
+        // `Op::TerminatorArgs` operands once those exist, below.
         let cfg_succs = crate::regalloc::global_liveness::cfg_successors(func);
-        let mut phi_uses = crate::regalloc::global_liveness::compute_phi_uses(
-            func,
-            &egraph.unionfind,
-            &block_class_to_vreg_snapshot,
-        );
-
-        // Post-process phi_uses: replace back-edge terminator VRegs with their
-        // block-param override VRegs so cross-block liveness is correct.
-        crate::regalloc::global_liveness::apply_block_param_overrides_to_phi_uses(
-            func,
-            &egraph.unionfind,
-            &block_param_vreg_overrides,
-            &block_param_map,
-            &class_to_vreg,
-            &rpo_order,
-            &mut phi_uses,
-        );
 
         // Task 6.1a (CRITICAL ORDER): Collect call-arg precolors BEFORE calling
         // populate_effectful_operands. The barrier system sorts operands by VReg
@@ -999,6 +983,13 @@ pub fn compile(
         // `printf("%d\n", ...)` would record the other arm's VReg for the format
         // string -- and since Phase 7 now trusts these operands as the record of
         // what each op reads, that names a register holding something else.
+        // Position of each block index in RPO, for telling a back edge from a
+        // forward one.
+        let mut rpo_pos = vec![0usize; func.blocks.len()];
+        for (pos, &idx) in rpo_order.iter().enumerate() {
+            rpo_pos[idx] = pos;
+        }
+
         for (block_idx, block) in func.blocks.iter().enumerate() {
             let non_term_count = block.non_term_count();
             if non_term_count > 0 {
@@ -1018,7 +1009,94 @@ pub fn compile(
                     &mut next_vreg,
                 );
             }
+
+            // The terminator's arguments, as operands, for the same reason the
+            // barrier ops carry theirs: so the splitter and coalescing rewrite
+            // them instead of three passes re-deriving them from a map those
+            // passes mutate.
+            if let Some(term) = block.ops.last() {
+                // Where a class has a VReg the block-exit snapshot does not name.
+                //
+                // A parameter this block re-emitted has the fresh VReg
+                // linearization minted for it, which the snapshot predates. And a
+                // back edge whose argument IS the target's parameter emits a
+                // self-copy: the parameter is that value's storage for the whole
+                // loop and the latch has no VReg of its own for it. Resolving
+                // such an argument at the latch's exit instead finds nothing once
+                // the header spills the parameter, the value looks dead over the
+                // loop body, and the header re-spills a register the latch has
+                // since reused (findings/seed6_reduced_wrong_sum.c).
+                let mut param_override_vregs: BTreeMap<ClassId, VReg> = block_param_vreg_overrides
+                    .iter()
+                    .filter(|((bid, _), _)| *bid == block.id)
+                    .filter_map(|(&(bid, pidx), &fresh)| {
+                        let cid = block_param_map.get(&(bid, pidx))?;
+                        Some((egraph.unionfind.find_immutable(*cid), fresh))
+                    })
+                    .collect();
+                for (target, args) in barrier::terminator_edges(term) {
+                    let target_idx = block_id_to_idx[&target];
+                    if rpo_pos[block_idx] < rpo_pos[target_idx] {
+                        continue; // Forward edge: the argument's own VReg is right.
+                    }
+                    for (pidx, &arg_cid) in args.iter().enumerate() {
+                        let Some(&param_cid) = block_param_map.get(&(target, pidx as u32)) else {
+                            continue;
+                        };
+                        let canon_param = egraph.unionfind.find_immutable(param_cid);
+                        if egraph.unionfind.find_immutable(arg_cid) != canon_param {
+                            continue;
+                        }
+                        let param_vreg = block_param_vreg_overrides
+                            .get(&(target, pidx as u32))
+                            .copied()
+                            .or_else(|| {
+                                class_to_vreg
+                                    .lookup(canon_param, ProgramPoint::block_entry(target_idx))
+                            });
+                        if let Some(v) = param_vreg {
+                            param_override_vregs.insert(canon_param, v);
+                        }
+                    }
+                }
+                crate::compile::barrier::append_terminator_args(
+                    &mut block_schedules[block_idx],
+                    term,
+                    block_idx,
+                    &egraph,
+                    &block_class_to_vreg_snapshot[block_idx],
+                    &param_override_vregs,
+                    &mut next_vreg,
+                )
+                .map_err(|message| CompileError {
+                    phase: "terminator-args".into(),
+                    message,
+                    location: Some(IrLocation {
+                        function: func.name.clone(),
+                        block: Some(block.id),
+                        inst: None,
+                    }),
+                })?;
+            }
         }
+
+        // Terminator uses, read straight off the schedules. `Op::TerminatorArgs`
+        // is the record of what each terminator consumes: the splitter rewrites
+        // its operands and coalescing renames them, so recomputing this after
+        // either pass gives that pass's answer rather than a second, independent
+        // derivation that can disagree with it.
+        let terminator_uses = |schedules: &[Vec<ScheduledInst>]| -> Vec<BTreeSet<VReg>> {
+            schedules
+                .iter()
+                .map(|s| {
+                    barrier::terminator_arg_operands(s)
+                        .into_iter()
+                        .map(|(_, v)| v)
+                        .collect()
+                })
+                .collect()
+        };
+        let mut phi_uses = terminator_uses(&block_schedules);
 
         // Pressure-driven splitter.
         // CRITICAL ORDER: apply_plan_to must run BEFORE collect_block_param_vregs_per_block.
@@ -1127,28 +1205,6 @@ pub fn compile(
                 }
             }
 
-            // Recompute phi_uses after the split plan is applied.
-            // Cross-block spills truncate the original VReg's class_to_vreg segment
-            // to end at the SpillStore, and add a new end-of-block reload VReg
-            // whose segment covers block_exit. Re-running compute_phi_uses ensures
-            // that terminator args (Jump/Branch) resolve to the reload VReg instead
-            // of the original spilled VReg, breaking the live-out chain that was
-            // causing the original to be live across all calls in the def block.
-            phi_uses = crate::regalloc::global_liveness::compute_phi_uses(
-                func,
-                &egraph.unionfind,
-                &block_class_to_vreg_snapshot,
-            );
-            crate::regalloc::global_liveness::apply_block_param_overrides_to_phi_uses(
-                func,
-                &egraph.unionfind,
-                &block_param_vreg_overrides,
-                &block_param_map,
-                &class_to_vreg,
-                &rpo_order,
-                &mut phi_uses,
-            );
-
             // Update call_arg_precolors: transfer each precolor to its reload VReg.
             if !vreg_remap.is_empty() {
                 for (precolor_vreg, _reg) in call_arg_precolors.iter_mut() {
@@ -1158,23 +1214,31 @@ pub fn compile(
                 }
             }
 
-            // Remove slot-spilled param VRegs from phi_uses.
-            // phi_uses was recomputed above, so this handles the post-split state.
-            // After slot-spilling, these VRegs have no registers; the allocator would
-            // try to reload them at block exit, creating spurious reloads that overwrite
-            // the slot with wrong values. The phi copy for a slot-spilled param is
-            // emitted as a slot store (PhiCopy::Slot) by lower_terminator.
-            for (&(bid, pidx), info) in &slot_spilled_params {
-                // Remove both the original VReg and any block-param override VReg
-                // (apply_block_param_overrides_to_phi_uses may have replaced it).
-                let override_vreg = block_param_vreg_overrides.get(&(bid, pidx)).copied();
-                for phi_set in phi_uses.iter_mut() {
-                    phi_set.remove(&info.vreg);
-                    if let Some(ov) = override_vreg {
-                        phi_set.remove(&ov);
-                    }
+            // A slot-spilled param holds no register, so an edge that passes the
+            // param straight back to itself has nothing to copy: the slot already
+            // holds the value. Drop those operands. Left in, they would ask the
+            // allocator for a register the param deliberately does not have, and
+            // the reload it inserts at the block exit would overwrite the slot.
+            let slot_routed: BTreeSet<VReg> = slot_spilled_params
+                .iter()
+                .flat_map(|(&(bid, pidx), info)| {
+                    [
+                        Some(info.vreg),
+                        block_param_vreg_overrides.get(&(bid, pidx)).copied(),
+                    ]
+                })
+                .flatten()
+                .collect();
+            if !slot_routed.is_empty() {
+                for schedule in block_schedules.iter_mut() {
+                    barrier::remove_terminator_arg_operands(schedule, &slot_routed);
                 }
             }
+
+            // The plan rewrote terminator operands to its reload VRegs, and the
+            // slot-routed ones are gone, so re-reading the schedules is what
+            // makes a spilled value stop being live out.
+            phi_uses = terminator_uses(&block_schedules);
 
             if converged {
                 break;
@@ -1803,6 +1867,11 @@ pub fn compile(
             &block_param_map,
             &block_param_vreg_overrides,
             &block_param_vregs,
+            // Straight off the final schedule: post-split, post-coalesce, the
+            // VRegs the allocator actually assigned registers to.
+            &barrier::terminator_arg_operands(&block_rewritten[block_idx])
+                .into_iter()
+                .collect::<BTreeMap<u32, VReg>>(),
             &coalesce_aliases,
             &regalloc_result,
             func,
