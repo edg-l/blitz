@@ -1257,6 +1257,22 @@ pub fn compile(
             block_param_vregs_per_block[block_idx].insert(fresh_vreg);
         }
 
+        // And what linearization recorded, for every param the class map cannot
+        // name. `collect_block_param_vregs_per_block` finds a param only where a
+        // segment still covers the block entry, but `lower_terminator` falls back
+        // to `block_param_vregs`, so a param the splitter truncated is a param
+        // there and not one here. The allocator then never learns it is written
+        // at block entry: it draws no interference edge to its siblings, and
+        // coalescing is free to merge two parameters of one block into a single
+        // register. Both phi copies then target that register and the second
+        // overwrites the first.
+        for (&(bid, pidx), &vreg) in &block_param_vregs {
+            if slot_spilled_params.contains_key(&(bid, pidx)) {
+                continue;
+            }
+            block_param_vregs_per_block[block_id_to_idx[&bid]].insert(vreg);
+        }
+
         // Remove slot-spilled params from block_param_vregs_per_block.
         // Slot-spilled params have no register: they are written via slot stores
         // by predecessor terminators and loaded on use. Adding them to
