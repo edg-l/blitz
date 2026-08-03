@@ -447,8 +447,21 @@ pub(super) fn lower_effectful_op(
             // Known limitation: caller-saved registers (RAX, RCX, RDX, RSI, RDI, R8-R11)
             // are not modeled as clobbered by the call. VRegs live across the call may
             // be incorrectly assigned to caller-saved registers and corrupted.
-            if let Some(&result_cid) = results.first()
-                && let Some(result_reg) = get_reg(result_cid)
+            // Which register the result must land in is answered by the barrier
+            // instruction's own dst, not by resolving the result CLASS. The
+            // schedule operand is the one the splitter rewrote and coalescing
+            // renamed, so it is what the consumers read; a class lookup can hand
+            // back a different VReg's register, and then this copy writes somewhere
+            // nobody reads while the consumer reads a register the call never
+            // wrote. Measured: with two calls in one block, `d0 = f1(...)` spilled
+            // XMM1 -- a leftover argument -- immediately after a call whose result
+            // was in XMM0, because no copy was emitted at all.
+            let result_reg = barrier_pos
+                .and_then(|pos| schedule.get(pos))
+                .and_then(|inst| regalloc.vreg_to_reg.get(&inst.dst).copied())
+                .or_else(|| results.first().and_then(|&cid| get_reg(cid)));
+            if let Some(&_result_cid) = results.first()
+                && let Some(result_reg) = result_reg
             {
                 let is_float_ret = ret_tys.first().is_some_and(|t| t.is_float());
                 let abi_reg = if is_float_ret {

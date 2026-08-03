@@ -1,49 +1,34 @@
-// KNOWN FAILING -- reproducer for a real bug. Do not "fix" by weakening it.
+// Regression test: a call's result was copied out of the ABI return register
+// only when the result CLASS resolved to a register, so with two calls in one
+// block the copy was skipped and nothing wrote the register the consumers read.
 //
-// Seed 36 of `tests/fuzz/run_fuzz.sh 40 mixed`, reduced. UB-free: `cc -O0`,
-// `cc -O2` and `cc -O1 -fsanitize=undefined,address` all print 87.
+// `main` calls f1 twice. SysV returns a double in XMM0, and lowering emits a copy
+// from XMM0 into the register the result was allocated -- but it asked which
+// register by resolving the result's e-class, and a class can name a different
+// VReg than the one the schedule carries. Here it named one whose register was
+// XMM0 already, so no copy was emitted, while the consumer read XMM1. The spill
+// of `d0` immediately after the call therefore stored XMM1, a leftover argument,
+// and `d0 = f1(...)` became -14 instead of 36.
 //
-// blitz exits 3 at both -O0 and -O1, which is this program's way of saying its
-// double sum came out wrong. BLITZ_VERIFY=strict is clean at both levels, so the
-// wrong value sits in a register that was written -- the case the verifier
-// explicitly cannot see.
+// Nothing downstream can see this. The register is written -- by the argument
+// setup -- so def-before-use holds, and no two values share a register or a slot.
+// The barrier instruction's own dst is the answer, as it is for terminator
+// arguments and for a division's projections.
 //
-// WHAT IS KNOWN, measured rather than read off the disassembly.
+// Related: `add_call_precolors_for_block` pins a call result to the ABI return
+// register only when its block holds exactly one call, which is why one call per
+// block never showed this. Widening that guard is not the fix -- two results
+// pinned to one register collide whenever their ranges overlap.
 //
-// Probing this program is delicate: every probe that adds an instruction moves
-// register allocation, and the fault moves with it. Adding six equality guards
-// made d0 the failing one; adding one guard at a time made d0..d3 pass and d4
-// fail. Printing the sum as an int, or calling printf on each double, pushes the
-// function past what the allocator can colour, so neither can be measured at all.
-//
-// The readout that does work replaces this file's final guard with
-// `if (<expr> > T) { return 4; }` and bisects T: one compare and one branch, the
-// same shape as the guard it replaces, so allocation stays comparable. Both
-// optimization levels then agree, which is the sign the probe is not the thing
-// being measured.
-//
-//   d0    cc 678         blitz 678         same
-//   d1    cc 88          blitz 88          same
-//   d2    cc 24444       blitz 24444       same
-//   d3    cc 939         blitz 939         same
-//   d4    cc 6233234     blitz 5774234     short by 459000
-//   d5    cc 6233449     blitz 5774449     inherits d4's error via d5 += d4 - 40
-//
-// So one statement is wrong: `d4 = (d4 + (d2 * d5))`. At that point d2 reads
-// 24444 and d5 reads 255 under both compilers, and 24444 * 255 = 6233220 is what
-// cc uses. blitz's product is 5774220 = 22644 * 255, and 22644 = 36 + 628 * 36
-// where 24444 = 36 + 678 * 36 -- so the multiply's d2 operand was computed with
-// d0 = 628 rather than 678. The suspect is therefore one statement further back,
-// `d2 = (d2 + (d0 * d2))`, reading a d0 that is 50 short.
-//
-// The IR is correct: `v46 = x86_addsd(v44, v45)` is the updated d0 and
-// `v49 = x86_mulsd(v46, v42)` uses it. The schedule and the final assignment are
-// self-consistent too (v46 -> XMM3, v42 -> XMM6, v49 -> XMM0). main carries 33
-// XMM spill/reload pairs, so the next probe should ask which slot each reload
-// reads rather than which register each op names.
+// How the fault was located, since the program resists probing: every added
+// instruction moves register allocation and the fault with it, so the value was
+// read out by bisecting a same-size comparison (tests/fuzz/read_double_sum.py),
+// which said d4 was short by exactly 459000, and then gdb on the unmodified
+// binary walked the operands back to the store after the call.
 //
 // EXIT: 0
 // OUTPUT: 87
+
 extern int printf(char* fmt, int x);
 int f0(int p0, int p1, double p2, double p3, int p4, int p5, double p6, int p7, int p8) {
     if ((((p4 & 1023) ^ 287) == p1)) {
