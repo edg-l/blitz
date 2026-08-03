@@ -47,6 +47,15 @@ rather than overhead against it.
 - Implemented e-graph rules: see `docs/egraph-optimization-roadmap.md`.
 - Splitter design: see `docs/split-pass-plan.md`.
 
+## The next refactor
+
+**`docs/vreg-cfg-refactor.md` -- the CFG should hold VRegs, not ClassIds.** Read it
+before starting anything in the register allocator or the block-parameter machinery.
+It is the root cause behind the seven wrong-code bugs the seam has produced, behind
+both failed attempts at rematerialization, and behind the 36 remaining capacity
+failures; and it is what makes redundant block-parameter elimination possible, which
+is worth 85-94% of every function's parameters.
+
 ## Priorities
 
 ### P0 -- Correctness
