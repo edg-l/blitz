@@ -1,5 +1,5 @@
 use crate::compile::program_point::ProgramPoint;
-use crate::egraph::extract::{ClassVRegMap, ExtractionResult, VReg};
+use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::egraph::unionfind::UnionFind;
 use crate::ir::Type;
 use crate::ir::effectful::EffectfulOp;
@@ -15,25 +15,27 @@ use crate::schedule::scheduler::ScheduledInst;
 
 use super::{CompileError, IrLocation, barrier};
 
-/// Build an `Addr` for Load/Store by checking if `addr_cid` extracted to an Addr node
-/// AND the addr VReg is an actual Addr instruction in the current schedule.
+/// Build an `Addr` for Load/Store, folding the address computation into the
+/// addressing mode when `addr_vreg` is the destination of an `Addr` instruction
+/// in this schedule.
 ///
 /// Addr folding replaces the LEA with a complex addressing mode `[base + index*scale + disp]`,
 /// using the Addr's children registers directly. This is only valid when those children's
 /// registers hold the correct values at the load/store point. If the addr VReg came from a
 /// SpillLoad or cross-block import, the children's registers may be stale.
+///
+/// `addr_vreg` is the VReg the barrier declares for the address, not a class
+/// resolved here: one class can have several VRegs once values are spilled or
+/// rematerialized, and only the instruction that computed the address knows
+/// which one it read.
 fn build_mem_addr(
-    addr_cid: ClassId,
+    addr_vreg: Option<VReg>,
     addr_reg: Reg,
-    block_idx: usize,
     barrier_pos: Option<usize>,
-    _extraction: &ExtractionResult,
-    class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
     conflict_reg: Option<Reg>,
     schedule: &[ScheduledInst],
 ) -> Addr {
-    let point = ProgramPoint::block_exit(block_idx);
     // Only fold if the addr VReg's scheduled instruction is an Addr op.
     // When it's a SpillLoad, BlockParam, or other non-Addr op, the extraction
     // may show an Addr node for the class, but the children's registers aren't
@@ -45,10 +47,7 @@ fn build_mem_addr(
     // Re-resolving `ext.children` through the class map instead is what
     // produced `mov [rax+rax*1]`: the map returned a VReg for the index class
     // that the allocator had placed in RAX, while the instruction that computed
-    // the address had used a different VReg in R13. One class can have several
-    // VRegs once values are rematerialized, and only the instruction knows
-    // which one it read.
-    let addr_vreg = class_to_vreg.lookup(addr_cid, point);
+    // the address had used a different VReg in R13.
     let addr_inst = addr_vreg.and_then(|v| {
         schedule
             .iter()
@@ -118,7 +117,6 @@ pub(super) fn lower_effectful_op(
     barrier_idx: usize,
     class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
-    extraction: &ExtractionResult,
     func: &Function,
     uf: &UnionFind,
     schedule: &[ScheduledInst],
@@ -171,11 +169,18 @@ pub(super) fn lower_effectful_op(
     // actually reads, and `vreg_to_reg` gives the register the allocator put it
     // in. No reconstruction, nothing to go stale.
     let barrier = barrier_pos.and_then(|p| schedule.get(p));
-    let role_reg = |i: usize| -> Option<Reg> {
+    // A role operand carries a register only if the allocator gave it one; where
+    // it did not, the caller falls back to the class map, so both forms have to
+    // agree on when the barrier has an answer.
+    let role_vreg = |i: usize| -> Option<VReg> {
         barrier
             .filter(|_| i < barrier::role_operand_count(op))
             .and_then(|b| b.operands.get(i))
-            .and_then(|v| regalloc.vreg_to_reg.get(v).copied())
+            .copied()
+            .filter(|v| regalloc.vreg_to_reg.contains_key(v))
+    };
+    let role_reg = |i: usize| -> Option<Reg> {
+        role_vreg(i).and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
     };
 
     // Under BLITZ_VERIFY, hold this seam to its own invariant: the register an
@@ -264,12 +269,9 @@ pub(super) fn lower_effectful_op(
                     }),
                 })?;
             let addr = build_mem_addr(
-                canon_addr,
+                role_vreg(0).or_else(|| class_to_vreg.lookup(canon_addr, point)),
                 addr_reg,
-                block_idx,
                 barrier_pos,
-                extraction,
-                class_to_vreg,
                 regalloc,
                 None,
                 schedule,
@@ -349,12 +351,9 @@ pub(super) fn lower_effectful_op(
                         }),
                     })?;
             let addr = build_mem_addr(
-                canon_addr,
+                role_vreg(0).or_else(|| class_to_vreg.lookup(canon_addr, point)),
                 addr_reg,
-                block_idx,
                 barrier_pos,
-                extraction,
-                class_to_vreg,
                 regalloc,
                 Some(val_reg),
                 schedule,

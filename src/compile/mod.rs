@@ -1808,7 +1808,6 @@ pub fn compile(
                     barrier_k,
                     &block_class_to_vreg,
                     &regalloc_result,
-                    &extraction,
                     func,
                     &egraph.unionfind,
                     full_schedule_for_barriers,
