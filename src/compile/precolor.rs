@@ -87,7 +87,7 @@ pub(super) fn add_div_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(
     // Collect VRegs defined by X86Idiv/X86Div instructions.
     let mut div_dst_vregs: BTreeSet<VReg> = BTreeSet::new();
     for inst in insts {
-        if !matches!(inst.op, Op::X86Idiv | Op::X86Div) {
+        if !matches!(inst.op, Op::X86Idiv(..) | Op::X86Div(..)) {
             continue;
         }
         div_dst_vregs.insert(inst.dst);

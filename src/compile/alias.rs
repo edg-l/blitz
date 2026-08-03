@@ -210,7 +210,7 @@ impl AliasInfo {
             Op::X86CmpI { .. } => AddrBase::Unknown,
 
             // x86 multiply/divide
-            Op::X86Imul3 | Op::X86Idiv | Op::X86Div => AddrBase::Unknown,
+            Op::X86Imul3 | Op::X86Idiv(..) | Op::X86Div(..) => AddrBase::Unknown,
 
             // x86 conditional move / setcc
             Op::X86Cmov(_) | Op::X86Setcc(_) => AddrBase::Unknown,

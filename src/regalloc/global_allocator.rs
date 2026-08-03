@@ -449,7 +449,7 @@ fn collect_call_div_points(
             if matches!(inst.op, Op::CallResult(_, _) | Op::VoidCallBarrier) {
                 call_points.push((b, i));
             }
-            if matches!(inst.op, Op::X86Idiv | Op::X86Div) {
+            if matches!(inst.op, Op::X86Idiv(..) | Op::X86Div(..)) {
                 div_points.push((b, i));
             }
         }

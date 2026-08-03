@@ -251,14 +251,29 @@ pub fn schedule(dag: &ScheduleDag) -> Vec<ScheduledInst> {
     }
 
     let mut result: Vec<ScheduledInst> = Vec::with_capacity(n);
+    let mut emitted: Vec<bool> = vec![false; n];
 
-    while let Some((_, node_idx)) = ready.pop() {
+    // A division writes its quotient to RAX and its remainder to RDX, and only the
+    // projection reading a result moves it anywhere else. Nothing models that: no
+    // VReg holds those registers in the meantime, so the allocator is free to hand
+    // RAX or RDX to any instruction scheduled in between, and `mov edx,esi` for an
+    // unrelated add destroyed a remainder before its projection ran.
+    //
+    // Emitting a division and its projections as one unit closes the window
+    // instead of narrowing it. A projection's only predecessor is its division, so
+    // it is always ready the moment the division is emitted.
+    let mut emit = |node_idx: usize,
+                    result: &mut Vec<ScheduledInst>,
+                    emitted: &mut Vec<bool>,
+                    remaining_preds: &mut Vec<usize>,
+                    ready: &mut BinaryHeap<(ReadyKey, usize)>| {
         let node = &dag.nodes[node_idx];
         result.push(ScheduledInst {
             op: node.op.clone(),
             dst: node.dst,
             operands: node.operands.clone(),
         });
+        emitted[node_idx] = true;
 
         // Reduce predecessor counts for successors; enqueue newly ready ones.
         for &succ in &dag.succs[node_idx] {
@@ -270,6 +285,43 @@ pub fn schedule(dag: &ScheduleDag) -> Vec<ScheduledInst> {
                     neg_id: -(succ as i64),
                 };
                 ready.push((key, succ));
+            }
+        }
+    };
+
+    while let Some((_, node_idx)) = ready.pop() {
+        if emitted[node_idx] {
+            continue;
+        }
+        emit(
+            node_idx,
+            &mut result,
+            &mut emitted,
+            &mut remaining_preds,
+            &mut ready,
+        );
+
+        if matches!(dag.nodes[node_idx].op, Op::X86Idiv(..) | Op::X86Div(..)) {
+            let div_dst = dag.nodes[node_idx].dst;
+            let projs: Vec<usize> = dag
+                .nodes
+                .iter()
+                .filter(|p| {
+                    matches!(p.op, Op::Proj0 | Op::Proj1)
+                        && p.operands.first() == Some(&div_dst)
+                        && !emitted[p.id]
+                        && remaining_preds[p.id] == 0
+                })
+                .map(|p| p.id)
+                .collect();
+            for p in projs {
+                emit(
+                    p,
+                    &mut result,
+                    &mut emitted,
+                    &mut remaining_preds,
+                    &mut ready,
+                );
             }
         }
     }

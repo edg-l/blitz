@@ -664,7 +664,7 @@ fn collect_call_div_points(insts: &[ScheduledInst]) -> (Vec<usize>, Vec<usize>) 
         if matches!(inst.op, Op::CallResult(_, _) | Op::VoidCallBarrier) {
             call_points.push(i);
         }
-        if matches!(inst.op, Op::X86Idiv | Op::X86Div) {
+        if matches!(inst.op, Op::X86Idiv(..) | Op::X86Div(..)) {
             div_points.push(i);
         }
     }

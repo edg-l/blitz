@@ -264,7 +264,13 @@ fn lower_op(
         // the OpSize is derived from the operand width, not the Flags dst.
         Op::X86CmpI { .. } => unreachable!("X86CmpI handled in lower_block_pure_ops"),
 
-        Op::X86Idiv => {
+        Op::X86Idiv(ty) => {
+            // The width comes from the op, not from `vreg_types`: that map is
+            // built before the splitter runs, so a reload or a re-emitted copy has
+            // no entry and `result_size` falls back to 64 bits. A 64-bit idiv whose
+            // divisor is a negative 32-bit constant, materialized by `mov ecx,imm32`
+            // and so zero-extended, divides by 4294967293 instead of -3.
+            let size = OpSize::from_int_type(ty);
             // Pre-coloring ensures dividend is in RAX.
             // Emit the appropriate sign-extension and idiv for the operand size.
             let divisor = get_op("X86Idiv", operand_regs, 1)?;
@@ -308,7 +314,9 @@ fn lower_op(
             Ok(insts)
         }
 
-        Op::X86Div => {
+        Op::X86Div(ty) => {
+            // Width from the op, for the reason given on `X86Idiv`.
+            let size = OpSize::from_int_type(ty);
             // Pre-coloring ensures dividend is in RAX.
             // Emit xor rdx,rdx (zero-extend) and div for the operand size.
             // For S8, unsigned division operates on AX, so zero-extend AL into AH.
@@ -1063,7 +1071,7 @@ fn lower_op(
 pub(super) fn division_and_proj0_sets(insts: &[ScheduledInst]) -> (BTreeSet<VReg>, BTreeSet<VReg>) {
     let div_dst_vregs = insts
         .iter()
-        .filter(|i| matches!(i.op, Op::X86Idiv | Op::X86Div))
+        .filter(|i| matches!(i.op, Op::X86Idiv(..) | Op::X86Div(..)))
         .map(|i| i.dst)
         .collect();
     let has_proj0_consumer = insts
@@ -1089,7 +1097,39 @@ pub(super) fn lower_block_pure_ops(
     let mut result: Vec<MachInst> = Vec::new();
     let get_reg = |vreg: VReg| -> Option<Reg> { regalloc.vreg_to_reg.get(&vreg).copied() };
 
-    for inst in insts {
+    // Projections handled together with their division rather than on their own
+    // turn. Taking the quotient and the remainder out of RAX and RDX is one
+    // parallel copy: with `mov edx,eax` for the quotient emitted first, the
+    // remainder is gone before the copy that reads it. `sequentialize_copies`
+    // exists for exactly this and breaks the cycle through the scratch register.
+    let mut handled_with_division: BTreeSet<VReg> = BTreeSet::new();
+    for (idx, inst) in insts.iter().enumerate() {
+        if matches!(inst.op, Op::X86Idiv(..) | Op::X86Div(..)) {
+            // The scheduler emits a division and its projections adjacently, so
+            // that nothing can be allocated a register the division still owns.
+            let projs: Vec<&ScheduledInst> = insts[idx + 1..]
+                .iter()
+                .take_while(|p| {
+                    matches!(p.op, Op::Proj0 | Op::Proj1) && p.operands.first() == Some(&inst.dst)
+                })
+                .collect();
+            debug_assert!(
+                !insts[idx + 1 + projs.len()..].iter().any(|p| {
+                    matches!(p.op, Op::Proj0 | Op::Proj1) && p.operands.first() == Some(&inst.dst)
+                }),
+                "a division's projections must follow it directly, or the register                  holding a result can be reallocated before the projection reads it"
+            );
+            for p in projs {
+                handled_with_division.insert(p.dst);
+            }
+        }
+    }
+
+    for (idx, inst) in insts.iter().enumerate() {
+        if handled_with_division.contains(&inst.dst) {
+            continue;
+        }
+
         // Handle stack-passed function parameters (7th+ args in SysV ABI).
         if let Op::Param(param_idx, ty) = &inst.op {
             if !param_vreg_set.contains(&inst.dst)
@@ -1335,6 +1375,38 @@ pub(super) fn lower_block_pure_ops(
             }),
         })?;
         result.extend(machinsts);
+
+        // Take both results out of RAX and RDX as one parallel copy, immediately
+        // after the division. A projection whose destination is the register the
+        // other result still occupies would otherwise destroy it.
+        if let Op::X86Idiv(ty) | Op::X86Div(ty) = &inst.op {
+            let size = OpSize::from_int_type(ty);
+            let mut copies: Vec<(Reg, Reg)> = Vec::new();
+            for p in insts[idx + 1..].iter().take_while(|p| {
+                matches!(p.op, Op::Proj0 | Op::Proj1) && p.operands.first() == Some(&inst.dst)
+            }) {
+                let src = if matches!(p.op, Op::Proj0) {
+                    Reg::RAX
+                } else {
+                    Reg::RDX
+                };
+                // No register means the result is dead here.
+                if let Some(dst) = get_reg(p.dst)
+                    && dst != src
+                {
+                    copies.push((src, dst));
+                }
+            }
+            if !copies.is_empty() {
+                for (src, dst) in crate::x86::abi::sequentialize_copies(&copies, Reg::R11) {
+                    result.push(MachInst::MovRR {
+                        size,
+                        dst: Operand::Reg(dst),
+                        src: Operand::Reg(src),
+                    });
+                }
+            }
+        }
     }
     Ok(result)
 }

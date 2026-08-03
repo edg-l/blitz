@@ -149,14 +149,22 @@ pub enum Op {
     /// Hardware notes:
     /// - Division by zero raises SIGFPE (x86 #DE exception).
     /// - INT_MIN / -1 raises SIGFPE (overflow). Matches C undefined behavior.
-    X86Idiv,
+    ///
+    /// The operand type rides on the op because the width cannot be recovered
+    /// later: `vreg_types` is built before the splitter runs, so a reload or a
+    /// re-emitted copy has no entry there and lowering fell back to 64 bits. A
+    /// 64-bit `idiv` reading a negative 32-bit divisor materialized by `mov
+    /// ecx,imm32` divides by its zero-extension instead.
+    X86Idiv(Type),
 
     /// Unsigned integer division: `div` — takes (dividend, divisor), produces
     /// `Pair(<int_ty>, <int_ty>)` where Proj0 = quotient (RAX), Proj1 = remainder (RDX).
     ///
     /// Hardware notes:
     /// - Division by zero raises SIGFPE (x86 #DE exception).
-    X86Div,
+    ///
+    /// Carries its operand type for the same reason as `X86Idiv`.
+    X86Div(Type),
 
     /// Conditional move — `cmov(cc, flags, t, f)` → `Pair` is not produced; returns the value type.
     X86Cmov(CondCode),
@@ -642,9 +650,13 @@ impl Op {
 
             // ── X86Idiv / X86Div (2 integer children → Pair(I64, I64)) ────────
             // Proj0 = quotient (RAX), Proj1 = remainder (RDX).
-            Op::X86Idiv | Op::X86Div => {
+            Op::X86Idiv(ty) | Op::X86Div(ty) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 let t = &child_types[0];
+                assert_eq!(
+                    t, ty,
+                    "{self:?} operand type disagrees with the type on the op"
+                );
                 assert!(
                     t.is_integer(),
                     "{self:?} requires integer operands, got {t:?}"

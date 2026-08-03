@@ -158,7 +158,7 @@ pub(super) fn assign_barrier_groups(
     // call left in RAX.
     let div_dsts: BTreeSet<VReg> = sched
         .iter()
-        .filter(|i| matches!(i.op, Op::X86Idiv | Op::X86Div))
+        .filter(|i| matches!(i.op, Op::X86Idiv(..) | Op::X86Div(..)))
         .map(|i| i.dst)
         .collect();
     let div_proj_source = |inst: &ScheduledInst| -> Option<VReg> {

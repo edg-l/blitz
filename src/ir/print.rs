@@ -88,8 +88,8 @@ pub fn fmt_op(op: &Op) -> String {
 
         // x86 multiply/divide
         Op::X86Imul3 => "x86_imul3".into(),
-        Op::X86Idiv => "x86_idiv".into(),
-        Op::X86Div => "x86_div".into(),
+        Op::X86Idiv(..) => "x86_idiv".into(),
+        Op::X86Div(..) => "x86_div".into(),
 
         // x86 conditional ops
         Op::X86Cmov(cc) => format!("x86_cmov({cc:?})"),

@@ -93,7 +93,7 @@ pub fn dying_clobber_operands(
 ) -> BTreeSet<usize> {
     let operands: &[VReg] = match inst.op {
         Op::CallResult(_, _) | Op::VoidCallBarrier => &inst.operands,
-        Op::X86Idiv | Op::X86Div => &inst.operands[..inst.operands.len().min(1)],
+        Op::X86Idiv(..) | Op::X86Div(..) => &inst.operands[..inst.operands.len().min(1)],
         _ => &[],
     };
     operands

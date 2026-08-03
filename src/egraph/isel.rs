@@ -39,16 +39,23 @@ fn apply_div_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             continue;
         }
 
-        let (x86_op, use_proj0) = match &snap.op {
-            Op::SDiv => (Op::X86Idiv, true),
-            Op::SRem => (Op::X86Idiv, false),
-            Op::UDiv => (Op::X86Div, true),
-            Op::URem => (Op::X86Div, false),
-            _ => continue,
-        };
-
         let a = snap.children[0];
         let b = snap.children[1];
+
+        // The operand type, not the class type: the class of an SRem is the
+        // remainder's type, which is the same integer type, but taking it from the
+        // operand is what the op documents and what lowering needs.
+        let operand_ty = egraph.class(egraph.unionfind.find_immutable(a)).ty.clone();
+        if !operand_ty.is_integer() {
+            continue;
+        }
+        let (x86_op, use_proj0) = match &snap.op {
+            Op::SDiv => (Op::X86Idiv(operand_ty), true),
+            Op::SRem => (Op::X86Idiv(operand_ty), false),
+            Op::UDiv => (Op::X86Div(operand_ty), true),
+            Op::URem => (Op::X86Div(operand_ty), false),
+            _ => continue,
+        };
 
         // Create (or reuse) X86Idiv/X86Div(a, b) — memo dedup handles sharing.
         let div_node = egraph.add(ENode {
