@@ -943,7 +943,13 @@ impl Op {
     pub fn has_no_result(&self) -> bool {
         matches!(
             self,
-            Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_)
+            Op::StoreBarrier
+                | Op::VoidCallBarrier
+                | Op::TerminatorArgs(_)
+                // A spill store writes memory. Its consumers read the slot back
+                // through a `SpillLoad`, never its `dst`.
+                | Op::SpillStore(_)
+                | Op::XmmSpillStore(_)
         )
     }
 
