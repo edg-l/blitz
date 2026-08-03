@@ -643,25 +643,20 @@ pub fn plan_splits(
     let function_vreg_classes =
         crate::regalloc::build_vreg_classes_from_all_blocks(block_schedules);
 
-    // Block-param split strategy (Phase 6).
-    //
-    // Scan each block for block param VRegs that are live across a call in the
-    // same block. Since all XMM registers are caller-saved, a block param that
-    // is live-in AND there is a call in the block will collide with the call's
-    // clobber set, forcing the allocator into an infeasible coloring. We fix
-    // this by routing the block param's phi copy to a slot in predecessors and
-    // inserting SpillLoad at each use in the block.
+    // Block-param slot routing (Phase 6).
     //
     // Runs before the pressure loop below and claims what it handles in
-    // `planned_victims`: block params need slot routing through their
-    // predecessors' phi copies, which the generic pressure paths cannot
-    // express, so whatever this plans has to win.
-    detect_blockparam_call_crossings(
+    // `planned_victims`: a block parameter is written by its predecessors' phi
+    // copies, so relieving it means changing every predecessor -- which the
+    // generic pressure paths cannot express, so whatever this plans has to win.
+    detect_blockparam_slot_routing(
         func,
         egraph,
         block_schedules,
         class_to_vreg,
         global_liveness,
+        gpr_budget,
+        xmm_budget,
         &mut new_slot_count,
         &mut next_vreg,
         &mut per_block_insertions,
@@ -1013,33 +1008,71 @@ fn format_plan(plan: &SplitPlan) -> String {
     out
 }
 
-// ── Block-param call-crossing detection (Phase 6) ───────────────────────────
+// ── Block-param slot routing (Phase 6) ──────────────────────────────────────
 
-/// Detect XMM block param VRegs that are live in some block containing a call.
+/// The VReg and e-class naming block `bid`'s parameter `pidx` at `entry_point`.
 ///
-/// For each block B with XMM params, check if the param VReg is live-in to
-/// any block that has a call instruction. If so, the param will conflict with
-/// the call's clobber of all XMM regs, causing a chromatic overshoot in the
-/// allocator. We fix this by routing the param through a slot.
+/// `None` when no class covers the entry point, which is a parameter that passes
+/// a dominating definition straight through and has no `BlockParam` of its own.
+fn find_block_param_vreg(
+    egraph: &EGraph,
+    class_to_vreg: &ClassVRegMap,
+    bid: BlockId,
+    pidx: u32,
+    entry_point: ProgramPoint,
+) -> Option<(VReg, ClassId)> {
+    (0..egraph.classes.len() as u32)
+        .map(ClassId)
+        .filter(|&cid| egraph.unionfind.find_immutable(cid) == cid)
+        .find_map(|cid| {
+            let matches =
+                egraph.class(cid).nodes.iter().any(
+                    |node| matches!(node.op, Op::BlockParam(b, p, _) if b == bid && p == pidx),
+                );
+            if !matches {
+                return None;
+            }
+            Some((class_to_vreg.lookup(cid, entry_point)?, cid))
+        })
+}
+
+/// Route block parameters through stack slots when they cannot all hold
+/// registers.
 ///
-/// For each such param:
+/// Two reasons a parameter must leave the register file, and neither is
+/// something the pressure loop below can express -- a parameter is written by
+/// its predecessors' phi copies, so relieving it means changing every
+/// predecessor, not inserting a reload here:
+///
+/// - **It is live in a block containing a call, and it is an XMM value.** Every
+///   XMM register is caller-saved, so the parameter interferes with the call's
+///   clobber set and no colouring exists.
+/// - **Its block has more parameters of one class than there are registers for
+///   that class.** `add_block_param_interferences` makes every parameter of a
+///   block interfere with every other of its class, because the phi copies write
+///   them simultaneously. That clique is real and its width is fixed by the
+///   block, so a block with 16 GPR parameters against 14 registers is
+///   uncolourable no matter what else is spilled. A generated loop carrying 28
+///   values produces exactly that.
+///
+/// For each parameter routed:
 /// 1. Allocate a spill slot.
-/// 2. Insert `XmmSpillLoad` before each use of the param VReg in EVERY block
-///    where the param is live AND has uses (covers both the block defining the
-///    param and any blocks where it appears as a live-in).
-/// 3. Record in `slot_spilled_params` so `lower_terminator` emits a slot
-///    store in each predecessor's phi copies (for forward edges only —
-///    the back-edge skips the store since the slot is already populated and
-///    the param's arg VReg has no register on the back-edge).
-/// 4. `apply_plan_to` truncates the param's segment to start after
+/// 2. Insert a reload before each use of the parameter VReg in EVERY block where
+///    it appears as a schedule operand (covers both the block defining the
+///    parameter and any block where it is a live-in).
+/// 3. Record it in `slot_spilled_params`, which is what makes each predecessor
+///    store to the slot instead of copying to a register.
+/// 4. `apply_plan_to` truncates the parameter's segment to start after
 ///    `BLOCK_ENTRY(param_block_idx)` so no register is allocated to it.
 #[allow(clippy::too_many_arguments)]
-fn detect_blockparam_call_crossings(
+fn detect_blockparam_slot_routing(
     func: &Function,
     egraph: &EGraph,
     block_schedules: &[Vec<ScheduledInst>],
     class_to_vreg: &ClassVRegMap,
     global_liveness: &GlobalLiveness,
+    gpr_budget: u32,
+    xmm_budget: u32,
     new_slot_count: &mut u32,
     next_vreg: &mut u32,
     per_block_insertions: &mut [Vec<(usize, ScheduledInst)>],
@@ -1060,12 +1093,6 @@ fn detect_blockparam_call_crossings(
         })
         .collect();
 
-    if call_blocks.is_empty() {
-        return;
-    }
-
-    // For each block with XMM params, check if the param VReg is live in
-    // a block that has a call.
     for block_idx in 0..n_blocks.min(func.blocks.len()) {
         let block = &func.blocks[block_idx];
         if block.param_types.is_empty() {
@@ -1074,53 +1101,73 @@ fn detect_blockparam_call_crossings(
 
         let entry_point = ProgramPoint::block_entry(block_idx);
 
-        for pidx in 0..block.param_types.len() as u32 {
-            // Only handle XMM (float) params.
-            if !block.param_types[pidx as usize].is_float() {
+        // Every parameter of this block that still holds a register, with the
+        // class and VReg naming it. Collected first because the over-budget
+        // decision is about the set, not about one parameter.
+        let params: Vec<(u32, RegClass, VReg, ClassId)> = (0..block.param_types.len() as u32)
+            .filter(|&pidx| {
+                // Already routed through a slot by an earlier round. Spilling it
+                // again would allocate a second slot, and only the newer entry
+                // survives in `slot_spilled_params` -- so predecessors would
+                // store to one slot while the earlier round's reloads read the
+                // other.
+                !already_slot_spilled.contains_key(&(block.id, pidx))
+            })
+            .filter_map(|pidx| {
+                let (vreg, cid) =
+                    find_block_param_vreg(egraph, class_to_vreg, block.id, pidx, entry_point)?;
+                let class = if block.param_types[pidx as usize].is_float() {
+                    RegClass::XMM
+                } else {
+                    RegClass::GPR
+                };
+                Some((pidx, class, vreg, cid))
+            })
+            .collect();
+
+        // How many parameters of each class have to go, so that what is left of
+        // the clique fits the register file. The budget is the only dial: the
+        // clique's width is decided by the block, and every parameter in it is
+        // written at the same point.
+        let mut over_budget: BTreeMap<RegClass, usize> = BTreeMap::new();
+        for (class, budget) in [(RegClass::GPR, gpr_budget), (RegClass::XMM, xmm_budget)] {
+            let n = params.iter().filter(|&&(_, c, _, _)| c == class).count();
+            over_budget.insert(class, n.saturating_sub(budget as usize));
+        }
+
+        // Cheapest first: a parameter read fewer times in this block costs fewer
+        // reloads to route. Ties by index, so the choice is deterministic.
+        let mut by_cost: Vec<&(u32, RegClass, VReg, ClassId)> = params.iter().collect();
+        by_cost.sort_by_key(|&&(pidx, _, vreg, _)| {
+            let uses: usize = block_schedules
+                .iter()
+                .flatten()
+                .map(|inst| inst.operands.iter().filter(|&&v| v == vreg).count())
+                .sum();
+            (uses, pidx)
+        });
+        let mut chosen_for_pressure: BTreeSet<u32> = BTreeSet::new();
+        for &&(pidx, class, _, _) in &by_cost {
+            let remaining = over_budget.get_mut(&class).expect("both classes seeded");
+            if *remaining == 0 {
                 continue;
             }
+            *remaining -= 1;
+            chosen_for_pressure.insert(pidx);
+        }
 
-            // Already routed through a slot by an earlier round. Spilling it
-            // again would allocate a second slot, and only the newer entry
-            // survives in `slot_spilled_params` -- so predecessors would store
-            // to one slot while the earlier round's reloads read the other.
-            if already_slot_spilled.contains_key(&(block.id, pidx)) {
-                continue;
-            }
+        for &(pidx, reg_class, param_vreg, param_class) in &params {
+            // An XMM parameter live in a block that contains a call has no
+            // colouring at all: every XMM register is caller-saved, so it
+            // interferes with the clobber set wherever it is live.
+            let crosses_call = reg_class == RegClass::XMM
+                && !call_blocks.is_empty()
+                && call_blocks.iter().any(|&call_bi| {
+                    call_bi < global_liveness.live_in.len()
+                        && global_liveness.live_in[call_bi].contains(&param_vreg)
+                });
 
-            // Find the ClassId and VReg for this BlockParam.
-            let mut param_vreg_and_class: Option<(VReg, ClassId)> = None;
-            'outer: for i in 0..egraph.classes.len() as u32 {
-                let cid = ClassId(i);
-                let canon = egraph.unionfind.find_immutable(cid);
-                if canon != cid {
-                    continue;
-                }
-                let class = egraph.class(cid);
-                for node in &class.nodes {
-                    if let Op::BlockParam(bid, pidx2, _) = &node.op
-                        && *bid == block.id
-                        && *pidx2 == pidx
-                        && let Some(vreg) = class_to_vreg.lookup(cid, entry_point)
-                    {
-                        param_vreg_and_class = Some((vreg, cid));
-                        break 'outer;
-                    }
-                }
-            }
-
-            let (param_vreg, param_class) = match param_vreg_and_class {
-                Some(p) => p,
-                None => continue,
-            };
-
-            // Check if this param VReg is live-in to any call block.
-            let is_live_in_call_block = call_blocks.iter().any(|&call_bi| {
-                call_bi < global_liveness.live_in.len()
-                    && global_liveness.live_in[call_bi].contains(&param_vreg)
-            });
-
-            if !is_live_in_call_block {
+            if !crosses_call && !chosen_for_pressure.contains(&pidx) {
                 continue;
             }
 
@@ -1128,7 +1175,7 @@ fn detect_blockparam_call_crossings(
             let slot = *new_slot_count as i64;
             *new_slot_count += 1;
 
-            // Insert XmmSpillLoad before each use of param_vreg in EVERY block
+            // Insert a reload before each use of param_vreg in EVERY block
             // where it appears as a schedule operand.
             for other_block_idx in 0..n_blocks {
                 let schedule = &block_schedules[other_block_idx];
@@ -1153,7 +1200,10 @@ fn detect_blockparam_call_crossings(
                     *next_vreg += 1;
 
                     let load_inst = ScheduledInst {
-                        op: Op::XmmSpillLoad(slot),
+                        op: match reg_class {
+                            RegClass::XMM => Op::XmmSpillLoad(slot),
+                            RegClass::GPR => Op::SpillLoad(slot),
+                        },
                         dst: reload_vreg,
                         operands: vec![],
                     };
@@ -1166,15 +1216,15 @@ fn detect_blockparam_call_crossings(
                 }
             }
 
-            // Record this param for slot-spill so lower_terminator can emit
-            // slot stores in phi copies for forward edges (back-edges with no
-            // register for the arg will be skipped automatically in build_phi_copies).
+            // Record this param so each predecessor stores to the slot instead
+            // of copying to a register (a back edge whose argument is the
+            // parameter itself needs no store at all: the slot already holds it).
             slot_spilled_params.insert(
                 (block.id, pidx),
                 SlotSpilledParamInfo {
                     vreg: param_vreg,
                     slot,
-                    reg_class: RegClass::XMM,
+                    reg_class,
                     block_idx,
                 },
             );

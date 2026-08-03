@@ -648,6 +648,28 @@ pub(crate) fn terminator_arg_classes(terminator: &EffectfulOp) -> Vec<ClassId> {
     }
 }
 
+/// The `(successor, parameter index)` each terminator argument feeds, in the
+/// same numbering as [`terminator_arg_classes`].
+///
+/// A `Ret`'s value feeds no parameter, so a `Ret` yields nothing.
+pub(crate) fn terminator_arg_destinations(terminator: &EffectfulOp) -> Vec<(BlockId, u32)> {
+    let edges: Vec<(BlockId, usize)> = match terminator {
+        EffectfulOp::Jump { target, args } => vec![(*target, args.len())],
+        EffectfulOp::Branch {
+            bb_true,
+            bb_false,
+            true_args,
+            false_args,
+            ..
+        } => vec![(*bb_true, true_args.len()), (*bb_false, false_args.len())],
+        _ => Vec::new(),
+    };
+    edges
+        .into_iter()
+        .flat_map(|(target, n)| (0..n as u32).map(move |pidx| (target, pidx)))
+        .collect()
+}
+
 /// Append the block's terminator arguments to its schedule as a single
 /// [`Op::TerminatorArgs`] pseudo-instruction.
 ///

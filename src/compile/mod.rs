@@ -1232,6 +1232,79 @@ pub fn compile(
                 }
             }
 
+            // An argument whose destination parameter lives in a slot becomes its
+            // own store, and stops being an operand of `Op::TerminatorArgs`.
+            //
+            // That is the whole point of routing the parameter. As an operand it
+            // sits in the terminator's parallel copy, which needs every argument
+            // readable at one point -- so sixteen slot-bound arguments still ask
+            // for sixteen registers at once and the clique the routing was meant
+            // to break is back one instruction later. A store to a slot clobbers
+            // no other argument's register, so these can go one at a time, and as
+            // ordinary instructions with one operand each that is exactly what
+            // liveness then sees.
+            //
+            // `build_phi_copies` needs no matching change: an argument index with
+            // no operand is already the signal that the value travels through a
+            // slot and the store is already in this block.
+            for (block_idx, block) in func.blocks.iter().enumerate() {
+                let terminator = block.ops.last().expect("block must have terminator");
+                let dests = barrier::terminator_arg_destinations(terminator);
+                let stores: Vec<(VReg, split::SlotSpilledParamInfo)> =
+                    barrier::terminator_arg_operands(&block_schedules[block_idx])
+                        .into_iter()
+                        .filter_map(|(arg_idx, vreg)| {
+                            let &(target, pidx) = dests.get(arg_idx as usize)?;
+                            Some((vreg, slot_spilled_params.get(&(target, pidx))?.clone()))
+                        })
+                        .collect();
+                if stores.is_empty() {
+                    continue;
+                }
+                let schedule = &mut block_schedules[block_idx];
+                let store_vregs: BTreeSet<VReg> = stores.iter().map(|&(v, _)| v).collect();
+                barrier::remove_terminator_arg_operands(schedule, &store_vregs);
+
+                // Each store goes immediately after the last point its value is
+                // needed for anything else -- its definition, or a later use.
+                // Putting them all at the end instead relieves nothing: the value
+                // is live until the instruction that reads it, so sixteen stores
+                // at the end keep sixteen registers occupied until the end,
+                // exactly as the terminator operands did.
+                let last_needed = |vreg: VReg, sched: &[ScheduledInst]| -> usize {
+                    sched
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, inst)| {
+                            !matches!(inst.op, Op::TerminatorArgs(_))
+                                && (inst.dst == vreg || inst.operands.contains(&vreg))
+                        })
+                        .map(|(i, _)| i + 1)
+                        .max()
+                        .unwrap_or(0)
+                };
+                let mut planned: Vec<(usize, ScheduledInst)> = stores
+                    .into_iter()
+                    .map(|(vreg, info)| {
+                        let store = ScheduledInst {
+                            op: match info.reg_class {
+                                crate::x86::reg::RegClass::XMM => Op::XmmSpillStore(info.slot),
+                                crate::x86::reg::RegClass::GPR => Op::SpillStore(info.slot),
+                            },
+                            dst: VReg(next_vreg),
+                            operands: vec![vreg],
+                        };
+                        next_vreg += 1;
+                        (last_needed(vreg, schedule), store)
+                    })
+                    .collect();
+                // Descending, so an insertion never moves a position not yet used.
+                planned.sort_by(|a, b| b.0.cmp(&a.0));
+                for (at, store) in planned {
+                    schedule.insert(at.min(schedule.len()), store);
+                }
+            }
+
             // The plan rewrote terminator operands to its reload VRegs, and the
             // slot-routed ones are gone, so re-reading the schedules is what
             // makes a spilled value stop being live out.
