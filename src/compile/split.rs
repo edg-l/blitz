@@ -163,6 +163,31 @@ fn compute_local_liveness(
         result[i] = live.clone();
     }
 
+    // Every parameter of the block is written by the phi copies on the edge, so
+    // all of them hold registers before the block's first instruction runs. A
+    // `BlockParam` is only a marker for where the value is named, and the
+    // scheduler puts the markers wherever the dependence order allows, so the
+    // backward scan above reads almost nothing as live across the run of markers
+    // -- at exactly the point where a whole parallel copy is resident.
+    //
+    // `add_block_param_interferences` asserts the same thing to the colorer.
+    // Leaving it out here is what let the colorer need a register the splitter
+    // had never been asked to free.
+    let shadow_end = schedule
+        .iter()
+        .rposition(|inst| matches!(inst.op, Op::BlockParam(..)))
+        .map_or(0, |i| i + 1);
+    if shadow_end > 0 {
+        let params: Vec<VReg> = schedule[..shadow_end]
+            .iter()
+            .filter(|inst| matches!(inst.op, Op::BlockParam(..)))
+            .map(|inst| inst.dst)
+            .collect();
+        for live in result[..shadow_end].iter_mut() {
+            live.extend(params.iter().copied());
+        }
+    }
+
     // Suppress unused variable warning for block_idx (kept for callers that need it).
     let _ = block_idx;
 
@@ -1165,6 +1190,10 @@ fn detect_blockparam_slot_routing(
         }
     }
 
+    // Must match what the allocator uses, or this measures a different graph
+    // than the one being colored.
+    let vreg_classes = crate::regalloc::build_vreg_classes_from_all_blocks(block_schedules);
+
     // Which VRegs must leave the register file.
     let mut route: BTreeSet<VReg> = BTreeSet::new();
 
@@ -1190,17 +1219,32 @@ fn detect_blockparam_slot_routing(
     // of spilling elsewhere makes it colourable -- a generated loop carrying 28
     // values gives a block 16 GPR parameters against 14 registers.
     //
-    // Cut to the budget and no further. The clique is the parameters plus
-    // everything else live in at that point, and making the parameters absorb the
-    // rest is both wrong and unnecessary: the other values are ordinary ones the
-    // pressure loop below can spill. Deriving the target from `budget - other
-    // live-ins` collapses to "route every parameter" as soon as the other live-ins
-    // fill the budget, and that miscompiled findings the corpus covers.
+    // Cut to the budget, less whatever else the block names before its last
+    // `BlockParam`. Those are the only values the parameters cannot share a
+    // register with and the pressure loop cannot help: each one lives and dies
+    // inside the run of markers, where the loop's own remedy -- spill it and
+    // reload it there -- puts another value in the same place. Everything live
+    // further into the block is an ordinary value the loop below can spill, and
+    // deriving the target from *those* collapses to "route every parameter" as
+    // soon as they fill the budget, which miscompiled findings the corpus covers.
     for block_idx in 0..n_blocks.min(func.blocks.len()) {
         let params = &block_param_vregs[block_idx];
         if params.is_empty() {
             continue;
         }
+        let shadow_end = block_schedules[block_idx]
+            .iter()
+            .rposition(|inst| matches!(inst.op, Op::BlockParam(..)))
+            .map_or(0, |i| i + 1);
+        let shadow_others: BTreeSet<VReg> = block_schedules[block_idx][..shadow_end]
+            .iter()
+            .flat_map(|inst| {
+                let dst = (!inst.op.has_no_result() && !matches!(inst.op, Op::BlockParam(..)))
+                    .then_some(inst.dst);
+                dst.into_iter().chain(inst.operands.iter().copied())
+            })
+            .filter(|v| !params.contains(v))
+            .collect();
         // Cheapest first: a parameter read fewer times costs fewer reloads to
         // route. Ties by VReg, so the choice is deterministic.
         let mut by_cost: Vec<VReg> = params.iter().copied().collect();
@@ -1214,7 +1258,11 @@ fn detect_blockparam_slot_routing(
         });
         for (class, budget) in [(RegClass::GPR, gpr_budget), (RegClass::XMM, xmm_budget)] {
             let of_class = |v: &VReg| groups.get(v).is_some_and(|g| g.reg_class == class);
-            let room = budget as usize;
+            let others = shadow_others
+                .iter()
+                .filter(|v| vreg_classes.get(v).copied() == Some(class))
+                .count();
+            let room = (budget as usize).saturating_sub(others);
             let mut holding = by_cost
                 .iter()
                 .filter(|v| of_class(v) && !route.contains(v))

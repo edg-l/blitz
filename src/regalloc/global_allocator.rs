@@ -131,14 +131,30 @@ pub(crate) struct Phase3State {
     alias_map: BTreeMap<u32, u32>,
 }
 
-/// Add pairwise interference between all block_params of each block. Phi
-/// copies at block entry write distinct values into each param, so even if
-/// two params have disjoint schedule-level live ranges (e.g. both unused in
-/// the block body), they must occupy distinct registers during the copy
-/// sequence.
+/// Add the interferences a block's parameters have that their `BlockParam`
+/// instructions do not express.
+///
+/// Every parameter of a block is written by the phi copies on the edge, before
+/// the block's first instruction runs. A `BlockParam` is only a marker for the
+/// value, and the scheduler puts those markers wherever the dependence order
+/// allows -- so the schedule's own live ranges understate what the parallel copy
+/// has already done, in two ways.
+///
+/// **Between parameters.** Two parameters unused in the block body have disjoint
+/// schedule-level ranges, yet the copy writes both, so they need distinct
+/// registers.
+///
+/// **Between a parameter and anything the block does before that parameter's
+/// marker.** A value defined and dead again ahead of the marker looks free to
+/// take the parameter's register, and the register already holds the parameter:
+/// a splitter store/reload pair inserted after the first parameter's marker read
+/// a slot into RAX while RAX held the seventeenth parameter, whose marker came
+/// twelve instructions later. Nothing downstream could see it -- RAX was written
+/// before it was read, and no two *modelled* ranges overlapped.
 fn add_block_param_interferences(
     graph: &mut InterferenceGraph,
     block_param_vregs_per_block: &[BTreeSet<VReg>],
+    block_schedules: &[Vec<ScheduledInst>],
     alias_map: &BTreeMap<u32, u32>,
 ) {
     let resolve = |v: VReg| -> VReg {
@@ -151,27 +167,51 @@ fn add_block_param_interferences(
         }
         VReg(idx)
     };
-    for params in block_param_vregs_per_block {
+    let interfere = |a: VReg, b: VReg, graph: &mut InterferenceGraph| {
+        let (a, b) = (a.0 as usize, b.0 as usize);
+        if a == b || a >= graph.num_vregs || b >= graph.num_vregs {
+            return;
+        }
+        if graph.reg_class[a] == graph.reg_class[b] {
+            graph.adj[a].insert(b);
+            graph.adj[b].insert(a);
+        }
+    };
+    for (bi, params) in block_param_vregs_per_block.iter().enumerate() {
         let mut seen: BTreeSet<VReg> = BTreeSet::new();
         let unique: Vec<VReg> = params
             .iter()
             .map(|&p| resolve(p))
             .filter(|&v| seen.insert(v))
             .collect();
-        if unique.len() < 2 {
-            continue;
-        }
         for i in 0..unique.len() {
             for j in (i + 1)..unique.len() {
-                let a = unique[i].0 as usize;
-                let b = unique[j].0 as usize;
-                if a >= graph.num_vregs || b >= graph.num_vregs {
-                    continue;
-                }
-                if graph.reg_class[a] == graph.reg_class[b] {
-                    graph.adj[a].insert(b);
-                    graph.adj[b].insert(a);
-                }
+                interfere(unique[i], unique[j], graph);
+            }
+        }
+
+        // Everything named before the last `BlockParam` of the block is inside
+        // the parallel copy's shadow. A pseudo-op's `dst` is excluded: it names
+        // no value and takes no register.
+        let Some(sched) = block_schedules.get(bi) else {
+            continue;
+        };
+        let Some(last_marker) = sched
+            .iter()
+            .rposition(|inst| matches!(inst.op, Op::BlockParam(..)))
+        else {
+            continue;
+        };
+        let mut in_shadow: BTreeSet<VReg> = BTreeSet::new();
+        for inst in &sched[..=last_marker] {
+            if !matches!(inst.op, Op::BlockParam(..)) && !inst.op.has_no_result() {
+                in_shadow.insert(resolve(inst.dst));
+            }
+            in_shadow.extend(inst.operands.iter().map(|&v| resolve(v)));
+        }
+        for &param in &unique {
+            for &other in &in_shadow {
+                interfere(param, other, graph);
             }
         }
     }
@@ -846,6 +886,7 @@ fn run_phase3(
     add_block_param_interferences(
         &mut rebuilt.graph,
         &renamed_block_param_vregs,
+        &post_coalesce_schedules,
         &alias_map_early,
     );
 
@@ -1570,6 +1611,7 @@ pub fn allocate_global(
     add_block_param_interferences(
         &mut phase2.graph,
         block_param_vregs_per_block,
+        block_schedules,
         &BTreeMap::new(),
     );
 
