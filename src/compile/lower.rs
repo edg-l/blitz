@@ -1323,7 +1323,7 @@ pub(super) fn lower_block_pure_ops(
             &inst.operands,
             &op_regs,
             result_size,
-            &div_dst_vregs,
+            div_dst_vregs,
         )
         .map_err(|msg| CompileError {
             phase: "lowering".into(),
