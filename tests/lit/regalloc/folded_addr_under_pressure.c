@@ -1,65 +1,26 @@
-// KNOWN FAILING under BLITZ_VERIFY only -- the answer is right, the allocation
-// is not. Do not "fix" by weakening it.
+// Regression test: a folded address, a cross-block spill and a block parameter
+// in one high-pressure function, printing 303 at both levels.
 //
-// It prints 303 and matches cc at both levels, so it cannot go in tests/lit:
-// `BLITZ_VERIFY=strict bash tests/lit/run_tests.sh` has to stay green, and this
-// program trips the register-sharing verifier:
+// Was KNOWN FAILING three times over, each time for a different reason in the
+// same seam. A Load resolved its address to the register holding its own array
+// index, so it read `[rax+rax*1]`, fixed by making the leading operands of a
+// barrier positional. Then a store's address register was overwritten before the
+// store read it, because Phase 7 computed a second barrier-group assignment on
+// the post-allocation schedule and emitted in that order instead of the one
+// liveness was measured against; fixed by stopping the double grouping. Then it
+// could not allocate at all -- `gpr_overshoot=2` at -O0 and 18 at -O1 -- until a
+// loop-carried value could stay in a stack slot across the loop.
+//
+// What kept it out of tests/lit last was `BLITZ_VERIFY=strict`:
 //
 //   block 0 exit: VReg 20 and VReg 779 are both live and both hold RBX
 //
-// That is the latent violation family the seed 7 reduction also shows (VReg 9 and
-// VReg 1056 in RBX), and this is a smaller handle on it: 60 lines, deterministic,
-// and the report names a block exit rather than a mid-block point.
+// which was the checker's own doing. VReg 20 is the constant 0, dead where block 0
+// defines it and written by the phi copy at the edge into the block that has it as
+// a parameter; the check propagated successor parameters into a predecessor's
+// live-out where the allocator does not.
 //
-// The two bugs it was originally kept for are both gone. The wrong-code bug -- a
-// load's address resolving to its own index constant, so the load read
-// `[rax+rax*1]` -- was fixed earlier; the register pressure that stopped it after
-// that (`gpr_overshoot=2` at -O0, 18 at -O1) is gone now that a loop-carried value
-// can stay in a slot across the loop. Promote it to tests/lit the moment the
-// sharing violation is fixed.
-//
-// Was KNOWN FAILING. The wrong-code bug was fixed earlier; what still stopped the
-// program was register pressure -- `gpr_overshoot=2` at -O0 and 18 at -O1 -- and
-// that is gone now that a loop-carried value can stay in a slot across the loop.
-//
-//   cc -O0          303
-//   blitz -O0       cannot allocate registers (gpr_overshoot=2)
-//   blitz -O1       cannot allocate registers (gpr_overshoot=18)
-//
-// It used to SIGSEGV at -O0, for the reason set out below. The wrong-code bug
-// that caused it is fixed; what stops this program now is register pressure
-// only, which is ROADMAP P0 and shared with most of the fuzz corpus. Keeping the
-// file: the moment the allocator gains a spill path, this is the first program
-// to re-check, and the analysis below is still the record of the seam.
-//
-// tests/fuzz/gen_c.py seed 4. Reaches codegen only since the barrier-group pin
-// rule started scanning the un-stripped schedule; before that the splitter left
-// an overshoot the allocator rejected, so this never compiled.
-//
-// The name is now historical. It first failed because a Load resolved its
-// address to the register holding its own array index -- barrier operands were
-// an unordered set and lowering had to guess which member was the address.
-// 437fd60 made the leading operands positional, so the address is read
-// correctly, and what remains is the *other* defect in the same seam:
-//
-//   b9 07 00 00 00    mov  ecx,0x7                ; an index constant
-//   48 89 8c ...      mov  QWORD PTR [rsp+..],rcx ; spill it
-//   89 39             mov  DWORD PTR [rcx],edi    ; store through RCX
-//
-// RCX held the store's address and is overwritten before the store reads it.
-// The allocator did not see the two ranges interfere because it measured
-// liveness on the schedule as ordered before allocation, while Phase 7 computes
-// a *second* barrier-group assignment on the post-allocation schedule and emits
-// in that order instead. Where the two groupings disagree, a value is emitted
-// somewhere its interference was never measured.
-//
-// That was fixed by stopping the double grouping (ae55ce9): the schedule handed
-// to the allocator is already ordered by barrier group, so Phase 7 emits in it
-// and places each effectful op at its own barrier instruction.
-//
-// The program the same reduction produced,
-// tests/lit/regalloc/seed6_truncated_guard_values.c, is correct now and is a lit
-// test. Seed 7 still gives a wrong answer at -O0.
+// 127 lines, from gen_c.py seed 4.
 //
 // OUTPUT: 303
 extern int printf(char* fmt, int x);

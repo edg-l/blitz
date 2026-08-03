@@ -1,12 +1,14 @@
-// KNOWN FAILING -- unreduced reproducer. Do not "fix" by weakening it.
+// Regression test: a float sum that the program's own guard rejected, printing 167
+// at both levels.
 //
-//   cc -O0 and cc -O2   167
-//   blitz -O0            exits 3 (the program's own guard rejected its float sum)
-//   blitz -O1            cannot allocate registers (ROADMAP P0)
+// Was KNOWN FAILING -- blitz exited 3 at -O0, the guard's own verdict on a wrong
+// sum, and could not allocate at all at -O1 -- against 167 from cc at -O0 and -O2.
+// Correct at both levels since the block-parameter slot routing and the
+// phi-destination fix landed.
 //
 // tests/fuzz/gen_c.py seed 23, shape mixed, saved verbatim: the generator was
-// fixed after this (loop counters are no longer assignment targets), so the
-// same seed no longer produces this program. Not yet reduced.
+// fixed after this (loop counters are no longer assignment targets), so the same
+// seed no longer produces this program.
 //
 // EXIT: 0
 // OUTPUT: 167

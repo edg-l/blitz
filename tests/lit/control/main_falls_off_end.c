@@ -1,35 +1,24 @@
-// KNOWN FAILING under BLITZ_VERIFY only -- the answer is right, the allocation
-// is not. Do not "fix" by weakening it.
+// Regression test: `main` falling off its end returns 0 (C99 5.1.2.2.3).
 //
-// `main` falling off its end must return 0 (C99 5.1.2.2.3), and it now does; blitz
-// used to exit 8 at -O0 and 223 at -O1, whatever happened to be in EAX. But the
-// program cannot go in tests/lit, because `BLITZ_VERIFY=strict` has to stay green
-// there and this trips the register-sharing verifier twice:
+// Was KNOWN FAILING twice over. blitz first exited 8 at -O0 and 223 at -O1 --
+// whatever happened to be in EAX -- and not for want of a `return`: a six-line
+// `main` with one `if` returns 0 correctly, so it takes this much surrounding
+// code. Once the exit status was right the program still could not go in
+// tests/lit, because `BLITZ_VERIFY=strict` reported two register-sharing
+// violations in one function:
 //
 //   block 0 exit: VReg 1 and VReg 336 are both live and both hold RCX
 //   block 0 before [45] StoreBarrier: VReg 0 and VReg 1 are both live and both hold RCX
 //
-// Same family as the seed 7 reduction (VReg 9 and VReg 1056 in RBX). Two reports
-// in one function, one of them at a named instruction, make this the better place
-// to start on it. Promote it to tests/lit once that is fixed.
+// Both were the checker's, not the allocator's: VReg 1 is the constant 0, dead
+// where block 0 defines it and written by the phi copy at the edge into the
+// block that has it as a parameter, and the check propagated successor
+// parameters into a predecessor's live-out where the allocator does not.
 //
-// Was KNOWN FAILING -- blitz exited 8 at -O0 and 223 at -O1, whatever happened to
-// be in EAX. Not a blanket missing-return: a six-line main returned 0 correctly,
-// so it took this much surrounding code.
-//
-// `main` falls off its end, which C99 5.1.2.2.3 defines as returning 0. cc exits
-// 0; blitz exits 8 at -O0 and 223 at -O1, so whatever happens to be in EAX is
-// what the process returns.
-//
-// Not a blanket missing-return: a six-line main with one `if` returns 0 correctly.
-// It takes this much surrounding code, so the implicit `return 0` is being emitted
-// and then EAX is clobbered, or the return is dropped on one path through this
-// CFG. Start by asking whether the exit block has a `mov eax,0` at all.
-//
-// Found while reducing fuzz seed 7: with the printf deleted the reducer drifted
-// onto this instead, and reduce.py was right to accept it -- the program is
-// well-defined and blitz gets it wrong. `-Werror=return-type` does not catch it
-// because falling off the end of `main` is legal.
+// 76 lines, from gen_c.py seed 7's reduction: with the printf deleted the reducer
+// drifted onto this, and it was right to accept it -- the program is well-defined
+// and blitz got it wrong. `-Werror=return-type` does not catch it, because
+// falling off the end of `main` is legal.
 //
 // EXIT: 0
 extern int printf(char* fmt, int x);

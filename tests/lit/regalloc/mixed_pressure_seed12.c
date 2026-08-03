@@ -1,12 +1,13 @@
-// KNOWN FAILING -- unreduced reproducer. Do not "fix" by weakening it.
+// Regression test: a wide mixed-signature program under enough pressure to spill,
+// printing 326 at both levels.
 //
-//   cc -O0 and cc -O2   326
-//   blitz -O0            prints -3233
-//   blitz -O1            cannot allocate registers (ROADMAP P0)
+// Was KNOWN FAILING -- blitz printed -3233 at -O0 and could not allocate at all
+// at -O1 -- against 326 from cc at -O0 and -O2. Correct at both levels since the
+// block-parameter slot routing and the phi-destination fix landed.
 //
 // tests/fuzz/gen_c.py seed 12, shape mixed, saved verbatim: the generator was
-// fixed after this (loop counters are no longer assignment targets), so the
-// same seed no longer produces this program. Not yet reduced.
+// fixed after this (loop counters are no longer assignment targets), so the same
+// seed no longer produces this program.
 //
 // EXIT: 0
 // OUTPUT: 326
