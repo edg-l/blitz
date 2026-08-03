@@ -467,6 +467,13 @@ fn build_phi_copies(
     let trace = crate::trace::is_enabled("phi") && crate::trace::fn_matches(&func.name);
 
     let mut copies = Vec::new();
+    // Two parameters of one block can be the same e-class, and then they are one
+    // value in one register: `propagate_block_params` merges a parameter with its
+    // incoming argument for single-predecessor blocks when that argument is
+    // constant, so two parameters carrying the same constant collapse onto the
+    // same class. The second copy would write the value its destination already
+    // holds, and a parallel copy cannot express two writes to one register.
+    let mut params_copied: BTreeMap<ClassId, usize> = BTreeMap::new();
     for (param_idx, &arg_cid) in args.iter().enumerate() {
         let param_cid = block_param_map
             .get(&(target, param_idx as u32))
@@ -478,6 +485,18 @@ fn build_phi_copies(
                 ),
                 location: None,
             })?;
+        let canon_param = egraph.unionfind.find_immutable(param_cid);
+        if let Some(&first_idx) = params_copied.get(&canon_param) {
+            if trace {
+                tracing::debug!(
+                    target: "blitz::phi",
+                    "[{}] b{src_block_idx} -> {target} p{param_idx}: param {canon_param:?} \
+                     is also p{first_idx} -- one value, one copy, SKIPPED",
+                    func.name,
+                );
+            }
+            continue;
+        }
 
         let canon_arg = egraph.unionfind.find_immutable(arg_cid);
         // The operand the schedule carries is the answer, not a hint. It is the
@@ -547,7 +566,6 @@ fn build_phi_copies(
         // slot already contains the correct value from the forward-edge store.
         // Skip the store; re-storing from an incorrect register would clobber it.
         if let Some(info) = slot_spilled_params.get(&(target, param_idx as u32)) {
-            let canon_param = egraph.unionfind.find_immutable(param_cid);
             if trace {
                 tracing::debug!(
                     target: "blitz::phi",
@@ -565,6 +583,7 @@ fn build_phi_copies(
                     slot: info.slot,
                     size,
                 });
+                params_copied.insert(canon_param, param_idx);
             }
             // If canon_arg == canon_param: back-edge with unchanged value; slot
             // already has the right value from the forward edge. Skip.
@@ -623,6 +642,7 @@ fn build_phi_copies(
                     );
                 }
                 copies.push(PhiCopy::Reg(src_reg, dst_reg, size));
+                params_copied.insert(canon_param, param_idx);
             }
             None => {
                 // Legacy path: param flows through cross-block spill slot.
