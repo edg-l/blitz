@@ -32,9 +32,9 @@ rather than overhead against it.
 
 ## Current state (2026-08-03)
 
-- 924 Rust tests + 438 lit tests, all green. `cargo fmt` clean.
+- 924 Rust tests + 440 lit tests, all green. `cargo fmt` clean.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 280 tests compared O0-vs-O1 and against a
+- `bash tests/lit/run_diff.sh`: 281 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
 - Generated programs, 60 seeds per shape, per (seed, level) pair: `mixed` 58/60,
   `args` 53/60, `pressure` 24/60. **Every remaining failure on every shape is
