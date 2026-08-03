@@ -17,36 +17,39 @@
 // running total; v14 arrives as -3 where 21 (`v14 = v7`) is right, and -24 is the
 // whole discrepancy, 106 - 82, so no other term is involved.
 //
-// ROOT CAUSE, traced end to end: RAX IS SHARED BY A BLOCK PARAMETER AND A VALUE
-// THAT IS STILL LIVE. `v297 = BlockParam(18, 15)` was coalesced onto
-// `v278 = Proj0(X86Sub(...))`, which is v7's subtraction and is live until block
-// 18's own terminator passes it on. The b17 -> 18 phi copy writes RAX with
-// parameter 15's incoming value, destroying v278; the b18 -> 19 copy then reads
-// RAX expecting 21 and gets what the earlier copy left.
-//
-// The chain from the printf back, each step read off the running binary:
+// WHERE IT IS, traced step by step off the running binary with read_frame.py.
+// Each step is a fact, not an inference:
 //
 //   v14's term            <- slot 62, reloaded
 //   slot 62               <- b1's p15 (v60), spilled every iteration; 37, -3, -3
 //   b1's p15 on the latch <- b3's arg, SpillLoad(53)
 //   slot 53               <- v321 = BlockParam(19, 15), spilled after its def
 //   v321                  <- `mov r15d,eax`, the b18 -> 19 copy, EAX = -3
-//   EAX                   <- v278's register, shared with v297 by coalescing
+//   EAX                   <- b18's p15, written by the b17 -> 18 copy from RBP
+//   RBP                   <- v384, class 268, already -3 there
 //
-// WHY BOTH VERIFIERS ARE SILENT, and this is the part worth fixing:
-// `verify_register_sharing` canonicalizes every VReg through the coalesce aliases
-// before it looks, so an illegal merge is invisible to it by construction -- the
-// two values have become one VReg by the time it counts them. The machine
-// verifier sees RAX written before every read. A check that can see this has to
-// compare the merge against liveness measured on the SCHEDULE, not on the
-// post-coalesce naming.
+// So the wrong value is already wrong when block 17 hands it over, and the search
+// continues above that: what is v384, and which parameter position is supposed to
+// carry v7 on this path?
 //
-// NEXT STEP: find the missing interference edge. v278 and v297 are both live at
-// block 18 in the emitted code -- v297 from entry, v278 through to the exit --
-// so an edge should have made the merge illegal. Either the graph never had it
-// (liveness disagreeing with what is emitted, the usual shape) or the merge is
-// one link in a chain, since v297 is copy-related to v321, not to v278 directly,
-// and merges compound.
+// The interesting fact at block 17 is that it DOES compute v7 freshly --
+// `v276 = Iconst(-12)`, `v277 = X86Sub([276, 260])`, `v278 = Proj0([277])`, giving
+// 21 -- and its terminator passes v278 at argument position 0, while position 15,
+// the one that reaches v14, carries v384 instead. `v14 = v7` should put v7's class
+// in both places.
+//
+// RULED OUT, and it looked convincing for a while: an illegal coalesce. The phi
+// trace prints b18's p15 as VReg 278 and v278 holds RAX, which reads as a block
+// parameter sharing a register with a live value. It is not: the trace chases
+// coalesce aliases before printing, v278 is merely the representative of
+// `v297 = BlockParam(18, 15)`, and v278's own range is entirely inside block 17
+// (defined at [2], consumed by the terminator at [3], live in zero blocks per the
+// allocator). The merge is legal and RAX legitimately holds the parameter.
+//
+// Worth keeping from that dead end: `verify_register_sharing` canonicalizes every
+// VReg through the coalesce aliases before it counts, so if a merge ever IS
+// illegal this check cannot see it -- the two values have become one VReg by the
+// time it looks. That blind spot is real whatever this bug turns out to be.
 //
 // `perturb.py` flags four terms (v8, v10, v13, arr[6]) and none is the fault. That
 // is the tool's limit, not a contradiction: it perturbs an initialiser, and a
