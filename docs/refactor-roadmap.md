@@ -8,6 +8,40 @@ Judge every step on the full battery (`cargo test --all-targets --workspace`,
 `bash tests/lit/run_diff.sh`) and per **(seed, level) pair** with
 `tests/fuzz/compare_ref.sh <ref> 60 <shape>`, never on a bare pass count.
 
+## Before you start: three cheap things that make the rest easier
+
+None of these changes behaviour. Each one shrinks the surface or the risk of the
+steps below, and they are worth doing first rather than carrying through a rewrite.
+
+**A. A CFG-versus-schedule agreement check, under `BLITZ_VERIFY`.** The whole risk of
+steps 1-3 is that the CFG's `ClassId` answer and the schedule's VReg answer disagree,
+and nothing checks that today. This comparison was written ad-hoc twice on 2026-08-03
+-- once against `compute_copy_pairs`, which found the bug behind `021d4ed`, and once
+as a throwaway probe -- so it is known to be about 60 lines. Making it permanent gives
+three things: a number nobody has yet (how many places already disagree), a regression
+guard during the refactor while both representations coexist, and an invariant that
+step 1 makes *vacuously* true, at which point it is deleted along with the machinery.
+This is the "build the diagnostic before the fix" rule that has resolved most bugs
+here; do it first.
+
+**B. Delete the stale plan references.** 198 occurrences of `Task N.N` and `Phase N`
+across 14 files, pointing at a plan document that no longer exists. `CLAUDE.md`'s
+comment rules forbid exactly this. It matters *for* the refactor rather than for
+tidiness: steps 1-6 rewrite `compile/mod.rs`, `global_allocator.rs` and `split.rs`,
+and today half the orientation comments in them decode only for whoever wrote the
+plan. `// Task 6.1 / Task 6.2: Call allocate_global` tells a later session nothing;
+the same comment stating what the ordering constraint *is* tells it everything.
+
+**C. One `block_param_map`, built once and threaded.** Seven places scan the e-graph
+for `BlockParam` nodes to rebuild the same map, each O(classes x nodes), and fourteen
+resolve a parameter's VReg. Steps 1-2 change what a parameter *is*, so that is 21
+sites to keep consistent while the change is in flight. Collapsing them first turns
+the risky part of steps 1-2 into one edit.
+
+Not worth doing first: splitting the large files (no evidence of harm), and the `Op`
+split -- that is step 7, and doing it early fights steps 1-4, which change what the
+CFG holds.
+
 ## Order, and why
 
 | # | step | size | why here |
