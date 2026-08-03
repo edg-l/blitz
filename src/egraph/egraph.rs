@@ -257,6 +257,33 @@ impl EGraph {
         }
     }
 
+    /// Which e-class names each block parameter, as `(block, index) -> class`.
+    ///
+    /// The read counterpart of [`Self::rewrite_block_params`], and the one place
+    /// that scans the arena for `Op::BlockParam` nodes. Six passes used to do it
+    /// themselves, two of them from inside a per-parameter loop -- so a block with
+    /// 28 parameters walked every class 28 times to answer 28 questions one pass
+    /// answers. It is also what makes a change to *what a parameter is* one edit
+    /// rather than one per scan.
+    ///
+    /// Values are canonical when built. A later merge can leave one stale, so a
+    /// caller resolving a value against the current union-find must still
+    /// `find_immutable` it, exactly as it would for a `ClassId` the CFG holds.
+    pub fn block_param_classes(&self) -> BTreeMap<(BlockId, u32), ClassId> {
+        let mut map = BTreeMap::new();
+        for cid in (0..self.arena_len() as u32).map(ClassId) {
+            if self.find_immutable(cid) != cid {
+                continue;
+            }
+            for node in &self.class(cid).nodes {
+                if let Op::BlockParam(bid, pidx, _) = node.op {
+                    map.insert((bid, pidx), cid);
+                }
+            }
+        }
+        map
+    }
+
     /// Renumber `Op::BlockParam` nodes after parameter positions are removed.
     ///
     /// `keep[block]` lists the surviving positions in their original order, so

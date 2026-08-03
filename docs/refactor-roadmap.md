@@ -44,19 +44,29 @@ The splitter's segments run `[def .. last reference]` over raw indices, so only 
 second lands inside a reload's segment. Harmless today because the first runs before
 the splitter, where every segment is full-range.
 
-**B. Delete the stale plan references.** 198 occurrences of `Task N.N` and `Phase N`
-across 14 files, pointing at a plan document that no longer exists. `CLAUDE.md`'s
-comment rules forbid exactly this. It matters *for* the refactor rather than for
-tidiness: steps 1-6 rewrite `compile/mod.rs`, `global_allocator.rs` and `split.rs`,
-and today half the orientation comments in them decode only for whoever wrote the
-plan. `// Task 6.1 / Task 6.2: Call allocate_global` tells a later session nothing;
-the same comment stating what the ordering constraint *is* tells it everything.
+**B. Delete the stale plan references.** DONE. All 65 `Task N.N` references are gone.
+A `Phase N` stays only where the repo defines the number: the pipeline's list in
+`compile/mod.rs`'s module doc, and the allocator's own `run_phase3`/`4`/`5`. The
+other 116 named the deleted plan's phases and collided with both of those -- "the
+Phase 6 splitter" is not the pipeline's phase 6 and "merged away by Phase 3" is not
+its phase 3 -- so those now name the pass. Where a comment's whole content was the
+task number it states the constraint instead.
 
-**C. One `block_param_map`, built once and threaded.** Seven places scan the e-graph
-for `BlockParam` nodes to rebuild the same map, each O(classes x nodes), and fourteen
-resolve a parameter's VReg. Steps 1-2 change what a parameter *is*, so that is 21
-sites to keep consistent while the change is in flight. Collapsing them first turns
-the risky part of steps 1-2 into one edit.
+**C. One `block_param_map`, built once and threaded.** DONE.
+`EGraph::block_param_classes` is the single scan, sitting next to
+`rewrite_block_params`, the write counterpart. Six passes had their own copy;
+`collect_block_param_vregs_per_block` and `split::find_block_param_vreg` ran theirs
+from *inside* a per-parameter loop, so a block with 28 parameters walked every class
+28 times to answer 28 questions one pass answers. Both now take the map
+`compile/mod.rs` already builds once.
+
+The fourteen parameter-VReg resolutions collapse to
+`cfg::resolve_block_param_vreg`, which names the four sources and why the order is
+what it is. Two of them were the same four-source chain written twice, in
+`compute_copy_pairs_from_schedules` and `build_phi_copies`, with a doc comment on
+the first saying it must match the second -- and they had already drifted: one
+canonicalized the parameter's class before the lookup and one did not. Coalescing
+merging onto a VReg the copy never writes is what `021d4ed` and `29e796d` were.
 
 Not worth doing first: splitting the large files (no evidence of harm), and the `Op`
 split -- that is step 7, and doing it early fights steps 1-4, which change what the

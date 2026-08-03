@@ -337,19 +337,9 @@ pub(super) fn collect_loop_defined_classes(
     let loop_block_ids: BTreeSet<BlockId> =
         loop_body.iter().map(|&idx| func.blocks[idx].id).collect();
 
-    for i in 0..egraph.classes.len() as u32 {
-        let cid = ClassId(i);
-        let canon = egraph.unionfind.find_immutable(cid);
-        if canon != cid {
-            continue;
-        }
-        let class = egraph.class(cid);
-        for node in &class.nodes {
-            if let Op::BlockParam(bid, _, _) = &node.op
-                && loop_block_ids.contains(bid)
-            {
-                defined.insert(canon);
-            }
+    for (&(bid, _), &cid) in &egraph.block_param_classes() {
+        if loop_block_ids.contains(&bid) {
+            defined.insert(cid);
         }
     }
 

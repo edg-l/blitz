@@ -1203,20 +1203,8 @@ pub fn propagate_block_params(func: &Function, egraph: &mut EGraph) {
         }
     }
 
-    // Step 2: Build block_param lookup: (block_id, param_index) -> ClassId.
-    let mut block_param_map: BTreeMap<(BlockId, u32), ClassId> = BTreeMap::new();
-    for i in 0..egraph.classes.len() as u32 {
-        let id = ClassId(i);
-        if egraph.unionfind.find_immutable(id) != id {
-            continue;
-        }
-        let class = egraph.class(id);
-        for node in &class.nodes {
-            if let Op::BlockParam(block_id, param_idx, _) = &node.op {
-                block_param_map.insert((*block_id, *param_idx), id);
-            }
-        }
-    }
+    // Step 2: Which class names each parameter position.
+    let block_param_map = egraph.block_param_classes();
 
     // Step 3: For single-predecessor blocks, merge block params with constant args.
     // Only merge when the source arg contains a constant, since merging with

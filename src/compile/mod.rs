@@ -45,9 +45,9 @@ mod canon;
 use canon::canonicalize_class_refs;
 mod cfg;
 use cfg::{
-    build_block_param_class_map, collect_block_roots, collect_externals, collect_phi_source_vregs,
-    collect_roots, compute_copy_pairs, compute_copy_pairs_from_schedules, compute_idom,
-    compute_loop_depths, compute_rpo, dominates,
+    collect_block_roots, collect_externals, collect_phi_source_vregs, collect_roots,
+    compute_copy_pairs, compute_copy_pairs_from_schedules, compute_idom, compute_loop_depths,
+    compute_rpo, dominates,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -272,7 +272,7 @@ pub(super) fn run_egraph_and_extract(
         }),
     })?;
 
-    let block_param_map = build_block_param_class_map(egraph);
+    let block_param_map = egraph.block_param_classes();
 
     let mut all_roots = collect_roots(func, egraph);
     all_roots.extend(block_param_map.values().copied());
@@ -1199,6 +1199,7 @@ pub fn compile(
                 splitter_slots_allocated,
                 &loop_depths,
                 func,
+                &block_param_map,
                 &slot_spilled_params,
             );
             // An empty plan still goes through `apply_plan_to`: that is what
@@ -1403,6 +1404,7 @@ pub fn compile(
             crate::regalloc::global_liveness::collect_block_param_vregs_per_block(
                 func,
                 &egraph,
+                &block_param_map,
                 &class_to_vreg,
             );
 

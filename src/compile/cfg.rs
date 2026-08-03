@@ -246,27 +246,6 @@ pub(super) fn collect_block_roots(block: &BasicBlock, egraph: &EGraph) -> Vec<Cl
     roots
 }
 
-/// Build a map from (block_id, param_idx) -> canonical ClassId for all block params.
-///
-/// Scans the egraph for BlockParam nodes and records their canonical class IDs.
-pub(super) fn build_block_param_class_map(egraph: &EGraph) -> BTreeMap<(BlockId, u32), ClassId> {
-    let mut map: BTreeMap<(BlockId, u32), ClassId> = BTreeMap::new();
-    for i in 0..egraph.classes.len() as u32 {
-        let cid = ClassId(i);
-        let canon = egraph.unionfind.find_immutable(cid);
-        if canon != cid {
-            continue; // Only process canonical classes.
-        }
-        let class = egraph.class(cid);
-        for node in &class.nodes {
-            if let Op::BlockParam(bid, pidx, _) = &node.op {
-                map.insert((*bid, *pidx), cid);
-            }
-        }
-    }
-    map
-}
-
 /// Collect VRegs for all phi-copy source arguments across all blocks.
 ///
 /// These are the values passed as args to Jump/Branch. They need to be in
@@ -416,6 +395,54 @@ pub(super) fn compute_copy_pairs(
     pairs
 }
 
+/// The VReg block `target`'s parameter `pidx` is written into, from the four
+/// places that can name it, in the order that matters.
+///
+/// Every pass that touches a phi copy has to agree on this answer: the copy that
+/// writes the parameter, the coalescer deciding which VRegs may share a register,
+/// and the allocator's parameter sets. Two passes deriving it separately is how
+/// coalescing came to merge a parameter onto a VReg the copy never wrote.
+///
+/// 1. **The target block's own `Op::BlockParam`.** That is the VReg the block
+///    reads, so a copy into anything else writes a register nobody looks at. One
+///    class can name several VRegs and here the two answers came apart: the class
+///    resolved to a VReg in RAX while the block's schedule read RSI, so a loop
+///    counter started at whatever RSI held and the loop was skipped entirely.
+/// 2. **The override linearization minted**, for a parameter whose class was
+///    already emitted by a non-dominating earlier block.
+/// 3. **The class map at the target's entry**, because where a reload covers that
+///    point the reload is what the block reads.
+/// 4. **What linearization recorded.** A parameter passing a dominating definition
+///    straight through gets no `BlockParam` of its own, so once the splitter
+///    cross-block-spills that definition and truncates its segment to the defining
+///    block, nothing else names the value here -- 9 of 40 generated programs
+///    failed to compile at -O1 on exactly that.
+pub(super) fn resolve_block_param_vreg(
+    target: BlockId,
+    pidx: u32,
+    target_idx: usize,
+    target_schedule: &[ScheduledInst],
+    egraph: &EGraph,
+    class_to_vreg: &ClassVRegMap,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
+    param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
+    block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
+) -> Option<VReg> {
+    target_schedule
+        .iter()
+        .find_map(|inst| match inst.op {
+            Op::BlockParam(bid, i, _) if bid == target && i == pidx => Some(inst.dst),
+            _ => None,
+        })
+        .or_else(|| param_vreg_overrides.get(&(target, pidx)).copied())
+        .or_else(|| {
+            let param_cid = *block_param_map.get(&(target, pidx))?;
+            let canon = egraph.unionfind.find_immutable(param_cid);
+            class_to_vreg.lookup(canon, ProgramPoint::block_entry(target_idx))
+        })
+        .or_else(|| block_param_vregs.get(&(target, pidx)).copied())
+}
+
 /// Build phi copy pairs from the schedules, as `(arg_vreg, param_vreg)`.
 ///
 /// The same pairs [`compute_copy_pairs`] derives from `class_to_vreg`, except
@@ -445,25 +472,21 @@ pub(super) fn compute_copy_pairs_from_schedules(
         .map(|(i, b)| (b.id, i))
         .collect();
 
-    // The same order of sources as `terminator::build_phi_copies` uses for a
-    // copy's destination, so coalescing merges onto the VReg the copy targets.
+    // Resolved exactly as the copy that writes the parameter resolves it, so
+    // coalescing merges onto the VReg that copy targets and not another.
     let param_vreg = |target: BlockId, pidx: u32| -> Option<VReg> {
         let target_idx = *block_id_to_idx.get(&target)?;
-        block_schedules
-            .get(target_idx)
-            .and_then(|sched| {
-                sched.iter().find_map(|inst| match inst.op {
-                    Op::BlockParam(bid, i, _) if bid == target && i == pidx => Some(inst.dst),
-                    _ => None,
-                })
-            })
-            .or_else(|| param_vreg_overrides.get(&(target, pidx)).copied())
-            .or_else(|| {
-                let param_cid = *block_param_map.get(&(target, pidx))?;
-                let canon = egraph.unionfind.find_immutable(param_cid);
-                class_to_vreg.lookup(canon, ProgramPoint::block_entry(target_idx))
-            })
-            .or_else(|| block_param_vregs.get(&(target, pidx)).copied())
+        resolve_block_param_vreg(
+            target,
+            pidx,
+            target_idx,
+            block_schedules.get(target_idx)?,
+            egraph,
+            class_to_vreg,
+            block_param_map,
+            param_vreg_overrides,
+            block_param_vregs,
+        )
     };
 
     let mut pairs: Vec<(VReg, VReg)> = Vec::new();

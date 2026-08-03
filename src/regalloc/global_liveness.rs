@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::extract::{ClassVRegMap, VReg};
-use crate::ir::effectful::EffectfulOp;
+use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::ClassId;
 use crate::schedule::scheduler::ScheduledInst;
 
 /// Per-block liveness information computed by global iterative dataflow.
@@ -212,6 +212,7 @@ pub fn cfg_successors(func: &Function) -> Vec<Vec<usize>> {
 pub fn collect_block_param_vregs_per_block(
     func: &Function,
     egraph: &crate::egraph::EGraph,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     class_to_vreg: &ClassVRegMap,
 ) -> Vec<BTreeSet<VReg>> {
     debug_assert!(
@@ -225,23 +226,10 @@ pub fn collect_block_param_vregs_per_block(
     for (block_idx, block) in func.blocks.iter().enumerate() {
         let entry_point = ProgramPoint::block_entry(block_idx);
         for pidx in 0..block.param_types.len() as u32 {
-            // Look for BlockParam nodes for this (block_id, pidx).
-            for i in 0..egraph.classes.len() as u32 {
-                let cid = ClassId(i);
-                let canon = egraph.unionfind.find_immutable(cid);
-                if canon != cid {
-                    continue;
-                }
-                let class = egraph.class(cid);
-                for node in &class.nodes {
-                    if let Op::BlockParam(bid, pidx2, _) = &node.op
-                        && *bid == block.id
-                        && *pidx2 == pidx
-                        && let Some(vreg) = class_to_vreg.lookup(cid, entry_point)
-                    {
-                        result[block_idx].insert(vreg);
-                    }
-                }
+            if let Some(&cid) = block_param_map.get(&(block.id, pidx))
+                && let Some(vreg) = class_to_vreg.lookup(egraph.find_immutable(cid), entry_point)
+            {
+                result[block_idx].insert(vreg);
             }
         }
     }

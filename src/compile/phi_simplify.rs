@@ -63,7 +63,7 @@ use super::cfg::{compute_idom, compute_rpo, dominates};
 use crate::egraph::EGraph;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::ClassId;
 
 /// Eliminate every block parameter that is a trivial phi. Returns how many went.
 ///
@@ -78,17 +78,7 @@ pub fn simplify_block_params(func: &mut Function, egraph: &mut EGraph) -> usize 
     // Which class each parameter position names. A position with no `BlockParam`
     // node cannot be proven trivial -- nothing names the parameter, so there is no
     // class to union its source into.
-    let mut param_class: BTreeMap<(BlockId, u32), ClassId> = BTreeMap::new();
-    for cid in (0..egraph.arena_len() as u32).map(ClassId) {
-        if egraph.find_immutable(cid) != cid {
-            continue;
-        }
-        for node in &egraph.class(cid).nodes {
-            if let Op::BlockParam(bid, pidx, _) = node.op {
-                param_class.insert((bid, pidx), cid);
-            }
-        }
-    }
+    let param_class = egraph.block_param_classes();
 
     // The arguments every predecessor passes to each position, tagged with which
     // predecessor passed them.

@@ -8,7 +8,7 @@ use crate::emit::phi_elim::phi_copies;
 use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::ClassId;
 use crate::regalloc::allocator::RegAllocResult;
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::{FP_RETURN_REG, FrameLayout, GPR_RETURN_REG};
@@ -660,52 +660,36 @@ fn build_phi_copies(
             continue;
         }
 
-        // The target block's own `BlockParam` instruction is asked first: that is
-        // the VReg the block reads, so a copy into anything else writes a register
-        // nobody looks at. One class can name several VRegs, and here the two
-        // answers came apart -- the class resolved to a VReg in RAX while the
-        // block's schedule read RSI, so a loop counter started at whatever RSI
-        // held and the loop was skipped entirely.
-        //
-        // `class_to_vreg` comes next, because where a reload covers the target's
-        // entry that reload is what the block reads.
-        //
-        // `block_param_vregs` backs it up with what linearization decided. A
-        // param that passes a dominating definition straight through gets no
-        // BlockParam of its own, so once the splitter cross-block-spills that
-        // definition and truncates its segment to the defining block, nothing
-        // else names the value here -- 9 of 40 generated programs failed to
-        // compile at -O1 on exactly that.
-        let param_vreg = target_schedule
-            .iter()
-            .find_map(|inst| match inst.op {
-                Op::BlockParam(bid, pidx, _) if bid == target && pidx == param_idx as u32 => {
-                    Some(inst.dst)
-                }
-                _ => None,
-            })
-            .or_else(|| {
-                param_vreg_overrides
-                    .get(&(target, param_idx as u32))
-                    .copied()
-            })
-            .or_else(|| class_to_vreg.lookup(param_cid, tgt_entry))
-            .or_else(|| block_param_vregs.get(&(target, param_idx as u32)).copied())
-            .ok_or_else(|| CompileError {
-                phase: "phi-elim".into(),
-                message: format!(
-                    "param class {param_cid:?} of ({target}, {param_idx}) not in \
+        // The destination, from the four places that can name it -- see
+        // `cfg::resolve_block_param_vreg`, which every pass touching a phi copy
+        // resolves through so they cannot disagree about which VReg the copy
+        // writes.
+        let param_vreg = super::cfg::resolve_block_param_vreg(
+            target,
+            param_idx as u32,
+            target_block_idx,
+            target_schedule,
+            egraph,
+            class_to_vreg,
+            block_param_map,
+            param_vreg_overrides,
+            block_param_vregs,
+        )
+        .ok_or_else(|| CompileError {
+            phase: "phi-elim".into(),
+            message: format!(
+                "param class {param_cid:?} of ({target}, {param_idx}) not in \
                      class_to_vreg at {tgt_entry:?}, jumping from block \
                      {src_block_idx}; segments for the class: [{}]",
-                    class_to_vreg
-                        .iter_segments()
-                        .filter(|&(c, _, _, _)| c == param_cid)
-                        .map(|(_, v, s, e)| format!("{v:?} {s:?}..={e:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                location: None,
-            })?;
+                class_to_vreg
+                    .iter_segments()
+                    .filter(|&(c, _, _, _)| c == param_cid)
+                    .map(|(_, v, s, e)| format!("{v:?} {s:?}..={e:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            location: None,
+        })?;
         // Apply coalesce aliases so a dest VReg coalescing merged away resolves
         // to its canonical. Without this, vreg_to_reg lookup fails and the copy
         // is silently dropped, dropping the back-edge and miscompiling loops.

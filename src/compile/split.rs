@@ -640,6 +640,7 @@ pub fn plan_splits(
     first_slot: u32,
     loop_depths: &BTreeMap<VReg, u32>,
     func: &Function,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     already_slot_spilled: &BlockParamSlotMap,
 ) -> SplitPlan {
     let trace = crate::trace::is_enabled("split") && crate::trace::fn_matches(&func.name);
@@ -677,6 +678,7 @@ pub fn plan_splits(
     detect_blockparam_slot_routing(
         func,
         egraph,
+        block_param_map,
         block_schedules,
         class_to_vreg,
         global_liveness,
@@ -1035,30 +1037,22 @@ fn format_plan(plan: &SplitPlan) -> String {
 
 // ── Block-param slot routing ────────────────────────────────────────────────
 
-/// The VReg and e-class naming block `bid`'s parameter `pidx` at `entry_point`.
+/// The VReg and canonical e-class naming block `bid`'s parameter `pidx` at
+/// `entry_point`.
 ///
-/// `None` when no class covers the entry point, which is a parameter that passes
-/// a dominating definition straight through and has no `BlockParam` of its own.
+/// `None` when no `BlockParam` node names the position, or when no segment covers
+/// the entry point -- both are a parameter passing a dominating definition
+/// straight through, which has no storage of its own to route.
 fn find_block_param_vreg(
     egraph: &EGraph,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     class_to_vreg: &ClassVRegMap,
     bid: BlockId,
     pidx: u32,
     entry_point: ProgramPoint,
 ) -> Option<(VReg, ClassId)> {
-    (0..egraph.classes.len() as u32)
-        .map(ClassId)
-        .filter(|&cid| egraph.unionfind.find_immutable(cid) == cid)
-        .find_map(|cid| {
-            let matches =
-                egraph.class(cid).nodes.iter().any(
-                    |node| matches!(node.op, Op::BlockParam(b, p, _) if b == bid && p == pidx),
-                );
-            if !matches {
-                return None;
-            }
-            Some((class_to_vreg.lookup(cid, entry_point)?, cid))
-        })
+    let canon = egraph.find_immutable(*block_param_map.get(&(bid, pidx))?);
+    Some((class_to_vreg.lookup(canon, entry_point)?, canon))
 }
 
 /// Route block parameters through stack slots when they cannot all hold
@@ -1093,6 +1087,7 @@ fn find_block_param_vreg(
 fn detect_blockparam_slot_routing(
     func: &Function,
     egraph: &EGraph,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     block_schedules: &[Vec<ScheduledInst>],
     class_to_vreg: &ClassVRegMap,
     global_liveness: &GlobalLiveness,
@@ -1164,9 +1159,14 @@ fn detect_blockparam_slot_routing(
             if already_slot_spilled.contains_key(&(block.id, pidx)) {
                 continue;
             }
-            let Some((vreg, class_id)) =
-                find_block_param_vreg(egraph, class_to_vreg, block.id, pidx, entry_point)
-            else {
+            let Some((vreg, class_id)) = find_block_param_vreg(
+                egraph,
+                block_param_map,
+                class_to_vreg,
+                block.id,
+                pidx,
+                entry_point,
+            ) else {
                 continue;
             };
             if value_defs.contains(&vreg) {
@@ -1892,6 +1892,7 @@ mod tests {
             0, // first_slot
             &loop_depths,
             &func,
+            &egraph.block_param_classes(),
             &BlockParamSlotMap::new(),
         );
 
@@ -1941,6 +1942,7 @@ mod tests {
             0, // first_slot
             &loop_depths,
             &func,
+            &egraph.block_param_classes(),
             &BlockParamSlotMap::new(),
         );
 
@@ -2127,6 +2129,7 @@ mod tests {
         detect_blockparam_slot_routing(
             &func,
             &egraph,
+            &egraph.block_param_classes(),
             &block_schedules,
             &class_to_vreg,
             &global_liveness,
@@ -2206,6 +2209,7 @@ mod tests {
         detect_blockparam_slot_routing(
             &func,
             &egraph,
+            &egraph.block_param_classes(),
             &block_schedules,
             &class_to_vreg,
             &global_liveness,
@@ -2268,6 +2272,7 @@ mod tests {
         detect_blockparam_slot_routing(
             &func,
             &egraph,
+            &egraph.block_param_classes(),
             &block_schedules,
             &class_to_vreg,
             &global_liveness,
@@ -2365,6 +2370,7 @@ mod tests {
         detect_blockparam_slot_routing(
             &func,
             &egraph,
+            &egraph.block_param_classes(),
             &block_schedules,
             &class_to_vreg,
             &global_liveness,
