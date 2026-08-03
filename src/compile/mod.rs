@@ -1242,13 +1242,13 @@ pub fn compile(
                 // `(arg VReg, destination info)`, and whether a store is needed:
                 // an argument that IS its destination parameter has nothing to
                 // store, the slot holds that value already.
-                let routed: Vec<(VReg, (BlockId, u32), split::SlotSpilledParamInfo)> =
+                let routed: Vec<(u32, VReg, (BlockId, u32), split::SlotSpilledParamInfo)> =
                     barrier::terminator_arg_operands(&block_schedules[block_idx])
                         .into_iter()
                         .filter_map(|(arg_idx, vreg)| {
                             let &(target, pidx) = dests.get(arg_idx as usize)?;
                             let info = slot_spilled_params.get(&(target, pidx))?.clone();
-                            Some((vreg, (target, pidx), info))
+                            Some((arg_idx, vreg, (target, pidx), info))
                         })
                         .collect();
                 if routed.is_empty() {
@@ -1256,17 +1256,17 @@ pub fn compile(
                 }
                 let stores: Vec<(VReg, split::SlotSpilledParamInfo)> = routed
                     .iter()
-                    .filter(|(vreg, dest, info)| {
+                    .filter(|(_, vreg, dest, info)| {
                         *vreg != info.vreg
                             && block_param_vreg_overrides
                                 .get(dest)
                                 .is_none_or(|&ov| *vreg != ov)
                     })
-                    .map(|(vreg, _, info)| (*vreg, info.clone()))
+                    .map(|(_, vreg, _, info)| (*vreg, info.clone()))
                     .collect();
                 let schedule = &mut block_schedules[block_idx];
-                let drop_vregs: BTreeSet<VReg> = routed.iter().map(|(v, _, _)| *v).collect();
-                barrier::remove_terminator_arg_operands(schedule, &drop_vregs);
+                let drop_args: BTreeSet<u32> = routed.iter().map(|(idx, _, _, _)| *idx).collect();
+                barrier::remove_terminator_arg_operands(schedule, &drop_args);
                 if stores.is_empty() {
                     continue;
                 }

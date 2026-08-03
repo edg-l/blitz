@@ -747,8 +747,8 @@ pub(super) fn append_terminator_args(
 /// Empty for a block whose terminator takes no arguments, and missing an entry
 /// for any argument the splitter routed through a stack slot -- so read it by
 /// argument index, never by position.
-/// Drop the terminator arguments whose operand names one of `vregs`, keeping the
-/// argument indices of the survivors.
+/// Drop the terminator arguments at `arg_indices_to_drop`, keeping the argument
+/// indices of the survivors.
 ///
 /// A value routed through a stack slot holds no register, so naming it as an
 /// operand would ask the allocator for one and put an unwritten register into
@@ -756,15 +756,25 @@ pub(super) fn append_terminator_args(
 /// without anything else having to pretend it was never an argument: it keeps
 /// its index, and lowering finds no operand under that index and emits the slot
 /// access instead.
+///
+/// Keyed on the argument index, never on the operand's VReg. One VReg can fill
+/// several argument positions -- an edge whose target has two parameters of the
+/// same e-class passes it twice -- and only some of those destinations need be
+/// routed. Dropping every operand that names the VReg then silently unhooks a
+/// parameter nothing routed, leaving whatever the register happened to hold as
+/// the value the target block reads.
 pub(crate) fn remove_terminator_arg_operands(
     schedule: &mut [ScheduledInst],
-    vregs: &BTreeSet<VReg>,
+    arg_indices_to_drop: &BTreeSet<u32>,
 ) {
     for inst in schedule.iter_mut() {
         let Op::TerminatorArgs(arg_indices) = &mut inst.op else {
             continue;
         };
-        let keep: Vec<bool> = inst.operands.iter().map(|v| !vregs.contains(v)).collect();
+        let keep: Vec<bool> = arg_indices
+            .iter()
+            .map(|idx| !arg_indices_to_drop.contains(idx))
+            .collect();
         if keep.iter().all(|&k| k) {
             continue;
         }
