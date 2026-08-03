@@ -1704,29 +1704,15 @@ pub fn compile(
             non_term_ops.len(),
         );
 
-        // Task 6.3 debug asserts: after the global allocator cutover, every
-        // VReg that appears in a terminator (Ret value) must have a physical
-        // register in vreg_to_reg. Only active for multi-block functions
-        // (single-block uses the old allocator path with its own guarantees).
+        // After the global allocator, every VReg in the schedule must have a
+        // physical register. Only active for multi-block functions (single-block
+        // uses the old allocator path with its own guarantees).
+        //
+        // A Ret's value needs no check here: `lower_terminator` fails outright
+        // when it cannot name a register for one, which is the same property
+        // stated where the register is actually needed, and unconditionally
+        // rather than only in a debug build.
         if func.blocks.len() > 1 {
-            let terminator_check = block.ops.last().expect("block must have terminator");
-            // 8a-ret: Ret value must have a register.
-            if let EffectfulOp::Ret { val: Some(cid) } = terminator_check {
-                let canon = egraph.unionfind.find_immutable(*cid);
-                if let Some(vreg) =
-                    block_class_to_vreg.lookup(canon, ProgramPoint::block_exit(block_idx))
-                {
-                    debug_assert!(
-                        regalloc_result.vreg_to_reg.contains_key(&vreg),
-                        "8a-ret safety net fired after global regalloc: \
-                         Ret value VReg {:?} has no register assignment in function '{}'",
-                        vreg,
-                        func.name,
-                    );
-                }
-            }
-            // 8a-phi and 8a-effectful: all VRegs in the rewritten schedule must
-            // have register assignments (guaranteed by allocate_global).
             for inst in rewritten.iter() {
                 for &op in &inst.operands {
                     debug_assert!(

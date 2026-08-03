@@ -291,8 +291,12 @@ pub(super) fn lower_terminator(
                     dst: Operand::Reg(GPR_RETURN_REG),
                     imm: value,
                 }));
-            } else if let Some(&ret_cid) = val.as_ref()
-                && let Some(ret_reg) = ret_value_reg(
+            } else if let Some(&ret_cid) = val.as_ref() {
+                // A returned value that resolves to no register used to emit no
+                // move at all, so the function returned whatever the ABI register
+                // happened to hold -- a wrong answer with nothing downstream able
+                // to see it. There is no correct code to emit here, so say so.
+                let ret_reg = ret_value_reg(
                     ret_cid,
                     term_args,
                     coalesce_aliases,
@@ -300,7 +304,18 @@ pub(super) fn lower_terminator(
                     ret_class_to_vreg,
                     &get_reg,
                 )
-            {
+                .ok_or_else(|| CompileError {
+                    phase: "lowering".into(),
+                    message: format!(
+                        "Ret: no register for value class {:?}; the terminator names {:?} \
+                         and the class map says {:?} at {exit_point:?}",
+                        egraph.unionfind.find_immutable(ret_cid),
+                        term_args.get(&0),
+                        ret_class_to_vreg
+                            .lookup(egraph.unionfind.find_immutable(ret_cid), exit_point),
+                    ),
+                    location: None,
+                })?;
                 let is_float_ret = func.return_types.first().is_some_and(|t| t.is_float());
                 let abi_reg = if is_float_ret {
                     FP_RETURN_REG
