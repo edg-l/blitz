@@ -20,6 +20,16 @@
 # Failing programs are left in the work directory and the path is printed.
 # Honors BLITZ_VERIFY, CC, and COMPILE_TIMEOUT (seconds per compile before it is
 # reported as a hang; default 60).
+#
+# Set RESULTS=<path> to also write one machine-readable line per seed and level:
+#
+#   <seed> <level> pass
+#   <seed> <level> fail <kind>
+#
+# with kind one of no-compile, hang, exit-nonzero, wrong-predicted, wrong-cc, or
+# levels-disagree (recorded against level `both`). compare_ref.sh joins two of
+# these files to say which pairs a change moved, since judging a change per seed
+# hides one level going backwards while the other improves.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -38,6 +48,17 @@ if [ ! -x "$TINYC" ]; then
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/blitz_fuzz_XXXXXX")"
+
+# One line per seed and level when RESULTS is set, so a run can be compared with
+# another instead of read.
+record() {
+    if [ -n "$RESULTS" ]; then
+        printf "%s %s %s\n" "$1" "$2" "$3" >> "$RESULTS"
+    fi
+}
+if [ -n "$RESULTS" ]; then
+    : > "$RESULTS"
+fi
 
 pass=0
 fail=0
@@ -102,9 +123,11 @@ while [ "$seed" -le "$COUNT" ]; do
             if [ "$st" -eq 124 ]; then
                 printf "\nFAIL seed %s: blitz %s HUNG (over %ss)\n  %s\n" \
                     "$seed" "$level" "$COMPILE_TIMEOUT" "$src"
+                record "$seed" "$level" "fail hang"
             else
                 printf "\nFAIL seed %s: blitz %s did not compile\n  %s\n" "$seed" "$level" "$src"
                 head -2 "$WORK/log" | sed 's/^/  /'
+                record "$seed" "$level" "fail no-compile"
             fi
             continue
         fi
@@ -117,19 +140,24 @@ while [ "$seed" -le "$COUNT" ]; do
         if [ "$st" -ne 0 ]; then
             seed_failed=1
             printf "\nFAIL seed %s: blitz %s exited %s\n  %s\n" "$seed" "$level" "$st" "$src"
+            record "$seed" "$level" "fail exit-nonzero"
             continue
         fi
         if [ -n "$want" ] && [ "$out" != "$want" ]; then
             seed_failed=1
             printf "\nFAIL seed %s: blitz %s printed %s, generator predicted %s\n  %s\n" \
                 "$seed" "$level" "$out" "$want" "$src"
+            record "$seed" "$level" "fail wrong-predicted"
             continue
         fi
         if [ -n "$wantc" ] && [ "$out" != "$wantc" ]; then
             seed_failed=1
             printf "\nFAIL seed %s: blitz %s printed %s, %s printed %s\n  %s\n" \
                 "$seed" "$level" "$out" "$CC" "$wantc" "$src"
+            record "$seed" "$level" "fail wrong-cc"
+            continue
         fi
+        record "$seed" "$level" "pass"
     done
 
     # -O0-vs-O1 self-consistency, when both levels produced a program. This
@@ -138,6 +166,7 @@ while [ "$seed" -le "$COUNT" ]; do
         seed_failed=1
         printf "\nFAIL seed %s: -O0 printed %s, -O1 printed %s\n  %s\n" \
             "$seed" "$o0_out" "$o1_out" "$src"
+        record "$seed" both "fail levels-disagree"
     fi
 
     if [ "$seed_failed" = 1 ]; then
