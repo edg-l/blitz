@@ -116,8 +116,6 @@ End-to-end tests require `cc` (gcc/clang) on PATH. They skip gracefully if unava
 
 The compiler produces correct code for integer arithmetic, floating-point (F32/F64 via SSE2), conditional branches, loops with block parameters, function calls with up to 6+ register args and stack args, memory loads/stores with addressing mode fusion, and programs requiring register spilling.
 
-The hand-written test corpus and the differential harness are green. The random-program corpus is not yet: of 40 generated programs, 38 pass at both optimization levels. Programs with high register pressure and many live values across calls are where the remaining bugs are.
-
 `crates/tinyc` is a small C frontend used to feed the backend realistic input in tests. It is not a product; see [`ROADMAP.md`](ROADMAP.md) for the project's goal, priorities, and non-goals.
 
 ## License
