@@ -1317,12 +1317,26 @@ pub(super) fn lower_block_pure_ops(
         // X86Sub with a dead difference: emit a flags-only `cmp` instead of
         // the destructive `mov dst, src_a; sub dst, src_b`. Saves two bytes
         // and a register clobber per compare-and-branch.
+        //
+        // The width is the OPERANDS' width. `result_size` reads the dst, and the
+        // dst of a flags-only sub names a value nobody materialises -- when its
+        // type was missing the 64-bit fallback compared a zero-extended negative
+        // operand against a small positive one and inverted the branch.
+        // `Op::X86Sub::result_type` requires both operands to share a type, so
+        // either one answers, and asking them is not a second derivation of the
+        // same fact but the only place it is stated about the comparison itself.
         if matches!(inst.op, Op::X86Sub) && !has_proj0_consumer.contains(&inst.dst) {
             let src_a = op_regs.first().copied().flatten();
             let src_b = op_regs.get(1).copied().flatten();
             if let (Some(a), Some(b)) = (src_a, src_b) {
+                let size = inst
+                    .operands
+                    .iter()
+                    .filter_map(|v| vreg_types.get(v))
+                    .find(|t| t.is_integer())
+                    .map_or(result_size, OpSize::from_int_type);
                 result.push(MachInst::CmpRR {
-                    size: result_size,
+                    size,
                     dst: Operand::Reg(a),
                     src: Operand::Reg(b),
                 });
