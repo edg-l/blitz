@@ -378,6 +378,7 @@ enum SplitScope {
 
 #[allow(clippy::too_many_arguments)]
 fn apply_splits_for_overshoot(
+    fn_name: &str,
     block_idx: usize,
     overshoot_inst_idx: usize,
     overshoot_class: RegClass,
@@ -469,13 +470,49 @@ fn apply_splits_for_overshoot(
         score_victim(b, len_b, depth_b).cmp(&score_victim(a, len_a, depth_a))
     });
 
+    // An overshoot with nothing to split is a stall: the pass reports the
+    // overshoot, plans nothing, and `plan.is_empty()` reads as convergence, so
+    // the point reaches the allocator untouched and it fails to color. Name every
+    // value live here and why it was rejected -- the answer is always in this
+    // list.
     if candidates.is_empty() {
+        if crate::trace::is_enabled("split") && crate::trace::fn_matches(fn_name) {
+            let rejected: Vec<String> = live_at
+                .iter()
+                .filter(|&&v| vreg_classes.get(&v).copied() == Some(overshoot_class))
+                .map(|&v| {
+                    let why = if planned_victims.contains(&v) {
+                        "already a victim".to_string()
+                    } else {
+                        match def_inst_map.get(&v) {
+                            Some(&def_idx) => format!("def {:?}", block_schedule[def_idx].op),
+                            None => "no local def".to_string(),
+                        }
+                    };
+                    format!("{v:?} ({why})")
+                })
+                .collect();
+            tracing::debug!(
+                target: "blitz::split",
+                "[{fn_name}] block {block_idx} at [{overshoot_inst_idx}]: STALLED, \
+                 excess={overshoot_excess} with no eligible victim among {}",
+                rejected.join(", "),
+            );
+        }
         return;
     }
 
     // Pick enough victims to eliminate the entire overshoot at this point.
     let n_victims = (overshoot_excess as usize).min(candidates.len());
     let victims = &candidates[..n_victims];
+    if crate::trace::is_enabled("split") && crate::trace::fn_matches(fn_name) {
+        tracing::debug!(
+            target: "blitz::split",
+            "[{fn_name}] block {block_idx} at [{overshoot_inst_idx}]: excess={overshoot_excess}, \
+             victims={victims:?} of {} candidates",
+            candidates.len(),
+        );
+    }
 
     let use_point = overshoot_point;
     let live_classes_at_use: BTreeSet<ClassId> = live_at
@@ -485,10 +522,22 @@ fn apply_splits_for_overshoot(
 
     for &victim in victims {
         planned_victims.insert(victim);
-        // The scope is per victim, not per call site. A victim with no def in
-        // this block has nothing to split at locally, whichever path found it,
-        // so it goes through the cross-block spill either way.
-        let victim_scope = if def_inst_map.contains_key(&victim) {
+        // The scope is per victim, not per call site. A per-block split rewrites
+        // the victim's uses in this block, so it needs both a def and a use here;
+        // with either one missing there is nothing to split at locally, whichever
+        // path found the victim, and the cross-block spill is the only shape that
+        // helps -- it stores after the def wherever that is and reloads at every
+        // use block.
+        //
+        // A value defined here and consumed only downstream is the case the def
+        // test alone misses: it occupies a register across the whole block, is the
+        // best victim at the peak, and `apply_split_planned` finds no use to
+        // rewrite and plans nothing. An empty plan reads as convergence, so the
+        // overshoot reached the allocator untouched.
+        let used_in_block = block_schedule
+            .iter()
+            .any(|inst| inst.operands.contains(&victim));
+        let victim_scope = if def_inst_map.contains_key(&victim) && used_in_block {
             scope
         } else {
             SplitScope::CrossBlock
@@ -717,6 +766,7 @@ pub fn plan_splits(
                 );
             }
             apply_splits_for_overshoot(
+                &func.name,
                 block_idx,
                 inst_idx,
                 class,
@@ -769,6 +819,7 @@ pub fn plan_splits(
                 );
             }
             apply_splits_for_overshoot(
+                &func.name,
                 block_idx,
                 call_inst_idx,
                 RegClass::GPR,
@@ -823,6 +874,7 @@ pub fn plan_splits(
                 );
             }
             apply_splits_for_overshoot(
+                &func.name,
                 block_idx,
                 call_inst_idx,
                 RegClass::XMM,
