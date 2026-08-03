@@ -6,6 +6,7 @@ use crate::egraph::eclass::EClass;
 use crate::egraph::enode::ENode;
 use crate::egraph::known_bits::KnownBits;
 use crate::egraph::unionfind::UnionFind;
+use crate::ir::effectful::BlockId;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 
@@ -254,6 +255,68 @@ impl EGraph {
                 }
             }
         }
+    }
+
+    /// Renumber `Op::BlockParam` nodes after parameter positions are removed.
+    ///
+    /// `keep[block]` lists the surviving positions in their original order, so
+    /// position `keep[block][i]` becomes position `i`. A `BlockParam` node for a
+    /// position not in the list is dropped: nothing names that parameter any more.
+    ///
+    /// Done as ONE pass over a drained memo, which is what makes it safe. Rewriting
+    /// the indices one node at a time collides -- the new index of a surviving
+    /// parameter is very often the old index of a removed one, and the half-renumbered
+    /// state has two nodes claiming the same `(block, index)`. Draining first means
+    /// every node is rewritten against the same map, and old→new is injective on
+    /// survivors, so no two survivors can collide.
+    pub fn rewrite_block_params(&mut self, keep: &BTreeMap<BlockId, Vec<u32>>) {
+        let new_index: BTreeMap<(BlockId, u32), u32> = keep
+            .iter()
+            .flat_map(|(&bid, positions)| {
+                positions
+                    .iter()
+                    .enumerate()
+                    .map(move |(new, &old)| ((bid, old), new as u32))
+            })
+            .collect();
+
+        let old_memo: BTreeMap<ENode, ClassId> = std::mem::take(&mut self.memo);
+        for class in self.classes.iter_mut() {
+            class.nodes.clear();
+        }
+        for (mut node, owner) in old_memo {
+            if let Op::BlockParam(bid, idx, _) = &mut node.op {
+                match keep.get(bid) {
+                    // A block this pass did not touch keeps its numbering.
+                    None => {}
+                    Some(_) => match new_index.get(&(*bid, *idx)) {
+                        Some(&new) => *idx = new,
+                        None => continue,
+                    },
+                }
+            }
+            for child in node.children.iter_mut() {
+                if *child != ClassId::NONE {
+                    *child = self.unionfind.find(*child);
+                }
+            }
+            let owner_canon = self.unionfind.find(owner);
+            match self.memo.get(&node).copied() {
+                Some(existing) => {
+                    let existing_canon = self.unionfind.find(existing);
+                    if existing_canon != owner_canon {
+                        self.merge(owner_canon, existing_canon);
+                    } else {
+                        self.classes[owner_canon.0 as usize].nodes.push(node);
+                    }
+                }
+                None => {
+                    self.memo.insert(node.clone(), owner_canon);
+                    self.classes[owner_canon.0 as usize].nodes.push(node);
+                }
+            }
+        }
+        self.rebuild();
     }
 
     /// Find the canonical representative of an e-class.

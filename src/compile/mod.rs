@@ -54,6 +54,7 @@ use effectful::lower_effectful_op;
 mod dce;
 mod licm;
 mod lower;
+mod phi_simplify;
 use lower::lower_block_pure_ops;
 mod precolor;
 use precolor::{
@@ -102,6 +103,12 @@ pub struct CompileOptions {
     pub enable_store_forwarding: bool,
     /// Enable intra-block dead store elimination.
     pub enable_dse: bool,
+    /// Eliminate block parameters that are trivial phis (`phi(x, ..., x) -> x`).
+    ///
+    /// A canonicalization rather than an optimization: SSA construction creates a
+    /// parameter for every variable live across an edge and never revisits it, and
+    /// 85-94% of them turn out to name a single value.
+    pub enable_phi_simplify: bool,
     /// Enable function inlining before optimization.
     pub enable_inlining: bool,
     /// Maximum inlining rescan iterations per caller function. Each rescan inlines one level
@@ -140,6 +147,7 @@ impl CompileOptions {
             enable_dce: false,
             enable_store_forwarding: false,
             enable_dse: false,
+            enable_phi_simplify: false,
             enable_inlining: false,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -160,6 +168,7 @@ impl CompileOptions {
             enable_dce: true,
             enable_store_forwarding: true,
             enable_dse: true,
+            enable_phi_simplify: false,
             enable_inlining: true,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -305,6 +314,23 @@ pub(super) fn run_ir_passes(
     sink: &mut Option<&mut dyn DiagnosticSink>,
 ) -> Result<IrPasses, CompileError> {
     crate::verify::verify_stage("ir-entry", func, egraph);
+
+    // Redundant block parameters, first: every later pass keyed on
+    // `(BlockId, param_index)` needs the arity final, and every later pass gets
+    // simpler input for it.
+    if opts.enable_phi_simplify {
+        let removed = phi_simplify::simplify_block_params(func, egraph);
+        if removed > 0 {
+            canonicalize_class_refs(func, egraph);
+        }
+        if crate::trace::is_enabled("egraph") && crate::trace::fn_matches(&func.name) {
+            tracing::debug!(
+                target: "blitz::egraph",
+                "[{}] phi-simplify: removed {removed} block parameter(s)", func.name,
+            );
+        }
+        crate::verify::verify_stage("phi-simplify", func, egraph);
+    }
 
     // Store-to-load / load-to-load forwarding: intra-block, pre-LICM so
     // hoisting and saturation both benefit from fewer memory ops.
