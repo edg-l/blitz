@@ -14,21 +14,44 @@
 //
 // ONE TERM OF THE SUM IS WRONG: v14. `read_frame.py --sum-chain` breaks at every
 // add of the printf's chain in the unmodified binary and prints the term and the
-// running total, and the table says v14 arrives as -3 where 21 (`v14 = v7`) is
-// right. -24 is the whole discrepancy, 106 - 82, so no other term is involved.
+// running total; v14 arrives as -3 where 21 (`v14 = v7`) is right, and -24 is the
+// whole discrepancy, 106 - 82, so no other term is involved.
 //
-// -3 IS `int v13 = -3;`, this program's only -3. So v14's term resolves to the
-// constant that initialised a different variable -- the classic shape here, a
-// block resolving an e-class to the wrong VReg, with the wrong value identified.
-// v14 is assigned once, inside `if ((-41 <= i99)) { v14 = v7; }` in the first
-// loop, and read only by the printf.
+// ROOT CAUSE, traced end to end: RAX IS SHARED BY A BLOCK PARAMETER AND A VALUE
+// THAT IS STILL LIVE. `v297 = BlockParam(18, 15)` was coalesced onto
+// `v278 = Proj0(X86Sub(...))`, which is v7's subtraction and is live until block
+// 18's own terminator passes it on. The b17 -> 18 phi copy writes RAX with
+// parameter 15's incoming value, destroying v278; the b18 -> 19 copy then reads
+// RAX expecting 21 and gets what the earlier copy left.
 //
-// `perturb.py` flags four terms (v8, v10, v13, arr[6]) and only v8 overlaps with
-// the real fault at all. That is the tool's known limit rather than a
-// contradiction: it perturbs an initialiser, and a changed constant folds
-// differently downstream, so near the allocator's limit the probe moves the bug.
-// Confirm every perturbation hit against the unmodified binary before believing
-// it. The chain reader is the confirmation.
+// The chain from the printf back, each step read off the running binary:
+//
+//   v14's term            <- slot 62, reloaded
+//   slot 62               <- b1's p15 (v60), spilled every iteration; 37, -3, -3
+//   b1's p15 on the latch <- b3's arg, SpillLoad(53)
+//   slot 53               <- v321 = BlockParam(19, 15), spilled after its def
+//   v321                  <- `mov r15d,eax`, the b18 -> 19 copy, EAX = -3
+//   EAX                   <- v278's register, shared with v297 by coalescing
+//
+// WHY BOTH VERIFIERS ARE SILENT, and this is the part worth fixing:
+// `verify_register_sharing` canonicalizes every VReg through the coalesce aliases
+// before it looks, so an illegal merge is invisible to it by construction -- the
+// two values have become one VReg by the time it counts them. The machine
+// verifier sees RAX written before every read. A check that can see this has to
+// compare the merge against liveness measured on the SCHEDULE, not on the
+// post-coalesce naming.
+//
+// NEXT STEP: find the missing interference edge. v278 and v297 are both live at
+// block 18 in the emitted code -- v297 from entry, v278 through to the exit --
+// so an edge should have made the merge illegal. Either the graph never had it
+// (liveness disagreeing with what is emitted, the usual shape) or the merge is
+// one link in a chain, since v297 is copy-related to v321, not to v278 directly,
+// and merges compound.
+//
+// `perturb.py` flags four terms (v8, v10, v13, arr[6]) and none is the fault. That
+// is the tool's limit, not a contradiction: it perturbs an initialiser, and a
+// changed constant folds differently downstream, so near the allocator's limit the
+// probe moves the bug. Confirm every hit against the unmodified binary.
 //
 // It needs the block-parameter slot routing to reproduce: with routing disabled
 // the program does not allocate at either level, and neither does it at 2f25de1,

@@ -76,37 +76,57 @@ def sum_chain(asm):
     return chain
 
 
-def gdb_read(binary, func, requests):
+def gdb_read(binary, func, requests, limit=200):
     """Run the binary under gdb, reading values at breakpoints.
 
-    `requests` is [(addr, [expr, ...])]. Returns {addr: [value, ...]}, with a
-    value of None where gdb could not read it. One process, one run: each
-    breakpoint fires in address order and the commands are attached to it, so a
-    program with a loop reports the first time through.
+    `requests` is [(addr, [expr, ...])]. Returns {addr: [[value, ...], ...]} --
+    one inner list per time that address was reached, in execution order.
+
+    Every reading is labelled with the `$pc` gdb actually stopped at, never with
+    the order the addresses were asked for. Attaching the reads to a fixed
+    sequence of `continue`s silently mislabels everything the moment an address
+    sits in a loop or the addresses are reached out of order, which is the normal
+    case and cost one wrong diagnosis before this was fixed.
     """
-    script = []
+    lines = ["set confirm off", "set pagination off", "set height 0"]
     for addr, exprs in requests:
-        script += ["-ex", f"break *({func}+{addr:#x})"]
-    script += ["-ex", "run"]
-    # After the run stops at the first breakpoint, step through them in order.
-    for i, (addr, exprs) in enumerate(requests):
-        script += ["-ex", f"printf \"@{addr:#x}\\n\""]
+        lines.append(f"break *({func}+{addr:#x})")
+        lines.append("commands")
+        lines.append("silent")
+        lines.append('printf "@%p\\n", $pc')
         for e in exprs:
-            script += ["-ex", f"printf \"{e} = %d\\n\", {e}"]
-        if i + 1 < len(requests):
-            script += ["-ex", "continue"]
+            lines.append(f'printf "{e} = %d\\n", {e}')
+        lines.append("continue")
+        lines.append("end")
+    lines.append("run")
+    with tempfile.NamedTemporaryFile("w", suffix=".gdb", delete=False) as f:
+        f.write("\n".join(lines) + "\n")
+        script_path = f.name
     proc = subprocess.run(
-        ["gdb", "-batch", "-nx", *script, binary],
+        ["gdb", "-batch", "-nx", "-x", script_path, binary],
         capture_output=True,
         text=True,
     )
-    values, current = {}, None
+    os.unlink(script_path)
+
+    # `$pc` is absolute; map it back to the offsets the caller asked about.
+    base = None
+    m = re.search(r"Breakpoint 1 at (0x[0-9a-f]+)", proc.stdout)
+    if m and requests:
+        base = int(m.group(1), 16) - requests[0][0]
+
+    values, current, count = {}, None, 0
     for line in proc.stdout.splitlines():
         if line.startswith("@"):
-            current = int(line[1:], 16)
-            values[current] = []
-        elif " = " in line and current is not None:
-            values[current].append(line.split(" = ", 1)[1].strip())
+            pc = int(line[1:], 16)
+            current = pc - base if base is not None else pc
+            values.setdefault(current, [])
+            values[current].append([])
+            count += 1
+            if count > limit:
+                break
+        elif " = " in line and current is not None and values.get(current):
+            values[current][-1].append(line.split(" = ", 1)[1].strip())
     if not values:
         sys.stderr.write(proc.stdout + proc.stderr)
         sys.exit("gdb produced no readings; is the address mid-instruction?")
@@ -147,7 +167,10 @@ def main():
             values = gdb_read(binary, args.func, requests)
             print(f"{'term':>5}  {'addr':>8}  running total  term added")
             for i, (addr, total, term) in enumerate(chain):
-                got = values.get(addr, [])
+                # First time through; the sum runs once, but a guard above it may
+                # not, so this is explicit rather than assumed.
+                occurrences = values.get(addr, [])
+                got = occurrences[0] if occurrences else []
                 have_total = got[0] if len(got) > 0 else "?"
                 have_term = got[1] if len(got) > 1 else "?"
                 print(
@@ -175,11 +198,16 @@ def main():
         values = gdb_read(binary, args.func, requests)
         labels = [f"[rsp+{int(s, 16):#x}]" for s in args.slot] + [f"%{r}" for r in args.reg]
         for addr, _ in requests:
-            got = values.get(addr, [])
+            occurrences = values.get(addr, [])
             text = dict(asm).get(addr, "?")
             print(f"{addr:#x}  {text}")
-            for label, value in zip(labels, got):
-                print(f"    {label:>16} = {value}")
+            if not occurrences:
+                print("    never reached")
+                continue
+            for n, got in enumerate(occurrences):
+                prefix = f"  #{n}" if len(occurrences) > 1 else "    "
+                for label, value in zip(labels, got):
+                    print(f"{prefix} {label:>16} = {value}")
 
 
 if __name__ == "__main__":
