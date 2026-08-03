@@ -242,9 +242,18 @@ pub(super) fn lower_effectful_op(
                     })?;
             check_barrier_operand("Load address", addr_reg);
             let canon_result = uf.find_immutable(*result);
-            let result_reg = class_to_vreg
-                .lookup(canon_result, point)
-                .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
+            // The `LoadResult` barrier's own dst names the register this load must
+            // write, for the same reason a call's result does (see the Call arm):
+            // the schedule's VReg is the one the splitter rewrote, coalescing
+            // renamed and the consumers read, while the class can name a different
+            // VReg whose register nobody is reading.
+            let result_reg = barrier
+                .and_then(|inst| regalloc.vreg_to_reg.get(&inst.dst).copied())
+                .or_else(|| {
+                    class_to_vreg
+                        .lookup(canon_result, point)
+                        .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
+                })
                 .ok_or_else(|| CompileError {
                     phase: "lowering".into(),
                     message: "Load: no register for result".into(),
