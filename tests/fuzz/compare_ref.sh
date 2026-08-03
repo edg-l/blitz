@@ -27,8 +27,18 @@
 # with a stable target dir, 0% across two of them). Two comparisons against
 # different refs at the same time will fight over it; run them one at a time.
 #
-# Honors CC, COMPILE_TIMEOUT and BLITZ_VERIFY (passed to both sides), and
-# CACHE_DIR for where the worktree and its build go (default ~/.cache).
+# Both sides are built optimized with `debug_assertions` still on -- the same thing
+# `[profile.checked]` gives, but spelled with cargo's environment overrides on top
+# of `--release`, because the ref side is a checkout of an arbitrary commit and a
+# commit older than that profile has no such profile to name.
+#
+# Optimized because this tool compiles `4 x count` programs and a debug blitz is
+# ~10x slower (25.4s against 2.8s on the 4990-line `args` seed 29), which turned a
+# 60-seed sweep into an hour. Assertions kept because a plain release build stops
+# checking the invariants only they check.
+#
+# Honors CC, COMPILE_TIMEOUT and BLITZ_VERIFY (passed to both sides), and CACHE_DIR
+# for where the worktree and its build go (default ~/.cache).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -43,6 +53,10 @@ if [ -z "$REF" ]; then
     echo "usage: bash tests/fuzz/compare_ref.sh <ref> [count] [shape]" >&2
     exit 2
 fi
+
+export CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true
+export CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true
+export CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
 
 SHA="$(git -C "$ROOT" rev-parse --short "$REF")"
 WT="$CACHE_DIR/blitz-compare-$SHA"
@@ -60,15 +74,15 @@ echo "building $REF ($SHA) in $WT"
 if [ ! -d "$WT" ]; then
     git -C "$ROOT" worktree add --detach -q "$WT" "$SHA"
 fi
-( cd "$WT" && CARGO_TARGET_DIR="$WT_TARGET" cargo build -q -p tinyc )
+( cd "$WT" && CARGO_TARGET_DIR="$WT_TARGET" cargo build -q --release -p tinyc )
 
 echo "building the working tree"
-( cd "$ROOT" && cargo build -q -p tinyc )
+( cd "$ROOT" && cargo build -q --release -p tinyc )
 
 echo "running $COUNT $SHAPE programs on each side"
-RESULTS="$OUT/ref.txt" TINYC="$WT_TARGET/debug/tinyc" \
+RESULTS="$OUT/ref.txt" TINYC="$WT_TARGET/release/tinyc" \
     sh "$SCRIPT_DIR/run_fuzz.sh" "$COUNT" "$SHAPE" > "$OUT/ref.log" 2>&1 || true
-RESULTS="$OUT/now.txt" TINYC="$ROOT/target/debug/tinyc" \
+RESULTS="$OUT/now.txt" TINYC="$ROOT/target/release/tinyc" \
     sh "$SCRIPT_DIR/run_fuzz.sh" "$COUNT" "$SHAPE" > "$OUT/now.log" 2>&1 || true
 
 # One row per (seed, level) that changed, plus the totals. `join` needs the pair

@@ -13,3 +13,25 @@ blitztest = { path = "crates/blitztest" }
 
 [workspace]
 members = ["crates/tinyc", "crates/blitztest"]
+
+# Optimized, with the assertions kept. What every test harness runs.
+#
+# A debug blitz is ~10x slower than an optimized one -- 25.4s against 2.6s
+# compiling the 4990-line `args` seed 29 -- and the harnesses compile thousands of
+# generated programs, so debug made a sweep cost an hour instead of minutes. But
+# `debug_assertions` are not optional here either: several invariants of this
+# backend are checked only by them, `ClassVRegMap`'s segment nesting among them,
+# and a release harness would silently stop checking those.
+#
+# No LTO and default codegen units, deliberately: this profile is rebuilt on every
+# edit, so link time is the cost that matters, not the last few percent of
+# throughput. Line tables rather than full debug info, for the same reason -- they
+# are what makes a panic backtrace and a `gdb` stop name a file and line, and
+# inspecting blitz's own locals in a debugger is not how anything here gets
+# debugged (`BLITZ_DEBUG` and the frame readers are).
+[profile.checked]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+lto = false
+debug = "line-tables-only"

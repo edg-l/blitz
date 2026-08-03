@@ -5,15 +5,20 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-TINYC="${TINYC:-$ROOT/target/debug/tinyc}"
-BLITZTEST="${BLITZTEST:-$ROOT/target/debug/blitztest}"
+# The `checked` profile: optimized with `debug_assertions` on. A debug blitz is
+# ~10x slower and the assertions are what catch a broken internal invariant, so
+# neither plain profile is the right one to test against. Build it with
+# `cargo build --profile checked -p tinyc -p blitztest`.
+PROFILE="${PROFILE:-checked}"
+TINYC="${TINYC:-$ROOT/target/$PROFILE/tinyc}"
+BLITZTEST="${BLITZTEST:-$ROOT/target/$PROFILE/blitztest}"
 
 if [ ! -x "$TINYC" ]; then
-    echo "error: tinyc not found at $TINYC (run 'cargo build -p tinyc' first)" >&2
+    echo "error: tinyc not found at $TINYC (run 'cargo build --profile checked -p tinyc' first)" >&2
     exit 1
 fi
 if [ ! -x "$BLITZTEST" ]; then
-    echo "error: blitztest not found at $BLITZTEST (run 'cargo build -p blitztest' first)" >&2
+    echo "error: blitztest not found at $BLITZTEST (run 'cargo build --profile checked -p blitztest' first)" >&2
     exit 1
 fi
 
