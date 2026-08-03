@@ -720,13 +720,24 @@ pub(super) fn append_terminator_args(
         // read, wherever the question is asked. Reporting it here names the
         // argument; skipping it silently is how the old derivations came to
         // disagree about which argument was which.
-        let vreg = param_override_vregs
-            .get(&canon)
-            .copied()
+        // Which of the two answers was used, traced because they disagree: the
+        // override is keyed by class alone and so applies function-wide, while
+        // the snapshot is keyed by program point. An argument resolved through
+        // the override to a VReg defined in some other block is a value the
+        // register holds only on paths through that block.
+        let from_override = param_override_vregs.get(&canon).copied();
+        let vreg = from_override
             .or_else(|| class_to_vreg.lookup(canon, exit_point))
             .ok_or_else(|| {
                 format!("terminator arg {arg_idx} class {canon:?} has no VReg at block exit")
             })?;
+        if crate::trace::is_enabled("phi") {
+            tracing::debug!(
+                target: "blitz::phi",
+                "[b{block_idx}] terminator arg {arg_idx} {canon:?} -> {vreg:?} via {}",
+                if from_override.is_some() { "OVERRIDE" } else { "snapshot" },
+            );
+        }
         arg_indices.push(arg_idx as u32);
         operands.push(vreg);
     }
