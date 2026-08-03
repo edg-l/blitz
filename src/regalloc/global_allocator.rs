@@ -1531,6 +1531,36 @@ pub fn allocate_global(
     // about block params. We pass block_param_vregs_per_block down and augment
     // at each site (see below).
 
+    // The liveness the allocator believes, per block, before anything acts on
+    // it. Two values the graph lets share a register are values this dump shows
+    // no block holding at once -- so it is where a missing interference edge is
+    // read off, against the emitted schedules rather than argued about.
+    if crate::trace::is_enabled("liveness") && crate::trace::fn_matches(func_name) {
+        for (bi, sched) in block_schedules.iter().enumerate() {
+            let fmt = |s: &BTreeSet<VReg>| {
+                let mut v: Vec<u32> = s.iter().map(|r| r.0).collect();
+                v.sort_unstable();
+                format!("{v:?}")
+            };
+            tracing::debug!(
+                target: "blitz::liveness",
+                "[{func_name}] block {bi}: live_in={} live_out={} params={}\n{}",
+                fmt(&global_liveness.live_in[bi]),
+                fmt(&global_liveness.live_out[bi]),
+                fmt(&block_param_vregs_per_block[bi]),
+                crate::trace::format_liveness(
+                    sched,
+                    &crate::regalloc::liveness::compute_liveness(
+                        sched,
+                        &global_liveness.live_out[bi],
+                    )
+                    .live_at,
+                    &global_liveness.live_out[bi],
+                ),
+            );
+        }
+    }
+
     // Tasks 2.3, 2.4, 2.4.5: Build function-wide interference graph and
     // per-block liveness (stored in Phase2State for Phase 3/5 consumption).
     let mut phase2 = build_global_interference(block_schedules, &global_liveness);
