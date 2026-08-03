@@ -1,47 +1,38 @@
-// KNOWN FAILING -- wrong value at -O0. Do not "fix" by weakening it.
+// Regression test: a value that lived and died before a block parameter's own
+// `BlockParam` marker took the register that parameter was holding.
 //
-//   cc -O0 and cc -O2   101
-//   blitz -O0            72
-//   blitz -O1            cannot allocate registers (gpr_overshoot=2)
+// The phi copies on the edge write every parameter of a block before its first
+// instruction runs; a marker only says where the value is named, and the
+// scheduler places the markers by dependence order. Nothing modelled that, so a
+// splitter store/reload pair inserted inside the run of markers was given a
+// register a later-marked parameter already held. Both verifiers pass on it --
+// the register is written before it is read, and no two *modelled* live ranges
+// overlap.
 //
-// Both verifiers are silent at every level, so this is a value error and not an
-// absence: every register is written before it is read and no slot is reloaded
-// unwritten.
+// Was KNOWN FAILING: cc said 101 and blitz -O0 said 72, from ONE wrong value.
+// `v7` is the constant 21, never assigned again, and blitz had 1 in it -- `v9`,
+// the constant beside it. The loop's only store indexes on it,
+// `arr[((v7 - v9)) & 7] = arr[0]`, so blitz wrote arr[7] where arr[4] belongs:
+// three wrong terms (v7 -20, arr[4] +12, arr[7] -21) from one register.
 //
-// ONE WRONG VALUE, THREE WRONG TERMS. `v7` is the constant 21 and is never
-// assigned again, yet blitz has 1 in it -- and 1 is `v9`, the constant beside it.
-// The loop's only store indexes on it:
+// Located by reading the sum off the unmodified binary with
+// `read_frame.py --sum-chain` against a `cc` build whose printf is split into
+// one call per term. `perturb.py` alone named five terms on this program, two of
+// them artefacts of the probe: it sits at the allocator's limit, so changing a
+// constant moves the allocation.
 //
-//     arr[((v7 - v9)) & 7] = arr[0];
+// Pinned at -O0 because -O1 still cannot allocate this function, which is
+// register pressure and tracked separately. The opt-level pin excludes it from
+// the differential harness, by design.
 //
-// so the reference writes arr[(21-1)&7] = arr[4] while blitz writes arr[7]. That
-// accounts for the whole -29:
-//
-//   term     cc   blitz
-//   v7       21       1   (-20)
-//   arr[4]   -7       5   (+12, blitz kept the initialiser)
-//   arr[7]   14      -7   (-21, blitz stored arr[0] here instead)
-//
-// Read off the unmodified binary with `read_frame.py --sum-chain` against a `cc`
-// build whose printf is split into one call per term. `perturb.py` alone named
-// five terms on this program, three of which are probe artefacts -- the program
-// sits at the allocator's limit, so changing a constant moves the allocation.
-//
-// The value inside the loop is not the value in the sum either: `(v7 - v9) & 7`
-// came out 7, which needs v7 - v9 = -1, i.e. v7 = 0 there. So the class of
-// iconst(21) resolves to at least two wrong VRegs at two different points, which
-// is the shape DEBUGGING-NOTES lists first.
-//
-// 72 lines, reduced from gen_c.py seed 18 shape pressure, whose unreduced form is
-// tests/lit/regalloc/coalesce_pair_from_schedule.c and is a DIFFERENT bug (fixed
-// in 021d4ed; this one is unchanged by it). Both reduction passes deleted
-// `arr[4] = 5;` while the sum still reads arr[4] and reduce.py's UB guard could
-// not see it -- the loop writes arr through a computed index, so gcc cannot prove
-// the read is uninitialised. It is restored here; check for that before trusting
-// any further reduction of a program with an array.
+// 72 lines, reduced from gen_c.py seed 18 shape pressure. Both reduction passes
+// deleted `arr[4] = 5;` while the sum still reads arr[4]; reduce.py's UB guard
+// cannot see it, because the loop writes arr through a computed index. Check for
+// that before trusting any further reduction of a program with an array.
 //
 // EXIT: 0
 // OUTPUT: 101
+// FLAGS: -O0
 extern int printf(char* fmt, int x);
 double f0(double p0, double p1, double p2, int p3, double p4, int p5, int p6) {
     return (((p3 & 1023) & 768) & 63);

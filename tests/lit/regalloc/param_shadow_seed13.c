@@ -1,14 +1,16 @@
-// KNOWN FAILING -- wrong value at -O0, not yet analysed. Do not "fix" by
-// weakening it.
+// Regression test: a value that lived and died before a block parameter's own
+// `BlockParam` marker took the register that parameter was holding.
 //
-// blitz -O0 prints -68 where -149 is right. The printed value moves with any
-// change to register allocation -- it was -125 before `021d4ed` -- so compare
-// against the reference compiler, never against a value recorded here.
+// The phi copies on the edge write every parameter of a block before its first
+// instruction runs; a marker only says where the value is named, and the
+// scheduler places the markers by dependence order. Nothing modelled that, so a
+// splitter store/reload pair inserted inside the run of markers was given a
+// register a later-marked parameter already held. Both verifiers pass on it --
+// the register is written before it is read, and no two *modelled* live ranges
+// overlap.
 //
-// One of four wrong-value programs the `pressure` shape produces, kept as
-// reproducers. Start with `tests/fuzz/perturb.py` to name the wrong terms, then
-// confirm each against the unmodified binary with `read_frame.py --sum-chain`:
-// perturbation alone flags terms that are artefacts of the probe.
+// Was KNOWN FAILING: blitz -O0 printed -68 where -149 is right, and the value
+// moved with any change to allocation (-125 before `021d4ed`).
 //
 // gen_c.py seed 13, shape pressure, saved unreduced.
 //
