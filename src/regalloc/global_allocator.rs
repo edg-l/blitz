@@ -1544,7 +1544,8 @@ pub fn allocate_global(
             };
             tracing::debug!(
                 target: "blitz::liveness",
-                "[{func_name}] block {bi}: live_in={} live_out={} params={}\n{}",
+                "[{func_name}] block {bi}: succs={:?} live_in={} live_out={} params={}\n{}",
+                cfg_succs[bi],
                 fmt(&global_liveness.live_in[bi]),
                 fmt(&global_liveness.live_out[bi]),
                 fmt(&block_param_vregs_per_block[bi]),

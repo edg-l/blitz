@@ -396,6 +396,72 @@ mod tests {
         );
     }
 
+    /// Two blocks: block 0 defines VReg 1 and VReg 2 and jumps to block 1, whose
+    /// parameters are `block1_params`. Block 0's terminator passes `passed`, and
+    /// block 1 reads `block1_uses`.
+    fn two_values_across_an_edge(
+        assignment: &[(u32, Reg)],
+        passed: &[u32],
+        block1_params: &[u32],
+        block1_uses: &[u32],
+    ) -> Vec<String> {
+        let inst = |dst: u32, operands: Vec<u32>| ScheduledInst {
+            op: Op::Iconst(0, Type::I32),
+            dst: VReg(dst),
+            operands: operands.into_iter().map(VReg).collect(),
+        };
+        let schedules = vec![
+            vec![inst(1, vec![]), inst(2, vec![])],
+            vec![inst(3, block1_uses.to_vec())],
+        ];
+        let phi_uses = vec![passed.iter().copied().map(VReg).collect(), BTreeSet::new()];
+        let block_params = vec![
+            BTreeSet::new(),
+            block1_params.iter().copied().map(VReg).collect(),
+        ];
+        verify_register_sharing(
+            &schedules,
+            &phi_uses,
+            &block_params,
+            &[vec![1], vec![]],
+            &assignment.iter().map(|&(v, r)| (VReg(v), r)).collect(),
+            &BTreeMap::new(),
+            &[],
+        )
+    }
+
+    #[test]
+    fn detects_two_live_values_in_one_register() {
+        let errors =
+            two_values_across_an_edge(&[(1, Reg::RBX), (2, Reg::RBX)], &[1, 2], &[], &[1, 2]);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("VReg 1 and VReg 2 are both live and both hold RBX")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn distinct_registers_verify() {
+        assert_eq!(
+            two_values_across_an_edge(&[(1, Reg::RBX), (2, Reg::RCX)], &[1, 2], &[], &[1, 2]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A parameter of the successor is written by the phi copy on the edge, so a
+    /// def of that same VReg in the predecessor is dead and its register is free
+    /// for anything else there. Reporting it is what kept two correct programs
+    /// out of `tests/lit`.
+    #[test]
+    fn a_successors_parameter_is_not_live_in_its_predecessor() {
+        assert_eq!(
+            two_values_across_an_edge(&[(1, Reg::RBX), (2, Reg::RBX)], &[2], &[1], &[1]),
+            Vec::<String>::new()
+        );
+    }
+
     #[test]
     fn detects_terminator_before_final_position() {
         let (mut func, egraph) = simple_function();
@@ -699,15 +765,19 @@ pub fn verify_machinsts(
 pub fn verify_register_sharing(
     block_schedules: &[Vec<ScheduledInst>],
     phi_uses: &[std::collections::BTreeSet<VReg>],
+    block_params: &[std::collections::BTreeSet<VReg>],
     cfg_succs: &[Vec<usize>],
     vreg_to_reg: &BTreeMap<VReg, Reg>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
     copy_pairs: &[(VReg, VReg)],
 ) -> Vec<String> {
-    use crate::regalloc::global_liveness::compute_global_liveness;
+    use crate::regalloc::global_liveness::compute_global_liveness_with_block_params;
 
     let mut errors = Vec::new();
-    if block_schedules.len() != phi_uses.len() || block_schedules.len() != cfg_succs.len() {
+    if block_schedules.len() != phi_uses.len()
+        || block_schedules.len() != block_params.len()
+        || block_schedules.len() != cfg_succs.len()
+    {
         return errors;
     }
 
@@ -744,7 +814,22 @@ pub fn verify_register_sharing(
                 .collect()
         })
         .collect();
-    let liveness = compute_global_liveness(&schedules_canon, cfg_succs, &phi_uses_canon);
+    // A block parameter is written by the phi copy on the edge, so it is not live
+    // at a predecessor's exit; what is live there is whatever the predecessor's
+    // terminator passes, which `phi_uses` carries. Without this, a VReg that is
+    // both a parameter of some block and the destination of a dead def in a
+    // predecessor reads as live across that predecessor, and every value holding
+    // its register in between reads as a clash.
+    let block_params_canon: Vec<std::collections::BTreeSet<VReg>> = block_params
+        .iter()
+        .map(|set| set.iter().map(|&v| canon(v)).collect())
+        .collect();
+    let liveness = compute_global_liveness_with_block_params(
+        &schedules_canon,
+        cfg_succs,
+        &phi_uses_canon,
+        &block_params_canon,
+    );
 
     // A phi copy's source and destination hold the SAME value, so sharing a
     // register is not a clash -- it is what coalescing the pair achieves, and

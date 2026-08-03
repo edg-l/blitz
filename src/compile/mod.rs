@@ -815,6 +815,10 @@ pub fn compile(
     // allocation: it is the terminator half of liveness, and the check needs the
     // same one the allocator was given.
     let mut verify_phi_uses: Vec<BTreeSet<VReg>> = Vec::new();
+    // The block parameters, for the same reason: a parameter is written by the
+    // phi copy at the edge, so it is not live at a predecessor's exit unless the
+    // predecessor's terminator passes it, which `verify_phi_uses` records.
+    let mut verify_block_params: Vec<BTreeSet<VReg>> = Vec::new();
 
     // Single-block fast path skips global liveness.
     let (regalloc_result, block_rewritten, coalesce_aliases) = if func.blocks.len() == 1 {
@@ -1371,6 +1375,7 @@ pub fn compile(
         // val, Jump args, Branch args), so the allocator has the full set of
         // terminator-consumed VRegs for liveness + end-of-block reload logic.
         verify_phi_uses = phi_uses.clone();
+        verify_block_params = block_param_vregs_per_block.clone();
         let global_result = allocate_global(
             &block_schedules,
             &param_vregs,
@@ -1486,6 +1491,7 @@ pub fn compile(
         let errors = crate::verify::verify_register_sharing(
             &block_rewritten,
             &verify_phi_uses,
+            &verify_block_params,
             &succs,
             &regalloc_result.vreg_to_reg,
             &coalesce_aliases,
