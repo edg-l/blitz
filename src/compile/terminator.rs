@@ -8,8 +8,9 @@ use crate::emit::phi_elim::phi_copies;
 use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
-use crate::ir::op::ClassId;
+use crate::ir::op::{ClassId, Op};
 use crate::regalloc::allocator::RegAllocResult;
+use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::{FP_RETURN_REG, FrameLayout, GPR_RETURN_REG};
 use crate::x86::addr::Addr;
 use crate::x86::inst::{LabelId, MachInst, OpSize, Operand};
@@ -251,6 +252,7 @@ pub(super) fn lower_terminator(
     next_label: &mut LabelId,
     slot_spilled_params: &BlockParamSlotMap,
     frame_layout: &FrameLayout,
+    block_schedules: &[Vec<ScheduledInst>],
 ) -> Result<Vec<BlockItem>, CompileError> {
     let exit_point = ProgramPoint::block_exit(block_idx);
     let get_reg = |cid: ClassId, ctv: &ClassVRegMap| -> Option<Reg> {
@@ -363,6 +365,7 @@ pub(super) fn lower_terminator(
                 regalloc,
                 func,
                 slot_spilled_params,
+                block_schedules,
             )?;
             let mut items: Vec<BlockItem> = emit_phi_copies(&copies, Reg::R11, frame_layout)
                 .into_iter()
@@ -403,6 +406,7 @@ pub(super) fn lower_terminator(
                 regalloc,
                 func,
                 slot_spilled_params,
+                block_schedules,
             )?;
             let false_copies = build_phi_copies(
                 *bb_false,
@@ -419,6 +423,7 @@ pub(super) fn lower_terminator(
                 regalloc,
                 func,
                 slot_spilled_params,
+                block_schedules,
             )?;
 
             let true_phi = emit_phi_copies(&true_copies, Reg::R11, frame_layout);
@@ -491,6 +496,9 @@ pub(super) fn lower_terminator(
 /// numbering -- 0 for a Jump or a Branch's true edge, `true_args.len()` for a
 /// Branch's false edge. An argument with no entry was routed through a stack
 /// slot and needs no copy.
+///
+/// `block_schedules` is indexed by block position and holds the final schedules,
+/// so the target block's own `BlockParam` instruction can name the destination.
 #[allow(clippy::too_many_arguments)]
 fn build_phi_copies(
     target: BlockId,
@@ -507,6 +515,7 @@ fn build_phi_copies(
     regalloc: &RegAllocResult,
     func: &Function,
     slot_spilled_params: &BlockParamSlotMap,
+    block_schedules: &[Vec<ScheduledInst>],
 ) -> Result<Vec<PhiCopy>, CompileError> {
     if args.is_empty() {
         return Ok(vec![]);
@@ -527,6 +536,11 @@ fn build_phi_copies(
     }
 
     let tgt_entry = ProgramPoint::block_entry(target_block_idx);
+    // The target block's final schedule. Empty when the caller has none for it,
+    // which leaves the lookups below exactly as they were.
+    let target_schedule: &[ScheduledInst] = block_schedules
+        .get(target_block_idx)
+        .map_or(&[], |s| s.as_slice());
 
     let trace = crate::trace::is_enabled("phi") && crate::trace::fn_matches(&func.name);
 
@@ -646,9 +660,15 @@ fn build_phi_copies(
             continue;
         }
 
-        // `class_to_vreg` is asked first, after the overrides, because it is the
-        // splitter-aware answer: where a reload covers the target's entry, that
-        // reload is the VReg the target block actually reads.
+        // The target block's own `BlockParam` instruction is asked first: that is
+        // the VReg the block reads, so a copy into anything else writes a register
+        // nobody looks at. One class can name several VRegs, and here the two
+        // answers came apart -- the class resolved to a VReg in RAX while the
+        // block's schedule read RSI, so a loop counter started at whatever RSI
+        // held and the loop was skipped entirely.
+        //
+        // `class_to_vreg` comes next, because where a reload covers the target's
+        // entry that reload is what the block reads.
         //
         // `block_param_vregs` backs it up with what linearization decided. A
         // param that passes a dominating definition straight through gets no
@@ -656,9 +676,19 @@ fn build_phi_copies(
         // definition and truncates its segment to the defining block, nothing
         // else names the value here -- 9 of 40 generated programs failed to
         // compile at -O1 on exactly that.
-        let param_vreg = param_vreg_overrides
-            .get(&(target, param_idx as u32))
-            .copied()
+        let param_vreg = target_schedule
+            .iter()
+            .find_map(|inst| match inst.op {
+                Op::BlockParam(bid, pidx, _) if bid == target && pidx == param_idx as u32 => {
+                    Some(inst.dst)
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                param_vreg_overrides
+                    .get(&(target, param_idx as u32))
+                    .copied()
+            })
             .or_else(|| class_to_vreg.lookup(param_cid, tgt_entry))
             .or_else(|| block_param_vregs.get(&(target, param_idx as u32)).copied())
             .ok_or_else(|| CompileError {

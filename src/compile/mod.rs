@@ -1701,6 +1701,7 @@ pub fn compile(
             &mut next_label,
             &slot_spilled_params,
             &frame_layout,
+            &block_rewritten,
         )?;
 
         // Phase 8: Peephole on this block's pure/effectful instructions.
