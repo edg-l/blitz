@@ -6,18 +6,18 @@
 
 A pure-Rust compiler backend targeting x86-64, optimizing for generated code quality.
 
-Blitz uses a custom e-graph for unified optimization and instruction selection, SSA-based chordal register allocation, and emits ELF64 relocatable object files. It targets only x86-64, which lets the optimizer natively understand addressing modes, flags, LEA tricks, and multi-output instructions without the abstraction penalty of multi-target backends.
+Blitz uses a custom e-graph for unified optimization and instruction selection, a function-scope graph-coloring register allocator, and emits ELF64 relocatable object files. It targets only x86-64, which lets the optimizer natively understand addressing modes, flags, LEA tricks, and multi-output instructions without the abstraction penalty of multi-target backends.
 
 ## Features
 
 - **Custom e-graph engine** with union-find, hashcons, typed e-classes, and phased rewrite rules (algebraic simplification, strength reduction, constant folding, x86-64 instruction selection, addressing mode formation, LEA/flag fusion)
 - **Cost-based extraction** with DAG sharing awareness and configurable optimization goals (latency, throughput, code size, balanced)
-- **SSA chordal register allocation** with MCS ordering, optimal greedy coloring, aggressive coalescing, loop-aware spill selection, rematerialization, and per-block allocation with cross-block live range splitting
+- **Function-scope graph-coloring register allocation** with MCS ordering, a degree-order retry when that overshoots the register budget, conservative (Briggs) coalescing, loop-aware spill selection, rematerialization, and pressure-driven live range splitting across blocks
 - **Hand-written x86-64 encoder** covering 70+ instruction forms (integer ALU, shifts, multiply/divide, MOV, LEA, branches, CALL/RET, CMOV, SETCC, SSE2 scalar FP, MOVQ, PUSH/POP, NOP) with correct REX, ModRM, SIB, and displacement encoding
 - **SystemV AMD64 ABI** with register/stack argument passing, callee-saved preservation, 16-byte aligned frames, parallel copy sequentialization for phi elimination, and caller-saved clobber tracking across calls
 - **ELF64 object emission** with .text, .symtab, .strtab, .shstrtab, .rela.text, and .note.GNU-stack sections
 - **Post-RA passes**: peephole optimization (redundant MOV elimination, XOR-zero idiom, TEST-for-CMP, INC/DEC substitution, branch threading), NOP alignment for loop headers, branch relaxation (short/near form selection)
-- **Multi-block support** with RPO ordering, fallthrough optimization, block parameter passing (SSA phi equivalent), and per-block register allocation with global liveness dataflow
+- **Multi-block support** with RPO ordering, fallthrough optimization, block parameter passing (SSA phi equivalent), and global liveness dataflow across the whole function
 
 ## Quick Start
 
@@ -31,16 +31,18 @@ let mut b = FunctionBuilder::new("add", &[Type::I64, Type::I64], &[Type::I64]);
 let p = b.params().to_vec();
 let sum = b.add(p[0], p[1]);
 b.ret(Some(sum));
-let (func, egraph) = b.finalize().expect("finalize");
+let func = b.finalize().expect("finalize");
 
 // Compile to object file
-let obj = compile(&func, egraph, &CompileOptions::default(), None).expect("compile");
+let obj = compile(func, &CompileOptions::default(), None).expect("compile");
 obj.write_to(std::path::Path::new("add.o")).expect("write");
 
 // Link with C: cc main.c add.o -o test
 ```
 
-See [`examples/basic.rs`](examples/basic.rs) for a complete example with add, max, and sum-to-N functions, and [`examples/main.c`](examples/main.c) for the C driver.
+Use `compile_module` to put several functions in one object file; inlining works across the functions it is given.
+
+See [`examples/basic.rs`](examples/basic.rs) for a complete example building add, max, sum-to-N, a constant-folded function, and an array index, and [`examples/main.c`](examples/main.c) for the C driver.
 
 ```sh
 cargo run --example basic
@@ -96,17 +98,25 @@ Source IR (FunctionBuilder API, or C via the tinyc test frontend)
 ## Testing
 
 ```sh
-cargo test --all-targets --workspace   # 887 tests
-bash tests/lit/run_tests.sh            # 382 tests
+cargo test --all-targets --workspace   # 917 tests
+bash tests/lit/run_tests.sh            # 406 tests
+bash tests/lit/run_diff.sh             # 268 programs, each at -O0 and -O1 and against cc
+bash tests/fuzz/run_fuzz.sh 40 mixed   # random UB-free programs
 ```
 
 Coverage includes instruction encoding tests (byte-level verification), end-to-end tests (compile -> link with C -> run -> verify results), miscompile regression tests (signed overflow, spill correctness, phi permutations, nested control flow), unit tests for every pipeline phase, and FileCheck-style codegen tests over C sources in `tests/lit/`.
+
+Two harnesses check values rather than patterns, and they fail differently: `run_diff.sh` compiles every runnable lit test at both optimization levels and against a reference compiler, so it catches a pass that changes behavior and a bug that is equally wrong at both levels. `run_fuzz.sh` generates programs that are free of undefined behavior by construction and interprets them while generating, so it knows the expected output before any compiler runs.
+
+`BLITZ_VERIFY=1` checks the IR at every pass boundary and the machine code after branch relaxation; `BLITZ_VERIFY=strict` additionally requires every e-class reference in the CFG to be canonical.
 
 End-to-end tests require `cc` (gcc/clang) on PATH. They skip gracefully if unavailable.
 
 ## Status
 
 The compiler produces correct code for integer arithmetic, floating-point (F32/F64 via SSE2), conditional branches, loops with block parameters, function calls with up to 6+ register args and stack args, memory loads/stores with addressing mode fusion, and programs requiring register spilling.
+
+The hand-written test corpus and the differential harness are green. The random-program corpus is not yet: of 40 generated programs, 38 pass at both optimization levels. Programs with high register pressure and many live values across calls are where the remaining bugs are.
 
 `crates/tinyc` is a small C frontend used to feed the backend realistic input in tests. It is not a product; see [`ROADMAP.md`](ROADMAP.md) for the project's goal, priorities, and non-goals.
 
