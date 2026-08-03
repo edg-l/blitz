@@ -630,7 +630,19 @@ pub fn compile(
     }
 
     // Build VReg -> Type map from the egraph's per-class type info.
+    //
+    // From the per-block snapshots as well as the function-wide map, because a
+    // class re-emitted in a later block gets a VReg of its own and the restore
+    // above is an `insert_single` -- it replaces the class's segments, so the
+    // function-wide map keeps one re-emission and every other one is left with no
+    // type at all. Lowering derives an operand width from this map and a missing
+    // entry falls back to 64 bits, which is a miscompile rather than a pessimism:
+    // a flags-only `cmp` on two I32 values came out `cmp r8,rdi`, and `mov edi,-2`
+    // had zero-extended, so `14 < -2` compared 14 against 4294967294 and was true.
     let mut vreg_types = build_vreg_types(&class_to_vreg, &egraph);
+    for snapshot in &block_class_to_vreg_snapshot {
+        vreg_types.extend(build_vreg_types(snapshot, &egraph));
+    }
 
     // Insert types for fresh block param VRegs allocated above.
     for (&(bid, pidx), &fresh_vreg) in &block_param_vreg_overrides {
