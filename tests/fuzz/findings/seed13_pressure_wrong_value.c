@@ -1,7 +1,9 @@
 // KNOWN FAILING -- wrong value at -O0, not yet analysed. Do not "fix" by
 // weakening it.
 //
-// blitz -O0 prints -125 where -149 is right.
+// blitz -O0 prints -68 where -149 is right. The printed value moves with any
+// change to register allocation -- it was -125 before `021d4ed` -- so compare
+// against the reference compiler, never against a value recorded here.
 //
 // One of four wrong-value programs the `pressure` shape produces, kept as
 // reproducers. Start with `tests/fuzz/perturb.py` to name the wrong terms, then
