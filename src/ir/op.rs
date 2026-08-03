@@ -931,6 +931,22 @@ impl Op {
         }
     }
 
+    /// Whether this op defines nothing, so its `dst` names no value.
+    ///
+    /// The barrier pseudo-ops exist to carry operands into liveness and are
+    /// skipped during lowering; nothing ever reads what they "define". Their
+    /// `dst` must therefore take no interference edges and count for no
+    /// pressure. Left in, it is a value the allocator has to colour at the
+    /// widest point in the block -- a terminator's argument list is the whole
+    /// parallel copy, so the phantom is the difference between fitting the
+    /// budget and overshooting it by one.
+    pub fn has_no_result(&self) -> bool {
+        matches!(
+            self,
+            Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_)
+        )
+    }
+
     /// Returns true if this op produces a value that lives in an XMM (FP) register.
     pub fn is_fp_op(&self) -> bool {
         match self {

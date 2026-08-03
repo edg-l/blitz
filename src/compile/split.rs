@@ -198,6 +198,7 @@ fn compute_pressure_for_class(
             // `budget + 1` colors for it, which is the whole overshoot on most
             // of the programs that fail to allocate.
             if let Some(inst) = schedule.get(i)
+                && !inst.op.has_no_result()
                 && vreg_classes.get(&inst.dst).copied() == Some(class)
                 && !live.contains(&inst.dst)
             {

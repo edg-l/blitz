@@ -50,6 +50,9 @@ pub fn build_interference_into(
 
     // The def interferes with everything live at its program point.
     for (i, inst) in insts.iter().enumerate() {
+        if inst.op.has_no_result() {
+            continue;
+        }
         let dst_idx = inst.dst.0 as usize;
         if dst_idx >= graph.num_vregs {
             continue;
