@@ -1211,38 +1211,23 @@ pub fn compile(
                 }
             }
 
-            // A slot-spilled param holds no register, so an edge that passes the
-            // param straight back to itself has nothing to copy: the slot already
-            // holds the value. Drop those operands. Left in, they would ask the
-            // allocator for a register the param deliberately does not have, and
-            // the reload it inserts at the block exit would overwrite the slot.
-            let slot_routed: BTreeSet<VReg> = slot_spilled_params
-                .iter()
-                .flat_map(|(&(bid, pidx), info)| {
-                    [
-                        Some(info.vreg),
-                        block_param_vreg_overrides.get(&(bid, pidx)).copied(),
-                    ]
-                })
-                .flatten()
-                .collect();
-            if !slot_routed.is_empty() {
-                for schedule in block_schedules.iter_mut() {
-                    barrier::remove_terminator_arg_operands(schedule, &slot_routed);
-                }
-            }
-
-            // An argument whose destination parameter lives in a slot becomes its
-            // own store, and stops being an operand of `Op::TerminatorArgs`.
+            // An argument whose destination parameter lives in a slot leaves the
+            // terminator's operand list, and becomes its own store unless the slot
+            // already holds its value.
             //
-            // That is the whole point of routing the parameter. As an operand it
-            // sits in the terminator's parallel copy, which needs every argument
-            // readable at one point -- so sixteen slot-bound arguments still ask
-            // for sixteen registers at once and the clique the routing was meant
-            // to break is back one instruction later. A store to a slot clobbers
-            // no other argument's register, so these can go one at a time, and as
-            // ordinary instructions with one operand each that is exactly what
-            // liveness then sees.
+            // Leaving it as an operand defeats the routing: the operand list is
+            // the parallel copy, which needs every argument readable at one point,
+            // so sixteen slot-bound arguments still ask for sixteen registers at
+            // once and the clique comes back one instruction later. A store to a
+            // slot clobbers no other argument's register, so these go one at a
+            // time, and as ordinary instructions with one operand each that is
+            // exactly what liveness then sees.
+            //
+            // Decided per argument, by the destination it feeds -- never by
+            // "this VReg belongs to some routed parameter". An edge can pass one
+            // routed parameter's VReg to a different parameter, and dropping that
+            // operand for the wrong reason left the destination's slot unwritten
+            // while every use reloaded from it.
             //
             // `build_phi_copies` needs no matching change: an argument index with
             // no operand is already the signal that the value travels through a
@@ -1250,20 +1235,37 @@ pub fn compile(
             for (block_idx, block) in func.blocks.iter().enumerate() {
                 let terminator = block.ops.last().expect("block must have terminator");
                 let dests = barrier::terminator_arg_destinations(terminator);
-                let stores: Vec<(VReg, split::SlotSpilledParamInfo)> =
+                // `(arg VReg, destination info)`, and whether a store is needed:
+                // an argument that IS its destination parameter has nothing to
+                // store, the slot holds that value already.
+                let routed: Vec<(VReg, (BlockId, u32), split::SlotSpilledParamInfo)> =
                     barrier::terminator_arg_operands(&block_schedules[block_idx])
                         .into_iter()
                         .filter_map(|(arg_idx, vreg)| {
                             let &(target, pidx) = dests.get(arg_idx as usize)?;
-                            Some((vreg, slot_spilled_params.get(&(target, pidx))?.clone()))
+                            let info = slot_spilled_params.get(&(target, pidx))?.clone();
+                            Some((vreg, (target, pidx), info))
                         })
                         .collect();
+                if routed.is_empty() {
+                    continue;
+                }
+                let stores: Vec<(VReg, split::SlotSpilledParamInfo)> = routed
+                    .iter()
+                    .filter(|(vreg, dest, info)| {
+                        *vreg != info.vreg
+                            && block_param_vreg_overrides
+                                .get(dest)
+                                .is_none_or(|&ov| *vreg != ov)
+                    })
+                    .map(|(vreg, _, info)| (*vreg, info.clone()))
+                    .collect();
+                let schedule = &mut block_schedules[block_idx];
+                let drop_vregs: BTreeSet<VReg> = routed.iter().map(|(v, _, _)| *v).collect();
+                barrier::remove_terminator_arg_operands(schedule, &drop_vregs);
                 if stores.is_empty() {
                     continue;
                 }
-                let schedule = &mut block_schedules[block_idx];
-                let store_vregs: BTreeSet<VReg> = stores.iter().map(|&(v, _)| v).collect();
-                barrier::remove_terminator_arg_operands(schedule, &store_vregs);
 
                 // Each store goes immediately after the last point its value is
                 // needed for anything else -- its definition, or a later use.
