@@ -35,7 +35,11 @@ import tempfile
 
 # `   6a0:\t48 8b bc 24 90 02 00 \tmov    rdi,QWORD PTR [rsp+0x290]`
 ASM_LINE = re.compile(r"^\s*([0-9a-f]+):\t[0-9a-f ]+\t(.*)$")
-ADD_REG_REG = re.compile(r"^add\s+([a-z0-9]+),([a-z0-9]+)$")
+# `add rsp,0x8` matches "add <word>,<word>" too, and the frame teardown before a
+# tail position put two of them at the head of the chain -- which shifted every
+# term by two and printed `?` for all of them, because the breakpoints no longer
+# sat on adds that ran once. An immediate is not a term and RSP is not a total.
+ADD_REG_REG = re.compile(r"^add\s+(?!rsp|esp|rbp|ebp)([a-z][a-z0-9]*),([a-z][a-z0-9]*)$")
 
 
 def emit_asm(blitz, src, opt, func):
