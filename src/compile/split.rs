@@ -1112,6 +1112,22 @@ fn detect_blockparam_slot_routing(
     // Parameter VRegs per block, for the over-budget decision below.
     let mut block_param_vregs: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n_blocks];
 
+    // A parameter that passes a dominating definition straight through has no
+    // `BlockParam` of its own: the class map names the definition, so the
+    // parameter and the value are one VReg. Routing that VReg does not move a
+    // parameter into a slot, it moves the VALUE -- and then every use of the
+    // value is rewritten to a reload, including the predecessor's own
+    // initialising store, which ends up reloading the slot it was about to
+    // write. Nothing ever fills the slot and the block reads whatever the frame
+    // held. A VReg defined by an ordinary instruction anywhere is therefore not
+    // routable.
+    let value_defs: BTreeSet<VReg> = block_schedules
+        .iter()
+        .flatten()
+        .filter(|inst| !matches!(inst.op, Op::BlockParam(..)) && !inst.op.has_no_result())
+        .map(|inst| inst.dst)
+        .collect();
+
     for block_idx in 0..n_blocks.min(func.blocks.len()) {
         let block = &func.blocks[block_idx];
         let entry_point = ProgramPoint::block_entry(block_idx);
@@ -1128,6 +1144,9 @@ fn detect_blockparam_slot_routing(
             else {
                 continue;
             };
+            if value_defs.contains(&vreg) {
+                continue;
+            }
             let reg_class = if block.param_types[pidx as usize].is_float() {
                 RegClass::XMM
             } else {
