@@ -149,6 +149,28 @@ pub(super) fn assign_barrier_groups(
     }
     let vreg_to_arg_of_barrier = &vreg_to_arg;
 
+    // A division leaves its quotient in RAX and its remainder in RDX, and nothing
+    // models that implicit liveness: the projection that moves a result into a
+    // VReg is the only thing that reads those registers, and no interference edge
+    // says so. So a projection has to run in the division's own group. What
+    // separates two groups is a barrier, a call is a barrier, and a call destroys
+    // both registers -- a quotient consumed after the next call read whatever that
+    // call left in RAX.
+    let div_dsts: BTreeSet<VReg> = sched
+        .iter()
+        .filter(|i| matches!(i.op, Op::X86Idiv | Op::X86Div))
+        .map(|i| i.dst)
+        .collect();
+    let div_proj_source = |inst: &ScheduledInst| -> Option<VReg> {
+        if !matches!(inst.op, Op::Proj0 | Op::Proj1) {
+            return None;
+        }
+        inst.operands
+            .first()
+            .copied()
+            .filter(|v| div_dsts.contains(v))
+    };
+
     let mut vreg_group: BTreeMap<VReg, usize> = BTreeMap::new();
     for inst in sched {
         let mut min_group: usize = 0;
@@ -168,6 +190,14 @@ pub(super) fn assign_barrier_groups(
             min_group = min_group.max(barrier_k + 1);
         } else if let Some(&arg_barrier_k) = vreg_to_arg_of_barrier.get(&inst.dst) {
             min_group = min_group.max(arg_barrier_k);
+        }
+        // Pinned, not merely bounded below: a consuming barrier's constraint would
+        // otherwise push the projection past the call that clobbers the register it
+        // reads.
+        if let Some(src) = div_proj_source(inst)
+            && let Some(&div_group) = vreg_group.get(&src)
+        {
+            min_group = div_group;
         }
         vreg_group.insert(inst.dst, min_group);
     }
@@ -192,6 +222,12 @@ pub(super) fn assign_barrier_groups(
             // to the group right after their producing barrier. Moving them later
             // would let the regalloc reuse their register before consumers read it.
             if vreg_to_result_of_barrier.contains_key(&v) {
+                continue;
+            }
+
+            // Division projections are anchored to their division for the same
+            // reason: the register they read is not theirs to keep.
+            if div_proj_source(inst).is_some() {
                 continue;
             }
 

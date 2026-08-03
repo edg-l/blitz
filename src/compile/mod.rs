@@ -1758,6 +1758,12 @@ pub fn compile(
         // A barrier instruction stands in for its effectful op. Emit the load,
         // store or call at the barrier's own position and no code for the
         // pseudo-op itself; everything else lowers as a pure op.
+        // Computed over the whole block: lowering below runs on each run of pure
+        // ops between barriers, and a projection is often in a different run from
+        // the op it projects.
+        let (div_dst_vregs, has_proj0_consumer) =
+            crate::compile::lower::division_and_proj0_sets(&full_schedule_for_barriers);
+
         let lower_pending = |pending: &mut Vec<ScheduledInst>,
                              out: &mut Vec<MachInst>|
          -> Result<(), CompileError> {
@@ -1772,6 +1778,8 @@ pub fn compile(
                 &frame_layout,
                 &vreg_types,
                 arg_locs,
+                &div_dst_vregs,
+                &has_proj0_consumer,
             )?);
             pending.clear();
             Ok(())

@@ -1047,6 +1047,34 @@ fn lower_op(
     }
 }
 
+/// The two facts `lower_block_pure_ops` needs about instructions it may not be
+/// given: which VRegs a division defines, and which VRegs some `Proj0` reads.
+///
+/// Both must be computed over the WHOLE block. Lowering runs on each run of pure
+/// ops between two barriers, so a projection and the op it projects routinely
+/// land in different runs -- a division's remainder is often consumed before the
+/// next call and its quotient after. Derived from the run alone, both questions
+/// get a silently wrong answer:
+///
+/// - a `Proj0` whose division is in an earlier run reads the pair VReg's register
+///   instead of RAX, and the quotient is never moved out of RAX at all;
+/// - an ALU op whose `Proj0` is in a later run looks register-dead and gets
+///   downgraded to a flags-only form, so its result is never materialized.
+pub(super) fn division_and_proj0_sets(insts: &[ScheduledInst]) -> (BTreeSet<VReg>, BTreeSet<VReg>) {
+    let div_dst_vregs = insts
+        .iter()
+        .filter(|i| matches!(i.op, Op::X86Idiv | Op::X86Div))
+        .map(|i| i.dst)
+        .collect();
+    let has_proj0_consumer = insts
+        .iter()
+        .filter(|i| matches!(i.op, Op::Proj0))
+        .filter_map(|i| i.operands.first().copied())
+        .collect();
+    (div_dst_vregs, has_proj0_consumer)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_block_pure_ops(
     insts: &[ScheduledInst],
     regalloc: &RegAllocResult,
@@ -1055,27 +1083,11 @@ pub(super) fn lower_block_pure_ops(
     frame_layout: &FrameLayout,
     vreg_types: &BTreeMap<VReg, Type>,
     arg_locs: &[ArgLoc],
+    div_dst_vregs: &BTreeSet<VReg>,
+    has_proj0_consumer: &BTreeSet<VReg>,
 ) -> Result<Vec<MachInst>, CompileError> {
     let mut result: Vec<MachInst> = Vec::new();
     let get_reg = |vreg: VReg| -> Option<Reg> { regalloc.vreg_to_reg.get(&vreg).copied() };
-
-    // Build set of VRegs defined by X86Idiv/X86Div for Proj1 lowering.
-    let div_dst_vregs: BTreeSet<VReg> = insts
-        .iter()
-        .filter(|i| matches!(i.op, Op::X86Idiv | Op::X86Div))
-        .map(|i| i.dst)
-        .collect();
-
-    // VRegs that are operands of some Proj0 op. A Proj0 consumer means the
-    // *difference* (or sum, etc.) of a flag-producing ALU op is live and must
-    // be materialized in a register. Without a Proj0 consumer, the register
-    // output is dead and the op can be downgraded to a flags-only form (e.g.
-    // X86Sub -> cmp).
-    let has_proj0_consumer: BTreeSet<VReg> = insts
-        .iter()
-        .filter(|i| matches!(i.op, Op::Proj0))
-        .filter_map(|i| i.operands.first().copied())
-        .collect();
 
     for inst in insts {
         // Handle stack-passed function parameters (7th+ args in SysV ABI).
