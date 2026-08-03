@@ -405,7 +405,7 @@ pub(super) fn insert_early_barrier_spills(
 /// A role operand is absent only when its class had no VReg at the barrier
 /// point, in which case the whole list is shorter -- so a reader must bound-check
 /// rather than assume the slot exists.
-pub(super) fn role_operand_count(op: &EffectfulOp) -> usize {
+pub(crate) fn role_operand_count(op: &EffectfulOp) -> usize {
     match op {
         EffectfulOp::Load { .. } => 1,
         EffectfulOp::Store { .. } => 2,

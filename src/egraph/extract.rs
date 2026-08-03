@@ -184,6 +184,39 @@ impl ClassVRegMap {
         found.map(|s| s.vreg)
     }
 
+    /// Describe two segments covering `point` that neither nest, or `None` when
+    /// [`Self::lookup`] can answer unambiguously.
+    ///
+    /// The same condition `lookup` asserts on, as a value rather than a panic.
+    /// A caller that is merely *asking* a question the map has never been asked
+    /// before -- the CFG/schedule agreement check asks at points no pass does --
+    /// should report the ambiguity as its own finding, not abort in the map.
+    pub fn lookup_ambiguity(&self, class: ClassId, point: ProgramPoint) -> Option<String> {
+        let segs = self.segments.get(&class)?;
+        let mut found: Option<&Segment> = None;
+        for seg in segs.iter() {
+            if seg.start > point || point > seg.end {
+                continue;
+            }
+            match found {
+                None => found = Some(seg),
+                Some(best) => {
+                    if !nests(seg, best) && !nests(best, seg) {
+                        return Some(format!(
+                            "class {class:?} has segments at {point:?} that do not nest: \
+                             v{} [{:?}..{:?}] and v{} [{:?}..{:?}]",
+                            best.vreg.0, best.start, best.end, seg.vreg.0, seg.start, seg.end,
+                        ));
+                    }
+                    if nests(seg, best) {
+                        found = Some(seg);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Return ANY VReg for `class`, or `None`.
     ///
     /// For use by printers and legacy callers that don't have a natural program

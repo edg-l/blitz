@@ -34,7 +34,7 @@ use crate::x86::encode::{Encoder, inst_size};
 use crate::x86::inst::{LabelId, MachInst};
 use crate::x86::reg::Reg;
 
-mod barrier;
+pub(crate) mod barrier;
 pub mod program_point;
 use barrier::{
     assign_barrier_groups, build_barrier_context, insert_early_barrier_spills,
@@ -1035,6 +1035,13 @@ pub fn compile(
             rpo_pos[idx] = pos;
         }
 
+        // What `append_terminator_args` resolved each block's arguments through
+        // besides its snapshot, kept so `verify_cfg_schedule_agreement` compares
+        // against the same two answers rather than reporting a deliberate
+        // divergence as a violation.
+        let mut param_override_vregs_per_block: Vec<BTreeMap<ClassId, VReg>> =
+            vec![BTreeMap::new(); func.blocks.len()];
+
         for (block_idx, block) in func.blocks.iter().enumerate() {
             let non_term_count = block.non_term_count();
             if non_term_count > 0 {
@@ -1122,8 +1129,21 @@ pub fn compile(
                         inst: None,
                     }),
                 })?;
+                param_override_vregs_per_block[block_idx] = param_override_vregs;
             }
         }
+
+        // Both representations now exist for every terminator argument and every
+        // effectful-op role operand, and must name the same VReg. Checked here,
+        // before the splitter, so a disagreement is attributable to construction.
+        crate::verify::verify_cfg_schedule_agreement_stage(
+            "terminator-args",
+            func,
+            &egraph,
+            &block_schedules,
+            &block_class_to_vreg_snapshot,
+            &param_override_vregs_per_block,
+        );
 
         // Terminator uses, read straight off the schedules. `Op::TerminatorArgs`
         // is the record of what each terminator consumes: the splitter rewrites
@@ -1362,6 +1382,20 @@ pub fn compile(
                 break;
             }
         }
+
+        // And again on the splitter's output, which is the state Phase 7 asks
+        // about. Reported rather than enforced: the splitter's segments do not
+        // reliably cover the point its own reload is consumed at, so the map is
+        // already the weaker of the two answers here. See
+        // `verify::report_cfg_schedule_agreement`.
+        crate::verify::report_cfg_schedule_agreement(
+            "split",
+            func,
+            &egraph,
+            &block_schedules,
+            &block_class_to_vreg_snapshot,
+            &param_override_vregs_per_block,
+        );
 
         // Step 3: Determine block params per block (passed to allocate_global).
         // CRITICAL ORDER: must run AFTER apply_plan_to (splitter output committed).

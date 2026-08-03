@@ -38,6 +38,14 @@
 //! means a pass that reintroduces stale ids is caught immediately rather than
 //! waiting for a consumer to mishandle one.
 //!
+//! # CFG versus schedule
+//!
+//! [`verify_cfg_schedule_agreement`] compares the two answers the pipeline holds
+//! for "which register carries this value here": the `ClassId` the CFG names,
+//! resolved through the class map, and the VReg the schedule carries as an
+//! operand. Two answers to one question is the defect behind most wrong-code bugs
+//! here, and this is the invariant that says they agree.
+//!
 //! # Machine level
 //!
 //! [`verify_machinsts`] checks the emitted instruction stream: no virtual
@@ -62,7 +70,7 @@ use std::sync::OnceLock;
 use crate::egraph::EGraph;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
-use crate::ir::op::ClassId;
+use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 
 static LEVEL: OnceLock<VerifyLevel> = OnceLock::new();
@@ -630,12 +638,295 @@ mod tests {
     }
 }
 
-// ── Machine level ────────────────────────────────────────────────────────────
+// ── CFG versus schedule ──────────────────────────────────────────────────────
 
-use crate::egraph::extract::VReg;
+use crate::compile::barrier;
+use crate::compile::program_point::ProgramPoint;
+use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::inst::MachInst;
 use crate::x86::reg::Reg;
+
+/// Compare the two answers the pipeline holds for "which register carries this
+/// value here": the `ClassId` the CFG names, resolved through the class map, and
+/// the VReg the schedule carries as an operand.
+///
+/// The CFG names pure values by `ClassId`, which is expression identity and has
+/// no position; every consumer after extraction needs occurrence identity. So
+/// each consumer resolves a class through a map keyed by program point, while the
+/// schedule already records the VReg that pass rewrote. Where the two disagree
+/// the emitted code reads a register holding some other value, and nothing else
+/// can see it: the register is written, so def-before-use holds, and no two
+/// modelled live ranges overlap, so the sharing check holds.
+///
+/// Checked at both positions where both representations exist:
+///
+/// - an effectful op's role operands (a `Load`'s address, a `Store`'s address and
+///   value, a `Call`'s arguments in ABI order) against the leading operands of
+///   the barrier instruction consuming that op, by index;
+/// - a terminator's arguments against the operands of `Op::TerminatorArgs`, by
+///   argument index.
+///
+/// Only positions where *both* sides have an answer are compared. A class the map
+/// cannot resolve at that point has no second answer to disagree with, and an
+/// argument the splitter routed through a stack slot deliberately has no operand.
+///
+/// `param_override_vregs[b]` is the map `append_terminator_args` consulted for
+/// block `b`: a parameter whose VReg linearization minted fresh, and a back edge
+/// passing a parameter straight through, resolve there and to nothing in the
+/// snapshot. Consulting it here is what keeps a deliberate divergence from
+/// reading as a violation.
+pub fn verify_cfg_schedule_agreement(
+    func: &Function,
+    egraph: &EGraph,
+    block_schedules: &[Vec<ScheduledInst>],
+    block_snapshots: &[ClassVRegMap],
+    param_override_vregs: &[BTreeMap<ClassId, VReg>],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if block_schedules.len() != func.blocks.len() || block_snapshots.len() != func.blocks.len() {
+        return errors;
+    }
+
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        let schedule = &block_schedules[block_idx];
+        let snapshot = &block_snapshots[block_idx];
+        // An ambiguity is a finding in its own right: two segments of one class
+        // covering a point without nesting means the map cannot say which VReg
+        // holds the value there, and `lookup` asserts rather than choosing. It
+        // stays latent while no pass asks at that point.
+        let resolve = |cid: ClassId, point: ProgramPoint| -> Result<Option<VReg>, String> {
+            let canon = egraph.unionfind.find_immutable(cid);
+            match snapshot.lookup_ambiguity(canon, point) {
+                Some(why) => Err(why),
+                None => Ok(snapshot.lookup(canon, point)),
+            }
+        };
+
+        // The schedule position of each barrier instruction, in effectful-op
+        // order. `lower_effectful_op` finds its barrier the same way.
+        let barrier_positions: Vec<usize> = schedule
+            .iter()
+            .enumerate()
+            .filter(|(_, inst)| {
+                matches!(
+                    inst.op,
+                    Op::LoadResult(..)
+                        | Op::CallResult(..)
+                        | Op::VoidCallBarrier
+                        | Op::StoreBarrier
+                )
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        for (barrier_k, op) in block.ops[..block.non_term_count()].iter().enumerate() {
+            let roles: Vec<(&str, ClassId)> = match op {
+                EffectfulOp::Load { addr, .. } => vec![("Load address", *addr)],
+                EffectfulOp::Store { addr, val, .. } => {
+                    vec![("Store address", *addr), ("Store value", *val)]
+                }
+                EffectfulOp::Call { args, .. } => {
+                    args.iter().map(|&cid| ("Call argument", cid)).collect()
+                }
+                _ => continue,
+            };
+            let Some(&barrier_pos) = barrier_positions.get(barrier_k) else {
+                continue;
+            };
+            let Some(barrier) = schedule.get(barrier_pos) else {
+                continue;
+            };
+            // The point `lower_effectful_op` asks at, which is the barrier's own
+            // instruction index. `ProgramPoint::barrier_point` would give one
+            // more, and the splitter's segments run `[def .. last reference]` over
+            // raw indices -- so a reload consumed by this barrier has a segment
+            // ending exactly here, and asking one point later falls through to the
+            // pre-spill VReg's full-range entry instead.
+            let point = if barrier_pos > 0 {
+                ProgramPoint::inst_point(block_idx, barrier_pos)
+            } else {
+                ProgramPoint::block_entry(block_idx)
+            };
+            let role_count = barrier::role_operand_count(op);
+            for (i, (what, cid)) in roles.iter().enumerate() {
+                if i >= role_count {
+                    break;
+                }
+                let Some(&from_schedule) = barrier.operands.get(i) else {
+                    continue;
+                };
+                let from_map = match resolve(*cid, point) {
+                    Err(why) => {
+                        errors.push(format!("block {block_idx}: {what} {i}: {why}"));
+                        continue;
+                    }
+                    Ok(None) => continue,
+                    Ok(Some(v)) => v,
+                };
+                if from_map != from_schedule {
+                    errors.push(format!(
+                        "block {block_idx}: {what} {i} (class {:?}) resolves to VReg {} \
+                         through the class map at {point:?}, but the {:?} operand at that \
+                         index is VReg {}",
+                        egraph.unionfind.find_immutable(*cid),
+                        from_map.0,
+                        barrier.op,
+                        from_schedule.0,
+                    ));
+                }
+            }
+        }
+
+        let Some(terminator) = block.ops.last() else {
+            continue;
+        };
+        let overrides = param_override_vregs.get(block_idx);
+        // The `Op::TerminatorArgs` instruction's own index, for the same reason:
+        // the arguments are read there, and a reload the splitter inserted for one
+        // of them has a segment ending exactly there. The block exit is past every
+        // segment the splitter records, so it always resolves through the
+        // full-range entry linearization made.
+        let args_point = schedule
+            .iter()
+            .position(|inst| matches!(inst.op, Op::TerminatorArgs(_)))
+            .map(|idx| ProgramPoint::inst_point(block_idx, idx.max(1)))
+            .unwrap_or_else(|| ProgramPoint::block_exit(block_idx));
+        let from_schedule: BTreeMap<u32, VReg> = barrier::terminator_arg_operands(schedule)
+            .into_iter()
+            .collect();
+        for (arg_idx, &cid) in barrier::terminator_arg_classes(terminator)
+            .iter()
+            .enumerate()
+        {
+            let canon = egraph.unionfind.find_immutable(cid);
+            let Some(&from_schedule) = from_schedule.get(&(arg_idx as u32)) else {
+                continue;
+            };
+            // Either answer counts as agreement. An argument has two legitimate
+            // resolutions here -- the snapshot and the override -- and which one
+            // `append_terminator_args` took is not recoverable afterwards, so the
+            // violation is the schedule naming a VReg *neither* map names.
+            let from_map = match resolve(cid, args_point) {
+                Err(why) => {
+                    errors.push(format!(
+                        "block {block_idx}: terminator argument {arg_idx}: {why}"
+                    ));
+                    continue;
+                }
+                Ok(v) => v,
+            };
+            let from_override = overrides.and_then(|o| o.get(&canon).copied());
+            if from_map.is_none() && from_override.is_none() {
+                continue;
+            }
+            if from_map != Some(from_schedule) && from_override != Some(from_schedule) {
+                errors.push(format!(
+                    "block {block_idx}: terminator argument {arg_idx} (class {canon:?}) \
+                     resolves to {} through the class map at {args_point:?} and {} through \
+                     the parameter overrides, but Op::TerminatorArgs names VReg {} at that \
+                     index",
+                    match from_map {
+                        Some(v) => format!("VReg {}", v.0),
+                        None => "nothing".into(),
+                    },
+                    match from_override {
+                        Some(v) => format!("VReg {}", v.0),
+                        None => "nothing".into(),
+                    },
+                    from_schedule.0,
+                ));
+            }
+        }
+    }
+
+    errors
+}
+
+/// Run [`verify_cfg_schedule_agreement`] and report the count on stderr. No-op
+/// unless `BLITZ_VERIFY` is set, or when the two representations agree.
+///
+/// For the stages where they do *not* agree today, so the number is visible and
+/// a regression in it is visible, without failing the suite on a defect that is
+/// latent. As measured over the 440-test lit suite, the two agree everywhere at
+/// construction and disagree in 16 programs after the splitter, in two shapes:
+///
+/// - two `SpillLoad`s of one class inserted at the same point, each with a
+///   segment of its own. Both hold the same slot, so the answers name different
+///   registers holding the same value, and `lookup` has nothing to choose by.
+/// - a reload whose segment does not reach the barrier that consumes it, so the
+///   map still answers with the pre-spill VReg. Segments are keyed on raw
+///   instruction indices, and a later split round inserting an instruction ahead
+///   of one moves the point it was measured against.
+///
+/// Both are latent because neither consumer trusts the map first: an effectful
+/// op reads the barrier's own operand and falls back to the map only where there
+/// is no operand at that index, and a terminator argument is read off
+/// `Op::TerminatorArgs` with no fallback at all. Committing the per-block VReg
+/// choice into the CFG removes the second answer, and with it both shapes.
+pub fn report_cfg_schedule_agreement(
+    stage: &str,
+    func: &Function,
+    egraph: &EGraph,
+    block_schedules: &[Vec<ScheduledInst>],
+    block_snapshots: &[ClassVRegMap],
+    param_override_vregs: &[BTreeMap<ClassId, VReg>],
+) {
+    if !is_enabled() {
+        return;
+    }
+    let errors = verify_cfg_schedule_agreement(
+        func,
+        egraph,
+        block_schedules,
+        block_snapshots,
+        param_override_vregs,
+    );
+    if errors.is_empty() {
+        return;
+    }
+    eprintln!(
+        "BLITZ_VERIFY: {} CFG/schedule disagreement(s) in function '{}' after stage '{}':\n  - {}",
+        errors.len(),
+        func.name,
+        stage,
+        errors.join("\n  - ")
+    );
+}
+
+/// Run [`verify_cfg_schedule_agreement`] and panic if the two representations
+/// disagree. No-op unless `BLITZ_VERIFY` is set.
+pub fn verify_cfg_schedule_agreement_stage(
+    stage: &str,
+    func: &Function,
+    egraph: &EGraph,
+    block_schedules: &[Vec<ScheduledInst>],
+    block_snapshots: &[ClassVRegMap],
+    param_override_vregs: &[BTreeMap<ClassId, VReg>],
+) {
+    if !is_enabled() {
+        return;
+    }
+    let errors = verify_cfg_schedule_agreement(
+        func,
+        egraph,
+        block_schedules,
+        block_snapshots,
+        param_override_vregs,
+    );
+    if !errors.is_empty() {
+        panic!(
+            "BLITZ_VERIFY: {} CFG/schedule disagreement(s) in function '{}' after stage \
+             '{}':\n  - {}",
+            errors.len(),
+            func.name,
+            stage,
+            errors.join("\n  - ")
+        );
+    }
+}
+
+// ── Machine level ────────────────────────────────────────────────────────────
 
 /// Registers that already hold something on entry to a function: the stack and
 /// frame pointers, and the SysV argument registers. Reading one of these before

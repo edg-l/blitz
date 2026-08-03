@@ -13,16 +13,36 @@ Judge every step on the full battery (`cargo test --all-targets --workspace`,
 None of these changes behaviour. Each one shrinks the surface or the risk of the
 steps below, and they are worth doing first rather than carrying through a rewrite.
 
-**A. A CFG-versus-schedule agreement check, under `BLITZ_VERIFY`.** The whole risk of
-steps 1-3 is that the CFG's `ClassId` answer and the schedule's VReg answer disagree,
-and nothing checks that today. This comparison was written ad-hoc twice on 2026-08-03
--- once against `compute_copy_pairs`, which found the bug behind `021d4ed`, and once
-as a throwaway probe -- so it is known to be about 60 lines. Making it permanent gives
-three things: a number nobody has yet (how many places already disagree), a regression
-guard during the refactor while both representations coexist, and an invariant that
-step 1 makes *vacuously* true, at which point it is deleted along with the machinery.
-This is the "build the diagnostic before the fix" rule that has resolved most bugs
-here; do it first.
+**A. A CFG-versus-schedule agreement check, under `BLITZ_VERIFY`.** DONE.
+`verify::verify_cfg_schedule_agreement` compares, at every position both
+representations name, the VReg a class resolves to through the map against the VReg
+the schedule carries as an operand: an effectful op's role operands against the
+barrier consuming it, and a terminator's arguments against `Op::TerminatorArgs`.
+Enforced at construction, where it is clean over the whole suite; reported after the
+splitter, where it is not. Step 1 makes it vacuous, at which point it goes.
+
+**The number, over the 440-test lit suite: 0 disagreements at construction, 16
+programs disagreeing after the splitter.** Two shapes, and neither is a live bug
+because neither consumer trusts the map first -- an effectful op reads the barrier's
+own operand and falls back to the map only where no operand exists at that index, and
+a terminator argument is read off `Op::TerminatorArgs` with no fallback at all.
+
+- **Two `SpillLoad`s of one class at the same point**, each with a segment of its own
+  and both covering it. `ClassVRegMap::lookup` has nothing to choose by and asserts;
+  `lookup_ambiguity` exposes that as a value so the check reports it. Also a missed
+  CSE: one reload would do.
+- **A reload whose segment does not reach the barrier that consumes it**, so the map
+  still answers with the pre-spill VReg -- `v864 = SpillLoad(20)` at index 48 is what
+  the `StoreBarrier` at index 152 reads, and the map at 152 says `v30 = StackAddr(0)`.
+  Segments are keyed on raw instruction indices, and a later split round inserting an
+  instruction ahead of one moves the point it was measured against.
+
+Also found and left alone, since it is a behaviour change and this step is not:
+`populate_effectful_operands` resolves at `ProgramPoint::barrier_point`, which is the
+barrier's index **plus one**, while `lower_effectful_op` resolves at the raw index.
+The splitter's segments run `[def .. last reference]` over raw indices, so only the
+second lands inside a reload's segment. Harmless today because the first runs before
+the splitter, where every segment is full-range.
 
 **B. Delete the stale plan references.** 198 occurrences of `Task N.N` and `Phase N`
 across 14 files, pointing at a plan document that no longer exists. `CLAUDE.md`'s
