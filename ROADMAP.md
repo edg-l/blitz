@@ -36,10 +36,10 @@ rather than overhead against it.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
 - `bash tests/lit/run_diff.sh`: 280 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
-- Generated programs, 60 seeds per shape, per (seed, level) pair: `mixed` 57/60,
-  `args` 52/60, `pressure` 24/60. Every `pressure` failure is capacity
-  (`register pressure overshoot`), not wrong code. Two wrong-value programs are
-  open, both wrong at *both* optimization levels; see Known bugs.
+- Generated programs, 60 seeds per shape, per (seed, level) pair: `mixed` 58/60,
+  `args` 53/60, `pressure` 24/60. **Every remaining failure on every shape is
+  capacity** (`register pressure overshoot`); no wrong-value program is open and
+  `tests/fuzz/findings/` is empty.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
   e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> DAG
   schedule -> live-range splitter -> function-scope Chaitin-Briggs regalloc ->
