@@ -4,26 +4,31 @@
 //   blitz -O0            82
 //   blitz -O1            cannot allocate registers (gpr_overshoot=3)
 //
+// The -O1 refusal arrived with aa91e96, which stopped routing a block parameter
+// that is really a value. Before it, -O1 emitted code that read three slots
+// nothing had written.
+//
 // Both verifiers are silent on it: the machine verifier sees every register
 // written before it is read, and the register-sharing check sees no two live
 // values in one register. It is a value error, not an absence.
 //
-// FOUR TERMS OF THE SUM ARE WRONG, and this is the handle on it. Adding 1000 to
-// one initialiser at a time and requiring blitz's delta to match cc's (the
-// reference validates each probe) singles out exactly four:
+// ONE TERM OF THE SUM IS WRONG: v14. `read_frame.py --sum-chain` breaks at every
+// add of the printf's chain in the unmodified binary and prints the term and the
+// running total, and the table says v14 arrives as -3 where 21 (`v14 = v7`) is
+// right. -24 is the whole discrepancy, 106 - 82, so no other term is involved.
 //
-//   term     cc delta   blitz delta
-//   v8          -1000             0
-//   v10             0             3
-//   v13           132          1132
-//   arr[6]       1000          1003
+// -3 IS `int v13 = -3;`, this program's only -3. So v14's term resolves to the
+// constant that initialised a different variable -- the classic shape here, a
+// block resolving an e-class to the wrong VReg, with the wrong value identified.
+// v14 is assigned once, inside `if ((-41 <= i99)) { v14 = v7; }` in the first
+// loop, and read only by the printf.
 //
-// v13 reads as the strongest lead: `v13 = v9;` is the last statement before the
-// printf, so v13's term must be v9's value whatever the initialiser was. cc's
-// delta of 132 is v13's use INSIDE the loop feeding v11; blitz adds a further
-// 1000, so blitz's v13 term is the pre-loop initialiser and the assignment after
-// the loop did not reach the sum. v10 is the same shape -- `v10 = i99` in the
-// loop fixes its final value, cc's delta is 0, and blitz's is 3.
+// `perturb.py` flags four terms (v8, v10, v13, arr[6]) and only v8 overlaps with
+// the real fault at all. That is the tool's known limit rather than a
+// contradiction: it perturbs an initialiser, and a changed constant folds
+// differently downstream, so near the allocator's limit the probe moves the bug.
+// Confirm every perturbation hit against the unmodified binary before believing
+// it. The chain reader is the confirmation.
 //
 // It needs the block-parameter slot routing to reproduce: with routing disabled
 // the program does not allocate at either level, and neither does it at 2f25de1,
