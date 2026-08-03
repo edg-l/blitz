@@ -227,7 +227,7 @@ impl ClassVRegMap {
 
     /// Use `lookup(class, point)` or `lookup_any(class)` instead.
     ///
-    /// Delegates to `lookup_any`. Will be removed in Phase 7.
+    /// Delegates to `lookup_any`.
     #[deprecated(
         since = "0.0.0",
         note = "use lookup(class, point) or lookup_any(class)"
@@ -1402,7 +1402,7 @@ mod tests {
         );
     }
 
-    // ── ClassVRegMap Phase 4: multi-segment tests ─────────────────────────────
+    // ── multi-segment tests ─────────────────────────────
 
     fn pp(block: u32, inst: u32) -> ProgramPoint {
         ProgramPoint { block, inst }

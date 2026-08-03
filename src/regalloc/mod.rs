@@ -39,15 +39,15 @@ pub struct GlobalRegAllocResult {
     /// entry for each entry here.
     pub unprecolored_params: Vec<(VReg, Reg)>,
     /// Coalesce alias map: `from_idx -> into_idx`. When two VRegs are coalesced
-    /// by Phase 3, the `from` VReg is rewritten to `into` in every post-coalesce
+    /// by coalescing, the `from` VReg is rewritten to `into` in every post-coalesce
     /// schedule. The `vreg_to_reg` map contains only `into` keys; `from` has no
     /// register assignment. Callers must apply this map when resolving a
     /// `ClassId -> VReg` (e.g. for terminator or phi-copy lowering) so stale
     /// `class_to_vreg` entries pointing at `from` chase to their canonical
     /// `into` counterpart. Transitively resolve until no further entry exists.
     ///
-    /// NOTE: this field cannot be removed until `class_to_vreg` is updated after
-    /// coalescing to reflect canonical VRegs. See Phase 8 follow-up work.
+    /// This field cannot go until `class_to_vreg` itself names canonical VRegs
+    /// after coalescing.
     pub coalesce_aliases: BTreeMap<VReg, VReg>,
 }
 

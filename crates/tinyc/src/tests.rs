@@ -191,7 +191,7 @@ fn test_multiple_functions() {
     assert_eq!(compile_and_run(src), Some(17));
 }
 
-// Phase 9.2: Division regression tests — verify native IDIV is correct.
+// Division regression tests — verify native IDIV is correct.
 
 #[test]
 fn test_div_basic() {
@@ -232,7 +232,7 @@ fn test_mod_100_7() {
     assert_eq!(compile_and_run("int main() { return 100 % 7; }"), Some(2));
 }
 
-// ── Phase 4: Multiple integer type tests ─────────────────────────────────
+// ── Multiple integer type tests ─────────────────────────────────
 
 #[test]
 fn test_char_widening() {
@@ -380,7 +380,7 @@ fn test_long_variable() {
     assert_eq!(compile_and_run(src), Some(42));
 }
 
-// ── Phase 6: Sub-64-bit type e2e tests ──────────────────────────────────
+// ── Sub-64-bit type e2e tests ──────────────────────────────────
 
 #[test]
 fn test_char_arithmetic() {
@@ -444,7 +444,7 @@ fn test_int_division_negative() {
     assert_eq!(compile_and_run(src), Some(253));
 }
 
-// ── Phase 5: Pointer codegen e2e tests ────────────────────────────────
+// ── Pointer codegen e2e tests ────────────────────────────────
 
 #[test]
 fn test_pointer_addr_deref() {
@@ -491,7 +491,7 @@ fn test_pointer_syntax_parse() {
     }
 }
 
-// ── Phase 6: Pointer arithmetic, comparison, indexing, NULL ──────────
+// ── Pointer arithmetic, comparison, indexing, NULL ──────────
 
 #[test]
 fn test_pointer_add_stride() {
@@ -631,7 +631,7 @@ fn test_char_pointer_stride() {
     assert_eq!(compile_and_run(src), Some(1));
 }
 
-// ── Phase 7: Pointer function params, return values, and casts ──────
+// ── Pointer function params, return values, and casts ──────
 
 #[test]
 fn test_pointer_function_param() {
@@ -749,7 +749,7 @@ fn test_pointer_type_parse_in_signatures() {
     }
 }
 
-// ── Phase 8: Comprehensive pointer e2e tests ───────────────────────────
+// ── Comprehensive pointer e2e tests ───────────────────────────
 
 #[test]
 fn test_ptr_func_param_e2e() {

@@ -1,7 +1,7 @@
 //! Alias analysis infrastructure for the Blitz compiler.
 //!
 //! Provides address categorization and alias queries used by
-//! store-to-load forwarding (Phase 2) and dead store elimination (Phase 3).
+//! store-to-load forwarding and dead store elimination.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;

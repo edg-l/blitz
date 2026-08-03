@@ -833,7 +833,7 @@ pub fn compile(
     // Compute loop depths from the CFG for spill selection.
     let loop_depths = compute_loop_depths(func, &block_schedules);
 
-    // Block params that are slot-spilled by the Phase 6 splitter.
+    // Block params the splitter routed through a stack slot.
     // Passed to lower_terminator so predecessor terminators emit slot stores.
     let mut slot_spilled_params: crate::compile::split::BlockParamSlotMap =
         std::collections::BTreeMap::new();
@@ -956,17 +956,16 @@ pub fn compile(
         let aliases: BTreeMap<VReg, VReg> = BTreeMap::new();
         (result, rewritten, aliases)
     } else {
-        // --- Multi-block path: global register allocator (Phase 6 cutover) ---
+        // --- Multi-block path: the function-scope register allocator ---
 
         // Step 1: Compute CFG successors. Terminator uses come from the
         // `Op::TerminatorArgs` operands once those exist, below.
         let cfg_succs = crate::regalloc::global_liveness::cfg_successors(func);
 
-        // Task 6.1a (CRITICAL ORDER): Collect call-arg precolors BEFORE calling
-        // populate_effectful_operands. The barrier system sorts operands by VReg
-        // index (barrier.rs:388,405-406), destroying ABI argument order.
-        // add_call_precolors_for_block reads EffectfulOp::Call args in positional
-        // ABI order and must run BEFORE the barrier sort.
+        // ORDER: before `populate_effectful_operands`, which appends the trailing
+        // liveness operands and dedupes them. `add_call_precolors_for_block` reads
+        // `EffectfulOp::Call`'s args positionally to pin each to its ABI register,
+        // so it needs the arg list as the CFG states it.
         let mut call_arg_precolors: Vec<(VReg, Reg)> = Vec::new();
         for (block_idx, block) in func.blocks.iter().enumerate() {
             let mut dummy_live_out: std::collections::BTreeSet<VReg> =
@@ -981,10 +980,11 @@ pub fn compile(
             );
         }
 
-        // Task 6.4: insert_early_barrier_spills per block before allocate_global.
-        // Tracks slot numbers used so we can separate them from global-allocator
-        // slots after the fact (the global allocator also starts its slot counter
-        // from 0 internally, so we need to distinguish the two ranges).
+        // Shorten a barrier result's live range where its consumer is two or more
+        // barrier groups away, by spilling it at the def and reloading it at the
+        // use. The slot numbers are recorded because the function-scope allocator
+        // numbers its own slots from 0 as well, and the two sets are told apart
+        // by range afterwards.
         let mut early_barrier_slots: std::collections::BTreeSet<u32> =
             std::collections::BTreeSet::new();
         let mut pre_spill_slots: u32 = 0;
@@ -1020,7 +1020,7 @@ pub fn compile(
         // CallResult, StoreBarrier, VoidCallBarrier) in each block's schedule
         // BEFORE global liveness, so compute_global_liveness sees them as regular
         // instruction operands and includes them in cross-block liveness.
-        // This MUST happen AFTER call_arg_precolors collection (Task 6.1a).
+        // This MUST happen AFTER call_arg_precolors collection.
         //
         // Resolved through each block's own snapshot, not the global map. A class
         // re-emitted per block has one VReg per block and the global map holds
@@ -1464,12 +1464,10 @@ pub fn compile(
             &block_param_vregs,
         );
 
-        // Task 6.1 / Task 6.2: Call allocate_global. This replaces the entire
-        // per-block loop (assign_cross_block_slots + rewrite_block_for_splitting +
-        // allocate() per block). Those functions are no longer called here.
-        // `phi_uses` already includes Ret values (compute_phi_uses covers Ret
-        // val, Jump args, Branch args), so the allocator has the full set of
-        // terminator-consumed VRegs for liveness + end-of-block reload logic.
+        // `phi_uses` covers every VReg a terminator consumes -- a Jump's and a
+        // Branch's arguments and a `Ret`'s value alike, since
+        // `barrier::terminator_arg_classes` numbers all three the same way -- so
+        // the allocator has the whole terminator half of liveness.
         verify_phi_uses = phi_uses.clone();
         verify_block_params = block_param_vregs_per_block.clone();
         verify_copy_pairs = copy_pairs.clone();
@@ -1495,12 +1493,11 @@ pub fn compile(
             }),
         })?;
 
-        // Task 6.5 (deleted per-block spill slot offset code): no per-block slot
-        // offsetting is needed. The global allocator uses a single slot space 0..M.
-        // Early-barrier spills (pre_spill_slots) are in the input schedule with
-        // slot numbers 0..pre_spill_slots. The global allocator's new spills use
-        // 0..M internally. We shift the global-allocator slots by +pre_spill_slots
-        // and leave early-barrier slots unchanged, giving disjoint ranges.
+        // One slot space for the whole function, in three ranges that must not
+        // collide. Early-barrier spills already hold `0..pre_spill_slots` in the
+        // input schedules and the splitter's cross-block spills continue from
+        // there; the function-scope allocator numbers its own from 0 internally,
+        // so those are shifted up past both.
         let mut block_rewritten_storage = global_result.per_block_insts;
         let merged_vreg_to_reg = global_result.vreg_to_reg;
         let mut merged_callee_saved = global_result.callee_saved_used;
@@ -1724,7 +1721,7 @@ pub fn compile(
                 });
             }
         }
-        // Task 6.6: Emit entry movs for unprecolored params from the global
+        // Emit entry movs for unprecolored params from the global
         // allocator. Only in the entry block; these are params whose ABI
         // precoloring was dropped by merge_precolorings_global because they
         // are live across a call that clobbers their ABI register.

@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(load_count, 2, "two SpillLoads expected (one per use)");
     }
 
-    // Phase 4.2: loop-depth penalty — VReg inside a loop is preferred to NOT be spilled.
+    // loop-depth penalty — VReg inside a loop is preferred to NOT be spilled.
     //
     // Given two candidates with equal next-use distance but different loop depths,
     // the one outside the loop (depth=0) should be spilled before the loop-body one.
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(spill_slots, 0);
     }
 
-    // Phase 4.4: XMM VReg spill inserts XMM-specific markers (not GPR markers).
+    // XMM VReg spill inserts XMM-specific markers (not GPR markers).
     //
     // When a VReg is classified as XMM (via vreg_classes), insert_spills must
     // emit XMM_SPILL_STORE_TYPE / XMM_SPILL_LOAD_TYPE sentinels instead of the

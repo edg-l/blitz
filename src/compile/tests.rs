@@ -641,7 +641,7 @@ fn branch_relaxation_uses_short_form_for_nearby_targets() {
     );
 }
 
-// Phase 2: sext compiles end-to-end — a function that sign-extends its I32
+// sext compiles end-to-end — a function that sign-extends its I32
 // parameter to I64 and returns it should compile without error.
 #[test]
 fn e2e_sext_i32_to_i64() {
@@ -654,7 +654,7 @@ fn e2e_sext_i32_to_i64() {
     compile(func, &opts, None).expect("compile sext_i32_to_i64");
 }
 
-// Phase 2: zext compiles end-to-end
+// zext compiles end-to-end
 #[test]
 fn e2e_zext_i8_to_i64() {
     let mut builder = FunctionBuilder::new("zext_i8_to_i64", &[Type::I8], &[Type::I64]);
@@ -666,7 +666,7 @@ fn e2e_zext_i8_to_i64() {
     compile(func, &opts, None).expect("compile zext_i8_to_i64");
 }
 
-// Phase 2: trunc compiles end-to-end
+// trunc compiles end-to-end
 #[test]
 fn e2e_trunc_i64_to_i32() {
     let mut builder = FunctionBuilder::new("trunc_i64_to_i32", &[Type::I64], &[Type::I32]);
@@ -678,7 +678,7 @@ fn e2e_trunc_i64_to_i32() {
     compile(func, &opts, None).expect("compile trunc_i64_to_i32");
 }
 
-// Phase 3: load from a pointer argument compiles end-to-end.
+// load from a pointer argument compiles end-to-end.
 //
 // Build: load_ptr(ptr: *i64) -> i64 = *ptr
 // The Load effectful op should produce a VReg, get allocated a register,
@@ -696,7 +696,7 @@ fn e2e_load_from_pointer_arg() {
     compile(func, &opts, None).expect("compile load_from_pointer_arg");
 }
 
-// Phase 3: store then load — write a value, read it back.
+// store then load — write a value, read it back.
 //
 // Build: store_load(ptr: *i64, val: i64) -> i64 { *ptr = val; return *ptr }
 #[test]
@@ -714,7 +714,7 @@ fn e2e_store_then_load() {
     compile(func, &opts, None).expect("compile store_then_load");
 }
 
-// Phase 4.3: function with a variable shift compiles end-to-end.
+// function with a variable shift compiles end-to-end.
 //
 // The shift count VReg must be pre-colored to RCX before regalloc so that
 // lower_shift_cl can assert src_b == RCX without clobbering live values.
@@ -731,7 +731,7 @@ fn e2e_variable_shift() {
     compile(func, &opts, None).expect("compile variable_shift");
 }
 
-// Phase 5.3: Diamond CFG merge with phi copies from both edges.
+// Diamond CFG merge with phi copies from both edges.
 //
 // IR structure:
 //   BB0 (entry, params=[a, b]):
@@ -809,7 +809,7 @@ int main(void) {
     }
 }
 
-// Phase 5.1: RPO ordering + fallthrough -- verify a simple loop compiles
+// RPO ordering + fallthrough -- verify a simple loop compiles
 // correctly and that the entry->loop jump is eliminated (fallthrough).
 #[test]
 fn rpo_fallthrough_eliminates_entry_jump() {
@@ -2004,7 +2004,7 @@ fn codegen_optimizer_reduces_code_size() {
     }
 }
 
-// ── Phase 9: Division e2e tests ───────────────────────────────────────────────
+// ── Division e2e tests ───────────────────────────────────────────────
 
 // 9.1a: Signed division — sdiv(17, 3) == 5
 #[test]
@@ -2401,9 +2401,9 @@ int main(void) {
     }
 }
 
-// ── Phase 6: Sub-64-bit backend end-to-end tests ────────────────────────────
+// ── Sub-64-bit backend end-to-end tests ────────────────────────────
 
-// Task 6.1: I32 And (the original bug that motivated the sub-64-bit backend).
+// I32 And (the original bug that motivated the sub-64-bit backend).
 #[test]
 fn e2e_i32_and() {
     // Build: i32_and(a: i64, b: i64) -> i64
@@ -2436,7 +2436,7 @@ int main(void) {
     }
 }
 
-// Task 6.2: I32 full arithmetic suite.
+// I32 full arithmetic suite.
 
 #[test]
 fn e2e_i32_add() {
@@ -2525,7 +2525,7 @@ int main(void) {
     }
 }
 
-// Task 6.3: I32 signed division (CDQ should be used, not CQO).
+// I32 signed division (CDQ should be used, not CQO).
 #[test]
 fn e2e_i32_sdiv() {
     use crate::test_utils::objdump_disasm;
@@ -2747,7 +2747,7 @@ int main(void) {
     }
 }
 
-// Task 6.4-6.5: I16 arithmetic tests.
+// I16 arithmetic tests.
 
 #[test]
 fn e2e_i16_add() {
@@ -2836,7 +2836,7 @@ int main(void) {
     }
 }
 
-// Task 6.6-6.7: I8 arithmetic tests.
+// I8 arithmetic tests.
 
 #[test]
 fn e2e_i8_add() {
@@ -2925,7 +2925,7 @@ int main(void) {
     }
 }
 
-// Task 6.8: Mixed-width operations (Sext, Zext, Trunc) with correctness verification.
+// Mixed-width operations (Sext, Zext, Trunc) with correctness verification.
 
 #[test]
 fn e2e_sext_i32_to_i64_negative() {
@@ -3019,7 +3019,7 @@ int main(void) {
     }
 }
 
-// Task 6.9: Spill correctness for I32 values with many live variables.
+// Spill correctness for I32 values with many live variables.
 #[test]
 fn e2e_i32_spill_pressure() {
     // Create 20 I32 constants, keep them all live, then sum them.
@@ -3069,7 +3069,7 @@ fn e2e_many_stores_register_pressure() {
     let base_a = builder.stack_addr(slot_a);
     let base_b = builder.stack_addr(slot_b);
 
-    // Phase 1: Store 6 I64 values to slot A: [10, 20, 30, 40, 50, 60]
+    // Store 6 I64 values to slot A: [10, 20, 30, 40, 50, 60]
     for i in 0..6i64 {
         let off = builder.iconst(i * 8, Type::I64);
         let addr = builder.add(base_a, off);
@@ -3077,7 +3077,7 @@ fn e2e_many_stores_register_pressure() {
         builder.store(addr, val);
     }
 
-    // Phase 2: Load from slot A, add constant, store I32 to slot B
+    // Load from slot A, add constant, store I32 to slot B
     // B[i] = (I32)(A[i] + 5)
     for i in 0..6i64 {
         let off = builder.iconst(i * 8, Type::I64);
@@ -3092,7 +3092,7 @@ fn e2e_many_stores_register_pressure() {
         builder.store(baddr, truncated);
     }
 
-    // Phase 3: Reload from both slots and sum.
+    // Reload from both slots and sum.
     // result = sum(A[i]) + sum(B[i] as I64)
     let mut acc = builder.iconst(0, Type::I64);
     for i in 0..6i64 {

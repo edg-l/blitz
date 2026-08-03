@@ -163,7 +163,7 @@ pub(super) fn thread_branches(
 
 /// A phi copy entry: either a register-to-register copy or a slot store.
 ///
-/// Used internally in `lower_terminator` to handle Phase 6 block-param
+/// Used internally in `lower_terminator` to handle slot-routed block-param
 /// slot spilling: when a block param is slot-spilled, the predecessor emits
 /// a `Slot` copy (stores the arg reg to the spill slot) instead of the
 /// normal register-to-register phi copy.
@@ -206,7 +206,7 @@ fn ret_value_reg(
         .or_else(|| get_reg(ret_cid, ret_class_to_vreg))
 }
 
-/// Follow a coalescing alias chain to the VReg that survived Phase 3.
+/// Follow a coalescing alias chain to the VReg that survived the merge.
 ///
 /// The map is transitive, and a single step leaves a VReg with no register
 /// assignment -- which reads as "no answer" and drops whatever copy was being
@@ -231,7 +231,7 @@ pub(super) fn chase_alias(mut vreg: VReg, coalesce_aliases: &BTreeMap<VReg, VReg
 /// in emission (RPO) order. When a jump target equals `next_block_id`, the jump
 /// can be omitted (fallthrough optimization).
 ///
-/// `slot_spilled_params` is populated by Phase 6 when block params are slot-spilled.
+/// `slot_spilled_params` is populated by the splitter's block-param slot routing.
 /// When a jump to `target` has a slot-spilled param at index `k`, `lower_terminator`
 /// emits a `SpillStore`/`XmmSpillStore` before the phi copies instead of a register copy.
 #[allow(clippy::too_many_arguments)]
@@ -483,7 +483,7 @@ pub(super) fn lower_terminator(
 /// Build phi copy entries for a jump to `target` with `args`.
 ///
 /// Returns a list of `PhiCopy` values: either register-to-register copies
-/// (`Reg`) or slot stores (`Slot`) for Phase 6 slot-spilled block params.
+/// (`Reg`) or slot stores (`Slot`) for slot-spilled block params.
 ///
 /// For each param:
 /// - If the param VReg has a register in `regalloc`, emit `PhiCopy::Reg`.
@@ -627,7 +627,7 @@ fn build_phi_copies(
             OpSize::from_int_type(param_ty)
         };
 
-        // Phase 6: if this param is slot-spilled, emit a slot store directly.
+        // If this param is slot-spilled, emit a slot store directly.
         // The param's segment was truncated to start after block_entry so the
         // class_to_vreg lookup at tgt_entry would fail -- we skip it entirely.
         //
@@ -706,7 +706,7 @@ fn build_phi_copies(
                 ),
                 location: None,
             })?;
-        // Apply coalesce aliases so a dest VReg merged away by Phase 3 resolves
+        // Apply coalesce aliases so a dest VReg coalescing merged away resolves
         // to its canonical. Without this, vreg_to_reg lookup fails and the copy
         // is silently dropped, dropping the back-edge and miscompiling loops.
         // The source side chases the same chain above.

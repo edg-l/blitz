@@ -26,7 +26,7 @@ use crate::egraph::extract::VReg;
 
 /// The kind of split to apply to a victim live range.
 ///
-/// Note: block-param splitting (Phase 6) uses a dedicated
+/// Note: block-param slot routing uses a dedicated
 /// `detect_blockparam_slot_routing` pass rather than routing through this
 /// enum. Block-param VRegs have no explicit def instruction in the block, so
 /// the pressure-victim-picker cannot determine a def site or cost for them.
@@ -50,7 +50,7 @@ pub(crate) enum SplitKind {
 /// Passed to `lower_terminator` so predecessor blocks can emit slot stores.
 pub type BlockParamSlotMap = BTreeMap<(BlockId, u32), SlotSpilledParamInfo>;
 
-/// Information about a block param that is being slot-spilled (Phase 6).
+/// Information about a block param that is being slot-spilled.
 ///
 /// When a block param VReg is live across a call in its block, we spill it
 /// to a stack slot via the phi-copy-to-slot strategy: predecessor terminators
@@ -76,7 +76,7 @@ pub struct SplitPlan {
     pub new_segments: Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
     /// Updated VReg operands: `(block_idx, inst_idx, operand_idx, new_vreg)`.
     pub operand_rewrites: Vec<(usize, usize, usize, VReg)>,
-    /// Block params that are slot-spilled (Phase 6).
+    /// Block params that are slot-spilled.
     ///
     /// Key: `(block_id, param_idx)` identifying the block param in the func.
     /// Value: slot info (VReg to truncate, slot number, class, block_idx).
@@ -620,7 +620,7 @@ fn apply_splits_for_overshoot(
 /// picks a victim and plans either a remat or slot-spill split.
 ///
 /// Also detects block param VRegs live across calls and plans
-/// `SlotSpillBlockParam` splits for them (Phase 6).
+/// `SlotSpillBlockParam` splits for them.
 ///
 /// `loop_depths` maps VReg -> loop nesting depth (from `compute_loop_depths`).
 /// `first_slot` is the first spill-slot index the splitter may allocate; must
@@ -668,7 +668,7 @@ pub fn plan_splits(
     let function_vreg_classes =
         crate::regalloc::build_vreg_classes_from_all_blocks(block_schedules);
 
-    // Block-param slot routing (Phase 6).
+    // Block-param slot routing.
     //
     // Runs before the pressure loop below and claims what it handles in
     // `planned_victims`: a block parameter is written by its predecessors' phi
@@ -1033,7 +1033,7 @@ fn format_plan(plan: &SplitPlan) -> String {
     out
 }
 
-// ── Block-param slot routing (Phase 6) ──────────────────────────────────────
+// ── Block-param slot routing ────────────────────────────────────────────────
 
 /// The VReg and e-class naming block `bid`'s parameter `pidx` at `entry_point`.
 ///
@@ -1680,7 +1680,7 @@ pub fn apply_plan_to(
         committed_segments.push((class, vreg, start, end));
     }
 
-    // Phase 6: Truncate block-param segments so they start AFTER block entry.
+    // Truncate block-param segments so they start AFTER block entry.
     // This causes `collect_block_param_vregs_per_block` (which looks up at
     // BLOCK_ENTRY) to NOT find the param VReg, so no register is allocated to
     // it. Predecessors store to the slot; uses in the block reload from it.
@@ -2045,7 +2045,7 @@ mod tests {
         );
     }
 
-    // ── Phase 6 block-param unit tests ───────────────────────────────────────
+    // ── Block-param slot routing ─────────────────────────────────────────────
 
     /// Build a minimal two-block Function and EGraph for block-param crossing tests.
     ///
@@ -2398,7 +2398,7 @@ mod tests {
         );
     }
 
-    // ── Ported legacy tests (Task 7.4-pre) ───────────────────────────────────
+    // ── Ported legacy tests ──────────────────────────────────────────────────
     //
     // Each test exercises behavior of the pressure-driven split pass.
 
@@ -3054,10 +3054,10 @@ mod tests {
     // Ported from `block_params_not_reloaded` (regalloc/split.rs):
     // Block params are handled by phi elimination, not the split pass.
     // detect_blockparam_slot_routing does insert loads for block params
-    // that cross calls (Phase 6 behavior), but does not treat them as ordinary
+    // that cross calls, but does not treat them as ordinary
     // cross-block victims. Here we verify that a GPR block param that does NOT
     // cross a call generates no insertions from apply_cross_block_slot_spill
-    // (since GPR block params are never XMM, the Phase 6 function ignores them).
+    // (since GPR block params are never XMM, that function ignores them).
     #[test]
     fn legacy_gpr_block_param_not_spilled_by_split_pass() {
         // Block 1 receives v5 as a block parameter (GPR type).

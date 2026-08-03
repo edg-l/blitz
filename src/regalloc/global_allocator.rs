@@ -220,22 +220,22 @@ fn add_block_param_interferences(
 /// Build the function-wide interference graph (Phase 2).
 ///
 /// Steps:
-/// 1. Build a function-wide VReg class map from all blocks (Task 2.3).
+/// 1. Build a function-wide VReg class map from all blocks.
 /// 2. Determine `num_vregs` and allocate the shared `InterferenceGraph` with
-///    `reg_class` pre-populated (Task 2.4).
+///    `reg_class` pre-populated.
 /// 3. For each block, compute per-block `LivenessInfo` using the global
 ///    `live_out` set, call `build_interference_into` to add edges, and store
 ///    the `LivenessInfo` in `per_block_liveness` (Tasks 2.4, 2.4.5).
 /// 4. Add cross-block boundary interferences: all pairs in `live_in[b]` of the
-///    same class interfere; same for `live_out[b]` (Task 2.4).
+///    Same class interfere; same for `live_out[b]`.
 fn build_global_interference(
     block_schedules: &[Vec<ScheduledInst>],
     global_liveness: &crate::regalloc::global_liveness::GlobalLiveness,
 ) -> Phase2State {
-    // Task 2.3: function-wide class map (must complete before graph init).
+    // Function-wide class map (must complete before graph init).
     let vreg_class_map = build_vreg_classes_from_all_blocks(block_schedules);
 
-    // Task 2.4: determine num_vregs across all blocks + global liveness sets.
+    // Determine num_vregs across all blocks + global liveness sets.
     let num_vregs = {
         let mut max_idx = 0usize;
         for sched in block_schedules {
@@ -307,7 +307,7 @@ fn build_global_interference(
         reg_class,
     };
 
-    // Task 2.4.5: collect per-block liveness.
+    // Collect per-block liveness.
     let mut per_block_liveness: Vec<LivenessInfo> = Vec::with_capacity(block_schedules.len());
 
     // For each block: compute liveness, add edges, then add boundary interferences.
@@ -354,7 +354,7 @@ fn add_boundary_interferences(graph: &mut InterferenceGraph, boundary_set: &BTre
     }
 }
 
-// ── Task 3.1: Function-wide precoloring ──────────────────────────────────────
+// ── Function-wide precoloring ──────────────────────────────────────
 
 /// Pre-color shift count operands to RCX for variable-shift instructions.
 ///
@@ -473,7 +473,7 @@ fn precolors_to_color_map(
     map
 }
 
-// ── Task 3.2: Call/div point collection ─────────────────────────────────────
+// ── Call/div point collection ─────────────────────────────────────
 
 /// Collect all call and div program points across all blocks.
 ///
@@ -498,7 +498,7 @@ fn collect_call_div_points(
     (call_points, div_points)
 }
 
-// ── Task 3.3 & 3.4: Global clobber interference injection ───────────────────
+// ── Global clobber interference injection ───────────────────
 
 /// Configuration for `add_clobber_interferences_global`.
 struct GlobalClobberConfig<'a> {
@@ -683,7 +683,7 @@ fn inject_clobber_phantoms(
     (graph, gpr_call_phantoms, xmm_call_phantoms, div_phantoms)
 }
 
-// ── Task 3.5: Global merge_precolorings ──────────────────────────────────────
+// ── Global merge_precolorings ──────────────────────────────────────
 
 /// Merge phantom precolorings with param precolorings into one map.
 ///
@@ -776,18 +776,18 @@ fn merge_precolorings_global(
     merged
 }
 
-// ── Task 3.6 + 3.7: Coalescing and post-rebuild ──────────────────────────────
+// ── Coalescing and post-rebuild ──────────────────────────────
 
 /// Run Phase 3: precoloring, clobber phantoms, coalescing, and graph rebuild.
 ///
 /// # Order of operations (matches the per-block allocator)
 ///
-/// 1. Build function-wide precoloring from params + shifts + divs (Task 3.1).
-/// 2. Collect call/div points (Task 3.2).
-/// 3. **Coalesce on the PRE-phantom graph** produced by Phase 2 (Task 3.6).
-/// 4. Apply coalescing aliases to each block's schedule (Task 3.6).
+/// 1. Build function-wide precoloring from params + shifts + divs.
+/// 2. Collect call/div points.
+/// 3. **Coalesce on the PRE-phantom graph** produced by Phase 2.
+/// 4. Apply coalescing aliases to each block's schedule.
 /// 5. Rebuild interference graph from scratch on post-coalesce schedules
-///    (Task 3.7).
+///   .
 /// 6. Inject clobber phantoms into the rebuilt graph (Tasks 3.3/3.4/3.7).
 /// 7. Rebuild precolorings on the post-coalesce VReg set; apply
 ///    `merge_precolorings_global` to detect and drop conflicting param
@@ -804,16 +804,16 @@ fn run_phase3(
     uses_frame_pointer: bool,
     mut next_vreg: u32,
 ) -> Phase3State {
-    // Task 3.1: build function-wide precoloring (params + shifts + divs +
+    // Build function-wide precoloring (params + shifts + divs +
     // caller-supplied call-arg precolors).
     let (precolors, param_vreg_indices) =
         build_function_wide_precoloring(param_vregs, &block_schedules, call_arg_precolors);
     let mut param_vreg_to_reg: BTreeMap<VReg, Reg> = precolors.iter().copied().collect();
 
-    // Task 3.2: collect call and div program points.
+    // Collect call and div program points.
     let (call_points, div_points) = collect_call_div_points(&block_schedules);
 
-    // Task 3.6 (first half): coalesce on the PRE-phantom graph from Phase 2.
+    // Coalesce on the PRE-phantom graph from Phase 2.
     // This mirrors the per-block allocator which coalesces on the pre-phantom
     // graph and never again.
     let coalesced = {
@@ -830,7 +830,7 @@ fn run_phase3(
         )
     };
 
-    // Task 3.6 (second half): apply coalescing aliases to each block's schedule
+    // Apply coalescing aliases to each block's schedule
     // individually, preserving block boundaries.
     let post_coalesce_schedules: Vec<Vec<ScheduledInst>> = block_schedules
         .iter()
@@ -845,10 +845,10 @@ fn run_phase3(
         .map(|&(into, from)| (from as u32, into as u32))
         .collect();
 
-    // Task 3.7: rebuild the interference graph from scratch on post-coalesce
-    // schedules. Re-run Task 2.3 (vreg class map), re-initialize graph with
-    // pre-populated reg_class, re-run build_interference_into per block, and
-    // re-add cross-block boundary interferences.
+    // Rebuild the interference graph from scratch on the post-coalesce
+    // schedules: rebuild the function-wide VReg class map, re-initialize the
+    // graph with `reg_class` pre-populated, re-run `build_interference_into`
+    // per block, and re-add the cross-block boundary interferences.
     //
     // The CFG topology (cfg_succs) is unchanged by coalescing — only VReg
     // names change. Apply the alias map to phi_uses and block_param_vregs
@@ -890,7 +890,7 @@ fn run_phase3(
         &alias_map_early,
     );
 
-    // Re-inject clobber phantoms into the rebuilt graph (Task 3.7).
+    // Re-inject clobber phantoms into the rebuilt graph.
     let (call_points_post, div_points_post) = collect_call_div_points(&post_coalesce_schedules);
 
     let (graph_with_phantoms, gpr_call_phantoms, xmm_call_phantoms, div_phantoms) =
@@ -938,7 +938,7 @@ fn run_phase3(
         uses_frame_pointer,
     );
 
-    // Task 3.5: merge_precolorings_global — detect and drop param precolorings
+    // merge_precolorings_global — detect and drop param precolorings
     // that conflict with a GPR call phantom.
     let mut unprecolored_params: Vec<(VReg, Reg)> = Vec::new();
     let pre_coloring_colors = merge_precolorings_global(
@@ -1009,23 +1009,23 @@ pub(crate) struct Phase4State {
 ///
 /// # Steps
 ///
-/// 1. **Task 4.1**: `mcs_ordering` on the Phase 3 graph.
-/// 2. **Task 4.2**: `greedy_color` with Phase 3's merged precoloring.
-/// 3. **Task 4.3**: compute per-class chromatic numbers and overshoot counts.
-/// 4. **Task 4.4**: interval-color fallback is intentionally omitted (see module
+/// 1. `mcs_ordering` on the Phase 3 graph.
+/// 2. `greedy_color` with Phase 3's merged precoloring.
+/// 3. compute per-class chromatic numbers and overshoot counts.
+/// 4. interval-color fallback is intentionally omitted (see module
 ///    doc `# Coloring strategy`). If greedy fails, Phase 5 handles it.
-/// 5. **Task 4.5**: `map_colors_to_regs` per class; build `vreg_to_reg` from
+/// 5. `map_colors_to_regs` per class; build `vreg_to_reg` from
 ///    real VRegs only (phantoms are excluded).
-/// 6. **Task 4.6**: compute `callee_saved_used` as the union of assigned physical
+/// 6. compute `callee_saved_used` as the union of assigned physical
 ///    registers that appear in `CALLEE_SAVED` / `CALLEE_SAVED_XMM`.
 pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase4State {
     use super::coloring::{available_gpr_colors, greedy_color, map_colors_to_regs, mcs_ordering};
     use crate::x86::abi::CALLEE_SAVED;
 
-    // Task 4.1: MCS ordering on the Phase 3 graph.
+    // MCS ordering on the Phase 3 graph.
     let ordering = mcs_ordering(&phase3.graph);
 
-    // Task 4.2: greedy coloring with merged precoloring from Phase 3.
+    // Greedy coloring with merged precoloring from Phase 3.
     let mut coloring = greedy_color(&phase3.graph, &ordering, &phase3.pre_coloring_colors);
 
     // Reverse MCS order is optimal on chordal graphs, and a single block's
@@ -1061,7 +1061,7 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
         .filter_map(|(idx, &c)| c.map(|color| (idx, color)))
         .collect();
 
-    // Task 4.3: per-class chromatic numbers and overshoot counts.
+    // Per-class chromatic numbers and overshoot counts.
     //
     // Count the maximum color assigned to VRegs of each class among REAL VRegs
     // (phantom VRegs are those with index >= the pre-phantom count, but since we
@@ -1103,7 +1103,7 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
         );
     }
 
-    // Task 4.5: map colors to physical registers per class.
+    // Map colors to physical registers per class.
     //
     // Build a `BTreeMap<usize, Reg>` precoloring (vreg_idx -> Reg) for each
     // class by decoding `pre_coloring_colors` (vreg_idx -> color) through the
@@ -1175,7 +1175,7 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
         }
     }
 
-    // Task 4.6: compute callee_saved_used.
+    // Compute callee_saved_used.
     //
     // Union of assigned physical registers (across both classes) that are in
     // CALLEE_SAVED (GPR) or CALLEE_SAVED_XMM. In SysV AMD64 all XMM registers
@@ -1266,9 +1266,9 @@ fn build_transitive_alias_map(raw: &BTreeMap<u32, u32>) -> BTreeMap<VReg, VReg> 
     out
 }
 
-/// Run Phase 5: global spilling with iterative spill-and-recolor (Task 5.7).
+/// Run Phase 5: global spilling with iterative spill-and-recolor.
 ///
-/// # XMM cross-block-phi audit (Task 5.9)
+/// # XMM cross-block-phi audit
 ///
 /// The legacy `compile/mod.rs` Step 6b unconditionally force-spilled ALL XMM
 /// VRegs appearing in `phi_uses` or `block_param_vregs_per_block`, because the
@@ -1556,7 +1556,7 @@ pub fn allocate_global(
     func_name: &str,
     uses_frame_pointer: bool,
 ) -> Result<GlobalRegAllocResult, String> {
-    // Task 2.2: Compute function-wide global liveness. Block params are added
+    // Compute function-wide global liveness. Block params are added
     // to their block's live_in so pairs of params on the same block interfere
     // (they're written simultaneously by phi copies and must occupy distinct
     // registers even when the block body never reads them).
@@ -1730,7 +1730,7 @@ mod tests {
         graph.adj[ai].contains(&bi)
     }
 
-    // ── Task 2.5: Two-block straight-line CFG ────────────────────────────────
+    // ── Two-block straight-line CFG ────────────────────────────────
     //
     // Block 0: v0 = iconst, v1 = iconst
     // Block 1: v2 = use(v0)
@@ -1773,7 +1773,7 @@ mod tests {
         );
     }
 
-    // ── Task 2.6: Diamond CFG ─────────────────────────────────────────────────
+    // ── Diamond CFG ─────────────────────────────────────────────────
     //
     // Block 0: v0 = iconst  (branches to block 1 and block 2)
     // Block 1: v1 = iconst  (arm A; joins at block 3)
@@ -1811,7 +1811,7 @@ mod tests {
         );
     }
 
-    // ── Task 2.7: Loop CFG ────────────────────────────────────────────────────
+    // ── Loop CFG ────────────────────────────────────────────────────
     //
     // Block 0 (header): v0 = iconst  (loop entry)
     // Block 1 (body):   v2 = iconst; v1 = add(v0, v2)  (back-edge to block 0)
@@ -1866,7 +1866,7 @@ mod tests {
         );
     }
 
-    // ── Task 3.6a: Coalescing reduces VReg count on a copy-pair program ──────
+    // ── Coalescing reduces VReg count on a copy-pair program ──────
     //
     // Two-block straight-line CFG where v0 and v1 are defined in separate blocks
     // with no overlap (never simultaneously live), forming a non-interfering pair.
@@ -1920,7 +1920,7 @@ mod tests {
         );
     }
 
-    // ── Task 3.6b: Param precolor dropped when call clobbers ABI reg ─────────
+    // ── Param precolor dropped when call clobbers ABI reg ─────────
     //
     // Function parameter v0 is precolored to RDI. Block 0 contains a call
     // (modeled as a VoidCallBarrier) so a GPR call phantom is injected that
@@ -2003,7 +2003,7 @@ mod tests {
         );
     }
 
-    // ── Task 3.6c: Post-rebuild graph has phantoms, pre-coalesce does not ────
+    // ── Post-rebuild graph has phantoms, pre-coalesce does not ────
     //
     // Build a two-block CFG with a call in block 0. The Phase 2 pre-phantom
     // graph should have no phantom VRegs (only real VRegs). The Phase 3
@@ -2202,7 +2202,7 @@ mod tests {
         )
     }
 
-    // ── Task 4 unit tests ─────────────────────────────────────────────────────
+    // ── Coloring ──────────────────────────────────────────────────────────────
 
     // ── simple_coloring_succeeds ─────────────────────────────────────────────
     //
@@ -2390,7 +2390,7 @@ mod tests {
         .expect("allocate_global should succeed")
     }
 
-    // ── Task 5 test 1: low_pressure_no_spill_roundtrips ─────────────────────
+    // ── Spilling ──────────────────────────────────────────────────────────────
     //
     // A two-block straight-line function with low register pressure (3 live
     // GPR values at most, well within the 14/15-register budget). Verifies
@@ -2432,7 +2432,7 @@ mod tests {
         assert_eq!(result.per_block_insts[1].len(), 1);
     }
 
-    // ── Task 5 test 4 / Task 5.9: xmm_cross_block_phi_allocates ────────────
+    // ── An XMM value crossing a block boundary through a phi ──────────────────
     //
     // An XMM value defined in block 0, consumed by a block parameter (phi) in
     // block 2 via block 1, with NO calls on the path. Verifies that:
@@ -2443,7 +2443,8 @@ mod tests {
     // - `spill_slots` == 0 (pressure-based spilling is sufficient; no forced
     //   slot pre-spill is needed when there are no calls on the path).
     //
-    // This test validates the Task 5.9 audit conclusion: phi-copy emission is
+    // This is the case `run_phase5`'s `# XMM cross-block-phi audit` covers, and
+    // what it concludes: phi-copy emission is
     // reg-to-reg movsd and the global allocator assigns XMM registers across
     // block boundaries correctly without forced-slot pre-spilling.
     #[test]

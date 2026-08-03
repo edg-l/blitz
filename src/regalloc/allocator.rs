@@ -899,7 +899,7 @@ mod tests {
         let _ = result; // success or error, both acceptable here
     }
 
-    // Phase 4.1: allocator with explicit copy pairs coalesces non-interfering ones.
+    // allocator with explicit copy pairs coalesces non-interfering ones.
     //
     // v0 = iconst; v1 = iconst; [v0 and v1 are non-interfering since v0 dies before v1 is used]
     // Copy pair (v0, v2) and (v1, v3) — if regalloc coalesces them, v0==v2 and v1==v3.
@@ -946,7 +946,7 @@ mod tests {
         assert!(result.vreg_to_reg.contains_key(&VReg(3)));
     }
 
-    // Phase 4.3: shift count VReg pre-colored to RCX is allocated to RCX.
+    // shift count VReg pre-colored to RCX is allocated to RCX.
     //
     // Simulate a variable shift by pre-coloring the count VReg to RCX,
     // as compile() does before calling allocate().
