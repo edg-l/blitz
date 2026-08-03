@@ -47,14 +47,22 @@ rather than overhead against it.
 - Implemented e-graph rules: see `docs/egraph-optimization-roadmap.md`.
 - Splitter design: see `docs/split-pass-plan.md`.
 
-## The next refactor
+## The next refactors
 
-**`docs/vreg-cfg-refactor.md` -- the CFG should hold VRegs, not ClassIds.** Read it
-before starting anything in the register allocator or the block-parameter machinery.
-It is the root cause behind the seven wrong-code bugs the seam has produced, behind
-both failed attempts at rematerialization, and behind the 36 remaining capacity
-failures; and it is what makes redundant block-parameter elimination possible, which
-is worth 85-94% of every function's parameters.
+**`docs/refactor-roadmap.md`** -- eight ordered steps with the reason for the order.
+Read it before starting anything in the register allocator, the splitter, or the
+block-parameter machinery. The two that matter:
+
+- **The CFG should hold VRegs, not ClassIds** (steps 1-4). The root cause behind the
+  seven wrong-code bugs that seam has produced, behind both failed attempts at
+  rematerialization, and behind 36 of the 46 remaining capacity failures; and it is
+  what makes redundant block-parameter elimination possible, worth 85-94% of every
+  function's parameters.
+- **The function-scope allocator cannot spill** (step 5). `run_phase5` is
+  `Ok`-or-`Err` with no spill loop, so "the splitter must be perfect" and every
+  capacity failure is a compile error rather than slow code. It comes *after* the
+  steps above on purpose -- a spiller mints new VRegs for existing classes, which is
+  exactly what the current representation handles worst.
 
 ## Priorities
 

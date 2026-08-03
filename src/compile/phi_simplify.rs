@@ -53,9 +53,9 @@
 //! Kept because the measurement is worth having: 85-94% redundant across the whole
 //! generated corpus, and one loop header carrying 28 parameters where 4 are real.
 //!
-//! **This module is superseded rather than fixed.** `docs/vreg-cfg-refactor.md` step
-//! 2 replaces it with the same rule over VRegs, where a phi operand is a *def* and
-//! the difficulty above does not exist. Do not re-attempt it on `ClassId`s.
+//! **This module is superseded rather than fixed.** `docs/refactor-roadmap.md` step 2
+//! replaces it with the same rule over VRegs, where a phi operand is a *def* and the
+//! difficulty above does not exist. Do not re-attempt it on `ClassId`s.
 
 use std::collections::{BTreeMap, BTreeSet};
 
