@@ -1,4 +1,26 @@
-// KNOWN FAILING -- reproducer for a real bug. Do not "fix" by weakening it.
+// KNOWN FAILING under BLITZ_VERIFY only -- the answer is right, the allocation
+// is not. Do not "fix" by weakening it.
+//
+// It prints 303 and matches cc at both levels, so it cannot go in tests/lit:
+// `BLITZ_VERIFY=strict bash tests/lit/run_tests.sh` has to stay green, and this
+// program trips the register-sharing verifier:
+//
+//   block 0 exit: VReg 20 and VReg 779 are both live and both hold RBX
+//
+// That is the latent violation family the seed 7 reduction also shows (VReg 9 and
+// VReg 1056 in RBX), and this is a smaller handle on it: 60 lines, deterministic,
+// and the report names a block exit rather than a mid-block point.
+//
+// The two bugs it was originally kept for are both gone. The wrong-code bug -- a
+// load's address resolving to its own index constant, so the load read
+// `[rax+rax*1]` -- was fixed earlier; the register pressure that stopped it after
+// that (`gpr_overshoot=2` at -O0, 18 at -O1) is gone now that a loop-carried value
+// can stay in a slot across the loop. Promote it to tests/lit the moment the
+// sharing violation is fixed.
+//
+// Was KNOWN FAILING. The wrong-code bug was fixed earlier; what still stopped the
+// program was register pressure -- `gpr_overshoot=2` at -O0 and 18 at -O1 -- and
+// that is gone now that a loop-carried value can stay in a slot across the loop.
 //
 //   cc -O0          303
 //   blitz -O0       cannot allocate registers (gpr_overshoot=2)

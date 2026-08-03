@@ -1,4 +1,12 @@
-// KNOWN FAILING -- reproducer for a real bug. Do not "fix" by weakening it.
+// Regression test: several values collapsed onto one storage location, so terms
+// of a sum were counted twice, three times, or not at all.
+//
+// Was KNOWN FAILING -- cc said -4 while blitz said 15 at -O0 and -21 at -O1 --
+// and it compiled at all only since the degree-order colouring retry, so it was a
+// miscompile the allocation failure had been hiding. Correct at both levels since
+// the phi copy started writing the VReg the target block's schedule reads
+// (29e796d). The opt-level pin it carried as a findings file is gone with it, so
+// both levels and the differential harness now cover it.
 //
 //   cc -O0 and cc -O2   -4
 //   blitz -O0           15
@@ -94,7 +102,6 @@
 // build the class-to-VReg map for lowering ONCE from the final post-allocation
 // schedules instead of patching a pre-split snapshot three times.
 //
-// FLAGS: -O0
 // OUTPUT: -4
 // EXIT: 0
 extern int printf(char* fmt, int x);

@@ -1,4 +1,9 @@
-// KNOWN FAILING -- reproducer for a real bug. Do not "fix" by weakening it.
+// Regression test: a spill store wrote an idiv divisor into the slot a sum reads.
+//
+// Was KNOWN FAILING -- cc said 83, blitz -O1 said 179, and -O0 could not allocate
+// at all. Correct at both levels since the block-parameter slot routing and the
+// phi-destination fix landed. The opt-level pin it carried as a findings file is
+// gone with it, so both levels now cover it.
 //
 //   cc -O0 and cc -O2   83
 //   blitz -O1           179
@@ -45,7 +50,6 @@
 // overlapping live ranges may share a physical register -- which names this
 // mechanically and covers the other programs the splitter change made visible.
 //
-// FLAGS: -O1
 // OUTPUT: 83
 // EXIT: 0
 extern int printf(char* fmt, int x);

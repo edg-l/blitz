@@ -1,4 +1,21 @@
-// KNOWN FAILING -- reproducer for a real bug. Do not "fix" by weakening it.
+// KNOWN FAILING under BLITZ_VERIFY only -- the answer is right, the allocation
+// is not. Do not "fix" by weakening it.
+//
+// `main` falling off its end must return 0 (C99 5.1.2.2.3), and it now does; blitz
+// used to exit 8 at -O0 and 223 at -O1, whatever happened to be in EAX. But the
+// program cannot go in tests/lit, because `BLITZ_VERIFY=strict` has to stay green
+// there and this trips the register-sharing verifier twice:
+//
+//   block 0 exit: VReg 1 and VReg 336 are both live and both hold RCX
+//   block 0 before [45] StoreBarrier: VReg 0 and VReg 1 are both live and both hold RCX
+//
+// Same family as the seed 7 reduction (VReg 9 and VReg 1056 in RBX). Two reports
+// in one function, one of them at a named instruction, make this the better place
+// to start on it. Promote it to tests/lit once that is fixed.
+//
+// Was KNOWN FAILING -- blitz exited 8 at -O0 and 223 at -O1, whatever happened to
+// be in EAX. Not a blanket missing-return: a six-line main returned 0 correctly,
+// so it took this much surrounding code.
 //
 // `main` falls off its end, which C99 5.1.2.2.3 defines as returning 0. cc exits
 // 0; blitz exits 8 at -O0 and 223 at -O1, so whatever happens to be in EAX is
