@@ -178,6 +178,48 @@ enum PhiCopy {
     },
 }
 
+/// The register holding a `Ret`'s value.
+///
+/// `Op::TerminatorArgs` numbers a `Ret`'s value as argument 0, so the schedule
+/// names the VReg directly: it is post-split, post-coalesce, and the one the
+/// allocator assigned a register to. Resolving the value's *class* instead is the
+/// same reconstruction that produced seven wrong-code bugs at this seam, and here
+/// it fails silently -- no register means no move, so the function returns
+/// whatever the ABI register already held.
+///
+/// The class map stays as the fallback for the single-block path, where
+/// `append_terminator_args` never ran and `term_args` is empty.
+fn ret_value_reg(
+    ret_cid: ClassId,
+    term_args: &BTreeMap<u32, VReg>,
+    coalesce_aliases: &BTreeMap<VReg, VReg>,
+    regalloc: &RegAllocResult,
+    ret_class_to_vreg: &ClassVRegMap,
+    get_reg: &impl Fn(ClassId, &ClassVRegMap) -> Option<Reg>,
+) -> Option<Reg> {
+    term_args
+        .get(&0)
+        .copied()
+        .map(|v| chase_alias(v, coalesce_aliases))
+        .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
+        .or_else(|| get_reg(ret_cid, ret_class_to_vreg))
+}
+
+/// Follow a coalescing alias chain to the VReg that survived Phase 3.
+///
+/// The map is transitive, and a single step leaves a VReg with no register
+/// assignment -- which reads as "no answer" and drops whatever copy was being
+/// emitted.
+fn chase_alias(mut vreg: VReg, coalesce_aliases: &BTreeMap<VReg, VReg>) -> VReg {
+    while let Some(&aliased) = coalesce_aliases.get(&vreg) {
+        if aliased == vreg {
+            break;
+        }
+        vreg = aliased;
+    }
+    vreg
+}
+
 /// Lower a block terminator, including phi copies for block-parameter passing.
 ///
 /// Returns a list of `BlockItem`s (instructions and label bindings).
@@ -250,7 +292,14 @@ pub(super) fn lower_terminator(
                     imm: value,
                 }));
             } else if let Some(&ret_cid) = val.as_ref()
-                && let Some(ret_reg) = get_reg(ret_cid, ret_class_to_vreg)
+                && let Some(ret_reg) = ret_value_reg(
+                    ret_cid,
+                    term_args,
+                    coalesce_aliases,
+                    regalloc,
+                    ret_class_to_vreg,
+                    &get_reg,
+                )
             {
                 let is_float_ret = func.return_types.first().is_some_and(|t| t.is_float());
                 let abi_reg = if is_float_ret {
@@ -511,17 +560,9 @@ fn build_phi_copies(
             continue;
         };
         // Chase the alias chain, exactly as the destination side below does.
-        // `apply_coalescing` renamed the schedule one step, but the map from
-        // Phase 3 is transitive; without this the register lookup misses and the
-        // copy is silently dropped -- which is a dropped back edge, so the loop
-        // never terminates.
-        let mut arg_vreg = arg_vreg;
-        while let Some(&aliased) = coalesce_aliases.get(&arg_vreg) {
-            if aliased == arg_vreg {
-                break;
-            }
-            arg_vreg = aliased;
-        }
+        // Without this the register lookup misses and the copy is silently
+        // dropped -- which is a dropped back edge, so the loop never terminates.
+        let arg_vreg = chase_alias(arg_vreg, coalesce_aliases);
         // `k=<n>` is the argument class's constant value when it has one. Two
         // params with different `k` reading the same `src` is the signature of
         // an argument resolved to the wrong VReg.
@@ -600,7 +641,7 @@ fn build_phi_copies(
         // definition and truncates its segment to the defining block, nothing
         // else names the value here -- 9 of 40 generated programs failed to
         // compile at -O1 on exactly that.
-        let mut param_vreg = param_vreg_overrides
+        let param_vreg = param_vreg_overrides
             .get(&(target, param_idx as u32))
             .copied()
             .or_else(|| class_to_vreg.lookup(param_cid, tgt_entry))
@@ -624,12 +665,7 @@ fn build_phi_copies(
         // to its canonical. Without this, vreg_to_reg lookup fails and the copy
         // is silently dropped, dropping the back-edge and miscompiling loops.
         // The source side chases the same chain above.
-        while let Some(&aliased) = coalesce_aliases.get(&param_vreg) {
-            if aliased == param_vreg {
-                break;
-            }
-            param_vreg = aliased;
-        }
+        let param_vreg = chase_alias(param_vreg, coalesce_aliases);
 
         match regalloc.vreg_to_reg.get(&param_vreg).copied() {
             Some(dst_reg) => {
