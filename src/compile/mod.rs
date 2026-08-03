@@ -46,7 +46,8 @@ use canon::canonicalize_class_refs;
 mod cfg;
 use cfg::{
     build_block_param_class_map, collect_block_roots, collect_externals, collect_phi_source_vregs,
-    collect_roots, compute_copy_pairs, compute_idom, compute_loop_depths, compute_rpo, dominates,
+    collect_roots, compute_copy_pairs, compute_copy_pairs_from_schedules, compute_idom,
+    compute_loop_depths, compute_rpo, dominates,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -791,15 +792,6 @@ pub fn compile(
         &func_arg_locs,
     );
 
-    // Build phi copy pairs from block parameter passing for coalescing.
-    let copy_pairs = compute_copy_pairs(
-        func,
-        &class_to_vreg,
-        &egraph,
-        &block_param_map,
-        &block_param_vreg_overrides,
-    );
-
     // Compute loop depths from the CFG for spill selection.
     let loop_depths = compute_loop_depths(func, &block_schedules);
 
@@ -819,6 +811,9 @@ pub fn compile(
     // phi copy at the edge, so it is not live at a predecessor's exit unless the
     // predecessor's terminator passes it, which `verify_phi_uses` records.
     let mut verify_block_params: Vec<BTreeSet<VReg>> = Vec::new();
+    // And the copy pairs, so the check exempts the same phi-related VRegs
+    // coalescing was allowed to merge.
+    let mut verify_copy_pairs: Vec<(VReg, VReg)> = Vec::new();
 
     // Single-block fast path skips global liveness.
     let (regalloc_result, block_rewritten, coalesce_aliases) = if func.blocks.len() == 1 {
@@ -881,6 +876,15 @@ pub fn compile(
             &class_to_vreg,
             &mut all_param_vregs,
             &mut live_out,
+        );
+        // Coalescing's copy pairs. One block reaches no other, so the only edge
+        // this can find is a self-loop.
+        let copy_pairs = compute_copy_pairs(
+            func,
+            &class_to_vreg,
+            &egraph,
+            &block_param_map,
+            &block_param_vreg_overrides,
         );
         let result = allocate(
             &all_scheduled,
@@ -1368,6 +1372,26 @@ pub fn compile(
             }
         }
 
+        // Coalescing's copy pairs, read off the final schedules. Resolving each
+        // argument's class through the function-wide map answers a per-block
+        // question with whichever VReg the class was last given: a pure class is
+        // re-emitted in every block that needs it, so the answer can be a VReg
+        // defined in a block the edge never reaches, and merging the destination
+        // parameter onto that VReg hands the parameter a register chosen for an
+        // unrelated value.
+        //
+        // CRITICAL ORDER: after the splitter, so an argument it routed through a
+        // stack slot -- which has no operand and no copy -- contributes no pair.
+        let copy_pairs = compute_copy_pairs_from_schedules(
+            func,
+            &block_schedules,
+            &egraph,
+            &class_to_vreg,
+            &block_param_map,
+            &block_param_vreg_overrides,
+            &block_param_vregs,
+        );
+
         // Task 6.1 / Task 6.2: Call allocate_global. This replaces the entire
         // per-block loop (assign_cross_block_slots + rewrite_block_for_splitting +
         // allocate() per block). Those functions are no longer called here.
@@ -1376,6 +1400,7 @@ pub fn compile(
         // terminator-consumed VRegs for liveness + end-of-block reload logic.
         verify_phi_uses = phi_uses.clone();
         verify_block_params = block_param_vregs_per_block.clone();
+        verify_copy_pairs = copy_pairs.clone();
         let global_result = allocate_global(
             &block_schedules,
             &param_vregs,
@@ -1495,7 +1520,7 @@ pub fn compile(
             &succs,
             &regalloc_result.vreg_to_reg,
             &coalesce_aliases,
-            &copy_pairs,
+            &verify_copy_pairs,
         );
         if !errors.is_empty() {
             panic!(

@@ -416,6 +416,77 @@ pub(super) fn compute_copy_pairs(
     pairs
 }
 
+/// Build phi copy pairs from the schedules, as `(arg_vreg, param_vreg)`.
+///
+/// The same pairs [`compute_copy_pairs`] derives from `class_to_vreg`, except
+/// that each argument's VReg is the operand its block's `Op::TerminatorArgs`
+/// carries and each parameter's VReg is the one the target block's own
+/// `Op::BlockParam` defines. Those are the VRegs the emitted copy reads and
+/// writes, so they are the pairs coalescing may merge; a class resolved through
+/// the function-wide map can instead name a VReg defined in a block that does
+/// not reach this edge, and merging *that* forces the parameter into a register
+/// chosen for an unrelated value.
+///
+/// An argument with no operand travels through a stack slot and needs no copy,
+/// so it contributes no pair.
+pub(super) fn compute_copy_pairs_from_schedules(
+    func: &Function,
+    block_schedules: &[Vec<ScheduledInst>],
+    egraph: &EGraph,
+    class_to_vreg: &ClassVRegMap,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
+    param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
+    block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
+) -> Vec<(VReg, VReg)> {
+    let block_id_to_idx: BTreeMap<BlockId, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+
+    // The same order of sources as `terminator::build_phi_copies` uses for a
+    // copy's destination, so coalescing merges onto the VReg the copy targets.
+    let param_vreg = |target: BlockId, pidx: u32| -> Option<VReg> {
+        let target_idx = *block_id_to_idx.get(&target)?;
+        block_schedules
+            .get(target_idx)
+            .and_then(|sched| {
+                sched.iter().find_map(|inst| match inst.op {
+                    Op::BlockParam(bid, i, _) if bid == target && i == pidx => Some(inst.dst),
+                    _ => None,
+                })
+            })
+            .or_else(|| param_vreg_overrides.get(&(target, pidx)).copied())
+            .or_else(|| {
+                let param_cid = *block_param_map.get(&(target, pidx))?;
+                let canon = egraph.unionfind.find_immutable(param_cid);
+                class_to_vreg.lookup(canon, ProgramPoint::block_entry(target_idx))
+            })
+            .or_else(|| block_param_vregs.get(&(target, pidx)).copied())
+    };
+
+    let mut pairs: Vec<(VReg, VReg)> = Vec::new();
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        let Some(term) = block.ops.last() else {
+            continue;
+        };
+        let dests = super::barrier::terminator_arg_destinations(term);
+        let Some(schedule) = block_schedules.get(block_idx) else {
+            continue;
+        };
+        for (arg_idx, arg_v) in super::barrier::terminator_arg_operands(schedule) {
+            let Some(&(target, pidx)) = dests.get(arg_idx as usize) else {
+                continue;
+            };
+            if let Some(param_v) = param_vreg(target, pidx) {
+                pairs.push((arg_v, param_v));
+            }
+        }
+    }
+    pairs
+}
+
 /// Compute loop depth for each VReg based on the CFG back-edges.
 ///
 /// A back-edge is a jump/branch to a block with a lower (or equal) index,
