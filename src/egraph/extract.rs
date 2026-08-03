@@ -98,6 +98,28 @@ impl ClassVRegMap {
         self.vreg_to_class_segs.insert(vreg, (class, start, end));
     }
 
+    /// Insert a segment without claiming `vreg` for `class` in the inverse index.
+    ///
+    /// For a map rebuilt after coalescing, where one surviving VReg legitimately
+    /// serves several classes: a phi copy relates the VRegs of two different
+    /// classes, so merging them makes both classes name the same register. The
+    /// inverse index holds one class per VReg and cannot say that, and the
+    /// exclusivity it asserts is worth keeping everywhere else -- so such a map
+    /// carries only the forward direction. `registered_class` and `vreg_to_class`
+    /// see nothing of these segments.
+    pub fn insert_segment_shared(
+        &mut self,
+        class: ClassId,
+        vreg: VReg,
+        start: ProgramPoint,
+        end: ProgramPoint,
+    ) {
+        self.segments
+            .entry(class)
+            .or_default()
+            .push(Segment { vreg, start, end });
+    }
+
     /// Legacy shim: insert a single (class, vreg) mapping, replacing any existing entry.
     ///
     /// Implemented as `insert_full_range`. Retained for construction sites that
@@ -179,17 +201,6 @@ impl ClassVRegMap {
     )]
     pub fn lookup_single(&self, class: ClassId) -> Option<VReg> {
         self.lookup_any(class)
-    }
-
-    /// The class this VReg is registered under, ignoring ranges.
-    ///
-    /// The inverse index holds one class per VReg. After coalescing, one VReg
-    /// legitimately serves several classes, and a caller building such a map has
-    /// to notice rather than trip the `insert_segment` assertion.
-    pub fn registered_class(&self, vreg: VReg) -> Option<ClassId> {
-        self.vreg_to_class_segs
-            .get(&vreg)
-            .map(|&(class, _, _)| class)
     }
 
     /// Inverse lookup: return the ClassId covering `vreg` at `point`, or `None`.

@@ -210,7 +210,7 @@ fn ret_value_reg(
 /// The map is transitive, and a single step leaves a VReg with no register
 /// assignment -- which reads as "no answer" and drops whatever copy was being
 /// emitted.
-fn chase_alias(mut vreg: VReg, coalesce_aliases: &BTreeMap<VReg, VReg>) -> VReg {
+pub(super) fn chase_alias(mut vreg: VReg, coalesce_aliases: &BTreeMap<VReg, VReg>) -> VReg {
     while let Some(&aliased) = coalesce_aliases.get(&vreg) {
         if aliased == vreg {
             break;

@@ -1490,80 +1490,31 @@ pub fn compile(
                     }
                 }
             }
-            // Apply the global coalesce alias map so `class_to_vreg[canon]`
-            // never points at a stale pre-coalesce VReg that has no register
-            // assignment. The alias map is from `allocate_global`'s result
-            // and is constant across blocks.
+            // Rename every VReg to the one that survived coalescing, keeping the
+            // range it was recorded with. `apply_coalescing` renamed the
+            // schedules and not this map, so a merged-away VReg has no register
+            // assignment and reads as no answer at all.
             //
-            // Each segment keeps its range. Rebuilding this as one VReg per
-            // class discards everything the splitter recorded: with a class
-            // holding a value plus a reload or a rematerialised copy per block,
-            // whichever segment happened to be visited last won every lookup,
-            // and a phi copy in one block would read the copy belonging to
-            // another.
+            // Renaming in place, rather than collapsing each class to a single
+            // full-range VReg: the collapse discarded everything the splitter
+            // recorded, so with a class holding a value plus a reload per block,
+            // one segment won every lookup and a phi copy in one block read the
+            // copy belonging to another. The full-range entries linearization
+            // made are still here and still act as the fallback where a class
+            // has no narrower segment covering the point; what is gone is
+            // fabricating one.
+            //
+            // The chase is transitive. A single step leaves a VReg that Phase 3
+            // merged twice still pointing at an intermediate with no register.
             if !coalesce_aliases.is_empty() {
                 let mut aliased_map = ClassVRegMap::new();
-                // The collapse first, as a full-range fallback per class: a
-                // lookup at a point no precise segment covers still resolves,
-                // which is the only reason collapsing ever worked.
-                //
-                // One fallback per CLASS, chosen deliberately. `insert_single`
-                // replaces the whole class, so iterating segments and inserting
-                // each in turn left whichever segment came last as the fallback
-                // -- typically a reload the splitter appended in some unrelated
-                // block, sharing one scratch register with every other reload.
-                // Every lookup at an uncovered point then named that scratch:
-                // ten back-edge phi copies all read RAX and the loop overwrote
-                // its own block params (findings/seed6_reduced_wrong_sum.c).
-                //
-                // Prefer the widest segment -- the original value's own range,
-                // which the splitter only ever truncates -- and among those
-                // prefer one that actually holds a register, since a fallback
-                // with no register resolves to nothing at all.
-                // Ranked: has a register first, then earliest start, then latest
-                // end, then VReg for determinism. The minimum is the widest
-                // segment that resolves to something.
-                type FallbackKey = (bool, ProgramPoint, std::cmp::Reverse<ProgramPoint>, VReg);
-                let mut fallbacks: BTreeMap<ClassId, FallbackKey> = BTreeMap::new();
                 for (cid, vreg, start, end) in map.iter_segments() {
-                    let aliased = coalesce_aliases.get(&vreg).copied().unwrap_or(vreg);
-                    let key: FallbackKey = (
-                        !regalloc_result.vreg_to_reg.contains_key(&aliased),
+                    aliased_map.insert_segment_shared(
+                        cid,
+                        terminator::chase_alias(vreg, &coalesce_aliases),
                         start,
-                        std::cmp::Reverse(end),
-                        aliased,
+                        end,
                     );
-                    fallbacks
-                        .entry(cid)
-                        .and_modify(|best| {
-                            if key < *best {
-                                *best = key;
-                            }
-                        })
-                        .or_insert(key);
-                }
-                for (cid, (_, _, _, aliased)) in fallbacks {
-                    aliased_map.insert_single(cid, aliased);
-                }
-                // Then overlay the precise ranges. They nest inside the
-                // fallback, so `lookup` prefers them where they apply.
-                //
-                // Only where the aliased VReg is unambiguous. Coalescing merges
-                // copy-related VRegs, and a phi copy relates VRegs of two
-                // different classes, so one target can serve several classes.
-                // The inverse index holds one class per VReg and cannot express
-                // that; those classes keep the fallback, which names the shared
-                // register -- the right answer for a coalesced value anyway.
-                for (cid, vreg, start, end) in map.iter_segments() {
-                    let aliased = coalesce_aliases.get(&vreg).copied().unwrap_or(vreg);
-                    if start.block != u32::MAX
-                        && end.block != u32::MAX
-                        && aliased_map
-                            .registered_class(aliased)
-                            .is_none_or(|c| c == cid)
-                    {
-                        aliased_map.insert_segment(cid, aliased, start, end);
-                    }
                 }
                 map = aliased_map;
             }
