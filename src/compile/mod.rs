@@ -1867,6 +1867,20 @@ pub fn compile(
     // no reload reads a spill slot nothing stored. This is the check that turns a
     // wrong-code bug from "segfault somewhere in a large program" into a named
     // instruction.
+    if crate::trace::is_enabled("slots") && crate::trace::fn_matches(&func.name) {
+        tracing::debug!(
+            target: "blitz::slots",
+            "[{}] spill slot traffic:\n{}",
+            func.name,
+            crate::trace::format_slot_traffic(
+                &flat_insts,
+                frame_layout.spill_base,
+                frame_layout.spill_offset,
+                regalloc_result.spill_slots,
+            ),
+        );
+    }
+
     crate::verify::verify_machinsts_stage(
         "encode",
         &func.name,

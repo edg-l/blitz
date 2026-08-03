@@ -4,7 +4,7 @@
 //!
 //! - `BLITZ_DEBUG`: comma-separated list of categories to enable.
 //!   Categories: `sched`, `liveness`, `regalloc`, `asm`, `licm`, `egraph`, `dce`, `alias`,
-//!   `split`, `phi`, `coalesce`, `all`.
+//!   `split`, `phi`, `coalesce`, `slots`, `all`.
 //!
 //! - `BLITZ_DEBUG_FN`: optional substring filter on function names.
 //!   When set, only functions whose name contains this string produce output.
@@ -32,9 +32,9 @@ struct BlitzDebugConfig {
 }
 
 /// Every valid `BLITZ_DEBUG` category. `all` enables the lot.
-const CATEGORIES: [&str; 11] = [
+const CATEGORIES: [&str; 12] = [
     "sched", "liveness", "regalloc", "asm", "licm", "egraph", "dce", "alias", "split", "phi",
-    "coalesce",
+    "coalesce", "slots",
 ];
 
 fn start_time() -> &'static Instant {
@@ -186,6 +186,128 @@ pub fn format_vreg_to_reg(map: &BTreeMap<VReg, crate::x86::reg::Reg>) -> String 
     out
 }
 
+/// Format every access to every spill slot in the final instruction stream.
+///
+/// A slot's traffic is the one thing the register-level dumps cannot show, and
+/// three separate wrong-code bugs came down to reading it out of a disassembly
+/// by hand. Each line is one slot: its frame displacement, then every load and
+/// store against it in instruction order with the register moved.
+///
+/// The notes after a slot are the shapes that have been bugs:
+///
+/// - `NEVER STORED` -- every read of it returns whatever the frame held. The
+///   machine verifier reports this per path; here it is a whole-function fact,
+///   so a slot written on some other path does not hide it.
+/// - `FIRST ACCESS IS A LOAD` -- weaker than the above and worth seeing: in
+///   program order the value is read before it is written.
+/// - `SELF-COPY` -- the only store takes the register the immediately preceding
+///   load of the SAME slot wrote, so the slot is copied onto itself and nothing
+///   ever puts a real value in it.
+///
+/// Deliberately not a flag: a slot stored from two different registers. It reads
+/// like two values sharing one slot and is almost always one value re-spilled
+/// after a reload put it somewhere else, which fired on a third of the slots in
+/// the first program tried. The store registers are in the line; judge them
+/// there.
+pub fn format_slot_traffic(
+    insts: &[crate::x86::inst::MachInst],
+    spill_base: crate::x86::reg::Reg,
+    spill_offset: i32,
+    spill_slots: u32,
+) -> String {
+    use std::fmt::Write;
+
+    let spill_hi = spill_offset + (spill_slots as i32) * 8;
+    // A plain `[spill_base + disp]` inside the slot region. An indexed address is
+    // not a slot reference: nothing addresses a spill slot that way.
+    let slot_of = |addr: &crate::x86::addr::Addr| -> Option<i32> {
+        if addr.base != Some(spill_base) || addr.index.is_some() {
+            return None;
+        }
+        (addr.disp >= spill_offset && addr.disp < spill_hi).then_some(addr.disp)
+    };
+
+    // disp -> accesses, in instruction order.
+    let mut traffic: BTreeMap<i32, Vec<(usize, bool, Vec<crate::x86::reg::Reg>)>> = BTreeMap::new();
+    for (i, inst) in insts.iter().enumerate() {
+        if let Some(addr) = inst.mem_load_addr()
+            && let Some(disp) = slot_of(addr)
+        {
+            traffic
+                .entry(disp)
+                .or_default()
+                .push((i, false, inst.defs()));
+        }
+        if let Some(addr) = inst.mem_store_addr()
+            && let Some(disp) = slot_of(addr)
+        {
+            // The address registers are a read of the frame pointer, not of the
+            // value being stored. Counting them made every slot look like it was
+            // stored from two registers.
+            let value: Vec<crate::x86::reg::Reg> = inst
+                .uses()
+                .into_iter()
+                .filter(|r| Some(*r) != addr.base && Some(*r) != addr.index)
+                .collect();
+            traffic.entry(disp).or_default().push((i, true, value));
+        }
+    }
+
+    let mut out = String::new();
+    if spill_slots == 0 {
+        writeln!(out, "  no spill slots").unwrap();
+        return out;
+    }
+    for (disp, accesses) in &traffic {
+        let regs = |set: &[crate::x86::reg::Reg]| -> String {
+            set.iter()
+                .map(|r| format!("{r:?}"))
+                .collect::<Vec<_>>()
+                .join("/")
+        };
+        let body: Vec<String> = accesses
+            .iter()
+            .map(|(i, is_store, rs)| {
+                let arrow = if *is_store { "<-" } else { "->" };
+                format!("[{i}] {arrow} {}", regs(rs))
+            })
+            .collect();
+        let stores: Vec<&(usize, bool, Vec<crate::x86::reg::Reg>)> =
+            accesses.iter().filter(|(_, s, _)| *s).collect();
+
+        let mut notes: Vec<String> = Vec::new();
+        if stores.is_empty() {
+            notes.push("NEVER STORED".to_string());
+        } else if accesses.first().is_some_and(|(_, is_store, _)| !is_store) {
+            notes.push("FIRST ACCESS IS A LOAD".to_string());
+        }
+        // The store's source is exactly what the load right before it produced,
+        // and that load read this same slot.
+        let self_copy = stores.len() == 1
+            && accesses.len() == 2
+            && !accesses[0].1
+            && accesses[0].2 == accesses[1].2;
+        if self_copy {
+            notes.push("SELF-COPY".to_string());
+        }
+        let slot = (disp - spill_offset) / 8;
+        writeln!(
+            out,
+            "  slot {slot:>3} {spill_base:?}{disp:+}  {}{}",
+            body.join("  "),
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!("   !! {}", notes.join(", "))
+            },
+        )
+        .unwrap();
+    }
+    let touched = traffic.len();
+    writeln!(out, "  {spill_slots} slot(s) allocated, {touched} touched",).unwrap();
+    out
+}
+
 /// Format a liveness info's live_at sets.
 pub fn format_liveness(
     insts: &[ScheduledInst],
@@ -208,4 +330,72 @@ pub fn format_liveness(
     lo.sort();
     writeln!(out, "  live_out={lo:?}").unwrap();
     out
+}
+
+#[cfg(test)]
+mod slot_traffic_tests {
+    use super::format_slot_traffic;
+    use crate::x86::addr::Addr;
+    use crate::x86::inst::{MachInst, OpSize, Operand};
+    use crate::x86::reg::Reg;
+
+    fn slot(disp: i32) -> Addr {
+        Addr {
+            base: Some(Reg::RSP),
+            index: None,
+            scale: 1,
+            disp,
+        }
+    }
+
+    fn load(disp: i32, dst: Reg) -> MachInst {
+        MachInst::MovRM {
+            size: OpSize::S64,
+            dst: Operand::Reg(dst),
+            addr: slot(disp),
+        }
+    }
+
+    fn store(disp: i32, src: Reg) -> MachInst {
+        MachInst::MovMR {
+            size: OpSize::S64,
+            addr: slot(disp),
+            src: Operand::Reg(src),
+        }
+    }
+
+    #[test]
+    fn a_slot_only_ever_read_is_named() {
+        let out = format_slot_traffic(&[load(0, Reg::RBX)], Reg::RSP, 0, 1);
+        assert!(out.contains("NEVER STORED"), "{out}");
+    }
+
+    /// The shape that cost a session: a routed block parameter's slot reloaded
+    /// into a scratch register and stored straight back, so the value the
+    /// predecessor was supposed to put there never arrived.
+    #[test]
+    fn a_slot_copied_onto_itself_is_named() {
+        let out = format_slot_traffic(&[load(8, Reg::RBP), store(8, Reg::RBP)], Reg::RSP, 0, 2);
+        assert!(out.contains("SELF-COPY"), "{out}");
+    }
+
+    #[test]
+    fn an_ordinary_spill_and_reload_is_not_flagged() {
+        let out = format_slot_traffic(
+            &[store(0, Reg::RBX), load(0, Reg::RCX), load(0, Reg::RDX)],
+            Reg::RSP,
+            0,
+            1,
+        );
+        assert!(!out.contains("!!"), "{out}");
+    }
+
+    /// The store's address register is not the value being stored. Counting it
+    /// made every slot in a real function look suspicious.
+    #[test]
+    fn the_address_register_is_not_a_stored_value() {
+        let out = format_slot_traffic(&[store(0, Reg::RBX)], Reg::RSP, 0, 1);
+        assert!(out.contains("<- RBX"), "{out}");
+        assert!(!out.contains("RSP/"), "{out}");
+    }
 }
