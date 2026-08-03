@@ -123,7 +123,12 @@ pub fn allocate(
                 .map(|(src, dst)| (src.0 as usize, dst.0 as usize))
                 .filter(|&(src, dst)| src < graph.num_vregs && dst < graph.num_vregs)
                 .collect();
-            coalesce(&graph, &pairs)
+            coalesce(
+                &graph,
+                &pairs,
+                available_gpr_colors(uses_frame_pointer),
+                AVAILABLE_XMM_COLORS,
+            )
         } else {
             vec![]
         };

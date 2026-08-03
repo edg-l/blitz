@@ -1,9 +1,23 @@
 use super::interference::InterferenceGraph;
+use crate::x86::reg::RegClass;
 
-/// Aggressive coalescing on the SSA interference graph.
+/// Conservative (Briggs) coalescing on the SSA interference graph.
 ///
-/// For each copy pair `(src, dst)`, if src and dst do not interfere,
-/// they can be merged (assigned the same physical register).
+/// For each copy pair `(src, dst)`, if src and dst do not interfere and the
+/// merged node would still be colorable, they are merged (assigned the same
+/// physical register).
+///
+/// Non-interference alone is not enough. Merging replaces two nodes with one
+/// whose neighbourhood is the union of theirs, so a merge that is individually
+/// legal can still raise the chromatic number above the register budget. Six
+/// parameters of one nine-parameter block, each merged onto a different constant
+/// living across the whole function, built a 15-clique against a 14-register
+/// budget out of merges that all passed the interference test.
+///
+/// The Briggs test admits a merge only when the merged node has fewer than `k`
+/// neighbours of significant degree (degree >= `k`), counting per register class.
+/// Nodes below that degree can always be colored after their neighbours, so they
+/// cannot be what makes the graph uncolorable.
 ///
 /// Must be run on the original SSA graph BEFORE spill code insertion.
 /// After spill insertion the graph may not be chordal, so coalescing
@@ -14,6 +28,8 @@ use super::interference::InterferenceGraph;
 pub fn coalesce(
     graph: &InterferenceGraph,
     copy_pairs: &[(usize, usize)], // (src, dst) VReg indices
+    gpr_colors: u32,
+    xmm_colors: u32,
 ) -> Vec<(usize, usize)> {
     let mut merged: Vec<(usize, usize)> = Vec::new();
     // Union-find to track already-merged groups.
@@ -59,6 +75,28 @@ pub fn coalesce(
         // Different register classes must never coalesce (GPR <-> XMM merge
         // is always invalid regardless of adjacency).
         if graph.reg_class[src_root] != graph.reg_class[dst_root] {
+            continue;
+        }
+
+        // Briggs: the merged node must have fewer than k neighbours of
+        // significant degree. Degrees are read from `adj`, which merges keep
+        // current, so this measures the graph as it stands.
+        let k = match graph.reg_class[src_root] {
+            RegClass::GPR => gpr_colors,
+            RegClass::XMM => xmm_colors,
+        } as usize;
+        let class = graph.reg_class[src_root];
+        let mut significant: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        for &n in adj[src_root].iter().chain(adj[dst_root].iter()) {
+            let n_root = find(&mut parent, n);
+            if n_root == src_root || n_root == dst_root {
+                continue;
+            }
+            if graph.reg_class[n_root] == class && adj[n_root].len() >= k {
+                significant.insert(n_root);
+            }
+        }
+        if significant.len() >= k {
             continue;
         }
 
@@ -110,7 +148,7 @@ mod tests {
         let graph = make_graph(3, &[(0, 2)]); // v0--v2 interfere; v1 is isolated
         // Copy pair: v1 -> v0 (src=1, dst=0). They don't interfere.
         let pairs = [(1, 0)];
-        let result = coalesce(&graph, &pairs);
+        let result = coalesce(&graph, &pairs, 14, 16);
         assert_eq!(result.len(), 1, "one coalescing merge expected");
         // Either (0,1) or (1,0) depending on merge direction.
         let (into, from) = result[0];
@@ -126,7 +164,7 @@ mod tests {
         // v5 and v3 interfere.
         let graph = make_graph(6, &[(3, 5)]);
         let pairs = [(3, 5)]; // copy pair between interfering VRegs
-        let result = coalesce(&graph, &pairs);
+        let result = coalesce(&graph, &pairs, 14, 16);
         assert!(result.is_empty(), "interfering pair must not be coalesced");
     }
 
@@ -135,7 +173,29 @@ mod tests {
     fn multiple_non_interfering_coalesced() {
         let graph = make_graph(4, &[]);
         let pairs = [(0, 1), (2, 3)];
-        let result = coalesce(&graph, &pairs);
+        let result = coalesce(&graph, &pairs, 14, 16);
         assert_eq!(result.len(), 2);
+    }
+
+    // A merge whose result would have k neighbours of significant degree is
+    // declined even though the pair does not interfere, and the same merge is
+    // taken when the budget is large enough to color around it.
+    #[test]
+    fn briggs_declines_merge_that_raises_degree() {
+        // v0 and v1 do not interfere. v0's neighbour v2 and v1's neighbour v3
+        // both have degree 3, so with k=2 they are both significant and the
+        // merged node would have 2 >= k of them.
+        let graph = make_graph(6, &[(0, 2), (1, 3), (2, 4), (2, 5), (3, 4), (3, 5)]);
+        let pairs = [(0, 1)];
+
+        assert!(
+            coalesce(&graph, &pairs, 2, 2).is_empty(),
+            "merge must be declined when the merged node has k significant neighbours"
+        );
+        assert_eq!(
+            coalesce(&graph, &pairs, 14, 16).len(),
+            1,
+            "the same merge is safe against a budget no degree here reaches"
+        );
     }
 }

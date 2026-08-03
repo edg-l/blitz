@@ -782,7 +782,12 @@ fn run_phase3(
             .map(|(src, dst)| (src.0 as usize, dst.0 as usize))
             .filter(|&(src, dst)| src < phase2.graph.num_vregs && dst < phase2.graph.num_vregs)
             .collect();
-        coalesce(&phase2.graph, &pairs)
+        coalesce(
+            &phase2.graph,
+            &pairs,
+            super::coloring::available_gpr_colors(uses_frame_pointer),
+            super::coloring::AVAILABLE_XMM_COLORS,
+        )
     };
 
     // Task 3.6 (second half): apply coalescing aliases to each block's schedule
@@ -1327,10 +1332,38 @@ fn exceeds_budget(
 /// bound on colors, not the count: precolored ABI nodes and clobber phantoms
 /// constrain *which* color each neighbour may take, so a set of values that fits
 /// in the budget by pressure can still fail to color. This prints each
-/// over-budget VReg with the op that defines it and the colors its neighbours
-/// already hold, which separates the two causes: a full low-color set means real
-/// clique pressure the splitter missed, gaps mean a precolor or ordering
-/// artifact.
+/// over-budget VReg with the op that defines it, the colors its neighbours
+/// already hold, and a clique it belongs to.
+///
+/// The clique is the part that separates the two causes. Neighbours holding every
+/// color below the budget does *not* mean they all conflict with each other, so
+/// it is not on its own evidence of real pressure; a found clique larger than the
+/// budget is, because no coloring can do better. Below that, the coloring order
+/// is the suspect.
+/// Size of a clique containing `idx`, found greedily among its neighbours of the
+/// same class in descending degree order.
+///
+/// A lower bound, not the maximum -- that is NP-hard and this runs inside an
+/// error path. It is still decisive in one direction: any clique it reports is
+/// real, so one larger than the budget proves the coloring could not have
+/// succeeded and the pressure has to be split rather than colored better.
+fn greedy_clique_containing(phase3: &Phase3State, idx: usize, class: RegClass) -> Vec<usize> {
+    let mut candidates: Vec<usize> = phase3.graph.adj[idx]
+        .iter()
+        .copied()
+        .filter(|&n| phase3.graph.reg_class[n] == class)
+        .collect();
+    candidates.sort_by_key(|&n| std::cmp::Reverse(phase3.graph.adj[n].len()));
+
+    let mut clique = vec![idx];
+    for cand in candidates {
+        if clique.iter().all(|&m| phase3.graph.adj[cand].contains(&m)) {
+            clique.push(cand);
+        }
+    }
+    clique
+}
+
 fn format_overshoot(
     phase3: &Phase3State,
     coloring: &super::coloring::ColoringResult,
@@ -1371,11 +1404,21 @@ fn format_overshoot(
         neighbor_colors.sort_unstable();
         neighbor_colors.dedup();
         let precolored = phase3.pre_coloring_colors.contains_key(&idx);
+        let clique = greedy_clique_containing(phase3, idx, class);
+        let members: Vec<String> = clique
+            .iter()
+            .map(|&m| match def_op.get(&(m as u32)) {
+                Some(d) => format!("v{m}={d}"),
+                None => format!("v{m}"),
+            })
+            .collect();
         writeln!(
             out,
             "  v{idx} {class:?} color={color} precolored={precolored} degree={} \
-             neighbor_colors={neighbor_colors:?} def={}",
+             clique>={} [{}] neighbor_colors={neighbor_colors:?} def={}",
             phase3.graph.adj[idx].len(),
+            clique.len(),
+            members.join(", "),
             def_op
                 .get(&(idx as u32))
                 .map(String::as_str)
@@ -1780,7 +1823,7 @@ mod tests {
 
         // Apply coalescing with copy pair (v0, v1).
         let pairs = [(0usize, 1usize)]; // v0 is src, v1 is dst
-        let coalesced = coalesce(&phase2.graph, &pairs);
+        let coalesced = coalesce(&phase2.graph, &pairs, 14, 16);
 
         // At least one merge should occur since v0 and v1 don't interfere.
         assert!(
