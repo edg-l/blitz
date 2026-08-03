@@ -27,7 +27,7 @@ use crate::egraph::extract::VReg;
 /// The kind of split to apply to a victim live range.
 ///
 /// Note: block-param splitting (Phase 6) uses a dedicated
-/// `detect_blockparam_call_crossings` pass rather than routing through this
+/// `detect_blockparam_slot_routing` pass rather than routing through this
 /// enum. Block-param VRegs have no explicit def instruction in the block, so
 /// the pressure-victim-picker cannot determine a def site or cost for them.
 /// The dedicated pass reconstructs the necessary context (param index, block
@@ -2028,7 +2028,7 @@ mod tests {
 
     // Test 7: blockparam_split_truncates_segment_at_entry
     //
-    // After detect_blockparam_call_crossings + apply_plan_to, the param VReg's
+    // After detect_blockparam_slot_routing + apply_plan_to, the param VReg's
     // segment should start at inst_point(block_idx, 1) (strictly after
     // block_entry(block_idx)) so the allocator doesn't assign a register to it.
     #[test]
@@ -2057,12 +2057,14 @@ mod tests {
         let mut operand_rewrites = vec![];
         let mut slot_spilled_params = BTreeMap::new();
 
-        detect_blockparam_call_crossings(
+        detect_blockparam_slot_routing(
             &func,
             &egraph,
             &block_schedules,
             &class_to_vreg,
             &global_liveness,
+            15, // gpr_budget
+            16, // xmm_budget
             &mut new_slot_count,
             &mut next_vreg,
             &mut per_block_insertions,
@@ -2134,12 +2136,14 @@ mod tests {
         let mut operand_rewrites = vec![];
         let mut slot_spilled_params = BTreeMap::new();
 
-        detect_blockparam_call_crossings(
+        detect_blockparam_slot_routing(
             &func,
             &egraph,
             &block_schedules,
             &class_to_vreg,
             &global_liveness,
+            15, // gpr_budget
+            16, // xmm_budget
             &mut new_slot_count,
             &mut next_vreg,
             &mut per_block_insertions,
@@ -2194,12 +2198,14 @@ mod tests {
         let mut operand_rewrites = vec![];
         let mut slot_spilled_params = BTreeMap::new();
 
-        detect_blockparam_call_crossings(
+        detect_blockparam_slot_routing(
             &func,
             &egraph,
             &block_schedules,
             &class_to_vreg,
             &global_liveness,
+            15, // gpr_budget
+            16, // xmm_budget
             &mut new_slot_count,
             &mut next_vreg,
             &mut per_block_insertions,
@@ -2289,12 +2295,14 @@ mod tests {
         let mut operand_rewrites = vec![];
         let mut slot_spilled_params = BTreeMap::new();
 
-        detect_blockparam_call_crossings(
+        detect_blockparam_slot_routing(
             &func,
             &egraph,
             &block_schedules,
             &class_to_vreg,
             &global_liveness,
+            15, // gpr_budget
+            16, // xmm_budget
             &mut new_slot_count,
             &mut next_vreg,
             &mut per_block_insertions,
@@ -2978,7 +2986,7 @@ mod tests {
 
     // Ported from `block_params_not_reloaded` (regalloc/split.rs):
     // Block params are handled by phi elimination, not the split pass.
-    // detect_blockparam_call_crossings does insert loads for block params
+    // detect_blockparam_slot_routing does insert loads for block params
     // that cross calls (Phase 6 behavior), but does not treat them as ordinary
     // cross-block victims. Here we verify that a GPR block param that does NOT
     // cross a call generates no insertions from apply_cross_block_slot_spill
