@@ -30,15 +30,16 @@ rather than overhead against it.
   atomics, sanitizers, LTO, PGO. These are what a *shipping* compiler needs, not
   what a *good* optimizer needs. Revisit only if one blocks measurement.
 
-## Current state (2026-07-25)
+## Current state (2026-08-03)
 
-- 916 Rust tests + 398 lit tests, all green. `cargo fmt` clean.
-- One open finding from the random generator, and it is register pressure
-  rather than wrong code (see Known bugs); the fuzzer still finds wrong
-  answers on generated programs that are not yet reduced.
+- 924 Rust tests + 438 lit tests, all green. `cargo fmt` clean.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 267 tests compared O0-vs-O1 and against a
+- `bash tests/lit/run_diff.sh`: 280 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
+- Generated programs, 60 seeds per shape, per (seed, level) pair: `mixed` 57/60,
+  `args` 52/60, `pressure` 24/60. Every `pressure` failure is capacity
+  (`register pressure overshoot`), not wrong code. Two wrong-value programs are
+  open, both wrong at *both* optimization levels; see Known bugs.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
   e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> DAG
   schedule -> live-range splitter -> function-scope Chaitin-Briggs regalloc ->
@@ -69,9 +70,13 @@ type handling** (the `X86CmpI` `ty` bug was exactly this class).
       functions past the argument registers, interleaved int/double
       signatures, and more live values than registers. Checks blitz against
       its own prediction, -O0 vs -O1, and `cc`.
-- [ ] **Shrinking.** Failures currently come out at 40-3000 lines; reducing
-      them to a minimal lit test is manual. Delta-debugging over the AST is
-      the natural fit since the generator can re-simulate any candidate.
+- [x] **Shrinking** (`tests/fuzz/reduce.py`). Line-based delta debugging: a
+      candidate still counts as failing only when the reference accepts it, `cc`
+      at two levels agree, blitz still compiles it, and blitz still disagrees.
+      That last condition is what keeps the search on the bug it started from --
+      without it, it drifts onto any panic it can reach. Typical result 666 -> 247
+      lines. It cannot see a deleted `arr[k] =` initializer, since the generated
+      loops index arr by a computed expression; count them by hand afterwards.
 - [x] **A gcc/clang oracle in the harness.** O0-vs-O1 self-consistency cannot
       see a bug that is equally wrong at both levels -- exactly how the
       `cvtsi2sd` REX.W bug and the missing variadic `AL` survived.
@@ -115,10 +120,14 @@ type handling** (the `X86CmpI` `ty` bug was exactly this class).
 - [~] **Machine-level verification.** Frame layout is covered: four properties
       (RSP 16-byte aligned at call sites, frame reserves spills + outgoing args,
       red-zone preconditions, spill area does not overlap outgoing args) are
-      checked exhaustively over 12k configurations in `src/x86/abi.rs`. Still
-      missing, and needing a `defs()`/`uses()` on `MachInst` first: no vreg
-      survives the rewrite, no two overlapping live ranges share a physical
-      register, callee-saved actually preserved.
+      checked exhaustively over 12k configurations in `src/x86/abi.rs`.
+      `MachInst::defs()`/`uses()` now exist and carry three more, all under
+      `BLITZ_VERIFY` after branch relaxation: no vreg survives the rewrite, no
+      register is read that is unwritten on some path to it (forward dataflow over
+      the CFG recovered from labels and branches), and no slot is reloaded that
+      nothing stored. Still missing: callee-saved actually preserved. And none of
+      it can see a register holding the *wrong* value -- that is the differential
+      harness's job.
 - [ ] **Rewrite-rule equivalence tests.** For each algebraic/strength rule,
       randomized equivalence check of LHS vs RHS over the operand space
       (including boundary values: 0, 1, -1, INT_MIN, INT_MAX, wraparound).
@@ -342,13 +351,10 @@ VRegs where only one has the right register is the signature.
       whichever was restored last, so a block's own copies had no recorded use,
       the allocator called them dead and gave them all one register, and every
       phi copy read the last constant computed.
-- [ ] **A live XMM parameter is clobbered by an intermediate in the merge
-      block** (`tests/fuzz/findings/xmm_param_clobbered_at_merge.c`, 20 lines).
-      Wrong at -O0, right at -O1, pre-existing at `a6a4494`. Parameter 4 lives
-      in XMM3 until the last add; the merge block's `x + y` is given XMM3 too
-      and overwrites it three instructions early. The interference between a
-      value live *through* both arms and one defined in the merge block is being
-      missed. Smallest open miscompile -- start here.
+- [x] **A live XMM parameter is clobbered by an intermediate in the merge
+      block** -- fixed in `dee0768`, and the reproducer is now
+      `tests/lit/regalloc/blockparam_live_from_block_entry.c`. Same cause as the
+      entry below.
 - [x] **A register clobbered between its def and its use because the compiler
       grouped instructions twice** -- fixed in `ae55ce9`. The schedule is ordered
       by barrier group before allocation and the allocator measures liveness on
@@ -360,7 +366,14 @@ VRegs where only one has the right register is the signature.
       computes nothing, but its pseudo-op sat wherever scheduling left it and
       liveness reads a def position as the start of a live range, so a param
       whose pseudo-op the backward pass pulled down next to its use looked dead
-      over the earlier part of its own block.
+      over the earlier part of its own block. Hoisting the markers to the front
+      of the block was necessary and not sufficient: later passes *insert* between
+      them, and a value that lives and dies in that run still takes a parameter's
+      register. Closed by `b5c0667`, test
+      `tests/lit/regalloc/param_shadow_const_v7.c` -- each parameter now
+      interferes with everything the block names before its last marker, the
+      splitter measures the same thing, and the slot-routing target is the budget
+      less what else that run names.
 - [x] **Parallel copy sequentialization dropped copies and panicked** -- fixed in
       `12719c3`. It walked cycles through a `src -> dst` map, which cannot
       represent a source fanning out to two destinations, and a one-element cycle
@@ -390,10 +403,13 @@ VRegs where only one has the right register is the signature.
       makes all of those sound. Found only because a fuzz sweep sat at 99.9% CPU;
       `run_fuzz.sh` times each compile out and reports a hang as one.
 
-Over 40 mixed fuzz programs, wrong answers went from 9 to 6 and three more seeds
-pass. What remains at -O0: seed 12 prints a wrong value, seeds 23 and 29 exit
-nonzero (29 by looping forever, so a loop condition is miscompiled), and seed 7
-now fails to allocate rather than printing 7180.
+Measured per (seed, level) pair, 60 seeds per generator shape: `mixed` 57/60,
+`args` 52/60, `pressure` 24/60. Every `pressure` failure is
+`register pressure overshoot` -- capacity, not correctness. Two wrong-value
+programs remain, both wrong at *both* optimization levels, which is a signature
+only the `cc` oracle sees; the smaller is
+`tests/fuzz/findings/mixed58_extra_array_store.c` and
+`docs/terminator-args-next-steps.md` item 9 has the analysis.
 
 ## Tooling to build next
 
