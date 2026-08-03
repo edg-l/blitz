@@ -1762,7 +1762,7 @@ pub fn compile(
         // ops between barriers, and a projection is often in a different run from
         // the op it projects.
         let (div_dst_vregs, has_proj0_consumer) =
-            crate::compile::lower::division_and_proj0_sets(&full_schedule_for_barriers);
+            crate::compile::lower::division_and_proj0_sets(full_schedule_for_barriers);
 
         let lower_pending = |pending: &mut Vec<ScheduledInst>,
                              out: &mut Vec<MachInst>|
