@@ -100,6 +100,23 @@ pub fn coalesce(
             continue;
         }
 
+        if crate::trace::is_enabled("coalesce") {
+            // The merge is between the two groups' representatives, not between
+            // the copy's own endpoints: `src`/`dst` name the copy, `src_root`/
+            // `dst_root` name everything that goes with them. A merge whose
+            // endpoints carry no edge in the pre-merge graph while its groups
+            // hold values that do overlap is how an illegal merge gets in, and
+            // the degrees say whether the Briggs test was what admitted it.
+            tracing::debug!(
+                target: "blitz::coalesce",
+                "merge v{src_root} <- v{dst_root} for copy (v{src}, v{dst}); \
+                 pre_merge_edge={} degrees {}/{} against k={k}",
+                graph.adj[src_root].contains(&dst_root),
+                adj[src_root].len(),
+                adj[dst_root].len(),
+            );
+        }
+
         // Coalesce: merge dst_root into src_root. Transfer adjacency so
         // subsequent checks against src_root see dst_root's neighbors too.
         // For every neighbor n of dst_root, update adj[n] to reference

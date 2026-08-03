@@ -4,7 +4,7 @@
 //!
 //! - `BLITZ_DEBUG`: comma-separated list of categories to enable.
 //!   Categories: `sched`, `liveness`, `regalloc`, `asm`, `licm`, `egraph`, `dce`, `alias`,
-//!   `split`, `phi`, `all`.
+//!   `split`, `phi`, `coalesce`, `all`.
 //!
 //! - `BLITZ_DEBUG_FN`: optional substring filter on function names.
 //!   When set, only functions whose name contains this string produce output.
@@ -32,8 +32,9 @@ struct BlitzDebugConfig {
 }
 
 /// Every valid `BLITZ_DEBUG` category. `all` enables the lot.
-const CATEGORIES: [&str; 10] = [
+const CATEGORIES: [&str; 11] = [
     "sched", "liveness", "regalloc", "asm", "licm", "egraph", "dce", "alias", "split", "phi",
+    "coalesce",
 ];
 
 fn start_time() -> &'static Instant {
