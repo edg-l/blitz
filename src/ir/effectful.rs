@@ -65,10 +65,6 @@ impl TermArgs {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// The `ClassId`s, in argument order, whichever form the list is in.
     pub fn class_ids(&self) -> impl Iterator<Item = ClassId> + '_ {
         let (pre, post) = match self {

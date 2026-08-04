@@ -105,8 +105,8 @@ impl ClassVRegMap {
     /// classes, so merging them makes both classes name the same register. The
     /// inverse index holds one class per VReg and cannot say that, and the
     /// exclusivity it asserts is worth keeping everywhere else -- so such a map
-    /// carries only the forward direction. `registered_class` and `vreg_to_class`
-    /// see nothing of these segments.
+    /// carries only the forward direction: `vreg_to_class` sees nothing of these
+    /// segments.
     pub fn insert_segment_shared(
         &mut self,
         class: ClassId,

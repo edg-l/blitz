@@ -640,29 +640,8 @@ pub(crate) fn terminator_edges_mut(terminator: &mut EffectfulOp) -> Vec<(BlockId
     }
 }
 
-/// The number of arguments a terminator passes, in the argument numbering
-/// [`terminator_arg_destinations`] and `Op::TerminatorArgs` share.
-///
-/// One flat sequence per terminator: a Jump's args, a Branch's `true_args`
-/// followed by its `false_args`, a Ret's value alone. Every pass that indexes
-/// terminator arguments -- the pseudo-op builder here, the splitter, and
-/// lowering -- numbers them the same way, so an argument index means the same
-/// thing everywhere.
-pub(crate) fn terminator_arg_count(terminator: &EffectfulOp) -> usize {
-    match terminator {
-        EffectfulOp::Jump { args, .. } => args.len(),
-        EffectfulOp::Branch {
-            true_args,
-            false_args,
-            ..
-        } => true_args.len() + false_args.len(),
-        EffectfulOp::Ret { val: Some(_) } => 1,
-        _ => 0,
-    }
-}
-
 /// The `(successor, parameter index)` each terminator argument feeds, in the
-/// same numbering as [`terminator_arg_count`].
+/// argument numbering [`append_terminator_args`] defines.
 ///
 /// A `Ret`'s value feeds no parameter, so a `Ret` yields nothing.
 pub(crate) fn terminator_arg_destinations(terminator: &EffectfulOp) -> Vec<(BlockId, u32)> {
@@ -674,6 +653,10 @@ pub(crate) fn terminator_arg_destinations(terminator: &EffectfulOp) -> Vec<(Bloc
 
 /// Append the block's terminator arguments to its schedule as a single
 /// [`Op::TerminatorArgs`] pseudo-instruction.
+///
+/// This is where the argument numbering every pass indexes by is defined: one
+/// flat sequence per terminator, a Jump's args, then a Branch's `true_args`
+/// followed by its `false_args`, or a Ret's value alone.
 ///
 /// ONE OP CARRYING ALL ARGUMENTS, not one op per argument. Lowering emits an
 /// edge's phi copies as a parallel copy (`sequentialize_copies`), which really
@@ -696,9 +679,15 @@ pub(crate) fn terminator_arg_destinations(terminator: &EffectfulOp) -> Vec<(Bloc
 ///
 /// A block argument's VReg is not resolved here: it is read off the CFG's
 /// [`TermArgs::Committed`], which `cfg::commit_terminator_arg_vregs` wrote once.
-/// `BLITZ_DEBUG=phi` traces that choice there, where it is made. A `Ret`'s value is the one argument still named by class, so it is the
-/// one still resolved -- `Ret.val` stays a `ClassId` because lowering reads it
-/// to materialize a constant return straight into the ABI register.
+/// `BLITZ_DEBUG=phi` traces that choice there, where it is made.
+///
+/// A `Ret`'s value is the one argument still named by class, so it is the one
+/// still resolved -- `Ret.val` stays a `ClassId` because lowering reads it to
+/// materialize a constant return straight into the ABI register.
+/// `param_override_vregs` is consulted for it and answers on no program
+/// measured: it would take a `Ret` of this block's own parameter whose VReg
+/// linearization minted fresh, which needs that parameter's class to have been
+/// emitted by a non-dominating earlier block.
 pub(super) fn append_terminator_args(
     schedule: &mut Vec<ScheduledInst>,
     terminator: &EffectfulOp,
@@ -708,7 +697,7 @@ pub(super) fn append_terminator_args(
     param_override_vregs: &BTreeMap<ClassId, VReg>,
     next_vreg: &mut u32,
 ) -> Result<(), String> {
-    let mut operands: Vec<VReg> = Vec::with_capacity(terminator_arg_count(terminator));
+    let mut operands: Vec<VReg> = Vec::new();
     match terminator {
         EffectfulOp::Jump { .. } | EffectfulOp::Branch { .. } => {
             for (_, args) in terminator_edges(terminator) {

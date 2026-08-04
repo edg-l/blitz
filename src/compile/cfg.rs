@@ -333,16 +333,25 @@ pub(super) fn compute_copy_pairs(
 /// class re-emitted per block has one VReg per block, and the function-wide map
 /// holds whichever block restored it last.
 ///
-/// `param_override_vregs` covers the two cases the snapshot cannot answer:
+/// The overrides answer ahead of the snapshot in two cases:
 ///
 /// - a parameter of this block whose VReg linearization minted fresh, which the
-///   snapshot predates;
+///   snapshot predates -- it names the non-dominating earlier block's VReg for
+///   that class instead;
 /// - a back edge whose argument *is* the target's parameter. That emits a
 ///   self-copy: the parameter is the value's storage for the whole loop and the
-///   latch has no VReg of its own for it. Resolving at the latch's exit instead
-///   finds nothing once the header spills the parameter, the value looks dead
-///   over the loop body, and the header re-spills a register the latch has since
-///   reused.
+///   latch has no VReg of its own for it.
+///
+/// **Neither changes an answer at this point, measured**: over the lit suite and
+/// 90 generated programs at both levels, the override and the snapshot never
+/// disagree. They existed because the resolution used to happen after the
+/// splitter, where the snapshot no longer covers the point -- a header that
+/// spills its parameter truncates the class's segment, the value looks dead over
+/// the loop body, and the header re-spills a register the latch has since reused.
+/// Resolving before the splitter, where every segment is still full-range, is
+/// what made them inert. They stay because which answer is right where the two
+/// *would* differ is unproven, and the shape is unreached rather than
+/// unreachable; step 4 of `docs/refactor-roadmap.md` is where they go.
 ///
 /// Must run after extraction and DCE2, and before the splitter -- the splitter's
 /// operand rewriting is what makes a pressure decision stick, and it works on
