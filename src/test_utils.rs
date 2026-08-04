@@ -41,9 +41,14 @@ pub fn objdump_disasm(bytes: &[u8]) -> Option<String> {
     if !has_tool("objdump") {
         return None;
     }
-    // Write to a unique temp file to avoid races with parallel tests.
+    // A temp file per thread AND per process. The thread id alone is unique only
+    // within one process, and every `tinyc` run is single-threaded, so two
+    // concurrent processes both picked `ThreadId(1)` and disassembled whichever
+    // one wrote the shared file last -- which reads as one compiler emitting
+    // another's code.
     let tid = std::thread::current().id();
-    let tmp = std::env::temp_dir().join(format!("blitz_test_{tid:?}.bin"));
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("blitz_test_{pid}_{tid:?}.bin"));
     std::fs::write(&tmp, bytes).ok()?;
     let output = Command::new("objdump")
         .args(["-D", "-b", "binary", "-m", "i386:x86-64", "-M", "intel"])
@@ -51,9 +56,18 @@ pub fn objdump_disasm(bytes: &[u8]) -> Option<String> {
         .output()
         .ok()?;
     let _ = std::fs::remove_file(&tmp);
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        None
+    if !output.status.success() {
+        return None;
     }
+    // objdump names its input file in a header line, so keeping it would make the
+    // disassembly of one program depend on which process disassembled it. Two
+    // runs of the same compiler over the same source must produce the same text:
+    // that equality is what says a change to the compiler changed no output.
+    let text = String::from_utf8_lossy(&output.stdout);
+    Some(
+        text.lines()
+            .filter(|line| !line.contains("file format binary"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
