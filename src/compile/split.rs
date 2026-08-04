@@ -17,6 +17,7 @@ use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 use crate::regalloc::global_liveness::GlobalLiveness;
 use crate::regalloc::spill::LOOP_DEPTH_PENALTY_BASE;
+use crate::regalloc::vregset::VRegSet;
 use crate::regalloc::{SlotAllocator, SlotOwner};
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::CALLER_SAVED_GPR;
@@ -132,14 +133,16 @@ fn compute_local_liveness(
     block_idx: usize,
     schedule: &[ScheduledInst],
     live_out_seed: &BTreeSet<VReg>,
-) -> Vec<BTreeSet<VReg>> {
+    vreg_count: usize,
+) -> Vec<VRegSet> {
     let n = schedule.len();
     // result[i] = live set before instruction i.
     // result[n] = live set at exit of block (= live_out_seed for this block).
-    let mut result: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n + 1];
+    let mut result: Vec<VRegSet> = vec![VRegSet::with_capacity(vreg_count); n + 1];
 
     // Seed the backward scan from live_out: values live at the exit of the block.
-    let mut live: BTreeSet<VReg> = live_out_seed.clone();
+    let mut live = VRegSet::with_capacity(vreg_count);
+    live.extend(live_out_seed.iter().copied());
     result[n] = live.clone();
 
     // Walk backward.
@@ -150,7 +153,7 @@ fn compute_local_liveness(
         // Remove def first (before adding uses) to handle the case where live-after
         // already contains def (possible when seeding from live_out, where values
         // defined in this block that flow to successors are included).
-        live.remove(&inst.dst);
+        live.remove(inst.dst);
 
         // Add uses to live (a value used by I is live before I).
         for &use_vreg in &inst.operands {
@@ -176,13 +179,13 @@ fn compute_local_liveness(
         .rposition(|inst| matches!(inst.op, Op::BlockParam(..)))
         .map_or(0, |i| i + 1);
     if shadow_end > 0 {
-        let params: Vec<VReg> = schedule[..shadow_end]
+        let params: VRegSet = schedule[..shadow_end]
             .iter()
             .filter(|inst| matches!(inst.op, Op::BlockParam(..)))
             .map(|inst| inst.dst)
             .collect();
         for live in result[..shadow_end].iter_mut() {
-            live.extend(params.iter().copied());
+            live.union_with(&params);
         }
     }
 
@@ -194,24 +197,24 @@ fn compute_local_liveness(
 
 // ── Pressure computation ──────────────────────────────────────────────────────
 
-/// Compute per-instruction register pressure for a specific register class.
+/// Compute per-instruction register pressure for one register class.
+///
+/// `class_mask` holds exactly the function's VRegs of that class, so a point's
+/// pressure is the popcount of its live set against the mask and membership of
+/// the class is one bit test rather than a map lookup.
 ///
 /// Returns a `Vec<u32>` of length `live_sets.len()` where each entry is the
-/// count of live VRegs of the specified `class` at that position.
+/// count of live VRegs of that class at that position.
 fn compute_pressure_for_class(
-    live_sets: &[BTreeSet<VReg>],
+    live_sets: &[VRegSet],
     schedule: &[ScheduledInst],
-    vreg_classes: &BTreeMap<VReg, RegClass>,
-    class: RegClass,
+    class_mask: &VRegSet,
 ) -> Vec<u32> {
     live_sets
         .iter()
         .enumerate()
         .map(|(i, live)| {
-            let mut n = live
-                .iter()
-                .filter(|&v| vreg_classes.get(v).copied() == Some(class))
-                .count() as u32;
+            let mut n = live.count_in(class_mask);
             // Count the definition, not just what is live before it.
             // `interference.rs` makes every def interfere with everything live
             // before it, so the clique the allocator sees here is
@@ -222,14 +225,30 @@ fn compute_pressure_for_class(
             // of the programs that fail to allocate.
             if let Some(inst) = schedule.get(i)
                 && !inst.op.has_no_result()
-                && vreg_classes.get(&inst.dst).copied() == Some(class)
-                && !live.contains(&inst.dst)
+                && class_mask.contains(inst.dst)
+                && !live.contains(inst.dst)
             {
                 n += 1;
             }
             n
         })
         .collect()
+}
+
+/// The function's VRegs of one register class, as a mask for `VRegSet::count_in`.
+fn class_mask(
+    vreg_classes: &BTreeMap<VReg, RegClass>,
+    class: RegClass,
+    vreg_count: usize,
+) -> VRegSet {
+    let mut mask = VRegSet::with_capacity(vreg_count);
+    mask.extend(
+        vreg_classes
+            .iter()
+            .filter(|(_, c)| **c == class)
+            .map(|(v, _)| *v),
+    );
+    mask
 }
 
 // ── Victim scoring ────────────────────────────────────────────────────────────
@@ -248,10 +267,10 @@ fn score_victim(_vreg: VReg, live_range_length: usize, loop_depth: u32) -> u64 {
 ///
 /// `live_sets[i]` is live-before of instruction i. Length is defined as the
 /// number of instructions at which the VReg appears live.
-fn compute_live_range_lengths(live_sets: &[BTreeSet<VReg>]) -> BTreeMap<VReg, usize> {
+fn compute_live_range_lengths(live_sets: &[VRegSet]) -> BTreeMap<VReg, usize> {
     let mut lengths: BTreeMap<VReg, usize> = BTreeMap::new();
     for live in live_sets {
-        for &v in live {
+        for v in live.iter() {
             *lengths.entry(v).or_insert(0) += 1;
         }
     }
@@ -341,10 +360,9 @@ fn collect_call_arg_vregs_set(schedule: &[ScheduledInst]) -> BTreeSet<VReg> {
 ///
 /// `callee_saved_budget` = total GPRs − caller-saved GPRs.
 fn find_call_crossing_overshoot(
-    live_sets: &[BTreeSet<VReg>],
+    live_sets: &[VRegSet],
     schedule: &[ScheduledInst],
-    vreg_classes: &BTreeMap<VReg, RegClass>,
-    class: RegClass,
+    class_mask: &VRegSet,
     callee_saved_budget: u32,
     call_arg_vregs: &BTreeSet<VReg>,
 ) -> Option<(usize, u32)> {
@@ -360,13 +378,13 @@ fn find_call_crossing_overshoot(
         // being kept anywhere else, and counting them would demand a spill that
         // cannot help. This mirrors `exclude_call_args` in the allocator's
         // `add_clobber_interferences`.
-        let live_after: Option<&BTreeSet<VReg>> = live_sets.get(inst_idx + 1);
+        let live_after: Option<&VRegSet> = live_sets.get(inst_idx + 1);
         let live_before = &live_sets[inst_idx];
         let live_count: u32 = live_before
             .iter()
-            .filter(|&&v| vreg_classes.get(&v).copied() == Some(class))
-            .filter(|&&v| {
-                !call_arg_vregs.contains(&v) || live_after.is_some_and(|la| la.contains(&v))
+            .filter(|&v| class_mask.contains(v))
+            .filter(|&v| {
+                !call_arg_vregs.contains(&v) || live_after.is_some_and(|la| la.contains(v))
             })
             .count() as u32;
         if live_count > callee_saved_budget {
@@ -408,7 +426,7 @@ fn apply_splits_for_overshoot(
     overshoot_class: RegClass,
     overshoot_excess: u32,
     scope: SplitScope,
-    live_sets: &[BTreeSet<VReg>],
+    live_sets: &[VRegSet],
     all_block_schedules: &[Vec<ScheduledInst>],
     vreg_classes: &BTreeMap<VReg, RegClass>,
     call_arg_vregs: &BTreeSet<VReg>,
@@ -439,9 +457,9 @@ fn apply_splits_for_overshoot(
     // point, excluding Flags-typed VRegs, spill pseudo-op defs, and already-planned victims.
     let mut candidates: Vec<VReg> = live_at
         .iter()
-        .filter(|&&v| vreg_classes.get(&v).copied() == Some(overshoot_class))
-        .filter(|&&v| !planned_victims.contains(&v))
-        .filter(|&&v| {
+        .filter(|v| vreg_classes.get(v).copied() == Some(overshoot_class))
+        .filter(|v| !planned_victims.contains(v))
+        .filter(|&v| {
             if let Some(&def_idx) = def_inst_map.get(&v) {
                 let op = &block_schedule[def_idx].op;
                 // Skip spill pseudo-ops (no result_type) and Flags-typed defs.
@@ -482,7 +500,6 @@ fn apply_splits_for_overshoot(
                 true
             }
         })
-        .copied()
         .collect();
 
     // Score and sort candidates (highest score = best victim).
@@ -503,8 +520,8 @@ fn apply_splits_for_overshoot(
         if crate::trace::is_enabled("split") && crate::trace::fn_matches(fn_name) {
             let rejected: Vec<String> = live_at
                 .iter()
-                .filter(|&&v| vreg_classes.get(&v).copied() == Some(overshoot_class))
-                .map(|&v| {
+                .filter(|v| vreg_classes.get(v).copied() == Some(overshoot_class))
+                .map(|v| {
                     let why = if planned_victims.contains(&v) {
                         "already a victim".to_string()
                     } else {
@@ -541,7 +558,7 @@ fn apply_splits_for_overshoot(
     let use_point = overshoot_point;
     let live_classes_at_use: BTreeSet<ClassId> = live_at
         .iter()
-        .filter_map(|&v| class_to_vreg.vreg_to_class(v, use_point))
+        .filter_map(|v| class_to_vreg.vreg_to_class(v, use_point))
         .collect();
 
     for &victim in victims {
@@ -665,6 +682,13 @@ pub fn plan_splits(
     let function_vreg_classes =
         crate::regalloc::build_vreg_classes_from_all_blocks(block_schedules);
 
+    // One bit per VReg is how the live sets and the pressure counts below are
+    // held, so they need the highest index in play. `next_vreg` is the next free
+    // one, and the sets grow rather than trap if a pass mints past it.
+    let vreg_count = next_vreg as usize;
+    let gpr_mask = class_mask(&function_vreg_classes, RegClass::GPR, vreg_count);
+    let xmm_mask = class_mask(&function_vreg_classes, RegClass::XMM, vreg_count);
+
     // Block-param slot routing.
     //
     // Runs before the pressure loop below and claims what it handles in
@@ -680,6 +704,7 @@ pub fn plan_splits(
         global_liveness,
         gpr_budget,
         xmm_budget,
+        &function_vreg_classes,
         slots,
         &mut next_vreg,
         &mut per_block_insertions,
@@ -719,13 +744,11 @@ pub fn plan_splits(
         let vreg_classes = &function_vreg_classes;
 
         // Compute per-instruction live-before sets.
-        let live_sets = compute_local_liveness(block_idx, schedule, live_out_seed);
+        let live_sets = compute_local_liveness(block_idx, schedule, live_out_seed, vreg_count);
 
         // Compute pressure per class.
-        let gpr_pressure =
-            compute_pressure_for_class(&live_sets, schedule, vreg_classes, RegClass::GPR);
-        let xmm_pressure =
-            compute_pressure_for_class(&live_sets, schedule, vreg_classes, RegClass::XMM);
+        let gpr_pressure = compute_pressure_for_class(&live_sets, schedule, &gpr_mask);
+        let xmm_pressure = compute_pressure_for_class(&live_sets, schedule, &xmm_mask);
 
         // Build def-site map and call-arg set once per block (shared by both paths).
         let def_inst_map: BTreeMap<VReg, usize> = schedule
@@ -824,8 +847,7 @@ pub fn plan_splits(
         let call_crossing = find_call_crossing_overshoot(
             &live_sets,
             schedule,
-            vreg_classes,
-            RegClass::GPR,
+            &gpr_mask,
             callee_saved_budget,
             &call_arg_vregs,
         );
@@ -879,8 +901,7 @@ pub fn plan_splits(
         let xmm_call_crossing = find_call_crossing_overshoot(
             &live_sets,
             schedule,
-            vreg_classes,
-            RegClass::XMM,
+            &xmm_mask,
             0, // no callee-saved XMM registers exist
             &call_arg_vregs,
         );
@@ -946,7 +967,7 @@ fn format_pressure(
     schedule: &[ScheduledInst],
     gpr_pressure: &[u32],
     xmm_pressure: &[u32],
-    live_sets: &[BTreeSet<VReg>],
+    live_sets: &[VRegSet],
     vreg_classes: &BTreeMap<VReg, RegClass>,
 ) -> String {
     use std::fmt::Write;
@@ -959,7 +980,7 @@ fn format_pressure(
         let live = live_sets.get(i).map(|s| {
             let mut v: Vec<String> = s
                 .iter()
-                .map(|r| match vreg_classes.get(r) {
+                .map(|r| match vreg_classes.get(&r) {
                     Some(RegClass::XMM) => format!("v{}x", r.0),
                     _ => format!("v{}", r.0),
                 })
@@ -1098,6 +1119,7 @@ fn detect_blockparam_slot_routing(
     global_liveness: &GlobalLiveness,
     gpr_budget: u32,
     xmm_budget: u32,
+    vreg_classes: &BTreeMap<VReg, RegClass>,
     slots: &mut SlotAllocator,
     next_vreg: &mut u32,
     per_block_insertions: &mut [Vec<(usize, ScheduledInst)>],
@@ -1108,6 +1130,18 @@ fn detect_blockparam_slot_routing(
     already_slot_spilled: &BlockParamSlotMap,
 ) {
     let n_blocks = block_schedules.len();
+
+    // How many times each VReg is read across the whole function, which is what
+    // orders the routing candidates below. Counted once: as a sort key it is
+    // recomputed per comparison, and each count is a scan of every instruction of
+    // every block, so a block with 28 parameters re-read the function a hundred
+    // times over.
+    let mut use_counts: BTreeMap<VReg, usize> = BTreeMap::new();
+    for inst in block_schedules.iter().flatten() {
+        for &v in &inst.operands {
+            *use_counts.entry(v).or_insert(0) += 1;
+        }
+    }
 
     // Build a set of blocks that contain calls.
     let call_blocks: BTreeSet<usize> = (0..n_blocks)
@@ -1195,10 +1229,6 @@ fn detect_blockparam_slot_routing(
         }
     }
 
-    // Must match what the allocator uses, or this measures a different graph
-    // than the one being colored.
-    let vreg_classes = crate::regalloc::build_vreg_classes_from_all_blocks(block_schedules);
-
     // Which VRegs must leave the register file.
     let mut route: BTreeSet<VReg> = BTreeSet::new();
 
@@ -1253,14 +1283,7 @@ fn detect_blockparam_slot_routing(
         // Cheapest first: a parameter read fewer times costs fewer reloads to
         // route. Ties by VReg, so the choice is deterministic.
         let mut by_cost: Vec<VReg> = params.iter().copied().collect();
-        by_cost.sort_by_key(|&vreg| {
-            let uses: usize = block_schedules
-                .iter()
-                .flatten()
-                .map(|inst| inst.operands.iter().filter(|&&v| v == vreg).count())
-                .sum();
-            (uses, vreg.0)
-        });
+        by_cost.sort_by_key(|&vreg| (use_counts.get(&vreg).copied().unwrap_or(0), vreg.0));
         for (class, budget) in [(RegClass::GPR, gpr_budget), (RegClass::XMM, xmm_budget)] {
             let of_class = |v: &VReg| groups.get(v).is_some_and(|g| g.reg_class == class);
             let others = shadow_others
@@ -2136,6 +2159,7 @@ mod tests {
             &global_liveness,
             15, // gpr_budget
             16, // xmm_budget
+            &crate::regalloc::build_vreg_classes_from_all_blocks(&block_schedules),
             &mut slots,
             &mut next_vreg,
             &mut per_block_insertions,
@@ -2215,6 +2239,7 @@ mod tests {
             &global_liveness,
             15, // gpr_budget
             16, // xmm_budget
+            &crate::regalloc::build_vreg_classes_from_all_blocks(&block_schedules),
             &mut slots,
             &mut next_vreg,
             &mut per_block_insertions,
@@ -2278,6 +2303,7 @@ mod tests {
             &global_liveness,
             15, // gpr_budget
             16, // xmm_budget
+            &crate::regalloc::build_vreg_classes_from_all_blocks(&block_schedules),
             &mut slots,
             &mut next_vreg,
             &mut per_block_insertions,
@@ -2376,6 +2402,7 @@ mod tests {
             &global_liveness,
             15, // gpr_budget
             16, // xmm_budget
+            &crate::regalloc::build_vreg_classes_from_all_blocks(&block_schedules),
             &mut slots,
             &mut next_vreg,
             &mut per_block_insertions,
