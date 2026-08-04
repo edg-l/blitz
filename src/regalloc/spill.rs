@@ -6,6 +6,7 @@ use crate::schedule::scheduler::ScheduledInst;
 
 use super::interference::InterferenceGraph;
 use super::liveness::LivenessInfo;
+use super::slots::{SlotAllocator, SlotOwner};
 
 pub(crate) const LOOP_DEPTH_PENALTY_BASE: u64 = 10;
 
@@ -290,7 +291,7 @@ pub fn collect_call_arg_vregs(insts: &[ScheduledInst]) -> BTreeSet<usize> {
 pub fn insert_spills(
     insts: &mut Vec<ScheduledInst>,
     spilled: &BTreeSet<usize>,
-    spill_slots: &mut u32,
+    slots: &mut SlotAllocator,
     next_vreg: &mut u32,
     vreg_classes: &BTreeMap<VReg, crate::x86::reg::RegClass>,
 ) -> BTreeMap<VReg, Vec<VReg>> {
@@ -330,8 +331,7 @@ pub fn insert_spills(
             false
         };
         if needs_slot {
-            let slot = *spill_slots;
-            *spill_slots += 1;
+            let slot = slots.alloc(SlotOwner::Allocator);
             vreg_to_slot.insert(idx, slot);
         }
     }
@@ -478,19 +478,18 @@ mod tests {
         let mut insts = insts_base.clone();
         let mut spilled = BTreeSet::new();
         spilled.insert(0usize); // spill v0
-        let mut spill_slots = 0u32;
+        let mut slots = SlotAllocator::new();
         let mut next_vreg = 100u32;
 
         insert_spills(
             &mut insts,
             &spilled,
-            &mut spill_slots,
+            &mut slots,
             &mut next_vreg,
             &BTreeMap::new(),
         );
 
-        // spill_slots should now be 1.
-        assert_eq!(spill_slots, 1);
+        assert_eq!(slots.count(), 1);
 
         // There should be a SpillStore after inst 0.
         let store_pos = insts
@@ -582,13 +581,13 @@ mod tests {
         ];
         let mut spilled = BTreeSet::new();
         spilled.insert(0usize);
-        let mut spill_slots = 0u32;
+        let mut slots = SlotAllocator::new();
         let mut next_vreg = 10u32;
 
         insert_spills(
             &mut insts,
             &spilled,
-            &mut spill_slots,
+            &mut slots,
             &mut next_vreg,
             &BTreeMap::new(),
         );
@@ -603,8 +602,7 @@ mod tests {
             !insts.iter().any(is_spill_load),
             "no SpillLoad for rematerializable Iconst"
         );
-        // spill_slots unchanged.
-        assert_eq!(spill_slots, 0);
+        assert_eq!(slots.count(), 0);
     }
 
     // XMM VReg spill inserts XMM-specific markers (not GPR markers).
@@ -630,7 +628,7 @@ mod tests {
 
         let mut spilled = BTreeSet::new();
         spilled.insert(0usize);
-        let mut spill_slots = 0u32;
+        let mut slots = SlotAllocator::new();
         let mut next_vreg = 100u32;
 
         // Mark v0 as XMM class.
@@ -640,7 +638,7 @@ mod tests {
         insert_spills(
             &mut insts,
             &spilled,
-            &mut spill_slots,
+            &mut slots,
             &mut next_vreg,
             &vreg_classes,
         );

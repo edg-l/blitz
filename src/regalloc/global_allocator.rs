@@ -71,6 +71,7 @@ use super::interference::{
 };
 use super::liveness::{LivenessInfo, compute_liveness};
 use super::rewrite::apply_coalescing;
+use super::slots::SlotAllocator;
 
 /// Result of Phase 2: function-wide interference graph + per-block liveness.
 ///
@@ -1303,9 +1304,14 @@ fn build_transitive_alias_map(raw: &BTreeMap<u32, u32>) -> BTreeMap<VReg, VReg> 
 /// The `block_param_vregs_per_block` parameter is retained for bookkeeping and
 /// potential future use by Phase 6, but no XMM forced-slot step is performed
 /// here.
+///
+/// `slots` is the function's slot allocator, shared with the passes that spilled
+/// before this one. A spill loop here takes its slots from it: numbering its own
+/// from zero would name cells those passes already hold.
 pub(crate) fn run_phase5(
     phase4: Phase4State,
     ctx: Phase5Context,
+    slots: &mut SlotAllocator,
 ) -> Result<GlobalRegAllocResult, String> {
     use crate::x86::abi::CALLEE_SAVED;
 
@@ -1330,7 +1336,6 @@ pub(crate) fn run_phase5(
         return Ok(GlobalRegAllocResult {
             per_block_insts: phase4.per_block_insts,
             vreg_to_reg: phase4.vreg_to_reg,
-            spill_slots: 0,
             callee_saved_used,
             unprecolored_params: phase4.unprecolored_params,
             coalesce_aliases,
@@ -1339,9 +1344,11 @@ pub(crate) fn run_phase5(
 
     Err(format!(
         "global regalloc: register pressure overshoot for function '{func_name}' \
-         (gpr_overshoot={}, xmm_overshoot={}). The split pass should have resolved \
-         all register pressure before phase 5.",
-        phase4.gpr_overshoot, phase4.xmm_overshoot,
+         (gpr_overshoot={}, xmm_overshoot={}, spill slots already committed={}). \
+         The split pass should have resolved all register pressure before phase 5.",
+        phase4.gpr_overshoot,
+        phase4.xmm_overshoot,
+        slots.count(),
     ))
 }
 
@@ -1555,6 +1562,7 @@ pub fn allocate_global(
     block_param_vregs_per_block: &[BTreeSet<VReg>],
     func_name: &str,
     uses_frame_pointer: bool,
+    slots: &mut SlotAllocator,
 ) -> Result<GlobalRegAllocResult, String> {
     // Compute function-wide global liveness. Block params are added
     // to their block's live_in so pairs of params on the same block interfere
@@ -1662,7 +1670,7 @@ pub fn allocate_global(
         alias_map,
     };
 
-    run_phase5(phase4, ctx)
+    run_phase5(phase4, ctx, slots)
 }
 
 #[cfg(test)]
@@ -2363,6 +2371,7 @@ mod tests {
     // ── Phase 5 unit tests ────────────────────────────────────────────────────
 
     /// Helper: run the full allocator pipeline (Phases 2–5) via `allocate_global`.
+    #[allow(clippy::too_many_arguments)]
     fn run_allocate_global(
         block_schedules: &[Vec<ScheduledInst>],
         cfg_succs: &[Vec<usize>],
@@ -2371,6 +2380,7 @@ mod tests {
         copy_pairs: &[(VReg, VReg)],
         loop_depths: &BTreeMap<VReg, u32>,
         uses_frame_pointer: bool,
+        slots: &mut SlotAllocator,
     ) -> GlobalRegAllocResult {
         let n = block_schedules.len();
         let phi_uses = empty_phi_uses(n);
@@ -2386,6 +2396,7 @@ mod tests {
             &block_param_vregs,
             "test_fn",
             uses_frame_pointer,
+            slots,
         )
         .expect("allocate_global should succeed")
     }
@@ -2406,6 +2417,7 @@ mod tests {
             vec![use_inst(3, 2)],
         ];
         let successors = vec![vec![1usize], vec![]];
+        let mut slots = SlotAllocator::new();
         let result = run_allocate_global(
             &block_schedules,
             &successors,
@@ -2414,11 +2426,13 @@ mod tests {
             &[],
             &BTreeMap::new(),
             false,
+            &mut slots,
         );
 
         // No spills: every real VReg must have a physical register.
         assert_eq!(
-            result.spill_slots, 0,
+            slots.count(),
+            0,
             "no spill slots expected for low-pressure function"
         );
         for idx in 0u32..=3 {
@@ -2483,6 +2497,7 @@ mod tests {
         // 0 -> 1 -> 2
         let successors = vec![vec![1usize], vec![2usize], vec![]];
 
+        let mut slots = SlotAllocator::new();
         let result = run_allocate_global(
             &block_schedules,
             &successors,
@@ -2491,6 +2506,7 @@ mod tests {
             &[],
             &BTreeMap::new(),
             false,
+            &mut slots,
         );
 
         // Must not panic (already verified by not crashing).
@@ -2508,7 +2524,8 @@ mod tests {
 
         // No spills expected: only 1 XMM value, budget is 16 XMM registers.
         assert_eq!(
-            result.spill_slots, 0,
+            slots.count(),
+            0,
             "no spill slots expected for low-pressure XMM cross-block function"
         );
     }
@@ -2570,6 +2587,7 @@ mod tests {
             &block_param_vregs,
             "test_many_args",
             false,
+            &mut SlotAllocator::new(),
         )
         .expect("allocate_global must succeed with 8 call args (6 precolored, 2 unprecolored)");
 
@@ -2708,6 +2726,7 @@ mod tests {
             &block_param_vregs,
             "three_phi_params",
             false,
+            &mut SlotAllocator::new(),
         )
         .expect("allocate_global must succeed");
 

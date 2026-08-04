@@ -17,6 +17,7 @@ use super::interference::{
 };
 use super::liveness::{LivenessInfo, compute_liveness};
 use super::rewrite::apply_coalescing;
+use super::slots::SlotAllocator;
 use super::spill::{insert_spills, select_spill, select_spill_for_class};
 
 const MAX_SPILL_ROUNDS: usize = 10;
@@ -58,18 +59,19 @@ pub struct RegAllocResult {
 /// 6. If chromatic_number > available_regs: spill, re-run (up to 3 times).
 /// 7. Map colors to physical registers.
 /// 8. Return result.
+#[allow(clippy::too_many_arguments)]
 pub fn allocate(
     insts: &[ScheduledInst],
     param_vregs: &[(VReg, Reg)], // pre-colored function params
     block_live_out: &BTreeSet<VReg>,
     copy_pairs: &[(VReg, VReg)], // phi copy pairs for coalescing
     loop_depths: &std::collections::BTreeMap<VReg, u32>, // loop-depth info for spill selection
+    slots: &mut SlotAllocator,   // the function's spill slots
     uses_frame_pointer: bool,
     func_name: &str,
 ) -> Result<RegAllocResult, String> {
     let mut insts: Vec<ScheduledInst> = insts.to_vec();
     let mut block_live_out: BTreeSet<VReg> = block_live_out.clone();
-    let mut spill_slots = 0u32;
 
     // Determine the starting next_vreg from the max VReg index in the input.
     let mut next_vreg: u32 = insts
@@ -232,7 +234,7 @@ pub fn allocate(
                 insts_coalesced,
                 &param_vreg_to_reg,
                 uses_frame_pointer,
-                spill_slots,
+                slots.count(),
                 func_name,
                 round,
             ));
@@ -284,13 +286,7 @@ pub fn allocate(
             }
         }
 
-        insert_spills(
-            &mut insts,
-            &spilled,
-            &mut spill_slots,
-            &mut next_vreg,
-            &vreg_classes2,
-        );
+        insert_spills(&mut insts, &spilled, slots, &mut next_vreg, &vreg_classes2);
     }
 
     unreachable!("loop should have returned before exhausting rounds")
@@ -775,6 +771,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
+            &mut SlotAllocator::new(),
             false,
             "",
         )
@@ -810,6 +807,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
+            &mut SlotAllocator::new(),
             false,
             "",
         )
@@ -847,6 +845,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
+            &mut SlotAllocator::new(),
             false,
             "",
         )
@@ -889,6 +888,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
+            &mut SlotAllocator::new(),
             false,
             "",
         );
@@ -934,6 +934,7 @@ mod tests {
             &live_out,
             &copy_pairs,
             &std::collections::BTreeMap::new(),
+            &mut SlotAllocator::new(),
             false,
             "",
         )
@@ -971,6 +972,7 @@ mod tests {
             &live_out,
             &[],
             &std::collections::BTreeMap::new(),
+            &mut SlotAllocator::new(),
             false,
             "",
         )

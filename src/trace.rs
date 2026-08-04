@@ -190,8 +190,10 @@ pub fn format_vreg_to_reg(map: &BTreeMap<VReg, crate::x86::reg::Reg>) -> String 
 ///
 /// A slot's traffic is the one thing the register-level dumps cannot show, and
 /// three separate wrong-code bugs came down to reading it out of a disassembly
-/// by hand. Each line is one slot: its frame displacement, then every load and
-/// store against it in instruction order with the register moved.
+/// by hand. Each line is one slot: its frame displacement, the pass that owns it,
+/// then every load and store against it in instruction order with the register
+/// moved. A displacement inside the slot region that no pass owns is reported as
+/// `UNOWNED` -- the frame does not reserve it.
 ///
 /// The notes after a slot are the shapes that have been bugs:
 ///
@@ -213,9 +215,11 @@ pub fn format_slot_traffic(
     insts: &[crate::x86::inst::MachInst],
     spill_base: crate::x86::reg::Reg,
     spill_offset: i32,
-    spill_slots: u32,
+    slots: &crate::regalloc::SlotAllocator,
 ) -> String {
     use std::fmt::Write;
+
+    let spill_slots = slots.count();
 
     let spill_hi = spill_offset + (spill_slots as i32) * 8;
     // A plain `[spill_base + disp]` inside the slot region. An indexed address is
@@ -291,9 +295,16 @@ pub fn format_slot_traffic(
             notes.push("SELF-COPY".to_string());
         }
         let slot = (disp - spill_offset) / 8;
+        // Which pass owns the slot, since what a suspicious access means depends
+        // on it: an early-barrier slot is stored and reloaded inside one block,
+        // a splitter slot spans blocks.
+        let owner = slots
+            .owner(slot as u32)
+            .map(|o| o.as_str())
+            .unwrap_or("UNOWNED");
         writeln!(
             out,
-            "  slot {slot:>3} {spill_base:?}{disp:+}  {}{}",
+            "  slot {slot:>3} {spill_base:?}{disp:+} {owner:>13}  {}{}",
             body.join("  "),
             if notes.is_empty() {
                 String::new()
@@ -335,6 +346,7 @@ pub fn format_liveness(
 #[cfg(test)]
 mod slot_traffic_tests {
     use super::format_slot_traffic;
+    use crate::regalloc::{SlotAllocator, SlotOwner};
     use crate::x86::addr::Addr;
     use crate::x86::inst::{MachInst, OpSize, Operand};
     use crate::x86::reg::Reg;
@@ -364,9 +376,18 @@ mod slot_traffic_tests {
         }
     }
 
+    /// `n` splitter-owned slots, which is what the flags below are about.
+    fn slots(n: u32) -> SlotAllocator {
+        let mut slots = SlotAllocator::new();
+        for _ in 0..n {
+            slots.alloc(SlotOwner::Splitter);
+        }
+        slots
+    }
+
     #[test]
     fn a_slot_only_ever_read_is_named() {
-        let out = format_slot_traffic(&[load(0, Reg::RBX)], Reg::RSP, 0, 1);
+        let out = format_slot_traffic(&[load(0, Reg::RBX)], Reg::RSP, 0, &slots(1));
         assert!(out.contains("NEVER STORED"), "{out}");
     }
 
@@ -375,7 +396,12 @@ mod slot_traffic_tests {
     /// predecessor was supposed to put there never arrived.
     #[test]
     fn a_slot_copied_onto_itself_is_named() {
-        let out = format_slot_traffic(&[load(8, Reg::RBP), store(8, Reg::RBP)], Reg::RSP, 0, 2);
+        let out = format_slot_traffic(
+            &[load(8, Reg::RBP), store(8, Reg::RBP)],
+            Reg::RSP,
+            0,
+            &slots(2),
+        );
         assert!(out.contains("SELF-COPY"), "{out}");
     }
 
@@ -385,7 +411,7 @@ mod slot_traffic_tests {
             &[store(0, Reg::RBX), load(0, Reg::RCX), load(0, Reg::RDX)],
             Reg::RSP,
             0,
-            1,
+            &slots(1),
         );
         assert!(!out.contains("!!"), "{out}");
     }
@@ -394,7 +420,7 @@ mod slot_traffic_tests {
     /// made every slot in a real function look suspicious.
     #[test]
     fn the_address_register_is_not_a_stored_value() {
-        let out = format_slot_traffic(&[store(0, Reg::RBX)], Reg::RSP, 0, 1);
+        let out = format_slot_traffic(&[store(0, Reg::RBX)], Reg::RSP, 0, &slots(1));
         assert!(out.contains("<- RBX"), "{out}");
         assert!(!out.contains("RSP/"), "{out}");
     }

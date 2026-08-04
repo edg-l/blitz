@@ -28,6 +28,7 @@ use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 use crate::regalloc::allocate_global;
 use crate::regalloc::allocator::{RegAllocResult, allocate};
+use crate::regalloc::slots::SlotAllocator;
 use crate::schedule::scheduler::{ScheduleDag, ScheduledInst, schedule};
 use crate::x86::abi::{compute_frame_layout, emit_epilogue, emit_prologue};
 use crate::x86::encode::{Encoder, inst_size};
@@ -853,6 +854,10 @@ pub fn compile(
     // coalescing was allowed to merge.
     let mut verify_copy_pairs: Vec<(VReg, VReg)> = Vec::new();
 
+    // Every pass that spills draws its slot numbers from here, so no two name the
+    // same 8-byte cell of the frame and each slot can say which pass owns it.
+    let mut slots = SlotAllocator::new();
+
     // Single-block fast path skips global liveness.
     let (regalloc_result, block_rewritten, coalesce_aliases) = if func.blocks.len() == 1 {
         // --- Single-block fast path ---
@@ -930,6 +935,7 @@ pub fn compile(
             &live_out,
             &copy_pairs,
             &loop_depths,
+            &mut slots,
             opts.force_frame_pointer,
             &func.name,
         )
@@ -982,12 +988,8 @@ pub fn compile(
 
         // Shorten a barrier result's live range where its consumer is two or more
         // barrier groups away, by spilling it at the def and reloading it at the
-        // use. The slot numbers are recorded because the function-scope allocator
-        // numbers its own slots from 0 as well, and the two sets are told apart
-        // by range afterwards.
-        let mut early_barrier_slots: std::collections::BTreeSet<u32> =
-            std::collections::BTreeSet::new();
-        let mut pre_spill_slots: u32 = 0;
+        // use. First of the three passes that spill in this function, all drawing
+        // their slots from `slots`.
         {
             let mut early_next_vreg = next_vreg;
             for (block_idx, block) in func.blocks.iter().enumerate() {
@@ -997,7 +999,6 @@ pub fn compile(
                         build_barrier_context(block, block_idx, &egraph, &class_to_vreg);
                     let mut vreg_group =
                         assign_barrier_groups(&block_schedules[block_idx], &result_map, &arg_map);
-                    let slots_before = pre_spill_slots;
                     insert_early_barrier_spills(
                         &mut block_schedules[block_idx],
                         &result_map,
@@ -1005,12 +1006,8 @@ pub fn compile(
                         &mut vreg_group,
                         &vreg_types,
                         &mut early_next_vreg,
-                        &mut pre_spill_slots,
+                        &mut slots,
                     );
-                    // Record which slot numbers were allocated by early-barrier spills.
-                    for slot in slots_before..pre_spill_slots {
-                        early_barrier_slots.insert(slot);
-                    }
                 }
             }
             next_vreg = early_next_vreg;
@@ -1166,7 +1163,6 @@ pub fn compile(
         // Pressure-driven splitter.
         // CRITICAL ORDER: apply_plan_to must run BEFORE collect_block_param_vregs_per_block.
         // The splitter may truncate segments, which affects what block params are found.
-        let mut splitter_slots_allocated: u32 = pre_spill_slots;
         // One round of splitting only lowers pressure at the points it looked
         // at, and the reloads it inserts are themselves live somewhere. Re-plan
         // against the rewritten schedules until no overshoot is left or a round
@@ -1196,7 +1192,7 @@ pub fn compile(
                 gpr_budget,
                 xmm_budget,
                 next_vreg,
-                splitter_slots_allocated,
+                &mut slots,
                 &loop_depths,
                 func,
                 &block_param_map,
@@ -1206,12 +1202,11 @@ pub fn compile(
             // bumps `split_generation`, and `collect_block_param_vregs_per_block`
             // asserts the splitter has committed at least once.
             let converged = plan.is_empty();
-            // Copy out slots_allocated and the accumulating maps. The plan keeps
-            // its `slot_spilled_params`: `apply_plan_to` reads them to truncate
-            // each param's segment past block entry, which is what stops a
-            // register being allocated to a value that lives in a slot.
+            // Accumulate the maps across rounds. The plan keeps its
+            // `slot_spilled_params`: `apply_plan_to` reads them to truncate each
+            // param's segment past block entry, which is what stops a register
+            // being allocated to a value that lives in a slot.
             slot_spilled_params.extend(plan.slot_spilled_params.clone());
-            splitter_slots_allocated = plan.slots_allocated;
 
             // Build old→new VReg remap restricted to CALL-ARG positions so we
             // can update call_arg_precolors after apply_plan_to. The precolors
@@ -1484,6 +1479,7 @@ pub fn compile(
             &block_param_vregs_per_block,
             &func.name,
             opts.force_frame_pointer,
+            &mut slots,
         )
         .map_err(|e| CompileError {
             phase: "regalloc".into(),
@@ -1495,52 +1491,15 @@ pub fn compile(
             }),
         })?;
 
-        // One slot space for the whole function, in three ranges that must not
-        // collide. Early-barrier spills already hold `0..pre_spill_slots` in the
-        // input schedules and the splitter's cross-block spills continue from
-        // there; the function-scope allocator numbers its own from 0 internally,
-        // so those are shifted up past both.
-        let mut block_rewritten_storage = global_result.per_block_insts;
+        let block_rewritten_storage = global_result.per_block_insts;
         let merged_vreg_to_reg = global_result.vreg_to_reg;
         let mut merged_callee_saved = global_result.callee_saved_used;
-        let global_alloc_slots = global_result.spill_slots;
         let global_unprecolored_params = global_result.unprecolored_params;
         let coalesce_aliases: BTreeMap<VReg, VReg> = global_result.coalesce_aliases;
 
-        // Shift global-allocator slot numbers to avoid collision with pre-allocated slots.
-        //
-        // Pre-allocated slots are:
-        //   0..pre_spill_slots       - early-barrier spills (in `early_barrier_slots` set)
-        //   pre_spill_slots..splitter_slots_allocated - splitter cross-block spills
-        //
-        // Global-allocator slots (created by Phase 5 spill loop) are numbered 0..global_alloc_slots
-        // internally and must be shifted up by `splitter_slots_allocated` to avoid all collisions.
-        //
-        // We identify global-allocator-created slots as those NOT in the pre-allocated set
-        // (0..splitter_slots_allocated).
-        let slot_shift = splitter_slots_allocated;
-        // Build a set of all pre-allocated slot numbers (early-barrier + splitter).
-        let pre_allocated_slots: std::collections::BTreeSet<u32> = (0..slot_shift).collect();
-        if slot_shift > 0 && global_alloc_slots > 0 {
-            for block_insts in block_rewritten_storage.iter_mut() {
-                for inst in block_insts.iter_mut() {
-                    match &mut inst.op {
-                        Op::SpillStore(slot)
-                        | Op::SpillLoad(slot)
-                        | Op::XmmSpillStore(slot)
-                        | Op::XmmSpillLoad(slot) => {
-                            let slot_u = *slot as u32;
-                            // Shift only global-allocator slots (those NOT in pre-allocated range).
-                            if !pre_allocated_slots.contains(&slot_u) {
-                                *slot += slot_shift as i64;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        let spill_slot_counter = global_alloc_slots + slot_shift;
+        // Every slot in these schedules came from `slots`, whichever pass spilled
+        // to it, so the frame reserves exactly what it handed out.
+        let spill_slot_counter = slots.count();
 
         merged_callee_saved.sort_by_key(|r| *r as u8);
         merged_callee_saved.dedup();
@@ -1555,6 +1514,30 @@ pub fn compile(
 
         (merged_result, block_rewritten_storage, coalesce_aliases)
     };
+
+    // A spill op naming a slot no pass allocated addresses a frame cell the
+    // prologue does not reserve, or one another value owns. Nothing downstream can
+    // see it: the displacement is well-formed and the store writes it, so both the
+    // machine verifier and the slot-traffic dump read it as an ordinary slot.
+    if cfg!(debug_assertions) {
+        let unowned: BTreeSet<i64> = block_rewritten
+            .iter()
+            .flatten()
+            .filter_map(|inst| match inst.op {
+                Op::SpillStore(slot)
+                | Op::SpillLoad(slot)
+                | Op::XmmSpillStore(slot)
+                | Op::XmmSpillLoad(slot) => slots.owner(slot as u32).is_none().then_some(slot),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            unowned.is_empty(),
+            "[{}] spill ops name slots {unowned:?}, outside the {} this function allocated",
+            func.name,
+            slots.count(),
+        );
+    }
 
     if let Some(s) = sink.as_mut() {
         s.phase_stats(
@@ -1972,7 +1955,7 @@ pub fn compile(
                 &flat_insts,
                 frame_layout.spill_base,
                 frame_layout.spill_offset,
-                regalloc_result.spill_slots,
+                &slots,
             ),
         );
     }

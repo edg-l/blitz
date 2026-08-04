@@ -6,10 +6,12 @@ pub mod global_liveness;
 pub mod interference;
 pub mod liveness;
 pub mod rewrite;
+pub mod slots;
 pub mod spill;
 
 pub use allocator::{RegAllocResult, allocate};
 pub use global_allocator::allocate_global;
+pub use slots::{SlotAllocator, SlotOwner};
 
 use std::collections::BTreeMap;
 
@@ -27,9 +29,6 @@ pub struct GlobalRegAllocResult {
     pub per_block_insts: Vec<Vec<ScheduledInst>>,
     /// Maps every VReg in the function to its assigned physical register.
     pub vreg_to_reg: BTreeMap<VReg, Reg>,
-    /// Total spill slots used across the entire function (each slot is 8 bytes
-    /// for GPR, 16 bytes for XMM).
-    pub spill_slots: u32,
     /// Callee-saved registers that were actually assigned and must be preserved
     /// in the function prologue/epilogue.
     pub callee_saved_used: Vec<Reg>,

@@ -3543,7 +3543,7 @@ fn early_spill_distant_barrier_result() {
         (VReg(4), Type::I32),
     ]);
     let mut next_vreg = 10u32;
-    let mut spill_counter = 0u32;
+    let mut slots = SlotAllocator::new();
 
     insert_early_barrier_spills(
         &mut schedule,
@@ -3552,11 +3552,11 @@ fn early_spill_distant_barrier_result() {
         &mut vreg_group,
         &vreg_types,
         &mut next_vreg,
-        &mut spill_counter,
+        &mut slots,
     );
 
     // Should have allocated one spill slot.
-    assert_eq!(spill_counter, 1, "one spill slot allocated");
+    assert_eq!(slots.count(), 1, "one spill slot allocated");
 
     // Should have inserted SpillStore and SpillLoad.
     let spill_stores: Vec<_> = schedule
@@ -3611,7 +3611,7 @@ fn early_spill_skips_close_consumer() {
     ]);
     let vreg_types = BTreeMap::from([(VReg(0), Type::I32), (VReg(1), Type::I32)]);
     let mut next_vreg = 10u32;
-    let mut spill_counter = 0u32;
+    let mut slots = SlotAllocator::new();
 
     insert_early_barrier_spills(
         &mut schedule,
@@ -3620,10 +3620,10 @@ fn early_spill_skips_close_consumer() {
         &mut vreg_group,
         &vreg_types,
         &mut next_vreg,
-        &mut spill_counter,
+        &mut slots,
     );
 
-    assert_eq!(spill_counter, 0, "no spill slots allocated");
+    assert_eq!(slots.count(), 0, "no spill slots allocated");
     assert_eq!(schedule.len(), 2, "no instructions inserted");
 }
 
@@ -3647,7 +3647,7 @@ fn early_spill_skips_effectful_consumer() {
         (VReg(2), Type::I32),
     ]);
     let mut next_vreg = 10u32;
-    let mut spill_counter = 0u32;
+    let mut slots = SlotAllocator::new();
 
     insert_early_barrier_spills(
         &mut schedule,
@@ -3656,10 +3656,10 @@ fn early_spill_skips_effectful_consumer() {
         &mut vreg_group,
         &vreg_types,
         &mut next_vreg,
-        &mut spill_counter,
+        &mut slots,
     );
 
-    assert_eq!(spill_counter, 0, "no spill for effectful-consumed result");
+    assert_eq!(slots.count(), 0, "no spill for effectful-consumed result");
 }
 
 #[test]
@@ -3671,7 +3671,7 @@ fn early_spill_skips_no_consumers() {
     let mut vreg_group = BTreeMap::from([(VReg(0), 1usize)]);
     let vreg_types = BTreeMap::from([(VReg(0), Type::I32)]);
     let mut next_vreg = 10u32;
-    let mut spill_counter = 0u32;
+    let mut slots = SlotAllocator::new();
 
     insert_early_barrier_spills(
         &mut schedule,
@@ -3680,10 +3680,10 @@ fn early_spill_skips_no_consumers() {
         &mut vreg_group,
         &vreg_types,
         &mut next_vreg,
-        &mut spill_counter,
+        &mut slots,
     );
 
-    assert_eq!(spill_counter, 0, "no spill for dead result");
+    assert_eq!(slots.count(), 0, "no spill for dead result");
 }
 
 #[test]
@@ -3715,7 +3715,7 @@ fn early_spill_multiple_consumers_uses_earliest() {
         (VReg(4), Type::I32),
     ]);
     let mut next_vreg = 10u32;
-    let mut spill_counter = 0u32;
+    let mut slots = SlotAllocator::new();
 
     insert_early_barrier_spills(
         &mut schedule,
@@ -3724,10 +3724,10 @@ fn early_spill_multiple_consumers_uses_earliest() {
         &mut vreg_group,
         &vreg_types,
         &mut next_vreg,
-        &mut spill_counter,
+        &mut slots,
     );
 
-    assert_eq!(spill_counter, 1);
+    assert_eq!(slots.count(), 1);
 
     let spill_loads: Vec<_> = schedule
         .iter()

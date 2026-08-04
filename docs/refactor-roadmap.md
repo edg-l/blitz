@@ -76,7 +76,7 @@ CFG holds.
 
 | # | step | size | why here |
 | --- | --- | --- | --- |
-| 0 | Slot numbering gets a real representation | small | a documented landmine now, and a prerequisite for step 5 |
+| 0 | Slot numbering gets a real representation | small | **DONE** — was a documented landmine, and a prerequisite for step 5 |
 | 1 | Terminator args become VRegs in the CFG | medium | the representation defect, smallest slice with the biggest payoff |
 | 2 | Trivial-phi elimination over those VRegs | small | 85-94% of every function's parameters; removes 36 of the 46 capacity failures |
 | 3 | The remaining `EffectfulOp` operands become VRegs | medium | finishes step 1 |
@@ -213,18 +213,37 @@ Per-block snapshots, the three-times-patched map, `block_param_vregs`,
 
 ---
 
-## Step 0: slot numbering
+## Step 0: slot numbering — DONE
 
-Three seams today: `pre_spill_slots`, the splitter's per-round `first_slot`, and a
-shift in `compile/mod.rs` that distinguishes the global allocator's slots from the
-splitter's **by number range** (`slot_shift` / `pre_allocated_slots`).
+The three seams were `pre_spill_slots`, the splitter's per-round `first_slot`, and a
+shift in `compile/mod.rs` that told the global allocator's slots from the splitter's
+**by number range** (`slot_shift` / `pre_allocated_slots`). That last one was only
+safe because `run_phase5` never allocates a slot, so `global_alloc_slots` was always
+0 and the shift loop never ran — a hazard that would have fired the moment step 5
+gave the allocator a spill loop, silently misclassifying its slots.
 
-`DEBUGGING-NOTES.md` records why that is a landmine: *"That last one is only safe
-because `run_phase5` never allocates a slot today."* So it is both a live hazard and
-a hard prerequisite for step 5 — the moment the allocator can spill, it allocates
-slots, and the number-range discrimination silently misclassifies them.
+`regalloc::slots::SlotAllocator` is now one allocator per function, threaded to all
+three passes that spill, and it records a `SlotOwner` per slot. The consequences:
 
-Give a slot an owner in its representation rather than inferring one from its index.
+- No range discrimination and no shift: `insert_early_barrier_spills`,
+  `plan_splits` and `insert_spills` all call `alloc(owner)`, so the numbers are
+  distinct by construction and the frame reserves exactly `slots.count()`.
+- `SplitPlan::slots_allocated` and `GlobalRegAllocResult::spill_slots` are gone.
+  Neither can report a private numbering, so a spill loop in `run_phase5` has to
+  take its slots from the one it is handed.
+- `BLITZ_DEBUG=slots` names the owner beside every access, which is what decides
+  whether a suspicious access is suspicious: an early-barrier slot is stored and
+  reloaded inside one block, a splitter slot spans blocks.
+- A `debug_assert` in `compile/mod.rs` rejects a spill op naming a slot no pass
+  allocated. Nothing downstream can see that shape on its own — the displacement is
+  well-formed and the store writes it, so the machine verifier and the slot dump
+  both read it as an ordinary slot.
+
+Judged by byte-identical output rather than a pass count, since it changes no
+behaviour: over the 440 lit programs and 180 generated ones at both levels, 982
+emitted-asm comparisons against the pre-change compiler are identical, and every
+failing pair fails identically (46 overshoots, 3 pre-existing division-projection
+assertions). The overshoot message gained the count of slots already committed.
 
 ---
 

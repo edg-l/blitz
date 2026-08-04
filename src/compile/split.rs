@@ -17,6 +17,7 @@ use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 use crate::regalloc::global_liveness::GlobalLiveness;
 use crate::regalloc::spill::LOOP_DEPTH_PENALTY_BASE;
+use crate::regalloc::{SlotAllocator, SlotOwner};
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::CALLER_SAVED_GPR;
 use crate::x86::reg::RegClass;
@@ -85,9 +86,6 @@ pub struct SplitPlan {
     /// given ProgramPoint. Used by cross-block slot spills to shorten the
     /// spilled VReg's live range so the terminator point maps to a reload VReg.
     pub segment_end_truncations: Vec<(VReg, ProgramPoint)>,
-    /// Total number of spill slots allocated by the splitter. The caller must
-    /// include this in the function's stack frame size calculation.
-    pub slots_allocated: u32,
 }
 
 impl SplitPlan {
@@ -422,7 +420,7 @@ fn apply_splits_for_overshoot(
     cost_model: &CostModel,
     extraction: &ExtractionResult,
     next_vreg: &mut u32,
-    new_slot_count: &mut u32,
+    slots: &mut SlotAllocator,
     all_per_block_insertions: &mut [Vec<(usize, ScheduledInst)>],
     new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
     operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
@@ -589,7 +587,7 @@ fn apply_splits_for_overshoot(
                     block_schedule,
                     overshoot_class,
                     next_vreg,
-                    new_slot_count,
+                    slots,
                     &mut all_per_block_insertions[block_idx],
                     new_segments,
                     operand_rewrites,
@@ -602,7 +600,7 @@ fn apply_splits_for_overshoot(
                     overshoot_class,
                     all_block_schedules,
                     next_vreg,
-                    new_slot_count,
+                    slots,
                     all_per_block_insertions,
                     new_segments,
                     operand_rewrites,
@@ -623,9 +621,8 @@ fn apply_splits_for_overshoot(
 /// `SlotSpillBlockParam` splits for them.
 ///
 /// `loop_depths` maps VReg -> loop nesting depth (from `compute_loop_depths`).
-/// `first_slot` is the first spill-slot index the splitter may allocate; must
-/// be set to the number of slots already allocated by `insert_early_barrier_spills`
-/// so that splitter-allocated slots do not alias early-barrier slots.
+/// `slots` is the function's slot allocator: every slot this plan spills to comes
+/// from it, so the numbers cannot collide with another pass's.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_splits(
     block_schedules: &[Vec<ScheduledInst>],
@@ -637,7 +634,7 @@ pub fn plan_splits(
     gpr_budget: u32,
     xmm_budget: u32,
     mut next_vreg: u32,
-    first_slot: u32,
+    slots: &mut SlotAllocator,
     loop_depths: &BTreeMap<VReg, u32>,
     func: &Function,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
@@ -647,7 +644,6 @@ pub fn plan_splits(
     let n_blocks = block_schedules.len();
     let mut per_block_insertions: Vec<Vec<(usize, ScheduledInst)>> = vec![Vec::new(); n_blocks];
     let mut new_segments: Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)> = Vec::new();
-    let mut new_slot_count: u32 = first_slot;
     let mut operand_rewrites: Vec<(usize, usize, usize, VReg)> = Vec::new();
     let mut slot_spilled_params: BTreeMap<(BlockId, u32), SlotSpilledParamInfo> = BTreeMap::new();
     let mut segment_end_truncations: Vec<(VReg, ProgramPoint)> = Vec::new();
@@ -684,7 +680,7 @@ pub fn plan_splits(
         global_liveness,
         gpr_budget,
         xmm_budget,
-        &mut new_slot_count,
+        slots,
         &mut next_vreg,
         &mut per_block_insertions,
         &mut new_segments,
@@ -807,7 +803,7 @@ pub fn plan_splits(
                 cost_model,
                 extraction,
                 &mut next_vreg,
-                &mut new_slot_count,
+                slots,
                 &mut per_block_insertions,
                 &mut new_segments,
                 &mut operand_rewrites,
@@ -860,7 +856,7 @@ pub fn plan_splits(
                 cost_model,
                 extraction,
                 &mut next_vreg,
-                &mut new_slot_count,
+                slots,
                 &mut per_block_insertions,
                 &mut new_segments,
                 &mut operand_rewrites,
@@ -915,7 +911,7 @@ pub fn plan_splits(
                 cost_model,
                 extraction,
                 &mut next_vreg,
-                &mut new_slot_count,
+                slots,
                 &mut per_block_insertions,
                 &mut new_segments,
                 &mut operand_rewrites,
@@ -931,12 +927,11 @@ pub fn plan_splits(
         operand_rewrites,
         slot_spilled_params,
         segment_end_truncations,
-        slots_allocated: new_slot_count,
     };
     if trace {
         tracing::debug!(
             target: "blitz::split",
-            "[{}] plan:\n{}", func.name, format_plan(&plan),
+            "[{}] plan:\n{}", func.name, format_plan(&plan, slots),
         );
     }
     plan
@@ -995,7 +990,7 @@ fn format_pressure(
 }
 
 /// Format the split plan: what got inserted where, and how operands moved.
-fn format_plan(plan: &SplitPlan) -> String {
+fn format_plan(plan: &SplitPlan, slots: &SlotAllocator) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     for (bi, insertions) in plan.per_block_insertions.iter().enumerate() {
@@ -1031,7 +1026,17 @@ fn format_plan(plan: &SplitPlan) -> String {
         )
         .unwrap();
     }
-    writeln!(out, "  slots_allocated={}", plan.slots_allocated).unwrap();
+    let mine = slots
+        .owners()
+        .iter()
+        .filter(|o| **o == SlotOwner::Splitter)
+        .count();
+    writeln!(
+        out,
+        "  function slots={} ({mine} owned by the splitter)",
+        slots.count(),
+    )
+    .unwrap();
     out
 }
 
@@ -1093,7 +1098,7 @@ fn detect_blockparam_slot_routing(
     global_liveness: &GlobalLiveness,
     gpr_budget: u32,
     xmm_budget: u32,
-    new_slot_count: &mut u32,
+    slots: &mut SlotAllocator,
     next_vreg: &mut u32,
     per_block_insertions: &mut [Vec<(usize, ScheduledInst)>],
     new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
@@ -1281,8 +1286,7 @@ fn detect_blockparam_slot_routing(
     for vreg in route {
         let group = &groups[&vreg];
         // One slot for the value, whatever number of parameter positions name it.
-        let slot = *new_slot_count as i64;
-        *new_slot_count += 1;
+        let slot = slots.alloc(SlotOwner::Splitter) as i64;
 
         // Insert a reload before each use in EVERY block where it appears as a
         // schedule operand -- the block defining it and any where it is live-in.
@@ -1365,16 +1369,14 @@ fn apply_cross_block_slot_spill(
     reg_class: RegClass,
     all_block_schedules: &[Vec<ScheduledInst>],
     next_vreg: &mut u32,
-    new_slot_count: &mut u32,
+    slots: &mut SlotAllocator,
     per_block_insertions: &mut [Vec<(usize, ScheduledInst)>],
     new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
     operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
     segment_end_truncations: &mut Vec<(VReg, ProgramPoint)>,
     class_to_vreg: &ClassVRegMap,
 ) {
-    // Allocate a spill slot.
-    let slot = *new_slot_count as i64;
-    *new_slot_count += 1;
+    let slot = slots.alloc(SlotOwner::Splitter) as i64;
 
     let load_op = if reg_class == RegClass::XMM {
         Op::XmmSpillLoad(slot)
@@ -1483,7 +1485,7 @@ fn apply_split_planned(
     schedule: &[ScheduledInst],
     reg_class: RegClass,
     next_vreg: &mut u32,
-    new_slot_count: &mut u32,
+    slots: &mut SlotAllocator,
     insertions: &mut Vec<(usize, ScheduledInst)>,
     new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
     operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
@@ -1538,8 +1540,7 @@ fn apply_split_planned(
             }
         }
         SplitKind::SlotSpill => {
-            let slot = *new_slot_count as i64;
-            *new_slot_count += 1;
+            let slot = slots.alloc(SlotOwner::Splitter) as i64;
 
             // Insert SpillStore after the def (or at beginning of block if no def here).
             let store_inst_op = if reg_class == RegClass::XMM {
@@ -1889,7 +1890,7 @@ mod tests {
             15, // gpr_budget
             16, // xmm_budget
             100,
-            0, // first_slot
+            &mut SlotAllocator::new(),
             &loop_depths,
             &func,
             &egraph.block_param_classes(),
@@ -1939,7 +1940,7 @@ mod tests {
             15,
             16, // xmm_budget; 17 live XMMs > 16
             200,
-            0, // first_slot
+            &mut SlotAllocator::new(),
             &loop_depths,
             &func,
             &egraph.block_param_classes(),
@@ -2119,7 +2120,7 @@ mod tests {
         let mut global_liveness = make_global_liveness(2);
         global_liveness.live_in[block1_idx].insert(param_vreg);
 
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
         let mut next_vreg = 2u32;
         let mut per_block_insertions = vec![vec![], vec![]];
         let mut new_segments = vec![];
@@ -2135,7 +2136,7 @@ mod tests {
             &global_liveness,
             15, // gpr_budget
             16, // xmm_budget
-            &mut new_slot_count,
+            &mut slots,
             &mut next_vreg,
             &mut per_block_insertions,
             &mut new_segments,
@@ -2145,7 +2146,7 @@ mod tests {
             &BlockParamSlotMap::new(),
         );
 
-        assert_eq!(new_slot_count, 1, "one slot should be allocated");
+        assert_eq!(slots.count(), 1, "one slot should be allocated");
         assert!(
             slot_spilled_params.contains_key(&(func.blocks[block1_idx].id, 0)),
             "param should be recorded in slot_spilled_params"
@@ -2158,7 +2159,6 @@ mod tests {
             operand_rewrites,
             slot_spilled_params: slot_spilled_params.clone(),
             segment_end_truncations: Vec::new(),
-            slots_allocated: 0,
         };
         let mut block_schedules_mut = vec![vec![], vec![call_result_inst(1, vec![0])]];
         let mut next_vreg2 = next_vreg;
@@ -2199,7 +2199,7 @@ mod tests {
         let mut global_liveness = make_global_liveness(2);
         global_liveness.live_in[block1_idx].insert(param_vreg);
 
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
         let mut next_vreg = 2u32;
         let mut per_block_insertions = vec![vec![], vec![]];
         let mut new_segments = vec![];
@@ -2215,7 +2215,7 @@ mod tests {
             &global_liveness,
             15, // gpr_budget
             16, // xmm_budget
-            &mut new_slot_count,
+            &mut slots,
             &mut next_vreg,
             &mut per_block_insertions,
             &mut new_segments,
@@ -2262,7 +2262,7 @@ mod tests {
         let mut global_liveness = make_global_liveness(2);
         global_liveness.live_in[block1_idx].insert(param_vreg);
 
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
         let mut next_vreg = 3u32;
         let mut per_block_insertions = vec![vec![], vec![]];
         let mut new_segments = vec![];
@@ -2278,7 +2278,7 @@ mod tests {
             &global_liveness,
             15, // gpr_budget
             16, // xmm_budget
-            &mut new_slot_count,
+            &mut slots,
             &mut next_vreg,
             &mut per_block_insertions,
             &mut new_segments,
@@ -2360,7 +2360,7 @@ mod tests {
         let mut global_liveness = make_global_liveness(3);
         global_liveness.live_in[1].insert(param_vreg);
 
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
         let mut next_vreg = 2u32;
         let mut per_block_insertions = vec![vec![], vec![], vec![]];
         let mut new_segments = vec![];
@@ -2376,7 +2376,7 @@ mod tests {
             &global_liveness,
             15, // gpr_budget
             16, // xmm_budget
-            &mut new_slot_count,
+            &mut slots,
             &mut next_vreg,
             &mut per_block_insertions,
             &mut new_segments,
@@ -2387,7 +2387,7 @@ mod tests {
         );
 
         // One slot allocated for the F64 param.
-        assert_eq!(new_slot_count, 1);
+        assert_eq!(slots.count(), 1);
         // One entry in slot_spilled_params for (b2_id, 0).
         assert!(
             slot_spilled_params.contains_key(&(b2_id, 0)),
@@ -2399,7 +2399,8 @@ mod tests {
         assert_eq!(info.slot, 0);
         // The slot number is the same for both predecessors (they both store to slot 0).
         assert_eq!(
-            new_slot_count, 1,
+            slots.count(),
+            1,
             "only one slot needed regardless of predecessor count"
         );
     }
@@ -2465,7 +2466,7 @@ mod tests {
         let mut new_segments: Vec<(_, VReg, _, _)> = vec![];
         let mut operand_rewrites: Vec<(usize, usize, usize, VReg)> = vec![];
         let mut next_vreg = 10u32;
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
 
         apply_split_planned(
             block_idx,
@@ -2474,7 +2475,7 @@ mod tests {
             &schedule,
             RegClass::GPR,
             &mut next_vreg,
-            &mut new_slot_count,
+            &mut slots,
             &mut insertions,
             &mut new_segments,
             &mut operand_rewrites,
@@ -2482,7 +2483,7 @@ mod tests {
         );
 
         // No slot allocated for remat.
-        assert_eq!(new_slot_count, 0, "remat must not allocate a spill slot");
+        assert_eq!(slots.count(), 0, "remat must not allocate a spill slot");
 
         // Two uses -> two fresh-copy insertions.
         let remat_copies: Vec<_> = insertions
@@ -2602,7 +2603,7 @@ mod tests {
         let mut new_segments = vec![];
         let mut operand_rewrites = vec![];
         let mut next_vreg = 10u32;
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
 
         apply_split_planned(
             0,
@@ -2611,7 +2612,7 @@ mod tests {
             &schedule,
             RegClass::GPR,
             &mut next_vreg,
-            &mut new_slot_count,
+            &mut slots,
             &mut insertions,
             &mut new_segments,
             &mut operand_rewrites,
@@ -2661,7 +2662,7 @@ mod tests {
         let mut new_segments = vec![];
         let mut operand_rewrites = vec![];
         let mut next_vreg = 10u32;
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
 
         apply_split_planned(
             0,
@@ -2670,7 +2671,7 @@ mod tests {
             &schedule,
             RegClass::XMM, // XMM class
             &mut next_vreg,
-            &mut new_slot_count,
+            &mut slots,
             &mut insertions,
             &mut new_segments,
             &mut operand_rewrites,
@@ -2724,14 +2725,14 @@ mod tests {
         let mut operand_rewrites = vec![];
         let mut segment_end_truncations = vec![];
         let mut next_vreg = 20u32;
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
 
         apply_cross_block_slot_spill(
             VReg(0),
             RegClass::GPR,
             &all_block_schedules,
             &mut next_vreg,
-            &mut new_slot_count,
+            &mut slots,
             &mut per_block_insertions,
             &mut new_segments,
             &mut operand_rewrites,
@@ -2803,14 +2804,14 @@ mod tests {
         let mut operand_rewrites = vec![];
         let mut segment_end_truncations = vec![];
         let mut next_vreg = 10u32;
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
 
         apply_cross_block_slot_spill(
             VReg(0),
             RegClass::GPR,
             &all_block_schedules,
             &mut next_vreg,
-            &mut new_slot_count,
+            &mut slots,
             &mut per_block_insertions,
             &mut new_segments,
             &mut operand_rewrites,
@@ -2870,14 +2871,14 @@ mod tests {
         let mut operand_rewrites = vec![];
         let mut segment_end_truncations = vec![];
         let mut next_vreg = 10u32;
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
 
         apply_cross_block_slot_spill(
             VReg(0),
             RegClass::GPR,
             &all_block_schedules,
             &mut next_vreg,
-            &mut new_slot_count,
+            &mut slots,
             &mut per_block_insertions,
             &mut new_segments,
             &mut operand_rewrites,
@@ -2885,7 +2886,7 @@ mod tests {
             &class_to_vreg,
         );
 
-        assert_eq!(new_slot_count, 1, "one slot must be allocated");
+        assert_eq!(slots.count(), 1, "one slot must be allocated");
 
         // Apply insertions.
         for (bi, mut insertions) in per_block_insertions.into_iter().enumerate() {
@@ -2957,7 +2958,7 @@ mod tests {
         let mut new_segments = vec![];
         let mut operand_rewrites = vec![];
         let mut next_vreg = 10u32;
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
 
         apply_split_planned(
             1, // block 1 has the use
@@ -2966,7 +2967,7 @@ mod tests {
             &schedule_b1,
             RegClass::GPR,
             &mut next_vreg,
-            &mut new_slot_count,
+            &mut slots,
             &mut insertions,
             &mut new_segments,
             &mut operand_rewrites,
@@ -3015,14 +3016,14 @@ mod tests {
         let mut operand_rewrites = vec![];
         let mut segment_end_truncations = vec![];
         let mut next_vreg = 10u32;
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
 
         apply_cross_block_slot_spill(
             VReg(0),
             RegClass::GPR,
             &all_block_schedules,
             &mut next_vreg,
-            &mut new_slot_count,
+            &mut slots,
             &mut per_block_insertions,
             &mut new_segments,
             &mut operand_rewrites,
@@ -3088,14 +3089,14 @@ mod tests {
         let mut operand_rewrites = vec![];
         let mut segment_end_truncations = vec![];
         let mut next_vreg = 10u32;
-        let mut new_slot_count = 0u32;
+        let mut slots = SlotAllocator::new();
 
         apply_cross_block_slot_spill(
             VReg(5),
             RegClass::GPR,
             &all_block_schedules,
             &mut next_vreg,
-            &mut new_slot_count,
+            &mut slots,
             &mut per_block_insertions,
             &mut new_segments,
             &mut operand_rewrites,
@@ -3104,7 +3105,8 @@ mod tests {
         );
 
         assert_eq!(
-            new_slot_count, 1,
+            slots.count(),
+            1,
             "slot must be allocated for cross-block GPR"
         );
         assert!(
@@ -3136,7 +3138,6 @@ mod tests {
             operand_rewrites: vec![],
             slot_spilled_params: BTreeMap::new(),
             segment_end_truncations: Vec::new(),
-            slots_allocated: 0,
         };
 
         let mut block_schedules: Vec<Vec<ScheduledInst>> = vec![vec![]];

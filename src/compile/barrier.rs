@@ -7,6 +7,7 @@ use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::BasicBlock;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
+use crate::regalloc::{SlotAllocator, SlotOwner};
 use crate::schedule::scheduler::ScheduledInst;
 
 /// If the block terminator is a Branch, mark its `cond` VReg as consumed after
@@ -277,7 +278,7 @@ pub(super) fn insert_early_barrier_spills(
     vreg_group: &mut BTreeMap<VReg, usize>,
     vreg_types: &BTreeMap<VReg, Type>,
     next_vreg: &mut u32,
-    spill_slot_counter: &mut u32,
+    slots: &mut SlotAllocator,
 ) {
     // Build consumers map: for each VReg, the dst VRegs that use it as an operand.
     let mut consumers: BTreeMap<VReg, Vec<VReg>> = BTreeMap::new();
@@ -324,8 +325,7 @@ pub(super) fn insert_early_barrier_spills(
 
     // Insert SpillStore/SpillLoad pairs.
     for (v, def_group, consumer_group) in &candidates {
-        let slot = *spill_slot_counter;
-        *spill_slot_counter += 1;
+        let slot = slots.alloc(SlotOwner::EarlyBarrier);
 
         // Fresh VReg for the SpillStore destination (not directly used).
         let store_vreg = VReg(*next_vreg);
