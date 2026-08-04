@@ -566,6 +566,14 @@ registers. Splitting into `PureOp` / `MachOp` / a schedule-level `Pseudo` makes 
 unrepresentable instead of guarded — the same kind of defect as the CFG one, where
 the type system has stopped helping.
 
+It also ends a duplication the type system is currently unable to prevent: the set of
+generic IR ops that must have been lowered before extraction is enumerated twice, 24
+variants each, in `lower.rs` (which rejects them) and `egraph/cost.rs` (which prices
+them as unlowerable). That list *is* `PureOp`. After the split both sites match on the
+type, and a new pure op cannot be added to one list and forgotten in the other — which
+is the same failure mode as `has_no_result()` being consulted in six places instead of
+being a property of the type.
+
 Lowest priority, and a natural follow-on to steps 1-4 since those already change
 what the CFG holds.
 
@@ -613,6 +621,63 @@ Redundant block parameters, `tests/fuzz/count_trivial_phis.py`:
 On `pressure` seed 22 the loop header carries 28 parameters of which **4** are real,
 and block 20 carries 28 of which **none** — a single-predecessor pass-through block
 whose incoming edge is the 28-argument terminator that stalls the splitter.
+
+## Cleanup: duplication that is real, and one piece that must stay
+
+Found by a 10-line-window scan over `src/` and `crates/`, filtered to production code
+and then read. Ordered by what it costs today, not by line count.
+
+**1. Five derivations of "which blocks does this one jump to".** `cfg::compute_rpo`'s
+inline closure and `regalloc::global_liveness::cfg_successors` are *character-identical*
+over 25 lines. `cfg::compute_idom` has a third, written differently.
+`dce::block_successors` is a fourth, returning `BlockId`s instead of indices.
+`licm::build_predecessor_map` is a fifth. `barrier::terminator_edges` is the general
+form — successors *with* the arguments each carries — and could be the one the others
+call. This is the same defect this whole document is about, applied to the CFG's shape
+instead of to VRegs: several passes deriving one fact separately, free to drift.
+
+**2. `split::apply_splits_for_overshoot` takes 25 parameters and is called 4 times;
+21 of the 25 are identical at every call site.** Only the overshoot's index, class,
+excess and `SplitScope` vary. A context struct built once per round would leave four
+call sites of five arguments. This is also a large part of why `split.rs` is hard to
+change: any new piece of state threads through 25-argument signatures.
+
+**3. The set of "generic IR ops that must have been lowered before extraction" is
+enumerated twice**, 24 variants each, in `lower.rs` (to reject them) and
+`egraph/cost.rs` (to price them as unlowerable). See the step 7 note: that list *is*
+`PureOp`, so the split turns both into a match on a type.
+
+**4. `terminator::chase_alias` has a second implementation inside `verify.rs`**, with a
+different termination guard — a bounded `for` loop against the original's `while let`.
+A verifier carrying its own copy of the thing it verifies is the worst possible place
+for a divergence. One line to fix: call the function.
+
+**5. `block_id_to_idx` is rebuilt inline in six files, fourteen sites.** Always the
+same map. Minor, and it is the sort of minor that adds up in profiles: the compile-time
+work is O(blocks) each time, and `commit_terminator_arg_vregs` builds a second one
+while `compile/mod.rs` already holds it.
+
+**6. Two pairs of near-identical rule bodies.** `algebraic.rs`'s
+`apply_sub_zero_eq_ne_rules` / `apply_add_const_zero_eq_ne_rules` share 36 lines, and
+`known_bits.rs`'s `Shr` and `Sar` by-constant arms share 25. A long rule set is fine —
+these are the *same* rule with one operation swapped, which is not the same thing.
+Lowest priority here.
+
+**7. `allocator.rs:319` and `global_allocator.rs:531` share 27 lines**, which is step 6
+showing up in the scan.
+
+### Do not merge the two local liveness passes
+
+`regalloc::liveness::compute_liveness` and `split::compute_local_liveness` are both
+backward scans over a schedule from a live-out seed, and they look like an obvious
+dedup. **They must differ.** The splitter's version counts a block's parameters as
+live over the `BlockParam` marker run; the allocator's deliberately does not, because
+extending the ranges the allocator *spills against* forces real spill code — measured
+at 36 → 33 on the corpus, with a new pressure failure and an `-O0`/`-O1` behaviour
+divergence, and reverted (`b5c0667`'s note). Modelling it in the splitter's
+measurement and the interference graph only is what worked. A dedup pass that unified
+them would silently reintroduce that regression, and the gates would show it as a
+capacity loss with no obvious cause.
 
 ## Cleanup: the per-pass flags are a debug facility wearing product clothes
 
