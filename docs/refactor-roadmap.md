@@ -85,6 +85,7 @@ CFG holds.
 | 1 | Terminator args become VRegs in the CFG | medium | **DONE** — the representation defect, smallest slice with the biggest payoff |
 | 2 | Trivial-phi elimination over those VRegs | small-medium | 85-94% of every function's parameters; removes 36 of the 46 capacity failures |
 | 3 | The remaining `EffectfulOp` operands become VRegs | medium | finishes step 1 |
+| 3b | Block parameters get VRegs in the CFG | small | the phi seam's *destination* end; step 4 deletes its four-source resolution and needs a replacement |
 | 4 | Delete the reconstruction machinery (~312 sites) | mechanical | the payoff: the bug class goes away |
 | 5 | Give the function-scope allocator a spill loop | medium | now safe, and it converts the residual failures from errors into spill code |
 | 6 | Fold the two allocators into one | medium | only sensible after 5, or the spill loop gets duplicated |
@@ -307,11 +308,161 @@ with `tests/profile.sh` rather than asserting it.
 correctness battery. `run_identity.sh` is the wrong gate here: this step is meant to
 change the emitted code.
 
+#### Two tiers, because triviality and self-reference are different questions
+
+The same distinction `TermArg` encodes. A **self-reference** is an expression
+question — "is this operand this very phi" — and `block_param_classes` answers it by
+class, which is what `commit_terminator_arg_vregs`'s back-edge case already detects.
+**Triviality** is a storage question, and the answer splits:
+
+- **Tier 1, unconditional.** Every predecessor passes the *same VReg*. The value is
+  already in one register on every path reaching the block, so removing the parameter
+  needs no new definition and no cost model. This is where a class emitted once in a
+  dominating block lands, which is most of a `pressure` function's parameters.
+- **Tier 2, cost-gated.** Predecessors pass *different VRegs of the same class* —
+  each computed the same expression into its own register, which is the case the
+  parameter exists for. Removal needs the target block to re-emit, so it is the
+  dial's decision.
+
+Keeping the tiers separate matters for soundness as much as for quality: tier 1 needs
+no justification beyond "same register", so it cannot be the thing that reintroduces
+`phi_simplify.rs`'s "reads a register only one path wrote". If tier 2 ever has to be
+disabled, tier 1 stands on its own.
+
+#### It subsumes `propagate_block_params`
+
+`egraph::algebraic::propagate_block_params` merges a single-predecessor block's
+parameter with its incoming argument, and refuses unless the argument is *constant* —
+its own comment says why: "merging with non-constant values can cause extraction to
+schedule computations in the wrong block (the source computation may not dominate the
+target block)". That is the dominance problem step 2 solves by re-emitting, so step 2
+does the same job for **every** argument rather than only constants, and does it by
+removing the parameter instead of merging two classes.
+
+Deleting it also removes a hazard class rather than adding one. Merging is what makes
+**two parameters of one block share an e-class**, which is why `build_phi_copies`
+needs its `params_copied` dedup and why `remove_terminator_arg_operands` had to be
+keyed on argument index instead of VReg (`f5ab27a`, a wrong-code bug). No merge, no
+shared-class parameters, no dedup.
+
+Check it against the corpus rather than assuming: the merge also feeds constant
+folding across inlined boundaries, so confirm the folding still happens once the
+parameter is gone instead of merged.
+
+#### `src/compile/phi_simplify.rs` is deleted by this step
+
+269 lines behind `--enable-phi-simplify`, off by default, superseded not fixed. Its
+private `terminator_edges` duplicate goes with it. Leaving a second, class-based
+trivial-phi pass in the tree next to a working one is how a later session picks the
+wrong one.
+
+#### This step needs a code-quality metric, and there is none
+
+Everything before it was judged by correctness and capacity, both of which exist.
+Step 2's tier 2 is the project's first genuine **cost** decision: recompute here
+versus copy there. `compare_ref.sh` cannot referee that — it reports whether a
+program is correct and whether it allocates, not whether the code got better. So
+ROADMAP P0-Measurement stops being a "nice to have once the refactor is done" and
+becomes a prerequisite of *this* step: instruction count, `.text` bytes,
+spill/reload count per program, with checked-in baselines so a diff shows a
+regression. Without it the dial's default is unfalsifiable and the 85-94% number
+measures parameters removed rather than code improved.
+
+### Step 3 notes — the remaining operands
+
+`Load.addr`, `Store.addr` and `.val`, `Call.args`, and the result classes
+(`Load.result`, `Call.results`), the same `TermArgs` treatment step 1 gave block
+arguments. Two members of the set are easy to miss because they are not in the
+obvious list:
+
+- **`Branch.cond`.** Resolved through the class map in two places nobody counts:
+  `barrier::mark_branch_cond_barrier`, to force the flags-producing instruction into
+  the last barrier group, and `compile/mod.rs`'s Phase 4b, to find the `Proj1` + ALU
+  pair that must sort to the end of its group. Both run before the splitter, so both
+  are currently right; both are resolutions all the same.
+- **`Ret.val`.** Step 1 left it deliberately. It cannot simply become a VReg: lowering
+  reads the *class* to fold a constant return straight into the ABI register
+  (`egraph.get_constant`), which exists because trusting the register assignment there
+  emitted nothing at all for `return 0` after a call, so `main` returned whatever
+  `printf` did. So `Ret` wants the same both-fields shape `TermArg` has, or the
+  constant has to be decided at commit time and carried.
+
+Step 3 is what makes `verify_cfg_schedule_agreement` vacuous so it can go, and with
+it both of the post-splitter disagreement shapes recorded under prereq A.
+
+### Step 3b notes — block parameters get VRegs
+
+The phi seam has two ends and step 1 fixed one. `cfg::resolve_block_param_vreg` still
+answers "which VReg does this parameter live in" from **four** ordered fallbacks, and
+three call sites consult it (`build_phi_copies`,
+`compute_copy_pairs_from_schedules`, `collect_block_param_vregs_per_block`). Two
+passes deriving it separately is what `021d4ed` and `29e796d` were.
+
+Linearization already decides it once, in one place, and records it in
+`block_param_vregs` — so this is the same move step 1 made: give `BasicBlock` a
+`param_vregs` beside `param_types`, write it where the decision is made, and collapse
+the four sources to one.
+
+It is listed after step 3 rather than before because **step 2 does not need it**: the
+self-reference test is a class question (see step 2's two tiers), so step 2 can land
+without touching this chain. It is listed *before* step 4 because step 4's deletion
+list already contains `block_param_vregs` and `block_param_vreg_overrides`, and
+deleting them needs something to have replaced them.
+
+One thing to get right, learned from step 1: the splitter truncates a parameter's
+segment but never renumbers its `Op::BlockParam` dst, so a committed parameter VReg
+stays valid modulo coalesce aliases, which are already applied downstream. The
+`param_vregs` list is therefore stable the way `TermArgs::Committed` is — and, like
+it, is not the post-split authority for a parameter routed through a slot.
+
 ### Step 4 notes — what to delete
 
 Per-block snapshots, the three-times-patched map, `block_param_vregs`,
 `block_param_vreg_overrides`, `class_emitted_in`, and the `value_defs` guard in
 `split.rs`. Judged by LOC removed with no behaviour change.
+
+It also unblocks the **slot-level verifier**: a reload must produce the class that was
+stored. That check cannot be built on the current map, which reports false positives
+on the splitter's own immediate store/reload pairs because it has collapsed each class
+to one VReg. It is the only check that would see a spill routing a value to the wrong
+cell, which nothing downstream can: the displacement is well-formed and the store
+writes it.
+
+
+---
+
+## Soundness: three checks that do not exist yet
+
+The goal is the best x86-64 code, and every quality lever here moves a value between
+registers, slots and recomputations — so each step should leave behind the invariant
+that says it did so correctly. `BLITZ_VERIFY` covers structure and def-before-use;
+these three gaps are what it does not cover, each with the step that should close it.
+
+**1. `vreg_types` completeness — cheap, and step 2 makes it urgent.** There is no
+assertion anywhere that every VReg a schedule names has a type. A missing entry is
+not a pessimism: `lower.rs`'s `result_size` falls back to `OpSize::S64`, which turned
+a flags-only 32-bit compare into `cmp r8,rdi` against a zero-extended `mov edi,-2`,
+so `14 < -2` was true (`9207141`). The cause was a class **re-emitted in a later
+block**, whose VReg the function-wide map does not keep because the per-block restore
+is an `insert_single` that replaces segments. Step 2's tier 2 deliberately *increases*
+re-emission — that is the remat lever — so it increases traffic through exactly the
+mechanism that produced that bug. A one-line invariant, over every schedule after
+linearization, would have caught it directly and costs nothing to keep.
+
+**2. `verify_register_sharing` cannot see an illegal coalesce, by construction.** It
+canonicalizes every VReg through `coalesce_aliases` before it counts registers
+(`verify.rs:992`), so by the time it looks, two values that were merged are one VReg
+and there is nothing to compare. Coalescing is where three wrong-code bugs landed
+(`021d4ed`, `29e796d`, and the `briggs_admits_illegal_merge.c` investigation), and it
+is the pass with the least verification. Closing it means comparing each merge against
+liveness measured **on the schedules as emitted**, not on the post-coalesce naming.
+Best done with step 6, which is already touching both allocators.
+
+**3. Nothing checks that a value is *right*, only that it is written.** Stated in
+`CLAUDE.md` and worth keeping stated: the machine verifier is satisfied by a register
+that holds somebody else's value. That is the differential harness's job, which is why
+`run_diff.sh`'s two oracles and `gen_c.py`'s UB-freedom are load-bearing rather than
+nice to have, and why no green verifier run should be read as "codegen is correct".
 
 ---
 
@@ -383,6 +534,16 @@ capabilities split the wrong way. A single-block function is a special case of t
 general one, not a separate algorithm. Fold after step 5, or the spill loop gets
 written twice.
 
+Beyond merging the two files, the single-block path is the last consumer of two
+helpers that duplicate the multi-block path's answers: `cfg::compute_copy_pairs`,
+which resolves parameter VRegs through the class map where the multi-block path uses
+`compute_copy_pairs_from_schedules`, and `cfg::collect_phi_source_vregs`. One
+algorithm means one derivation of the copy set, which is the same "two passes deriving
+it separately" hazard as everywhere else in this document.
+
+This is also the natural place for soundness gap 2 above: the merge-versus-liveness
+check needs to sit inside whichever allocator survives.
+
 ---
 
 ## Step 7: `Op` is three enums wearing one hat
@@ -399,6 +560,18 @@ the type system has stopped helping.
 
 Lowest priority, and a natural follow-on to steps 1-4 since those already change
 what the CFG holds.
+
+**One open question underneath it: can `Op::BlockParam` leave the e-graph
+altogether?** It is the root-cause statement of
+this whole document — a position-dependent value stored as a position-free e-node — and
+after steps 1-4 the CFG names both ends of every phi by VReg, so the node looks
+vestigial. It is not yet: `EGraph::block_param_classes` answers step 2's
+self-reference test, `extract.rs` has a tie-break preferring a `BlockParam` node over
+a non-`BlockParam` candidate, and `cost.rs` weights it 0.0. Deleting it needs each of
+those re-expressed without it. Worth checking before step 7 rather than assuming
+either way; if it can go, `block_param_map`, `block_param_classes` and
+`rewrite_block_params` go with it and "one e-class is one expression, not one value"
+stops being a hazard the pipeline has to remember.
 
 ---
 
@@ -433,13 +606,53 @@ On `pressure` seed 22 the loop header carries 28 parameters of which **4** are r
 and block 20 carries 28 of which **none** — a single-predecessor pass-through block
 whose incoming edge is the 28-argument terminator that stalls the splitter.
 
+## Cleanup: the per-pass flags are a debug facility wearing product clothes
+
+Seven `--enable-X` / `--disable-X` pairs mirror the seven `enable_*` fields on
+`CompileOptions` one-for-one, and the `-O` levels are what actually configure the
+pipeline: `o0()` sets every pass off, `o1()` sets every pass on except
+`phi_simplify`. So the flags add no configuration the levels do not already express;
+what they add is the ability to deviate from a level.
+
+**That ability has earned its keep, for one reason.** Bisecting the pass set is
+`CLAUDE.md`'s fifth debugging technique and the cheapest attribution tool in a backend
+whose main hazard is wrong code — `-O0 --enable-inlining`,
+`--disable-store-forwarding`. Keep it.
+
+**Two things about the current shape are wrong, though.**
+
+- **The reachable configuration space is 2^7; the tested one is 2.** Every gate — 440
+  lit, 281 differential, the fuzz corpus at 60 seeds a shape — runs `-O0` and `-O1`
+  and nothing else, so soundness is established for two pipelines out of 128 the CLI
+  invites. 15 of the 440 lit tests pin a pass flag, and those are the only mixed
+  configurations under test at all. Either say plainly that only the levels are
+  supported, or gate more.
+- **It is seven independent dials with no derived default**, which is the inverse of
+  this project's own rule (*prefer one dial with a derived default*). The other
+  development switches already live in the environment — `BLITZ_DEBUG`,
+  `BLITZ_VERIFY`, `BLITZ_DEBUG_FN` — and a single `BLITZ_DISABLE=licm,dse,inlining`
+  derived off the `-O` level would keep the *shipped* surface at exactly
+  `{O0, O1}` while leaving bisection as easy as it is now, and would name the
+  mechanism as what it is.
+
+**`--enable-phi-simplify` is a different animal in the same cage:** a feature gate on
+an unfinished pass, off at every level, and the reason `phi_simplify.rs` has sat in
+the tree since `02be4ae` being neither used nor deleted. Step 2 removes both.
+
+Also: the six `licm/*.c` tests pass `--enable-licm` although LICM is already on at
+`-O1`, which is the level `run_tests.sh` compiles at. Harmless, and a small sign that
+the flags read as "how you turn a pass on" rather than "how you deviate from a level".
+
 ## Not part of this roadmap
 
-- **A benchmark harness** (ROADMAP P0-Measurement, both items unchecked): instruction
-  count, `.text` bytes, spill/reload count, hyperfine, checked-in baselines. Worth
-  having and not a prerequisite — every step above is judged by the correctness gates
-  plus the capacity numbers, both of which already exist. It becomes the binding
-  constraint once steps 1-5 are done and the work turns to pure quality tuning.
+- ~~**A benchmark harness**~~ — **moved in.** It was written here as "worth having and
+  not a prerequisite… becomes the binding constraint once steps 1-5 are done", on the
+  grounds that every step is judged by correctness plus capacity. That holds for steps
+  1, 3, 3b and 4, which change no behaviour or only delete. It does **not** hold for
+  step 2: its tier 2 is a cost decision, recompute here versus copy there, and no
+  existing gate can referee it. See "This step needs a code-quality metric" under the
+  step 2 notes. ROADMAP P0-Measurement is therefore a prerequisite of step 2, not a
+  follow-on to step 5.
 - **Redo the constant-remat pass.** Unblocked by step 4, and the next quality lever
   after step 2. It failed twice on the seam step 4 removes, never on its policy.
 - **Shape A** (`gpr_overshoot=1`, mostly `-O0`, ~8 pairs): real pressure at a call
