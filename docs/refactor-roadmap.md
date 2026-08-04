@@ -83,7 +83,7 @@ CFG holds.
 | --- | --- | --- | --- |
 | 0 | Slot numbering gets a real representation | small | **DONE** — was a documented landmine, and a prerequisite for step 5 |
 | 1 | Terminator args become VRegs in the CFG | medium | **DONE** — the representation defect, smallest slice with the biggest payoff |
-| 2 | Trivial-phi elimination over those VRegs | small | 85-94% of every function's parameters; removes 36 of the 46 capacity failures |
+| 2 | Trivial-phi elimination over those VRegs | small-medium | 85-94% of every function's parameters; removes 36 of the 46 capacity failures |
 | 3 | The remaining `EffectfulOp` operands become VRegs | medium | finishes step 1 |
 | 4 | Delete the reconstruction machinery (~312 sites) | mechanical | the payoff: the bug class goes away |
 | 5 | Give the function-scope allocator a spill loop | medium | now safe, and it converts the residual failures from errors into spill code |
@@ -158,12 +158,15 @@ decision into the IR instead of deferring it to Phase 7.** The CFG becomes
 VReg-based immediately after extraction, and class → VReg resolution happens in
 exactly one place, once.
 
-Then trivial-phi elimination is a small pass, sound by construction because phi
-operands are *defs* rather than expressions. The question that blocks it today
-becomes an explicit cost-model choice: where a removed parameter's value is not
-available on some path, the target block rematerializes it — cheap for a constant
-or an address, and `src/egraph/cost.rs` already exists to decide. That is the same
-mechanism the reverted remat pass needed.
+Then trivial-phi elimination is a small pass whose *operands* are unambiguous,
+because a committed argument is a def rather than an expression. Its destinations
+are not made unambiguous by that alone: removing a parameter leaves the block
+naming a class no single predecessor's emitter dominates, so the removal has to
+re-run linearization rather than patch it, and the target block re-emits the class.
+That turns the question blocking the pass today into an explicit cost-model
+choice — cheap for a constant or an address, and `src/egraph/cost.rs` already
+exists to decide. It is the same mechanism the reverted remat pass needed. See
+"Removal re-runs linearization" under the step 2 notes.
 
 ### What it buys, in order of size
 
@@ -246,6 +249,63 @@ chain for its self-reference test.
 - The entry block's parameters are the function's own. Never remove them.
 - `tests/fuzz/count_trivial_phis.py` measures the prize off `--emit-ir` and needs no
   compiler change, so the number is checkable before and after.
+
+#### Removal re-runs linearization; it does not patch it
+
+**Analyse on the committed VRegs, remove on the CFG, then linearize again.** The
+pass reads each block's snapshot *before* `commit_terminator_arg_vregs` runs, so it
+mutates nothing; where it finds anything to remove it drops those parameters while
+the argument lists are still `TermArgs::Classes`, and linearization runs a second
+time over the reduced CFG.
+
+**This is what makes the transform sound, not a tidier way to arrange it.** A block
+parameter exists to reconcile two predecessors that computed the same *expression*
+into different *registers* — one e-class, two values. Remove it and the block names
+that class directly, but neither emitter dominates the block, so on some path
+nothing has written the register it reads. What supplies the missing definition is
+linearization's dominance filter re-emitting the class in the block. There is
+nowhere else to put it: that is why the two `phi_simplify.rs` attempts either
+miscompiled or needed a dominance condition strong enough to win nothing back
+(`pressure` seed 22 returned to `gpr_overshoot=4`).
+
+**That re-emission is lever 2, not a cost.** Trading a copy per incoming edge per
+iteration plus a place in the parameter clique for one recomputation in the target
+block is a win whenever the class is cheap to recompute — an `Iconst`, a
+`StackAddr`, a `lea`, which is most of what these parameters carry. Re-emission is
+linearization's decision and `src/egraph/cost.rs` is already there, so the choice
+has a home for the first time. An in-place patch cannot consult a cost model
+because it never makes the choice.
+
+**One dial, with a derived default.** Remove a parameter when the extraction cost of
+its class is below the copies it saves — one per incoming edge, weighted by loop
+depth from `compute_loop_depths` exactly as the splitter weights spills — plus the
+clique slot. Keep it otherwise.
+
+**What patching in place would forfeit,** beyond being unsound: the classes that
+were re-emitted per block *because* a parameter mediated them stay re-emitted, so
+the redundant materializations remain; the schedule keeps the order it had with the
+markers in it, so the liveness the splitter measures no longer matches the code
+emitted — the second of the two bug shapes `CLAUDE.md` names; and coalescing sees a
+copy set containing copies that should not exist. Any patch thorough enough to fix
+those *is* the second linearization.
+
+It would also be the larger job. Everything keyed on `(BlockId, param_index)` would
+need patching in step with the removal: `block_param_vregs` (71 references),
+`slot_spilled_params` (50), `block_param_map` (48), `block_param_vregs_per_block`
+(38), `block_param_vreg_overrides` (16), plus `param_types` (77) and the
+`Op::BlockParam` nodes (44). Re-linearizing rebuilds all of it, and
+`EGraph::rewrite_block_params` already renumbers the nodes. Which is why the size
+in the table is small-medium rather than the "small" this step was first written as:
+small as a pass, medium as a pipeline change.
+
+**Cost.** One extra linearization, paid only when there is something to remove. It
+then runs over an IR with 85-94% fewer parameters, as do the scheduler and the
+splitter — and the splitter is 72% of compile time. Expect net faster; measure it
+with `tests/profile.sh` rather than asserting it.
+
+**Judged by `compare_ref.sh` per (seed, level) pair on all three shapes**, plus the
+correctness battery. `run_identity.sh` is the wrong gate here: this step is meant to
+change the emitted code.
 
 ### Step 4 notes — what to delete
 
