@@ -8,10 +8,11 @@ Judge every step on the full battery (`cargo test --all-targets --workspace`,
 `bash tests/lit/run_diff.sh`) and per **(seed, level) pair** with
 `tests/fuzz/compare_ref.sh <ref> 60 <shape>`, never on a bare pass count.
 
-## Before you start: three cheap things that make the rest easier
+## Cheap things that make the rest easier
 
 None of these changes behaviour. Each one shrinks the surface or the risk of the
 steps below, and they are worth doing first rather than carrying through a rewrite.
+A, B and C were done before step 1; **D is a prerequisite of step 2** and is not done.
 
 **A. A CFG-versus-schedule agreement check, under `BLITZ_VERIFY`.** DONE.
 `verify::verify_cfg_schedule_agreement` compares, at every position both
@@ -73,9 +74,88 @@ the first saying it must match the second -- and they had already drifted: one
 canonicalized the parameter's class before the lookup and one did not. Coalescing
 merging onto a VReg the copy never writes is what `021d4ed` and `29e796d` were.
 
+**D. One derivation of the CFG's edges. NOT DONE, and a prerequisite of step 2.**
+There are five. `cfg::compute_rpo`'s inline closure and
+`regalloc::global_liveness::cfg_successors` are *character-identical* over 25 lines;
+`cfg::compute_idom` has a third written differently; `dce::block_successors` is a
+fourth, returning `BlockId`s rather than indices; `licm::build_predecessor_map` is a
+fifth. `barrier::terminator_edges` is already the general form — each successor with
+the arguments that edge carries — so it is the one the rest should call.
+
+This is a prerequisite rather than a cleanup because **step 2's core question is
+per-predecessor**: "does every predecessor pass the same VReg at this position". Left
+alone, step 2 reaches for `build_predecessor_map` and becomes the *sixth* consumer of
+a fact five passes already derive separately — which is the defect the rest of this
+document exists to remove, reintroduced by the step meant to benefit from removing it.
+
+Same shape as A, B and C: behaviour-neutral, so judged by byte identity with
+`tests/run_identity.sh` rather than by a pass count.
+
 Not worth doing first: splitting the large files (no evidence of harm), and the `Op`
 split -- that is step 7, and doing it early fights steps 1-4, which change what the
 CFG holds.
+
+## Duplication: do it first, except where first makes it worse
+
+Found by a 10-line-window scan over `src/` and `crates/`, filtered to production code
+and then read. **Cleanups go before new work** — that is why A, B and C preceded step 1
+and why step 0 preceded it too, and it is what keeps a rewrite from carrying somebody
+else's mess through it. Every item here is behaviour-neutral, so each is one commit
+gated by `tests/run_identity.sh` and the battery, which is the cheapest kind of change
+this repo can make.
+
+**The exception, and it is mechanical rather than a matter of taste: dedupe now only
+where the result is what the owning step would have produced anyway.** Where deduping
+first means inventing a shared helper that the step then deletes, you have not removed
+a duplicate — you have added a third thing to keep in sync until the step lands, and
+paid a rewrite for the privilege.
+
+| what | when | why |
+| --- | --- | --- |
+| Five derivations of the CFG's edges | **now** (prereq D) | step 2's core question is per-predecessor; left alone it becomes the sixth consumer |
+| `apply_splits_for_overshoot`'s 25 parameters | **now** | steps 2 and 5 both add state to the splitter, and each new piece threads through 25-argument signatures |
+| `verify.rs`'s private `chase_alias` | **now** | one line, and a verifier's own copy of what it verifies is the worst place for a drift |
+| `block_id_to_idx` rebuilt in six files | **now** | trivial, and steps 3b/4 churn that area |
+| Two pairs of near-identical rule bodies | **now**, lowest priority | `egraph/` only, no interaction with any step |
+| The generic-IR-op set in `lower.rs` and `cost.rs` | **wait for step 7** | the list *is* `PureOp`; a shared constant now is a third copy the split deletes |
+| `allocator.rs:319` / `global_allocator.rs:531` | **wait for step 6** | a shared helper now is deleted by the fold |
+
+So five of the seven before step 2, in five commits. The two that wait are written up
+under the steps that own them.
+
+The three "now" items not already covered as prereq D:
+
+**`split::apply_splits_for_overshoot` takes 25 parameters and is called 4 times, with
+21 of the 25 identical at every site.** Only the overshoot's index, class, excess and
+`SplitScope` vary. A context struct built once per round leaves four calls of five
+arguments. This is a large part of why `split.rs` resists change, and both step 2 and
+step 5 add state to the splitter — so paying for it once now beats threading two new
+fields through 25-argument signatures twice.
+
+**`block_id_to_idx` is rebuilt inline in six files, fourteen sites**, always the same
+map. Minor, and the sort of minor that shows up in a profile: O(blocks) each time, and
+`commit_terminator_arg_vregs` builds a second one while `compile/mod.rs` already holds
+it.
+
+**Two pairs of near-identical rule bodies.** `algebraic.rs`'s
+`apply_sub_zero_eq_ne_rules` / `apply_add_const_zero_eq_ne_rules` share 36 lines, and
+`known_bits.rs`'s `Shr` and `Sar` by-constant arms share 25. A long rule set is fine —
+these are the *same* rule with one operation swapped, which is not the same thing.
+
+### Do not merge the two local liveness passes
+
+`regalloc::liveness::compute_liveness` and `split::compute_local_liveness` are both
+backward scans over a schedule from a live-out seed, and they look like an obvious
+dedup. **They must differ.** The splitter's version counts a block's parameters as
+live over the `BlockParam` marker run; the allocator's deliberately does not, because
+extending the ranges the allocator *spills against* forces real spill code — measured
+at 36 → 33 on the corpus, with a new pressure failure and an `-O0`/`-O1` behaviour
+divergence, and reverted (`b5c0667`'s note). Modelling it in the splitter's
+measurement and the interference graph only is what worked. A dedup pass that unified
+them would silently reintroduce that regression, and the gates would show it as a
+capacity loss with no obvious cause.
+
+---
 
 ## Order, and why
 
@@ -83,6 +163,7 @@ CFG holds.
 | --- | --- | --- | --- |
 | 0 | Slot numbering gets a real representation | small | **DONE** — was a documented landmine, and a prerequisite for step 5 |
 | 1 | Terminator args become VRegs in the CFG | medium | **DONE** — the representation defect, smallest slice with the biggest payoff |
+| — | Prereq D and four cleanups | small | behaviour-neutral, before step 2; see "Duplication: do it first, except where first makes it worse" |
 | 2 | Trivial-phi elimination over those VRegs | small-medium | 85-94% of every function's parameters; removes 36 of the 46 capacity failures |
 | 3 | The remaining `EffectfulOp` operands become VRegs | medium | finishes step 1 |
 | 3b | Block parameters get VRegs in the CFG | small | the phi seam's *destination* end; step 4 deletes its four-source resolution and needs a replacement |
@@ -621,63 +702,6 @@ Redundant block parameters, `tests/fuzz/count_trivial_phis.py`:
 On `pressure` seed 22 the loop header carries 28 parameters of which **4** are real,
 and block 20 carries 28 of which **none** — a single-predecessor pass-through block
 whose incoming edge is the 28-argument terminator that stalls the splitter.
-
-## Cleanup: duplication that is real, and one piece that must stay
-
-Found by a 10-line-window scan over `src/` and `crates/`, filtered to production code
-and then read. Ordered by what it costs today, not by line count.
-
-**1. Five derivations of "which blocks does this one jump to".** `cfg::compute_rpo`'s
-inline closure and `regalloc::global_liveness::cfg_successors` are *character-identical*
-over 25 lines. `cfg::compute_idom` has a third, written differently.
-`dce::block_successors` is a fourth, returning `BlockId`s instead of indices.
-`licm::build_predecessor_map` is a fifth. `barrier::terminator_edges` is the general
-form — successors *with* the arguments each carries — and could be the one the others
-call. This is the same defect this whole document is about, applied to the CFG's shape
-instead of to VRegs: several passes deriving one fact separately, free to drift.
-
-**2. `split::apply_splits_for_overshoot` takes 25 parameters and is called 4 times;
-21 of the 25 are identical at every call site.** Only the overshoot's index, class,
-excess and `SplitScope` vary. A context struct built once per round would leave four
-call sites of five arguments. This is also a large part of why `split.rs` is hard to
-change: any new piece of state threads through 25-argument signatures.
-
-**3. The set of "generic IR ops that must have been lowered before extraction" is
-enumerated twice**, 24 variants each, in `lower.rs` (to reject them) and
-`egraph/cost.rs` (to price them as unlowerable). See the step 7 note: that list *is*
-`PureOp`, so the split turns both into a match on a type.
-
-**4. `terminator::chase_alias` has a second implementation inside `verify.rs`**, with a
-different termination guard — a bounded `for` loop against the original's `while let`.
-A verifier carrying its own copy of the thing it verifies is the worst possible place
-for a divergence. One line to fix: call the function.
-
-**5. `block_id_to_idx` is rebuilt inline in six files, fourteen sites.** Always the
-same map. Minor, and it is the sort of minor that adds up in profiles: the compile-time
-work is O(blocks) each time, and `commit_terminator_arg_vregs` builds a second one
-while `compile/mod.rs` already holds it.
-
-**6. Two pairs of near-identical rule bodies.** `algebraic.rs`'s
-`apply_sub_zero_eq_ne_rules` / `apply_add_const_zero_eq_ne_rules` share 36 lines, and
-`known_bits.rs`'s `Shr` and `Sar` by-constant arms share 25. A long rule set is fine —
-these are the *same* rule with one operation swapped, which is not the same thing.
-Lowest priority here.
-
-**7. `allocator.rs:319` and `global_allocator.rs:531` share 27 lines**, which is step 6
-showing up in the scan.
-
-### Do not merge the two local liveness passes
-
-`regalloc::liveness::compute_liveness` and `split::compute_local_liveness` are both
-backward scans over a schedule from a live-out seed, and they look like an obvious
-dedup. **They must differ.** The splitter's version counts a block's parameters as
-live over the `BlockParam` marker run; the allocator's deliberately does not, because
-extending the ranges the allocator *spills against* forces real spill code — measured
-at 36 → 33 on the corpus, with a new pressure failure and an `-O0`/`-O1` behaviour
-divergence, and reverted (`b5c0667`'s note). Modelling it in the splitter's
-measurement and the interference graph only is what worked. A dedup pass that unified
-them would silently reintroduce that regression, and the gates would show it as a
-capacity loss with no obvious cause.
 
 ## Cleanup: the per-pass flags are a debug facility wearing product clothes
 
