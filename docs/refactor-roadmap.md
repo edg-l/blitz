@@ -438,6 +438,14 @@ registers, slots and recomputations — so each step should leave behind the inv
 that says it did so correctly. `BLITZ_VERIFY` covers structure and def-before-use;
 these three gaps are what it does not cover, each with the step that should close it.
 
+**None of them adds a gate.** The battery is four runs and stays four runs: new
+invariants go *inside* the runs that already happen — 1 as a `debug_assert` the
+`checked` profile already carries through every harness, 2 inside
+`verify_register_sharing`, which only executes under `BLITZ_VERIFY`. The rule to hold
+to is that the gate *set* is fixed and checks are added within it. A battery that
+grows every time something is learned stops being run between every change, and
+one-change-at-a-time is what makes attribution possible here.
+
 **1. `vreg_types` completeness — cheap, and step 2 makes it urgent.** There is no
 assertion anywhere that every VReg a schedule names has a type. A missing entry is
 not a pessimism: `lower.rs`'s `result_size` falls back to `OpSize::S64`, which turned
@@ -623,10 +631,19 @@ whose main hazard is wrong code — `-O0 --enable-inlining`,
 
 - **The reachable configuration space is 2^7; the tested one is 2.** Every gate — 440
   lit, 281 differential, the fuzz corpus at 60 seeds a shape — runs `-O0` and `-O1`
-  and nothing else, so soundness is established for two pipelines out of 128 the CLI
-  invites. 15 of the 440 lit tests pin a pass flag, and those are the only mixed
-  configurations under test at all. Either say plainly that only the levels are
-  supported, or gate more.
+  and nothing else. 15 of the 440 lit tests pin a pass flag, and those are the only
+  mixed configurations under test at all.
+
+  **The answer is not to test more of it.** `-O0` and `-O1` are the supported
+  configurations; the toggles are a debugging facility, and a pipeline reached only by
+  a hand-picked combination of them is not a configuration this compiler claims to
+  compile correctly. Gating 128 pipelines would multiply the battery to buy confidence
+  in configurations nobody ships, and the battery's length is a real constraint — it is
+  run between every single change, which is what makes one-change-at-a-time affordable.
+
+  What follows from that is the opposite of more testing: stop presenting the toggles
+  as options. Deviating from a level should look like reaching for a debugger, not like
+  choosing a build configuration.
 - **It is seven independent dials with no derived default**, which is the inverse of
   this project's own rule (*prefer one dial with a derived default*). The other
   development switches already live in the environment — `BLITZ_DEBUG`,
