@@ -4,7 +4,7 @@ use smallvec::smallvec;
 
 use crate::egraph::{EGraph, ENode};
 use crate::ir::condcode::CondCode;
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::{BlockId, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function, StackSlot, StackSlotData};
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
@@ -600,8 +600,8 @@ impl FunctionBuilder {
             cc,
             bb_true,
             bb_false,
-            true_args: true_args.iter().map(|v| v.0).collect(),
-            false_args: false_args.iter().map(|v| v.0).collect(),
+            true_args: TermArgs::classes(true_args.iter().map(|v| v.0)),
+            false_args: TermArgs::classes(false_args.iter().map(|v| v.0)),
         });
         block.terminated = true;
 
@@ -630,7 +630,7 @@ impl FunctionBuilder {
         );
         block.ops.push(EffectfulOp::Jump {
             target,
-            args: args.iter().map(|v| v.0).collect(),
+            args: TermArgs::classes(args.iter().map(|v| v.0)),
         });
         block.terminated = true;
 

@@ -227,7 +227,7 @@ pub fn simplify_block_params(func: &mut Function, egraph: &mut EGraph) -> usize 
 /// `(target, args)` for each edge a terminator has.
 fn terminator_edges(term: &EffectfulOp) -> Vec<(BlockId, &[ClassId])> {
     match term {
-        EffectfulOp::Jump { target, args } => vec![(*target, args.as_slice())],
+        EffectfulOp::Jump { target, args } => vec![(*target, args.expect_classes())],
         EffectfulOp::Branch {
             bb_true,
             bb_false,
@@ -235,8 +235,8 @@ fn terminator_edges(term: &EffectfulOp) -> Vec<(BlockId, &[ClassId])> {
             false_args,
             ..
         } => vec![
-            (*bb_true, true_args.as_slice()),
-            (*bb_false, false_args.as_slice()),
+            (*bb_true, true_args.expect_classes()),
+            (*bb_false, false_args.expect_classes()),
         ],
         _ => Vec::new(),
     }
@@ -253,7 +253,7 @@ fn retain_edge_args(term: &mut EffectfulOp, keep: &BTreeMap<BlockId, Vec<u32>>) 
         }
     };
     match term {
-        EffectfulOp::Jump { target, args } => filter(target, args),
+        EffectfulOp::Jump { target, args } => filter(target, args.expect_classes_mut()),
         EffectfulOp::Branch {
             bb_true,
             bb_false,
@@ -261,8 +261,8 @@ fn retain_edge_args(term: &mut EffectfulOp, keep: &BTreeMap<BlockId, Vec<u32>>) 
             false_args,
             ..
         } => {
-            filter(bb_true, true_args);
-            filter(bb_false, false_args);
+            filter(bb_true, true_args.expect_classes_mut());
+            filter(bb_false, false_args.expect_classes_mut());
         }
         _ => {}
     }

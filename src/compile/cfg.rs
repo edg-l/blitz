@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::{BlockId, EffectfulOp, TermArg, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
 use crate::schedule::scheduler::ScheduledInst;
@@ -251,47 +251,31 @@ pub(super) fn collect_block_roots(block: &BasicBlock, egraph: &EGraph) -> Vec<Cl
 /// These are the values passed as args to Jump/Branch. They need to be in
 /// `live_out` so the regalloc doesn't allocate two simultaneously-needed
 /// phi source values to the same register (especially on loop back-edges).
-pub(super) fn collect_phi_source_vregs(
-    func: &Function,
-    egraph: &EGraph,
-    class_to_vreg: &ClassVRegMap,
-    result: &mut BTreeSet<VReg>,
-) {
-    for (block_idx, block) in func.blocks.iter().enumerate() {
-        let exit_point = ProgramPoint::block_exit(block_idx);
-        for op in &block.ops {
-            let args: &[ClassId] = match op {
-                EffectfulOp::Jump { args, .. } => args,
-                EffectfulOp::Branch {
-                    true_args,
-                    false_args,
-                    ..
-                } => {
-                    for &cid in true_args.iter().chain(false_args.iter()) {
-                        let canon = egraph.unionfind.find_immutable(cid);
-                        if let Some(vreg) = class_to_vreg.lookup(canon, exit_point) {
-                            result.insert(vreg);
-                        }
-                    }
-                    continue;
-                }
-                _ => continue,
-            };
-            for &cid in args {
-                let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(vreg) = class_to_vreg.lookup(canon, exit_point) {
-                    result.insert(vreg);
-                }
-            }
+///
+/// Read straight off the CFG, which names them by VReg once
+/// [`commit_terminator_arg_vregs`] has run.
+pub(super) fn collect_phi_source_vregs(func: &Function, result: &mut BTreeSet<VReg>) {
+    for block in &func.blocks {
+        let Some(term) = block.ops.last() else {
+            continue;
+        };
+        for (_, args) in super::barrier::terminator_edges(term) {
+            result.extend(
+                args.as_committed()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|a| a.vreg),
+            );
         }
     }
 }
 
 /// Build phi copy pairs from block parameter passing for coalescing.
 ///
-/// For each Jump/Branch that passes args to a target block with params,
-/// for each (arg_class_id, param_class_id) pair, look up their VRegs
-/// and add them as copy pairs: (arg_vreg, param_vreg).
+/// One pair per argument the CFG names and destination parameter that resolves,
+/// as `(arg_vreg, param_vreg)`. Used on the single-block path only; the
+/// multi-block path takes its pairs from the schedules, after the splitter, via
+/// [`compute_copy_pairs_from_schedules`].
 pub(super) fn compute_copy_pairs(
     func: &Function,
     class_to_vreg: &ClassVRegMap,
@@ -309,90 +293,165 @@ pub(super) fn compute_copy_pairs(
         .map(|(i, b)| (b.id, i))
         .collect();
 
-    let get_vreg_at = |cid: ClassId, point: ProgramPoint| -> Option<VReg> {
-        let canon = egraph.unionfind.find_immutable(cid);
-        class_to_vreg.lookup(canon, point)
-    };
-
-    // Look up the destination VReg for a block param, preferring the
-    // per-block override (fresh VReg) over the global class_to_vreg.
-    let get_param_vreg = |target: BlockId,
-                          idx: u32,
-                          param_cid: ClassId,
-                          entry_point: ProgramPoint|
-     -> Option<VReg> {
-        param_vreg_overrides
-            .get(&(target, idx))
-            .copied()
-            .or_else(|| get_vreg_at(param_cid, entry_point))
-    };
-
-    for (block_idx, block) in func.blocks.iter().enumerate() {
-        let exit_point = ProgramPoint::block_exit(block_idx);
-        for op in &block.ops {
-            let (target, args): (BlockId, &[ClassId]) = match op {
-                EffectfulOp::Jump { target, args } => (*target, args),
-                EffectfulOp::Branch {
-                    bb_true, true_args, ..
-                } => {
-                    // Handle true branch.
-                    let true_entry = block_id_to_idx
-                        .get(bb_true)
-                        .map(|&i| ProgramPoint::block_entry(i))
-                        .unwrap_or(exit_point);
-                    for (idx, &arg_cid) in true_args.iter().enumerate() {
-                        if let Some(&param_cid) = block_param_map.get(&(*bb_true, idx as u32))
-                            && let (Some(arg_v), Some(param_v)) = (
-                                get_vreg_at(arg_cid, exit_point),
-                                get_param_vreg(*bb_true, idx as u32, param_cid, true_entry),
-                            )
-                        {
-                            pairs.push((arg_v, param_v));
-                        }
-                    }
-                    // Handle false branch via the destructuring below.
-                    if let EffectfulOp::Branch {
-                        bb_false,
-                        false_args,
-                        ..
-                    } = op
-                    {
-                        let false_entry = block_id_to_idx
-                            .get(bb_false)
-                            .map(|&i| ProgramPoint::block_entry(i))
-                            .unwrap_or(exit_point);
-                        for (idx, &arg_cid) in false_args.iter().enumerate() {
-                            if let Some(&param_cid) = block_param_map.get(&(*bb_false, idx as u32))
-                                && let (Some(arg_v), Some(param_v)) = (
-                                    get_vreg_at(arg_cid, exit_point),
-                                    get_param_vreg(*bb_false, idx as u32, param_cid, false_entry),
-                                )
-                            {
-                                pairs.push((arg_v, param_v));
-                            }
-                        }
-                    }
-                    continue;
-                }
-                _ => continue,
+    for block in &func.blocks {
+        let Some(term) = block.ops.last() else {
+            continue;
+        };
+        for (target, args) in super::barrier::terminator_edges(term) {
+            let Some(&target_idx) = block_id_to_idx.get(&target) else {
+                continue;
             };
-            let target_entry = block_id_to_idx
-                .get(&target)
-                .map(|&i| ProgramPoint::block_entry(i))
-                .unwrap_or(exit_point);
-            for (idx, &arg_cid) in args.iter().enumerate() {
-                if let Some(&param_cid) = block_param_map.get(&(target, idx as u32))
-                    && let (Some(arg_v), Some(param_v)) = (
-                        get_vreg_at(arg_cid, exit_point),
-                        get_param_vreg(target, idx as u32, param_cid, target_entry),
-                    )
-                {
-                    pairs.push((arg_v, param_v));
+            let entry_point = ProgramPoint::block_entry(target_idx);
+            for (idx, arg) in args.as_committed().unwrap_or_default().iter().enumerate() {
+                // The destination VReg for a block param, preferring the
+                // per-block override (fresh VReg) over the global class map.
+                let param_v = param_vreg_overrides
+                    .get(&(target, idx as u32))
+                    .copied()
+                    .or_else(|| {
+                        let param_cid = *block_param_map.get(&(target, idx as u32))?;
+                        let canon = egraph.unionfind.find_immutable(param_cid);
+                        class_to_vreg.lookup(canon, entry_point)
+                    });
+                if let Some(param_v) = param_v {
+                    pairs.push((arg.vreg, param_v));
                 }
             }
         }
     }
     pairs
+}
+
+/// Commit linearization's choice of VReg for every block argument into the CFG.
+///
+/// Each `Jump`/`Branch` argument list goes from [`TermArgs::Classes`] to
+/// [`TermArgs::Committed`]. After this, "which register carries this argument" is a
+/// fact the CFG states rather than a question every later pass answers against a
+/// position-keyed map -- the seam that produced seven wrong-code bugs.
+///
+/// Resolved through the *block's own* snapshot, not the function-wide map: a
+/// class re-emitted per block has one VReg per block, and the function-wide map
+/// holds whichever block restored it last.
+///
+/// `param_override_vregs` covers the two cases the snapshot cannot answer:
+///
+/// - a parameter of this block whose VReg linearization minted fresh, which the
+///   snapshot predates;
+/// - a back edge whose argument *is* the target's parameter. That emits a
+///   self-copy: the parameter is the value's storage for the whole loop and the
+///   latch has no VReg of its own for it. Resolving at the latch's exit instead
+///   finds nothing once the header spills the parameter, the value looks dead
+///   over the loop body, and the header re-spills a register the latch has since
+///   reused.
+///
+/// Must run after extraction and DCE2, and before the splitter -- the splitter's
+/// operand rewriting is what makes a pressure decision stick, and it works on
+/// the schedules, which are built from what this writes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn commit_terminator_arg_vregs(
+    func: &mut Function,
+    egraph: &EGraph,
+    class_to_vreg: &ClassVRegMap,
+    block_snapshots: &[ClassVRegMap],
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
+    block_param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
+    rpo_pos: &[usize],
+) -> Result<(), String> {
+    let block_id_to_idx: BTreeMap<BlockId, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+
+    let overrides: Vec<BTreeMap<ClassId, VReg>> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(block_idx, block)| {
+            let mut overrides: BTreeMap<ClassId, VReg> = block_param_vreg_overrides
+                .iter()
+                .filter(|((bid, _), _)| *bid == block.id)
+                .filter_map(|(&(bid, pidx), &fresh)| {
+                    let cid = block_param_map.get(&(bid, pidx))?;
+                    Some((egraph.unionfind.find_immutable(*cid), fresh))
+                })
+                .collect();
+            let Some(term) = block.ops.last() else {
+                return overrides;
+            };
+            for (target, args) in super::barrier::terminator_edges(term) {
+                let Some(&target_idx) = block_id_to_idx.get(&target) else {
+                    continue;
+                };
+                if rpo_pos[block_idx] < rpo_pos[target_idx] {
+                    continue; // Forward edge: the argument's own VReg is right.
+                }
+                for (pidx, &arg_cid) in args.expect_classes().iter().enumerate() {
+                    let Some(&param_cid) = block_param_map.get(&(target, pidx as u32)) else {
+                        continue;
+                    };
+                    let canon_param = egraph.unionfind.find_immutable(param_cid);
+                    if egraph.unionfind.find_immutable(arg_cid) != canon_param {
+                        continue;
+                    }
+                    let param_vreg = block_param_vreg_overrides
+                        .get(&(target, pidx as u32))
+                        .copied()
+                        .or_else(|| {
+                            class_to_vreg.lookup(canon_param, ProgramPoint::block_entry(target_idx))
+                        });
+                    if let Some(v) = param_vreg {
+                        overrides.insert(canon_param, v);
+                    }
+                }
+            }
+            overrides
+        })
+        .collect();
+
+    for (block_idx, block) in func.blocks.iter_mut().enumerate() {
+        let snapshot = &block_snapshots[block_idx];
+        let exit_point = ProgramPoint::block_exit(block_idx);
+        let overrides = &overrides[block_idx];
+        let Some(term) = block.ops.last_mut() else {
+            continue;
+        };
+        for (_, args) in super::barrier::terminator_edges_mut(term) {
+            let mut committed: Vec<TermArg> = Vec::with_capacity(args.len());
+            for (arg_idx, &cid) in args.expect_classes().iter().enumerate() {
+                let canon = egraph.unionfind.find_immutable(cid);
+                // An argument with no VReg at the block exit has nothing for the
+                // copy to read, wherever the question is asked. Reporting it here
+                // names the argument; skipping it silently is how the old
+                // derivations came to disagree about which argument was which.
+                let vreg = overrides
+                    .get(&canon)
+                    .copied()
+                    .or_else(|| snapshot.lookup(canon, exit_point))
+                    .ok_or_else(|| {
+                        format!(
+                            "block {block_idx}: argument {arg_idx} class {canon:?} \
+                             has no VReg at block exit"
+                        )
+                    })?;
+                if crate::trace::is_enabled("phi") {
+                    tracing::debug!(
+                        target: "blitz::phi",
+                        "[b{block_idx}] argument {arg_idx} {canon:?} -> {vreg:?} via {}",
+                        if overrides.contains_key(&canon) {
+                            "OVERRIDE"
+                        } else {
+                            "snapshot"
+                        },
+                    );
+                }
+                committed.push(TermArg { class: canon, vreg });
+            }
+            *args = TermArgs::Committed(committed);
+        }
+    }
+    Ok(())
 }
 
 /// The VReg block `target`'s parameter `pidx` is written into, from the four

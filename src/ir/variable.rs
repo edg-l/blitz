@@ -172,13 +172,13 @@ impl FunctionBuilder {
             .expect("from_block has no terminator");
         match (term, edge) {
             (EffectfulOp::Jump { args, .. }, PredEdge::Jump) => {
-                args.push(arg.0);
+                args.expect_classes_mut().push(arg.0);
             }
             (EffectfulOp::Branch { true_args, .. }, PredEdge::BranchTrue) => {
-                true_args.push(arg.0);
+                true_args.expect_classes_mut().push(arg.0);
             }
             (EffectfulOp::Branch { false_args, .. }, PredEdge::BranchFalse) => {
-                false_args.push(arg.0);
+                false_args.expect_classes_mut().push(arg.0);
             }
             _ => panic!("edge kind does not match terminator type"),
         }

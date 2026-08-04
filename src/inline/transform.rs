@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use smallvec::smallvec;
 
 use crate::egraph::enode::ENode;
-use crate::ir::effectful::EffectfulOp;
+use crate::ir::effectful::{EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
 
@@ -31,11 +31,11 @@ fn collect_referenced_ids(ops: &[EffectfulOp]) -> BTreeSet<ClassId> {
                 ..
             } => {
                 ids.insert(*cond);
-                ids.extend(true_args);
-                ids.extend(false_args);
+                ids.extend(true_args.expect_classes());
+                ids.extend(false_args.expect_classes());
             }
             EffectfulOp::Jump { args, .. } => {
-                ids.extend(args);
+                ids.extend(args.expect_classes());
             }
             EffectfulOp::Ret { val } => {
                 if let Some(v) = val {
@@ -171,7 +171,7 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
     caller.blocks[block_idx].ops = ops_before;
     caller.blocks[block_idx].ops.push(EffectfulOp::Jump {
         target: callee_entry_id,
-        args: vec![],
+        args: TermArgs::default(),
     });
 
     // Rewrite callee Ret ops to Jump to continuation block,
@@ -186,14 +186,13 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
                     args.extend(external_ids.iter().copied());
                     *op = EffectfulOp::Jump {
                         target: cont_id,
-                        args,
+                        args: TermArgs::Classes(args),
                     };
                 }
                 EffectfulOp::Ret { val: None } => {
-                    let args: Vec<ClassId> = external_ids.to_vec();
                     *op = EffectfulOp::Jump {
                         target: cont_id,
-                        args,
+                        args: TermArgs::classes(external_ids.iter().copied()),
                     };
                 }
                 _ => {}
@@ -269,12 +268,12 @@ fn substitute_class_ids(op: &EffectfulOp, subst: &[(ClassId, ClassId)]) -> Effec
             cc: *cc,
             bb_true: *bb_true,
             bb_false: *bb_false,
-            true_args: true_args.iter().map(|&a| sub(a)).collect(),
-            false_args: false_args.iter().map(|&a| sub(a)).collect(),
+            true_args: TermArgs::classes(true_args.expect_classes().iter().map(|&a| sub(a))),
+            false_args: TermArgs::classes(false_args.expect_classes().iter().map(|&a| sub(a))),
         },
         EffectfulOp::Jump { target, args } => EffectfulOp::Jump {
             target: *target,
-            args: args.iter().map(|&a| sub(a)).collect(),
+            args: TermArgs::classes(args.expect_classes().iter().map(|&a| sub(a))),
         },
         EffectfulOp::Ret { val } => EffectfulOp::Ret { val: val.map(sub) },
     }

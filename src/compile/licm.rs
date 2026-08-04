@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use smallvec::smallvec;
 
 use crate::egraph::{EGraph, ENode};
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::{BlockId, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
@@ -275,7 +275,7 @@ pub(super) fn insert_preheader(
     // The preheader jumps unconditionally to the header, forwarding its params.
     let preheader_term = EffectfulOp::Jump {
         target: header_id,
-        args: param_class_ids,
+        args: TermArgs::Classes(param_class_ids),
     };
 
     let mut preheader = BasicBlock::new(preheader_id, header_param_types);
@@ -424,10 +424,10 @@ fn collect_effectful_operands(func: &Function, block_indices: &BTreeSet<usize>) 
                     ..
                 } => {
                     out.push(*cond);
-                    out.extend_from_slice(true_args);
-                    out.extend_from_slice(false_args);
+                    out.extend_from_slice(true_args.expect_classes());
+                    out.extend_from_slice(false_args.expect_classes());
                 }
-                EffectfulOp::Jump { args, .. } => out.extend_from_slice(args),
+                EffectfulOp::Jump { args, .. } => out.extend_from_slice(args.expect_classes()),
                 EffectfulOp::Ret { val } => {
                     if let Some(v) = val {
                         out.push(*v);
@@ -556,7 +556,7 @@ pub fn run_licm(func: &mut Function, egraph: &mut EGraph) -> ExtraRoots {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::effectful::EffectfulOp;
+    use crate::ir::effectful::{EffectfulOp, TermArgs};
     use crate::ir::function::{BasicBlock, Function};
     use crate::ir::op::ClassId;
 
@@ -569,7 +569,7 @@ mod tests {
     fn jump(target: BlockId) -> EffectfulOp {
         EffectfulOp::Jump {
             target,
-            args: vec![],
+            args: TermArgs::default(),
         }
     }
 
@@ -579,8 +579,8 @@ mod tests {
             cc: crate::ir::condcode::CondCode::Ne,
             bb_true,
             bb_false,
-            true_args: vec![],
-            false_args: vec![],
+            true_args: TermArgs::default(),
+            false_args: TermArgs::default(),
         }
     }
 
@@ -945,7 +945,7 @@ mod tests {
         let mut bb2 = BasicBlock::new(2, vec![]);
         bb2.ops.push(EffectfulOp::Jump {
             target: 1,
-            args: vec![ClassId(1), ClassId(2)],
+            args: TermArgs::classes([ClassId(1), ClassId(2)]),
         });
         f.blocks.push(bb2);
 
@@ -1062,7 +1062,7 @@ mod tests {
         let mut bb2 = BasicBlock::new(2, vec![]);
         bb2.ops.push(EffectfulOp::Jump {
             target: 1,
-            args: vec![header_param],
+            args: TermArgs::classes([header_param]),
         });
         f.blocks.push(bb2);
 

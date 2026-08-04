@@ -17,15 +17,16 @@ steps below, and they are worth doing first rather than carrying through a rewri
 `verify::verify_cfg_schedule_agreement` compares, at every position both
 representations name, the VReg a class resolves to through the map against the VReg
 the schedule carries as an operand: an effectful op's role operands against the
-barrier consuming it, and a terminator's arguments against `Op::TerminatorArgs`.
-Enforced at construction, where it is clean over the whole suite; reported after the
-splitter, where it is not. Step 1 makes it vacuous, at which point it goes.
+barrier consuming it. Enforced at construction, where it is clean over the whole
+suite; reported after the splitter, where it is not. Step 3 makes it vacuous, at
+which point it goes.
 
-**The number, over the 440-test lit suite: 0 disagreements at construction, 16
-programs disagreeing after the splitter.** Two shapes, and neither is a live bug
-because neither consumer trusts the map first -- an effectful op reads the barrier's
-own operand and falls back to the map only where no operand exists at that index, and
-a terminator argument is read off `Op::TerminatorArgs` with no fallback at all.
+**The number when it was written, over the 440-test lit suite: 0 disagreements at
+construction, 16 programs disagreeing after the splitter.** Two shapes, and neither
+was a live bug because neither consumer trusts the map first -- an effectful op reads
+the barrier's own operand and falls back to the map only where no operand exists at
+that index, and a terminator argument was read off `Op::TerminatorArgs` with no
+fallback at all.
 
 - **Two `SpillLoad`s of one class at the same point**, each with a segment of its own
   and both covering it. `ClassVRegMap::lookup` has nothing to choose by and asserts;
@@ -36,6 +37,10 @@ a terminator argument is read off `Op::TerminatorArgs` with no fallback at all.
   the `StoreBarrier` at index 152 reads, and the map at 152 says `v30 = StackAddr(0)`.
   Segments are keyed on raw instruction indices, and a later split round inserting an
   instruction ahead of one moves the point it was measured against.
+
+Step 1 removed the terminator half of this check outright: block arguments no
+longer have two answers to compare. What the check covers now is the effectful-op
+role operands alone, and both shapes above are still reachable through those.
 
 Also found and left alone, since it is a behaviour change and this step is not:
 `populate_effectful_operands` resolves at `ProgramPoint::barrier_point`, which is the
@@ -77,7 +82,7 @@ CFG holds.
 | # | step | size | why here |
 | --- | --- | --- | --- |
 | 0 | Slot numbering gets a real representation | small | **DONE** — was a documented landmine, and a prerequisite for step 5 |
-| 1 | Terminator args become VRegs in the CFG | medium | the representation defect, smallest slice with the biggest payoff |
+| 1 | Terminator args become VRegs in the CFG | medium | **DONE** — the representation defect, smallest slice with the biggest payoff |
 | 2 | Trivial-phi elimination over those VRegs | small | 85-94% of every function's parameters; removes 36 of the 46 capacity failures |
 | 3 | The remaining `EffectfulOp` operands become VRegs | medium | finishes step 1 |
 | 4 | Delete the reconstruction machinery (~312 sites) | mechanical | the payoff: the bug class goes away |
@@ -170,24 +175,61 @@ mechanism the reverted remat pass needed.
 4. The bug class that has consumed most sessions disappears, so optimization work
    stops being interrupted by miscompiles.
 
-### Step 1 notes — terminator args
+### Step 1 — terminator args — DONE
 
-`EffectfulOp::Jump.args`, `Branch.true_args`, `Branch.false_args`.
+`EffectfulOp::Jump.args`, `Branch.true_args` and `Branch.false_args` are a
+`TermArgs`: `Classes(Vec<ClassId>)` while the IR is still being transformed,
+`Committed(Vec<TermArg>)` from `cfg::commit_terminator_arg_vregs` onward. One
+discriminant per argument list, so a half-committed list is unrepresentable, and
+the passes that run either side of the commit say which they expect
+(`expect_classes`, `as_committed`) instead of agreeing by convention.
 
-- The choice is already computed. `compile/mod.rs` linearization builds
-  `class_to_vreg` plus `block_class_to_vreg_snapshot[block]`, and
-  `barrier::append_terminator_args` already resolves every argument to a VReg and
-  puts it in `Op::TerminatorArgs`. Step 1 is to make the **CFG** hold that answer
-  rather than have Phase 7 ask again.
-- Ordering constraint: the rewrite must happen after extraction and after DCE2
-  (which needs `func` mutable and rebuilds index-keyed structures), and before the
-  splitter — the splitter's whole value is that its operand rewriting reaches the
-  operands.
+The commit runs at the end of linearization — after extraction and DCE2, before
+scheduling and the splitter — and is the *only* place an argument class is
+resolved to a VReg. It carries over the two answers `append_terminator_args` used
+to consult: the block's own snapshot, and the parameter overrides for a
+freshly-minted parameter VReg or a back edge passing a parameter straight
+through.
+
+**A committed argument carries both its VReg and its `ClassId`,** because they
+answer different questions. `build_phi_copies` asks the class exactly once, to
+tell an argument that *is* the parameter it feeds (a loop-carried value the slot
+already holds) from one that merely equals it; no VReg comparison expresses that,
+and nothing else reconstructs a VReg from the class.
+
+What followed from it:
+
+- `append_terminator_args` copies the CFG's list into `Op::TerminatorArgs` rather
+  than resolving it, so the two cannot disagree and the agreement check lost its
+  terminator half along with `param_override_vregs_per_block`.
+- `collect_phi_source_vregs` no longer takes the e-graph or the class map at all,
+  and `compute_copy_pairs`'s argument side is a field read. Both are the
+  single-block path.
+- `terminator_arg_classes` is gone; `terminator_arg_count` is what the argument
+  numbering needs, and `terminator_edges` hands out the `TermArgs` itself.
+
+`Committed` is deliberately not maintained past the splitter: slot routing takes
+an argument out of the register file, which a list of VRegs cannot express.
+`Op::TerminatorArgs` stays the post-split carrier because its operands are tagged
+with argument indices and so can be missing one.
+
+Judged by byte identity, since it changes no behaviour: 854 emitted-asm
+comparisons against the pre-change compiler (440 lit programs and 90 generated
+ones at both levels) are **identical, with 0 differing and 0 differing in
+status**. 934 unit, 440 lit at `BLITZ_VERIFY` off/1/strict, 281 differential +
+`cc`. Capacity is unchanged, as expected; the 36 shape-B failures are step 2's
+prize.
+
+Still on classes, and left alone on purpose: `Ret.val`, because lowering reads it
+to materialize a constant return straight into the ABI register, and the
+destination end — `cfg::resolve_block_param_vreg` still answers "which VReg is
+this parameter" from four places. Step 4 deletes those; step 2 will ask that
+chain for its self-reference test.
+
 - `EGraph::rewrite_block_params(keep)` is already written and is the reusable half
   of removing parameter positions: it renumbers `BlockParam` nodes in one pass over
   a drained memo, because the new index of a surviving parameter is usually the old
   index of a removed one and any incremental rewrite collides.
-- Judged by the 36 shape-B capacity failures (`pressure` at -O1).
 
 ### Step 2 notes — trivial-phi elimination
 

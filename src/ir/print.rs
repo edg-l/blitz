@@ -228,12 +228,12 @@ fn fmt_effectful(
         } => {
             let cond_s = resolve_cid(*cond, class_to_vreg, egraph_uf);
             let true_arg_strs: Vec<String> = true_args
-                .iter()
-                .map(|a| resolve_cid(*a, class_to_vreg, egraph_uf))
+                .class_ids()
+                .map(|a| resolve_cid(a, class_to_vreg, egraph_uf))
                 .collect();
             let false_arg_strs: Vec<String> = false_args
-                .iter()
-                .map(|a| resolve_cid(*a, class_to_vreg, egraph_uf))
+                .class_ids()
+                .map(|a| resolve_cid(a, class_to_vreg, egraph_uf))
                 .collect();
             format!(
                 "branch {cc:?} {cond_s} block{bb_true}({}) block{bb_false}({})",
@@ -243,8 +243,8 @@ fn fmt_effectful(
         }
         EffectfulOp::Jump { target, args } => {
             let arg_strs: Vec<String> = args
-                .iter()
-                .map(|a| resolve_cid(*a, class_to_vreg, egraph_uf))
+                .class_ids()
+                .map(|a| resolve_cid(a, class_to_vreg, egraph_uf))
                 .collect();
             format!("jump block{target}({})", arg_strs.join(", "))
         }

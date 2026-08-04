@@ -6,7 +6,7 @@ use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::emit::phi_elim::phi_copies;
 use crate::ir::condcode::CondCode;
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::{BlockId, EffectfulOp, TermArgs};
 use crate::ir::function::Function;
 use crate::ir::op::ClassId;
 use crate::regalloc::allocator::RegAllocResult;
@@ -493,16 +493,16 @@ pub(super) fn lower_terminator(
 ///
 /// `term_args` maps a terminator argument index to the VReg the schedule
 /// carries for it, and `arg_base` is where this edge's arguments start in that
-/// numbering -- 0 for a Jump or a Branch's true edge, `true_args.len()` for a
-/// Branch's false edge. An argument with no entry was routed through a stack
-/// slot and needs no copy.
+/// numbering -- 0 for a Jump or a Branch's true edge, the true edge's argument
+/// count for a Branch's false edge. An argument with no entry was routed through
+/// a stack slot and needs no copy.
 ///
 /// `block_schedules` is indexed by block position and holds the final schedules,
 /// so the target block's own `BlockParam` instruction can name the destination.
 #[allow(clippy::too_many_arguments)]
 fn build_phi_copies(
     target: BlockId,
-    args: &[ClassId],
+    args: &TermArgs,
     src_block_idx: usize,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
@@ -517,6 +517,15 @@ fn build_phi_copies(
     slot_spilled_params: &BlockParamSlotMap,
     block_schedules: &[Vec<ScheduledInst>],
 ) -> Result<Vec<PhiCopy>, CompileError> {
+    // The VReg beside each argument's class is what linearization chose; the
+    // authority at this point is `term_args`, which the splitter rewrote and
+    // coalescing renamed. The class is read for one question a VReg cannot
+    // answer: whether an argument *is* the parameter it feeds.
+    let args = args.as_committed().ok_or_else(|| CompileError {
+        phase: "phi-elim".into(),
+        message: format!("block {src_block_idx}: terminator arguments were never committed"),
+        location: None,
+    })?;
     if args.is_empty() {
         return Ok(vec![]);
     }
@@ -552,7 +561,7 @@ fn build_phi_copies(
     // same class. The second copy would write the value its destination already
     // holds, and a parallel copy cannot express two writes to one register.
     let mut params_copied: BTreeMap<ClassId, usize> = BTreeMap::new();
-    for (param_idx, &arg_cid) in args.iter().enumerate() {
+    for (param_idx, arg) in args.iter().enumerate() {
         let param_cid = block_param_map
             .get(&(target, param_idx as u32))
             .copied()
@@ -576,7 +585,7 @@ fn build_phi_copies(
             continue;
         }
 
-        let canon_arg = egraph.unionfind.find_immutable(arg_cid);
+        let canon_arg = egraph.unionfind.find_immutable(arg.class);
         // The operand the schedule carries is the answer, not a hint. It is the
         // one the splitter rewrote and coalescing renamed, so it names the VReg
         // that actually holds the value at this point; re-resolving the class

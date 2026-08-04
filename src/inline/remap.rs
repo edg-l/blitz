@@ -4,7 +4,7 @@ use smallvec::SmallVec;
 
 use crate::egraph::EGraph;
 use crate::egraph::enode::ENode;
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::{BlockId, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
 
@@ -184,12 +184,26 @@ impl RemapContext {
                 cc: *cc,
                 bb_true: self.remap_block_id(*bb_true),
                 bb_false: self.remap_block_id(*bb_false),
-                true_args: true_args.iter().map(|&a| self.remap_class_id(a)).collect(),
-                false_args: false_args.iter().map(|&a| self.remap_class_id(a)).collect(),
+                true_args: TermArgs::classes(
+                    true_args
+                        .expect_classes()
+                        .iter()
+                        .map(|&a| self.remap_class_id(a)),
+                ),
+                false_args: TermArgs::classes(
+                    false_args
+                        .expect_classes()
+                        .iter()
+                        .map(|&a| self.remap_class_id(a)),
+                ),
             },
             EffectfulOp::Jump { target, args } => EffectfulOp::Jump {
                 target: self.remap_block_id(*target),
-                args: args.iter().map(|&a| self.remap_class_id(a)).collect(),
+                args: TermArgs::classes(
+                    args.expect_classes()
+                        .iter()
+                        .map(|&a| self.remap_class_id(a)),
+                ),
             },
             EffectfulOp::Ret { val } => EffectfulOp::Ret {
                 val: val.map(|v| self.remap_class_id(v)),

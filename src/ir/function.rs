@@ -168,7 +168,7 @@ impl Function {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::effectful::EffectfulOp;
+    use crate::ir::effectful::{EffectfulOp, TermArgs};
     use crate::ir::op::ClassId;
     use crate::ir::types::Type;
 
@@ -179,7 +179,7 @@ mod tests {
     fn jump_to(target: BlockId) -> EffectfulOp {
         EffectfulOp::Jump {
             target,
-            args: vec![],
+            args: TermArgs::default(),
         }
     }
 
@@ -297,8 +297,8 @@ mod tests {
             cc: CondCode::Ne,
             bb_true: 1,
             bb_false: 2,
-            true_args: vec![],
-            false_args: vec![],
+            true_args: TermArgs::default(),
+            false_args: TermArgs::default(),
         });
         assert!(bb.is_well_formed());
     }

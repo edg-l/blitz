@@ -1180,7 +1180,7 @@ pub fn propagate_block_params(func: &Function, egraph: &mut EGraph) {
                     pred_map
                         .entry(*target)
                         .or_default()
-                        .push((block.id, args.clone()));
+                        .push((block.id, args.expect_classes().to_vec()));
                 }
                 EffectfulOp::Branch {
                     bb_true,
@@ -1192,11 +1192,11 @@ pub fn propagate_block_params(func: &Function, egraph: &mut EGraph) {
                     pred_map
                         .entry(*bb_true)
                         .or_default()
-                        .push((block.id, true_args.clone()));
+                        .push((block.id, true_args.expect_classes().to_vec()));
                     pred_map
                         .entry(*bb_false)
                         .or_default()
-                        .push((block.id, false_args.clone()));
+                        .push((block.id, false_args.expect_classes().to_vec()));
                 }
                 _ => {}
             }

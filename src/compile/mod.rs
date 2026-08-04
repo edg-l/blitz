@@ -47,8 +47,8 @@ use canon::canonicalize_class_refs;
 mod cfg;
 use cfg::{
     collect_block_roots, collect_externals, collect_phi_source_vregs, collect_roots,
-    compute_copy_pairs, compute_copy_pairs_from_schedules, compute_idom, compute_loop_depths,
-    compute_rpo, dominates,
+    commit_terminator_arg_vregs, compute_copy_pairs, compute_copy_pairs_from_schedules,
+    compute_idom, compute_loop_depths, compute_rpo, dominates,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -424,8 +424,9 @@ pub fn compile(
         extraction,
     } = run_ir_passes(&mut func, &mut egraph, opts, &mut sink)?;
 
-    // NOW freeze func for the rest of the pipeline.
-    let func = &func;
+    // `func` stays mutable until linearization has chosen a VReg for every block
+    // argument and `commit_terminator_arg_vregs` has written that choice into the
+    // terminators; from there the CFG is read-only.
 
     // Build BlockId -> index map for O(1) lookups (must be after DCE2).
     let block_id_to_idx: HashMap<BlockId, usize> = func
@@ -436,7 +437,7 @@ pub fn compile(
         .collect();
 
     // Detect whether this function contains any call instructions (must be after DCE2).
-    let has_calls = func_has_calls(func);
+    let has_calls = func_has_calls(&func);
 
     // Phase 3: Build per-block VRegInst lists with a shared class_to_vreg map.
     //
@@ -451,12 +452,12 @@ pub fn compile(
     let mut next_vreg: u32 = 0;
 
     // Compute RPO block ordering (indices into func.blocks).
-    let rpo_order = compute_rpo(func);
+    let rpo_order = compute_rpo(&func);
     // Predecessor counts per block index. Used by block_param_fixup to
     // distinguish loop headers / merge points (multi-pred, need phi storage)
     // from pass-through blocks (single-pred, the block param IS its sole
     // predecessor's argument and doesn't need a fresh VReg).
-    let (block_preds, _) = licm::build_predecessor_map(func);
+    let (block_preds, _) = licm::build_predecessor_map(&func);
 
     // Map (BlockId, param_idx) -> fresh VReg for block params whose canonical
     // VReg was emitted by a prior block. This prevents the e-graph from merging
@@ -480,7 +481,7 @@ pub fn compile(
     // recorded.
     let mut block_param_vregs: BTreeMap<(BlockId, u32), VReg> = BTreeMap::new();
 
-    let idom = compute_idom(func, &rpo_order);
+    let idom = compute_idom(&func, &rpo_order);
     let mut class_emitted_in: BTreeMap<ClassId, usize> = BTreeMap::new();
 
     // Build per-block VRegInst lists in RPO order, stored by block index.
@@ -677,6 +678,37 @@ pub fn compile(
         let ty = block.param_types[pidx as usize].clone();
         vreg_types.insert(fresh_vreg, ty);
     }
+
+    // Commit linearization's choice into the CFG: from here a block argument is
+    // a VReg the terminator names, not a class every consumer resolves for
+    // itself. Before scheduling, so the schedules are built from what this
+    // wrote, and before the splitter, whose operand rewriting is what makes a
+    // pressure decision stick.
+    let mut rpo_pos = vec![0usize; func.blocks.len()];
+    for (pos, &idx) in rpo_order.iter().enumerate() {
+        rpo_pos[idx] = pos;
+    }
+    commit_terminator_arg_vregs(
+        &mut func,
+        &egraph,
+        &class_to_vreg,
+        &block_class_to_vreg_snapshot,
+        &block_param_map,
+        &block_param_vreg_overrides,
+        &rpo_pos,
+    )
+    .map_err(|message| CompileError {
+        phase: "terminator-args".into(),
+        message,
+        location: Some(IrLocation {
+            function: func.name.clone(),
+            block: None,
+            inst: None,
+        }),
+    })?;
+
+    // NOW freeze func for the rest of the pipeline.
+    let func = &func;
 
     // Phase 4: Schedule per block (indexed by block index, same as block_vreg_insts).
     let mut block_schedules: Vec<Vec<ScheduledInst>> = vec![Vec::new(); func.blocks.len()];
@@ -896,7 +928,7 @@ pub fn compile(
         }
 
         let mut live_out: BTreeSet<VReg> = BTreeSet::new();
-        collect_phi_source_vregs(func, &egraph, &class_to_vreg, &mut live_out);
+        collect_phi_source_vregs(func, &mut live_out);
         // Add Ret operands to live_out. Ret is the terminator (no barrier
         // instruction) so its operands must survive until end of block.
         if let Some(EffectfulOp::Ret { val: Some(cid) }) = func.blocks[0].ops.last() {
@@ -1025,20 +1057,6 @@ pub fn compile(
         // `printf("%d\n", ...)` would record the other arm's VReg for the format
         // string -- and since Phase 7 now trusts these operands as the record of
         // what each op reads, that names a register holding something else.
-        // Position of each block index in RPO, for telling a back edge from a
-        // forward one.
-        let mut rpo_pos = vec![0usize; func.blocks.len()];
-        for (pos, &idx) in rpo_order.iter().enumerate() {
-            rpo_pos[idx] = pos;
-        }
-
-        // What `append_terminator_args` resolved each block's arguments through
-        // besides its snapshot, kept so `verify_cfg_schedule_agreement` compares
-        // against the same two answers rather than reporting a deliberate
-        // divergence as a violation.
-        let mut param_override_vregs_per_block: Vec<BTreeMap<ClassId, VReg>> =
-            vec![BTreeMap::new(); func.blocks.len()];
-
         for (block_idx, block) in func.blocks.iter().enumerate() {
             let non_term_count = block.non_term_count();
             if non_term_count > 0 {
@@ -1062,20 +1080,14 @@ pub fn compile(
             // The terminator's arguments, as operands, for the same reason the
             // barrier ops carry theirs: so the splitter and coalescing rewrite
             // them instead of three passes re-deriving them from a map those
-            // passes mutate.
+            // passes mutate. A copy of what the CFG names, not a second
+            // resolution of it.
             if let Some(term) = block.ops.last() {
-                // Where a class has a VReg the block-exit snapshot does not name.
-                //
-                // A parameter this block re-emitted has the fresh VReg
-                // linearization minted for it, which the snapshot predates. And a
-                // back edge whose argument IS the target's parameter emits a
-                // self-copy: the parameter is that value's storage for the whole
-                // loop and the latch has no VReg of its own for it. Resolving
-                // such an argument at the latch's exit instead finds nothing once
-                // the header spills the parameter, the value looks dead over the
-                // loop body, and the header re-spills a register the latch has
-                // since reused (findings/seed6_reduced_wrong_sum.c).
-                let mut param_override_vregs: BTreeMap<ClassId, VReg> = block_param_vreg_overrides
+                // A `Ret`'s value is the one argument still named by class, so
+                // this is the one still resolved. A parameter of this block that
+                // linearization gave a fresh VReg is not in the snapshot, which
+                // predates it, so the overrides answer first.
+                let param_override_vregs: BTreeMap<ClassId, VReg> = block_param_vreg_overrides
                     .iter()
                     .filter(|((bid, _), _)| *bid == block.id)
                     .filter_map(|(&(bid, pidx), &fresh)| {
@@ -1083,31 +1095,6 @@ pub fn compile(
                         Some((egraph.unionfind.find_immutable(*cid), fresh))
                     })
                     .collect();
-                for (target, args) in barrier::terminator_edges(term) {
-                    let target_idx = block_id_to_idx[&target];
-                    if rpo_pos[block_idx] < rpo_pos[target_idx] {
-                        continue; // Forward edge: the argument's own VReg is right.
-                    }
-                    for (pidx, &arg_cid) in args.iter().enumerate() {
-                        let Some(&param_cid) = block_param_map.get(&(target, pidx as u32)) else {
-                            continue;
-                        };
-                        let canon_param = egraph.unionfind.find_immutable(param_cid);
-                        if egraph.unionfind.find_immutable(arg_cid) != canon_param {
-                            continue;
-                        }
-                        let param_vreg = block_param_vreg_overrides
-                            .get(&(target, pidx as u32))
-                            .copied()
-                            .or_else(|| {
-                                class_to_vreg
-                                    .lookup(canon_param, ProgramPoint::block_entry(target_idx))
-                            });
-                        if let Some(v) = param_vreg {
-                            param_override_vregs.insert(canon_param, v);
-                        }
-                    }
-                }
                 crate::compile::barrier::append_terminator_args(
                     &mut block_schedules[block_idx],
                     term,
@@ -1126,20 +1113,18 @@ pub fn compile(
                         inst: None,
                     }),
                 })?;
-                param_override_vregs_per_block[block_idx] = param_override_vregs;
             }
         }
 
-        // Both representations now exist for every terminator argument and every
-        // effectful-op role operand, and must name the same VReg. Checked here,
-        // before the splitter, so a disagreement is attributable to construction.
+        // Every effectful-op role operand now exists in both representations and
+        // must name the same VReg. Checked here, before the splitter, so a
+        // disagreement is attributable to construction.
         crate::verify::verify_cfg_schedule_agreement_stage(
-            "terminator-args",
+            "effectful-operands",
             func,
             &egraph,
             &block_schedules,
             &block_class_to_vreg_snapshot,
-            &param_override_vregs_per_block,
         );
 
         // Terminator uses, read straight off the schedules. `Op::TerminatorArgs`
@@ -1390,7 +1375,6 @@ pub fn compile(
             &egraph,
             &block_schedules,
             &block_class_to_vreg_snapshot,
-            &param_override_vregs_per_block,
         );
 
         // Step 3: Determine block params per block (passed to allocate_global).

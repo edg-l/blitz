@@ -1834,6 +1834,7 @@ mod tests {
     use crate::egraph::EGraph;
     use crate::egraph::cost::{CostModel, OptGoal};
     use crate::egraph::extract::ExtractionResult;
+    use crate::ir::effectful::TermArgs;
     use crate::ir::op::Op;
     use crate::ir::types::Type;
     use crate::regalloc::global_liveness::GlobalLiveness;
@@ -2099,7 +2100,7 @@ mod tests {
         let mut block0 = BasicBlock::new(b0_id, vec![]);
         block0.ops.push(EffectfulOp::Jump {
             target: b1_id,
-            args: vec![ClassId(0)], // arg = ClassId(0) (placeholder)
+            args: TermArgs::classes([ClassId(0)]), // arg = ClassId(0) (placeholder)
         });
         let mut block1 = BasicBlock::new(b1_id, vec![Type::F64]);
         block1.ops.push(EffectfulOp::Ret { val: None });
@@ -2355,12 +2356,12 @@ mod tests {
         let mut block0 = BasicBlock::new(b0_id, vec![]);
         block0.ops.push(EffectfulOp::Jump {
             target: b2_id,
-            args: vec![ClassId(0)],
+            args: TermArgs::classes([ClassId(0)]),
         });
         let mut block1 = BasicBlock::new(b1_id, vec![]);
         block1.ops.push(EffectfulOp::Jump {
             target: b2_id,
-            args: vec![ClassId(0)],
+            args: TermArgs::classes([ClassId(0)]),
         });
         let mut block2 = BasicBlock::new(b2_id, vec![Type::F64]);
         block2.ops.push(EffectfulOp::Ret { val: None });

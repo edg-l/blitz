@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::{BlockId, EffectfulOp, TermArgs};
 use crate::ir::function::BasicBlock;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
@@ -611,62 +611,64 @@ pub(super) fn populate_effectful_operands(
 }
 
 /// The successor edges a terminator has, each with the arguments it passes.
-pub(crate) fn terminator_edges(terminator: &EffectfulOp) -> Vec<(BlockId, &[ClassId])> {
+pub(crate) fn terminator_edges(terminator: &EffectfulOp) -> Vec<(BlockId, &TermArgs)> {
     match terminator {
-        EffectfulOp::Jump { target, args } => vec![(*target, args.as_slice())],
+        EffectfulOp::Jump { target, args } => vec![(*target, args)],
         EffectfulOp::Branch {
             bb_true,
             bb_false,
             true_args,
             false_args,
             ..
-        } => vec![
-            (*bb_true, true_args.as_slice()),
-            (*bb_false, false_args.as_slice()),
-        ],
+        } => vec![(*bb_true, true_args), (*bb_false, false_args)],
         _ => Vec::new(),
     }
 }
 
-/// The `ClassId`s a terminator passes to its successors, in argument order.
+/// The successor edges a terminator has, mutably.
+pub(crate) fn terminator_edges_mut(terminator: &mut EffectfulOp) -> Vec<(BlockId, &mut TermArgs)> {
+    match terminator {
+        EffectfulOp::Jump { target, args } => vec![(*target, args)],
+        EffectfulOp::Branch {
+            bb_true,
+            bb_false,
+            true_args,
+            false_args,
+            ..
+        } => vec![(*bb_true, true_args), (*bb_false, false_args)],
+        _ => Vec::new(),
+    }
+}
+
+/// The number of arguments a terminator passes, in the argument numbering
+/// [`terminator_arg_destinations`] and `Op::TerminatorArgs` share.
 ///
 /// One flat sequence per terminator: a Jump's args, a Branch's `true_args`
 /// followed by its `false_args`, a Ret's value alone. Every pass that indexes
 /// terminator arguments -- the pseudo-op builder here, the splitter, and
-/// lowering -- numbers them through this one function, so an argument index
-/// means the same thing everywhere.
-pub(crate) fn terminator_arg_classes(terminator: &EffectfulOp) -> Vec<ClassId> {
+/// lowering -- numbers them the same way, so an argument index means the same
+/// thing everywhere.
+pub(crate) fn terminator_arg_count(terminator: &EffectfulOp) -> usize {
     match terminator {
-        EffectfulOp::Jump { args, .. } => args.clone(),
+        EffectfulOp::Jump { args, .. } => args.len(),
         EffectfulOp::Branch {
             true_args,
             false_args,
             ..
-        } => true_args.iter().chain(false_args.iter()).copied().collect(),
-        EffectfulOp::Ret { val: Some(cid) } => vec![*cid],
-        _ => Vec::new(),
+        } => true_args.len() + false_args.len(),
+        EffectfulOp::Ret { val: Some(_) } => 1,
+        _ => 0,
     }
 }
 
 /// The `(successor, parameter index)` each terminator argument feeds, in the
-/// same numbering as [`terminator_arg_classes`].
+/// same numbering as [`terminator_arg_count`].
 ///
 /// A `Ret`'s value feeds no parameter, so a `Ret` yields nothing.
 pub(crate) fn terminator_arg_destinations(terminator: &EffectfulOp) -> Vec<(BlockId, u32)> {
-    let edges: Vec<(BlockId, usize)> = match terminator {
-        EffectfulOp::Jump { target, args } => vec![(*target, args.len())],
-        EffectfulOp::Branch {
-            bb_true,
-            bb_false,
-            true_args,
-            false_args,
-            ..
-        } => vec![(*bb_true, true_args.len()), (*bb_false, false_args.len())],
-        _ => Vec::new(),
-    };
-    edges
+    terminator_edges(terminator)
         .into_iter()
-        .flat_map(|(target, n)| (0..n as u32).map(move |pidx| (target, pidx)))
+        .flat_map(|(target, args)| (0..args.len() as u32).map(move |pidx| (target, pidx)))
         .collect()
 }
 
@@ -692,11 +694,11 @@ pub(crate) fn terminator_arg_destinations(terminator: &EffectfulOp) -> Vec<(Bloc
 /// no rewrite touched, and three separate passes re-derived them from
 /// `class_to_vreg`.
 ///
-/// `param_override_vregs` maps a canonical class to the VReg linearization gave
-/// this block's own parameter, for the parameters where it minted a fresh one. A
-/// back edge passing a parameter straight through resolves to that VReg and to
-/// nothing in the snapshot, so it has to be consulted here for the same reason
-/// lowering consults it.
+/// A block argument's VReg is not resolved here: it is read off the CFG's
+/// [`TermArgs::Committed`], which `cfg::commit_terminator_arg_vregs` wrote once.
+/// `BLITZ_DEBUG=phi` traces that choice there, where it is made. A `Ret`'s value is the one argument still named by class, so it is the
+/// one still resolved -- `Ret.val` stays a `ClassId` because lowering reads it
+/// to materialize a constant return straight into the ABI register.
 pub(super) fn append_terminator_args(
     schedule: &mut Vec<ScheduledInst>,
     terminator: &EffectfulOp,
@@ -706,42 +708,36 @@ pub(super) fn append_terminator_args(
     param_override_vregs: &BTreeMap<ClassId, VReg>,
     next_vreg: &mut u32,
 ) -> Result<(), String> {
-    let classes = terminator_arg_classes(terminator);
-    if classes.is_empty() {
+    let mut operands: Vec<VReg> = Vec::with_capacity(terminator_arg_count(terminator));
+    match terminator {
+        EffectfulOp::Jump { .. } | EffectfulOp::Branch { .. } => {
+            for (_, args) in terminator_edges(terminator) {
+                let committed = args.as_committed().ok_or_else(|| {
+                    "terminator arguments were never committed to VRegs".to_string()
+                })?;
+                operands.extend(committed.iter().map(|a| a.vreg));
+            }
+        }
+        EffectfulOp::Ret { val: Some(cid) } => {
+            let canon = egraph.unionfind.find_immutable(*cid);
+            // A value with no VReg at the block exit has nothing for the return
+            // move to read, wherever the question is asked. Reporting it here
+            // names the argument; skipping it silently leaves the function
+            // returning whatever the ABI register happened to hold.
+            let vreg = param_override_vregs
+                .get(&canon)
+                .copied()
+                .or_else(|| class_to_vreg.lookup(canon, ProgramPoint::block_exit(block_idx)))
+                .ok_or_else(|| format!("Ret value class {canon:?} has no VReg at block exit"))?;
+            operands.push(vreg);
+        }
+        _ => {}
+    }
+    if operands.is_empty() {
         return Ok(());
     }
 
-    let exit_point = ProgramPoint::block_exit(block_idx);
-    let mut arg_indices: Vec<u32> = Vec::with_capacity(classes.len());
-    let mut operands: Vec<VReg> = Vec::with_capacity(classes.len());
-    for (arg_idx, &cid) in classes.iter().enumerate() {
-        let canon = egraph.unionfind.find_immutable(cid);
-        // An argument with no VReg at the block exit has nothing for the copy to
-        // read, wherever the question is asked. Reporting it here names the
-        // argument; skipping it silently is how the old derivations came to
-        // disagree about which argument was which.
-        // Which of the two answers was used, traced because they disagree: the
-        // override is keyed by class alone and so applies function-wide, while
-        // the snapshot is keyed by program point. An argument resolved through
-        // the override to a VReg defined in some other block is a value the
-        // register holds only on paths through that block.
-        let from_override = param_override_vregs.get(&canon).copied();
-        let vreg = from_override
-            .or_else(|| class_to_vreg.lookup(canon, exit_point))
-            .ok_or_else(|| {
-                format!("terminator arg {arg_idx} class {canon:?} has no VReg at block exit")
-            })?;
-        if crate::trace::is_enabled("phi") {
-            tracing::debug!(
-                target: "blitz::phi",
-                "[b{block_idx}] terminator arg {arg_idx} {canon:?} -> {vreg:?} via {}",
-                if from_override.is_some() { "OVERRIDE" } else { "snapshot" },
-            );
-        }
-        arg_indices.push(arg_idx as u32);
-        operands.push(vreg);
-    }
-
+    let arg_indices: Vec<u32> = (0..operands.len() as u32).collect();
     let dst = VReg(*next_vreg);
     *next_vreg += 1;
     schedule.push(ScheduledInst {

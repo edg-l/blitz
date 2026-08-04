@@ -206,11 +206,11 @@ fn collect_consumed_class_ids(
                     ..
                 } => {
                     seeds.push(*cond);
-                    seeds.extend(true_args.iter().copied());
-                    seeds.extend(false_args.iter().copied());
+                    seeds.extend(true_args.expect_classes().iter().copied());
+                    seeds.extend(false_args.expect_classes().iter().copied());
                 }
                 EffectfulOp::Jump { args, .. } => {
-                    seeds.extend(args.iter().copied());
+                    seeds.extend(args.expect_classes().iter().copied());
                 }
                 EffectfulOp::Ret { val } => {
                     if let Some(v) = val {
@@ -380,7 +380,7 @@ pub(super) fn run_dce2_with_extra_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::effectful::EffectfulOp;
+    use crate::ir::effectful::{EffectfulOp, TermArgs};
     use crate::ir::function::{BasicBlock, Function};
 
     fn make_function(name: &str, blocks: Vec<BasicBlock>) -> Function {
@@ -415,14 +415,14 @@ mod tests {
                     0,
                     vec![EffectfulOp::Jump {
                         target: 1,
-                        args: vec![],
+                        args: TermArgs::default(),
                     }],
                 ),
                 make_block(
                     1,
                     vec![EffectfulOp::Jump {
                         target: 2,
-                        args: vec![],
+                        args: TermArgs::default(),
                     }],
                 ),
                 make_block(2, vec![EffectfulOp::Ret { val: None }]),
@@ -442,7 +442,7 @@ mod tests {
                     0,
                     vec![EffectfulOp::Jump {
                         target: 2,
-                        args: vec![],
+                        args: TermArgs::default(),
                     }],
                 ),
                 make_block(1, vec![EffectfulOp::Ret { val: None }]), // unreachable
@@ -465,14 +465,14 @@ mod tests {
                     0,
                     vec![EffectfulOp::Jump {
                         target: 1,
-                        args: vec![],
+                        args: TermArgs::default(),
                     }],
                 ),
                 make_block(
                     1,
                     vec![EffectfulOp::Jump {
                         target: 1,
-                        args: vec![],
+                        args: TermArgs::default(),
                     }],
                 ), // self-loop
             ],
@@ -494,22 +494,22 @@ mod tests {
                         cc: CondCode::Ne,
                         bb_true: 1,
                         bb_false: 2,
-                        true_args: vec![],
-                        false_args: vec![],
+                        true_args: TermArgs::default(),
+                        false_args: TermArgs::default(),
                     }],
                 ),
                 make_block(
                     1,
                     vec![EffectfulOp::Jump {
                         target: 3,
-                        args: vec![],
+                        args: TermArgs::default(),
                     }],
                 ),
                 make_block(
                     2,
                     vec![EffectfulOp::Jump {
                         target: 3,
-                        args: vec![],
+                        args: TermArgs::default(),
                     }],
                 ),
                 make_block(3, vec![EffectfulOp::Ret { val: None }]),
@@ -539,14 +539,14 @@ mod tests {
                     1,
                     vec![EffectfulOp::Jump {
                         target: 2,
-                        args: vec![],
+                        args: TermArgs::default(),
                     }],
                 ), // unreachable
                 make_block(
                     2,
                     vec![EffectfulOp::Jump {
                         target: 3,
-                        args: vec![],
+                        args: TermArgs::default(),
                     }],
                 ), // unreachable
                 make_block(3, vec![EffectfulOp::Ret { val: None }]), // unreachable
