@@ -1184,11 +1184,25 @@ parameter under ordinary pressure. Slot routing declines because each of those
 blocks is within budget on its own parameters, and the XMM/call rule declines
 because the pressure point is not a call.
 
-The two candidate answers, neither tried: let the spill loop hand a parameter to
-slot routing rather than skip it, or give the splitter a third trigger that
-counts *ordinary* points, not just block entries and edges, and routes the
-parameters it finds there. The second is the same move step 5b made for the
-terminator, one level more general.
+**The third trigger was tried and it miscompiles.** Walking each block's
+per-instruction pressure and routing the parameters live at any point over
+budget *does* fix both -- seeds 24 and 28 compile -- and it makes five other
+programs print wrong answers: `pressure` seed 14 prints 1730 for 1788, `mixed`
+seeds 14, 15 and 28 are wrong at both levels. Reverted.
+
+The obvious explanation is wrong, which is the part worth keeping. The two rules
+that work each decide *at an edge*, where the store's source register is known;
+this one decides anywhere, so the guess was that some predecessor's store reads a
+register nothing wrote there. Requiring every edge into the parameter to pass the
+same `defined_here` test the edge rule applies changes nothing -- the same five
+programs fail identically. So the difference between routing a parameter at an
+edge and routing the same parameter elsewhere is not the store side, and the next
+attempt should find out what it is before adding another guard. The method for
+that is `DEBUGGING-NOTES.md`'s first technique: one `printf` per term against
+`cc`, then `read_frame.py --sum-chain` on the unmodified binary.
+
+The other candidate is still untried: let the spill loop hand a parameter to slot
+routing rather than skip it.
 
 ---
 
