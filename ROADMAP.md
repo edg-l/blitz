@@ -183,6 +183,27 @@ Without numbers, "most optimized" is unfalsifiable and every session drifts.
 
 ### P1 -- Optimizer gaps with the largest measured impact
 
+- [ ] **LICM has no pressure check, and it is the largest measured quality gap
+      in the tree.** Measured on the `bench` corpus at `-O1` with
+      `FLAGS=--disable-licm bash tests/run_codesize.sh`: turning LICM off takes
+      reloads from **377 to 149** and spills from **84 to 30**, and *lowers* the
+      instruction count from 2637 to 2518. Per kernel it is a trade the pass
+      always takes and often loses -- `matmul` 172 insts / 23 reloads becomes
+      163 / 0, `binary_search` 136 / 39 becomes 113 / 0, `hash_table` 415 / 150
+      becomes 340 / 45 -- against a genuine saving of 2 to 14 instructions on
+      the six kernels where the hoisted value fits (`sieve`, `crc32`,
+      `bitcount`, `dot_product`, `nbody_step`, `struct_walk`). The pass hoists
+      every invariant it can prove, and a value hoisted out of a loop is live
+      across the whole body: on a loop whose body already needs most of the
+      register file that is a spill and one reload per use. What it needs is a
+      hoist decision that consults the same pressure the splitter measures,
+      which is why this sits behind the refactor rather than in front of it --
+      `docs/refactor-roadmap.md` step 5 gives the allocator a spill loop and
+      step 2 changes how many values are in flight, and both move the number
+      this policy would be tuned against.
+      Second contributor, same corpus: `--disable-inlining` takes reloads to 247
+      and insts to 2422, so inlining is paying for itself in call overhead and
+      losing in pressure. Same fix shape, same reason to wait.
 - [ ] **Offset-aware alias analysis.** Today any write to a base invalidates
       every cached load at that base, so `s->a` and `s->b` kill each other.
       Byte-offset + width disjointness in `src/compile/alias.rs` is ~50 LOC and

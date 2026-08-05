@@ -450,17 +450,32 @@ private `terminator_edges` duplicate goes with it. Leaving a second, class-based
 trivial-phi pass in the tree next to a working one is how a later session picks the
 wrong one.
 
-#### This step needs a code-quality metric, and there is none
+#### This step needs a code-quality metric — DONE, and it moved the picture
 
 Everything before it was judged by correctness and capacity, both of which exist.
 Step 2's tier 2 is the project's first genuine **cost** decision: recompute here
 versus copy there. `compare_ref.sh` cannot referee that — it reports whether a
 program is correct and whether it allocates, not whether the code got better. So
-ROADMAP P0-Measurement stops being a "nice to have once the refactor is done" and
-becomes a prerequisite of *this* step: instruction count, `.text` bytes,
-spill/reload count per program, with checked-in baselines so a diff shows a
-regression. Without it the dial's default is unfalsifiable and the 85-94% number
-measures parameters removed rather than code improved.
+ROADMAP P0-Measurement was a prerequisite of *this* step, and it is now
+`bash tests/run_codesize.sh`: instructions, `.text` bytes, spills and reloads per
+(program, level), 888 baseline rows across `lit`, `bench` and `fuzz`. Without it
+the dial's default is unfalsifiable and the 85-94% number measures parameters
+removed rather than code improved.
+
+**The first table said something this step has to account for.** On the kernel
+corpus `-O1` emits *worse* code than `-O0` on 7 of 15 programs, spills and
+reloads every time — `hash_table` 223 instructions at `-O0` against 415 at `-O1`,
+`matmul` 0 reloads against 23. Attributed with `FLAGS=--disable-licm`: LICM is
+60% of the reloads and inlining most of the rest, with the other four passes flat
+(ROADMAP P1 carries the per-kernel numbers).
+
+That is a *policy* gap rather than a representation one, so it does not reorder
+this document — but it bounds the claim at the top of this step. Removing 85-94%
+of block parameters removes the phi copies and the terminator-argument clique; it
+does not shorten a live range that spans a loop because LICM put the value there.
+Expect step 2 to move the parameter counts and the `fuzz` capacity failures, and
+expect the `bench` reload counts to stay put until the hoist decision consults
+the same pressure the splitter measures. Judge it on the rows it should move.
 
 ### Step 3 notes — the remaining operands
 

@@ -52,13 +52,19 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 LEVELS="${LEVELS:--O0 -O1}"
 CORPUS="${CORPUS:-all}"
 SEEDS="${SEEDS:-30}"
+# Extra tinyc flags, for attributing a number to a pass: run the table again
+# with `FLAGS=--disable-licm` and the difference is what that pass cost or
+# bought. Not part of a baseline -- `--update` with FLAGS set would record a
+# pipeline nobody compiles with.
+FLAGS="${FLAGS:-}"
 
 # One worker run: compile one program at one level and print its row.
 if [ "$1" = "--one" ]; then
     name="$2"
     file="$3"
     level="$4"
-    out="$(BLITZ_DEBUG=stats "$TINYC" "$level" "$file" -o "$5/a.out" 2>&1 >/dev/null || true)"
+    # shellcheck disable=SC2086 -- FLAGS is a list of flags on purpose.
+    out="$(BLITZ_DEBUG=stats "$TINYC" "$level" $FLAGS "$file" -o "$5/a.out" 2>&1 >/dev/null || true)"
     # A program that does not compile is a hole in the table, kept visible.
     if ! printf '%s' "$out" | grep -q 'blitz::stats'; then
         printf '%s\t%s\t-\t-\t-\t-\n' "$name" "${level#-}"
@@ -147,7 +153,7 @@ measure() {
     done < "$WORK/files.$corpus"
 
     SELF="$SCRIPT_DIR/run_codesize.sh"
-    export SELF TINYC
+    export SELF TINYC FLAGS
     # `|| true`: a worker that fails still wrote its row, and xargs exiting
     # non-zero under `set -e` would end the run before the rows are read.
     xargs -d '\n' -P "$JOBS" -n1 sh -c '
@@ -223,6 +229,10 @@ for corpus in $corpora; do
             cat "$WORK/$corpus.tsv"
             ;;
         update)
+            if [ -n "$FLAGS" ]; then
+                echo "refusing to write a baseline with FLAGS set: $FLAGS" >&2
+                exit 2
+            fi
             {
                 printf '# program\tlevel\tinsts\tbytes\tspills\treloads\n'
                 printf '# corpus: %s -- written by tests/run_codesize.sh --update\n' "$corpus"
