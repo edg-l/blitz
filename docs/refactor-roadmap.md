@@ -1235,12 +1235,24 @@ Both known culprits sit at a point inside their block's run of `BlockParam`
 markers, which is the region the first rule already accounts for -- so the
 obvious third guard is to skip those points and leave them to it. **Measured, and
 it does not fix either program**: the same two still print the same wrong
-answers. So the marker shadow is not the distinguishing property either, and the
-next attempt should stop proposing guards and find the wrong term with
-`DEBUGGING-NOTES.md` technique 1 -- one `printf` per term against `cc`, then
-`read_frame.py --sum-chain`. The bisection harness is a `BLITZ_RULE3_LIMIT`
-counter around `route.insert`; it turns a whole-program miscompile into one named
-parameter in about eight compiles.
+answers.
+
+**And the third culprit's slot is well-formed**, which is the finding that should
+redirect the next attempt. Block 43's parameter 1 routes to slot 90, whose entire
+traffic is one store and one reload; the only edge feeding it (`b21 -> 43 p1`)
+keeps its store, is not a back edge, and its argument is not the parameter. There
+is nothing wrong with what routing did to that parameter. So the bisection
+identifies the routing that *triggers* the wrong answer, not a routing that is
+itself wrong: the remaining miscompile is most likely a separate latent defect
+that the changed allocation exposes, consistent with it being wrong at `-O1` and
+right at `-O0`.
+
+That makes it a value-level hunt on the emitted code, not another guard on the
+splitter: `DEBUGGING-NOTES.md` technique 1, one `printf` per term against `cc`,
+then `read_frame.py --sum-chain`. The bisection harness is worth rebuilding first
+-- a `BLITZ_RULE3_LIMIT` counter around `route.insert` turns a whole-program
+miscompile into one named parameter in about eight compiles, and it is what
+found both of the defects this section did fix.
 
 ### A store must not overwrite a slot its own block still reads
 
