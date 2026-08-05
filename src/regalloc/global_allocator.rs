@@ -1002,6 +1002,13 @@ pub(crate) struct Phase4State {
     /// Inherited from Phase 3: post-coalesce instruction lists, one per block.
     pub per_block_insts: Vec<Vec<ScheduledInst>>,
 
+    /// Real VRegs the coloring could not fit in their class's budget.
+    ///
+    /// The spill loop's candidates: a VReg with a color at or above its budget
+    /// is one no register exists for. Precolored VRegs are excluded, since
+    /// spilling one would break the ABI constraint that gave it its color.
+    pub over_budget: Vec<VReg>,
+
     /// Inherited from Phase 3: coalesce alias map (`from_idx -> into_idx`).
     pub alias_map: BTreeMap<u32, u32>,
 }
@@ -1176,6 +1183,28 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
         }
     }
 
+    // The VRegs no register exists for: a color at or above the class budget.
+    // `map_colors_to_regs` gives them no entry in `vreg_to_reg` either, so
+    // without a spill loop they reach lowering with no register at all.
+    let mut over_budget: Vec<VReg> = real_vreg_indices
+        .iter()
+        .copied()
+        .filter(|&idx| idx < phase3.graph.num_vregs)
+        .filter(|idx| !phase3.pre_coloring_colors.contains_key(idx))
+        .filter(|&idx| {
+            let Some(color) = coloring.colors.get(idx).copied().flatten() else {
+                return false;
+            };
+            let budget = match phase3.graph.reg_class[idx] {
+                RegClass::GPR => gpr_budget,
+                RegClass::XMM => xmm_budget,
+            };
+            color >= budget
+        })
+        .map(|idx| VReg(idx as u32))
+        .collect();
+    over_budget.sort_unstable();
+
     // Compute callee_saved_used.
     //
     // Union of assigned physical registers (across both classes) that are in
@@ -1206,6 +1235,7 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
         color_map,
         vreg_to_reg,
         callee_saved_used,
+        over_budget,
         gpr_overshoot,
         xmm_overshoot,
         unprecolored_params: phase3.unprecolored_params,
@@ -1564,113 +1594,255 @@ pub fn allocate_global(
     uses_frame_pointer: bool,
     slots: &mut SlotAllocator,
 ) -> Result<GlobalRegAllocResult, String> {
-    // Compute function-wide global liveness. Block params are added
-    // to their block's live_in so pairs of params on the same block interfere
-    // (they're written simultaneously by phi copies and must occupy distinct
-    // registers even when the block body never reads them).
-    let global_liveness =
-        crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
-            block_schedules,
-            cfg_succs,
-            phi_uses,
-            block_param_vregs_per_block,
-        );
-    // Also augment the global liveness that run_phase3 will recompute
-    // internally: it uses plain `compute_global_liveness` which doesn't know
-    // about block params. We pass block_param_vregs_per_block down and augment
-    // at each site (see below).
-
-    // The liveness the allocator believes, per block, before anything acts on
-    // it. Two values the graph lets share a register are values this dump shows
-    // no block holding at once -- so it is where a missing interference edge is
-    // read off, against the emitted schedules rather than argued about.
-    if crate::trace::is_enabled("liveness") && crate::trace::fn_matches(func_name) {
-        for (bi, sched) in block_schedules.iter().enumerate() {
-            let fmt = |s: &BTreeSet<VReg>| {
-                let mut v: Vec<u32> = s.iter().map(|r| r.0).collect();
-                v.sort_unstable();
-                format!("{v:?}")
-            };
-            tracing::debug!(
-                target: "blitz::liveness",
-                "[{func_name}] block {bi}: succs={:?} live_in={} live_out={} params={}\n{}",
-                cfg_succs[bi],
-                fmt(&global_liveness.live_in[bi]),
-                fmt(&global_liveness.live_out[bi]),
-                fmt(&block_param_vregs_per_block[bi]),
-                crate::trace::format_liveness(
-                    sched,
-                    &crate::regalloc::liveness::compute_liveness(
-                        sched,
-                        &global_liveness.live_out[bi],
-                    )
-                    .live_at,
-                    &global_liveness.live_out[bi],
-                ),
-            );
-        }
-    }
-
-    // Tasks 2.3, 2.4, 2.4.5: Build function-wide interference graph and
-    // per-block liveness (stored in Phase2State for Phase 3/5 consumption).
-    let mut phase2 = build_global_interference(block_schedules, &global_liveness);
-    // Pre-coalesce Phase 2 graph: block_params are still distinct VRegs, so no
-    // alias resolution needed.
-    add_block_param_interferences(
-        &mut phase2.graph,
-        block_param_vregs_per_block,
-        block_schedules,
-        &BTreeMap::new(),
-    );
-
-    // Determine starting next_vreg for phantom injection.
-    let next_vreg: u32 = block_schedules
+    let mut schedules: Vec<Vec<ScheduledInst>> = block_schedules.to_vec();
+    let mut spill_next_vreg: u32 = schedules
         .iter()
         .flatten()
         .flat_map(|i| std::iter::once(i.dst.0).chain(i.operands.iter().map(|v| v.0)))
         .max()
         .map(|m| m + 1)
-        .unwrap_or(0)
-        .max(phase2.graph.num_vregs as u32);
+        .unwrap_or(0);
 
-    // Phase 3: precolorings, clobbers, coalescing, graph rebuild.
-    let phase3 = run_phase3(
-        phase2,
-        block_schedules.to_vec(),
-        param_vregs,
-        call_arg_precolors.clone(),
-        copy_pairs,
-        cfg_succs,
-        phi_uses,
-        block_param_vregs_per_block,
-        uses_frame_pointer,
-        next_vreg,
-    );
+    // A register allocator's contract is that it always succeeds, in the worst
+    // case with a great deal of spill code. Before this loop existed the
+    // contract here was "the splitter must be perfect": an overshoot was a
+    // compile error, which made every splitter change a correctness gamble
+    // rather than a quality knob.
+    //
+    // Nothing changes for a function that colors on the first round, which is
+    // every function the splitter already handles -- the loop's body only runs
+    // where the old code returned `Err`.
+    // The overshoot the previous round left, so a round that does not reduce it
+    // can stop rather than run the limit out. Spilling is not always able to
+    // help: where the pressure point is one instruction with more operands than
+    // the budget has registers -- a terminator passing 28 block arguments, say --
+    // every reload lands immediately before that instruction and is live there
+    // too, so the overshoot rises instead. Measured on `pressure` seed 15: 3, 9,
+    // 12, 15, 18, 21, 23, and then flat for the remaining rounds, having
+    // committed 207 slots to buy nothing.
+    let mut prev_overshoot: Option<u32> = None;
 
-    // Phase 4: global coloring and color-to-register mapping.
-    let phase4 = run_phase4(phase3, uses_frame_pointer);
+    for round in 0..=MAX_GLOBAL_SPILL_ROUNDS {
+        let block_schedules: &[Vec<ScheduledInst>] = &schedules;
 
-    // Coalescing alias map: threaded through from Phase 3. Used in Phase 5 to
-    // build the transitive alias map so the caller's ClassId -> VReg resolution
-    // (block_class_to_vreg in compile/mod.rs) chases stale `class_to_vreg`
-    // entries that still point at pre-coalesce VRegs.
-    let alias_map = phase4.alias_map.clone();
+        // Compute function-wide global liveness. Block params are added
+        // to their block's live_in so pairs of params on the same block interfere
+        // (they're written simultaneously by phi copies and must occupy distinct
+        // registers even when the block body never reads them).
+        let global_liveness =
+            crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
+                block_schedules,
+                cfg_succs,
+                phi_uses,
+                block_param_vregs_per_block,
+            );
+        // Also augment the global liveness that run_phase3 will recompute
+        // internally: it uses plain `compute_global_liveness` which doesn't know
+        // about block params. We pass block_param_vregs_per_block down and augment
+        // at each site (see below).
 
-    // Phase 5: global spilling.
-    let ctx = Phase5Context {
-        cfg_succs: cfg_succs.to_vec(),
-        phi_uses: phi_uses.to_vec(),
-        block_param_vregs_per_block: block_param_vregs_per_block.to_vec(),
-        param_vregs: param_vregs.to_vec(),
-        call_arg_precolors: call_arg_precolors.clone(),
-        copy_pairs: copy_pairs.to_vec(),
-        loop_depths: loop_depths.clone(),
-        uses_frame_pointer,
-        func_name: func_name.to_string(),
-        alias_map,
-    };
+        // The liveness the allocator believes, per block, before anything acts on
+        // it. Two values the graph lets share a register are values this dump shows
+        // no block holding at once -- so it is where a missing interference edge is
+        // read off, against the emitted schedules rather than argued about.
+        if crate::trace::is_enabled("liveness") && crate::trace::fn_matches(func_name) {
+            for (bi, sched) in block_schedules.iter().enumerate() {
+                let fmt = |s: &BTreeSet<VReg>| {
+                    let mut v: Vec<u32> = s.iter().map(|r| r.0).collect();
+                    v.sort_unstable();
+                    format!("{v:?}")
+                };
+                tracing::debug!(
+                    target: "blitz::liveness",
+                    "[{func_name}] block {bi}: succs={:?} live_in={} live_out={} params={}\n{}",
+                    cfg_succs[bi],
+                    fmt(&global_liveness.live_in[bi]),
+                    fmt(&global_liveness.live_out[bi]),
+                    fmt(&block_param_vregs_per_block[bi]),
+                    crate::trace::format_liveness(
+                        sched,
+                        &crate::regalloc::liveness::compute_liveness(
+                            sched,
+                            &global_liveness.live_out[bi],
+                        )
+                        .live_at,
+                        &global_liveness.live_out[bi],
+                    ),
+                );
+            }
+        }
 
-    run_phase5(phase4, ctx, slots)
+        // Tasks 2.3, 2.4, 2.4.5: Build function-wide interference graph and
+        // per-block liveness (stored in Phase2State for Phase 3/5 consumption).
+        let mut phase2 = build_global_interference(block_schedules, &global_liveness);
+        // Pre-coalesce Phase 2 graph: block_params are still distinct VRegs, so no
+        // alias resolution needed.
+        add_block_param_interferences(
+            &mut phase2.graph,
+            block_param_vregs_per_block,
+            block_schedules,
+            &BTreeMap::new(),
+        );
+
+        // Determine starting next_vreg for phantom injection.
+        let next_vreg: u32 = block_schedules
+            .iter()
+            .flatten()
+            .flat_map(|i| std::iter::once(i.dst.0).chain(i.operands.iter().map(|v| v.0)))
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0)
+            .max(phase2.graph.num_vregs as u32);
+
+        // Phase 3: precolorings, clobbers, coalescing, graph rebuild.
+        let phase3 = run_phase3(
+            phase2,
+            block_schedules.to_vec(),
+            param_vregs,
+            call_arg_precolors.clone(),
+            copy_pairs,
+            cfg_succs,
+            phi_uses,
+            block_param_vregs_per_block,
+            uses_frame_pointer,
+            next_vreg,
+        );
+
+        // Phase 4: global coloring and color-to-register mapping.
+        let phase4 = run_phase4(phase3, uses_frame_pointer);
+
+        // Coalescing alias map: threaded through from Phase 3. Used in Phase 5 to
+        // build the transitive alias map so the caller's ClassId -> VReg resolution
+        // (block_class_to_vreg in compile/mod.rs) chases stale `class_to_vreg`
+        // entries that still point at pre-coalesce VRegs.
+        let alias_map = phase4.alias_map.clone();
+
+        // Phase 5: global spilling.
+        let ctx = Phase5Context {
+            cfg_succs: cfg_succs.to_vec(),
+            phi_uses: phi_uses.to_vec(),
+            block_param_vregs_per_block: block_param_vregs_per_block.to_vec(),
+            param_vregs: param_vregs.to_vec(),
+            call_arg_precolors: call_arg_precolors.clone(),
+            copy_pairs: copy_pairs.to_vec(),
+            loop_depths: loop_depths.clone(),
+            uses_frame_pointer,
+            func_name: func_name.to_string(),
+            alias_map,
+        };
+
+        if phase4.gpr_overshoot == 0 && phase4.xmm_overshoot == 0 {
+            return run_phase5(phase4, ctx, slots);
+        }
+
+        // Spill and try again. A block parameter is not a candidate: its value
+        // is written by a phi copy on the edge, so a store placed in the block
+        // would store whatever the register held before the copy. Routing one
+        // through a slot is the splitter's `slot_spilled_params`, which decides
+        // it before the schedules are built.
+        let block_params: BTreeSet<VReg> = block_param_vregs_per_block
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        let candidates: BTreeSet<usize> = phase4
+            .over_budget
+            .iter()
+            .filter(|v| !block_params.contains(v))
+            .map(|v| v.0 as usize)
+            .collect();
+
+        let overshoot = phase4.gpr_overshoot + phase4.xmm_overshoot;
+        let no_progress = prev_overshoot.is_some_and(|prev| overshoot >= prev);
+        if round == MAX_GLOBAL_SPILL_ROUNDS || candidates.is_empty() || no_progress {
+            let why = if no_progress {
+                "spilling did not reduce it, so the pressure point is one instruction \
+                 whose own operands are what is live there"
+            } else if candidates.is_empty() {
+                "every over-budget VReg is a block parameter, which only the splitter \
+                 can route through a slot"
+            } else {
+                "the round limit ran out"
+            };
+            return Err(format!(
+                "global regalloc: register pressure overshoot for function '{func_name}' \
+                 after {round} spill round(s): {why} (gpr_overshoot={}, xmm_overshoot={}, \
+                 over-budget VRegs={}, of which spillable={}, spill slots committed={})",
+                phase4.gpr_overshoot,
+                phase4.xmm_overshoot,
+                phase4.over_budget.len(),
+                candidates.len(),
+                slots.count(),
+            ));
+        }
+        prev_overshoot = Some(overshoot);
+
+        // Spill on the schedules the coloring was computed from, which are
+        // Phase 3's post-coalesce lists rather than the ones this round
+        // started with: the candidate VRegs are named in that numbering.
+        let mut next = schedules
+            .iter()
+            .chain(phase4.per_block_insts.iter())
+            .flatten()
+            .flat_map(|i| std::iter::once(i.dst.0).chain(i.operands.iter().map(|v| v.0)))
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0)
+            .max(spill_next_vreg);
+        let mut next_schedules = phase4.per_block_insts;
+        let vreg_classes = vreg_class_map(&next_schedules, block_param_vregs_per_block);
+        crate::regalloc::spill::insert_spills_global(
+            &mut next_schedules,
+            &candidates,
+            slots,
+            &mut next,
+            &vreg_classes,
+        );
+        spill_next_vreg = next;
+        schedules = next_schedules;
+
+        if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+            tracing::debug!(
+                target: "blitz::regalloc",
+                "[{func_name}] global spill round {round}: spilled {} VReg(s), \
+                 gpr_overshoot={}, xmm_overshoot={}",
+                candidates.len(),
+                phase4.gpr_overshoot,
+                phase4.xmm_overshoot,
+            );
+        }
+    }
+
+    unreachable!("the spill loop returns before exhausting its rounds")
+}
+
+/// How many times the global allocator will spill and recolor before giving up.
+///
+/// Each round shatters a value's live range into one store and one reload per
+/// use, so pressure at the point that overflowed strictly falls; the limit is a
+/// backstop against a shape that does not converge, not a budget the allocator
+/// is expected to use.
+const MAX_GLOBAL_SPILL_ROUNDS: usize = 10;
+
+/// Which register class each VReg belongs to, for spill code selection.
+///
+/// Read off the defining instruction's own result type, with block parameters
+/// taking the class their `Op::BlockParam` declares.
+fn vreg_class_map(
+    block_schedules: &[Vec<ScheduledInst>],
+    block_param_vregs_per_block: &[BTreeSet<VReg>],
+) -> BTreeMap<VReg, RegClass> {
+    let mut classes: BTreeMap<VReg, RegClass> = BTreeMap::new();
+    for inst in block_schedules.iter().flatten() {
+        let class = if inst.op.is_fp_op() {
+            RegClass::XMM
+        } else {
+            RegClass::GPR
+        };
+        classes.insert(inst.dst, class);
+    }
+    let _ = block_param_vregs_per_block;
+    classes
 }
 
 #[cfg(test)]

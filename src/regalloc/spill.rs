@@ -298,143 +298,215 @@ pub fn insert_spills(
     if spilled.is_empty() {
         return BTreeMap::new();
     }
+    let plan = SpillPlacement::plan(std::slice::from_ref(&*insts), spilled, slots);
+    let mut reload_map = BTreeMap::new();
+    plan.apply_to(insts, next_vreg, vreg_classes, &mut reload_map);
+    reload_map
+}
 
-    // Build a map of VReg -> defining instruction op (for rematerialization).
-    let def_ops: BTreeMap<usize, ScheduledInst> = insts
-        .iter()
-        .filter(|inst| spilled.contains(&(inst.dst.0 as usize)))
-        .map(|inst| {
-            (
-                inst.dst.0 as usize,
-                ScheduledInst {
-                    op: inst.op.clone(),
-                    dst: inst.dst,
-                    operands: inst.operands.clone(),
-                },
-            )
-        })
-        .collect();
-
-    // Collect call-arg VRegs: these must NOT be rematerialized even if
-    // their defining op is Iconst/StackAddr, because the call needs
-    // the value alive at the call point.
-    let call_arg_vregs = collect_call_arg_vregs(insts);
-
-    // Assign spill slots to non-rematerializable VRegs AND call-arg VRegs
-    // (call-arg constants need a spill slot because we can't remat them away).
-    let mut vreg_to_slot: BTreeMap<usize, u32> = BTreeMap::new();
-    for &idx in spilled {
-        let is_call_arg = call_arg_vregs.contains(&idx);
-        let needs_slot = if let Some(def) = def_ops.get(&idx) {
-            !is_rematerializable(def) || is_call_arg
-        } else {
-            false
-        };
-        if needs_slot {
-            let slot = slots.alloc(SlotOwner::Allocator);
-            vreg_to_slot.insert(idx, slot);
-        }
+/// Spill every VReg in `spilled` across every block of a function.
+///
+/// The function-wide form of [`insert_spills`], and the difference is the whole
+/// point: a slot is allocated **once per spilled VReg**, not once per block, and
+/// the defining instruction a reload rematerializes from may live in a different
+/// block than the use. Spilling per block with per-block slots would give one
+/// value two cells and store it into the one nobody reads.
+///
+/// Spill-everywhere: a store after each def, a reload before each use, each
+/// reload with a VReg of its own. What survives across a block boundary is the
+/// slot, so the value stops being live-out and the next round's liveness sees
+/// that without being told.
+pub fn insert_spills_global(
+    block_schedules: &mut [Vec<ScheduledInst>],
+    spilled: &BTreeSet<usize>,
+    slots: &mut SlotAllocator,
+    next_vreg: &mut u32,
+    vreg_classes: &BTreeMap<VReg, crate::x86::reg::RegClass>,
+) {
+    if spilled.is_empty() {
+        return;
     }
+    let plan = SpillPlacement::plan(block_schedules, spilled, slots);
+    let mut reload_map = BTreeMap::new();
+    for insts in block_schedules.iter_mut() {
+        plan.apply_to(insts, next_vreg, vreg_classes, &mut reload_map);
+    }
+}
 
-    let mut reload_map: BTreeMap<VReg, Vec<VReg>> = BTreeMap::new();
+/// What spilling a set of VRegs needs decided once, before any list is rewritten:
+/// where each one is defined, which are call arguments, and which slot each takes.
+struct SpillPlacement<'a> {
+    spilled: &'a BTreeSet<usize>,
+    def_ops: BTreeMap<usize, ScheduledInst>,
+    call_arg_vregs: BTreeSet<usize>,
+    vreg_to_slot: BTreeMap<usize, u32>,
+}
 
-    // We need to process the instruction list and insert spill/reload code.
-    // We do a single pass, building a new instruction list.
-    let old_insts = std::mem::take(insts);
-    let mut new_insts: Vec<ScheduledInst> = Vec::with_capacity(old_insts.len() * 2);
+impl<'a> SpillPlacement<'a> {
+    fn plan(
+        block_schedules: &[Vec<ScheduledInst>],
+        spilled: &'a BTreeSet<usize>,
+        slots: &mut SlotAllocator,
+    ) -> Self {
+        // VReg -> defining instruction, for rematerialization.
+        let def_ops: BTreeMap<usize, ScheduledInst> = block_schedules
+            .iter()
+            .flatten()
+            .filter(|inst| spilled.contains(&(inst.dst.0 as usize)))
+            .map(|inst| {
+                (
+                    inst.dst.0 as usize,
+                    ScheduledInst {
+                        op: inst.op.clone(),
+                        dst: inst.dst,
+                        operands: inst.operands.clone(),
+                    },
+                )
+            })
+            .collect();
 
-    for mut inst in old_insts {
-        // Before this instruction, insert reloads for any spilled operands.
-        let mut new_operands = Vec::with_capacity(inst.operands.len());
-        for &op in &inst.operands {
-            let op_idx = op.0 as usize;
-            if spilled.contains(&op_idx) {
-                // Replace with a reload VReg. Call-arg VRegs must NOT use
-                // rematerialization: the original def must stay alive at the
-                // call point with proper interference against call clobbers.
-                let reload_vreg = if let Some(def) = def_ops.get(&op_idx)
-                    && is_rematerializable(def)
-                    && !call_arg_vregs.contains(&op_idx)
-                {
-                    // Rematerialization: re-emit the defining instruction.
-                    let new_vreg = VReg(*next_vreg);
-                    *next_vreg += 1;
-                    let remat_inst = ScheduledInst {
-                        op: def.op.clone(),
-                        dst: new_vreg,
-                        operands: def.operands.clone(),
-                    };
-                    new_insts.push(remat_inst);
-                    new_vreg
-                } else if let Some(&slot) = vreg_to_slot.get(&op_idx) {
-                    // Check if we already inserted a reload for this use.
-                    // Each use gets its own reload VReg (short-lived).
-                    let new_vreg = VReg(*next_vreg);
-                    *next_vreg += 1;
-                    let is_xmm = super::is_xmm_vreg(op, vreg_classes);
-                    let load_op = if is_xmm {
-                        Op::XmmSpillLoad(slot as i64)
-                    } else {
-                        Op::SpillLoad(slot as i64)
-                    };
-                    let load_inst = ScheduledInst {
-                        op: load_op,
-                        dst: new_vreg,
-                        operands: vec![],
-                    };
-                    new_insts.push(load_inst);
-                    reload_map.entry(op).or_default().push(new_vreg);
-                    new_vreg
-                } else {
-                    // Should not happen: spilled but no slot and not remat.
-                    op
-                };
-                new_operands.push(reload_vreg);
+        // Call-arg VRegs must NOT be rematerialized even where the defining op
+        // is an Iconst or a StackAddr: the value has to be live at the call
+        // point, and rematerializing shortens its range past the clobber.
+        let mut call_arg_vregs: BTreeSet<usize> = BTreeSet::new();
+        for insts in block_schedules {
+            call_arg_vregs.extend(collect_call_arg_vregs(insts));
+        }
+
+        // One slot per spilled VReg that needs one, for the whole function.
+        let mut vreg_to_slot: BTreeMap<usize, u32> = BTreeMap::new();
+        for &idx in spilled {
+            let is_call_arg = call_arg_vregs.contains(&idx);
+            let needs_slot = if let Some(def) = def_ops.get(&idx) {
+                !is_rematerializable(def) || is_call_arg
             } else {
-                new_operands.push(op);
+                false
+            };
+            if needs_slot {
+                let slot = slots.alloc(SlotOwner::Allocator);
+                vreg_to_slot.insert(idx, slot);
             }
         }
-        inst.operands = new_operands;
 
-        let dst_idx = inst.dst.0 as usize;
-        let is_spill_def = spilled.contains(&dst_idx);
-
-        // For rematerializable spilled VRegs (that are NOT call args), drop
-        // the original definition — uses are replaced by fresh remat copies.
-        // Call-arg VRegs keep their def so they remain live at call points.
-        if is_spill_def
-            && def_ops.get(&dst_idx).is_some_and(is_rematerializable)
-            && !call_arg_vregs.contains(&dst_idx)
-        {
-            // Skip the original definition.
-        } else {
-            new_insts.push(inst);
-        }
-
-        // After the def of a spilled VReg, insert a SpillStore (if not remat).
-        if is_spill_def && let Some(&slot) = vreg_to_slot.get(&dst_idx) {
-            let spilled_vreg = VReg(dst_idx as u32);
-            let is_xmm = super::is_xmm_vreg(spilled_vreg, vreg_classes);
-            let store_op = if is_xmm {
-                Op::XmmSpillStore(slot as i64)
-            } else {
-                Op::SpillStore(slot as i64)
-            };
-            let dummy_dst = VReg(*next_vreg);
-            *next_vreg += 1;
-            let store_inst = ScheduledInst {
-                op: store_op,
-                dst: dummy_dst,
-                operands: vec![spilled_vreg],
-            };
-            new_insts.push(store_inst);
+        SpillPlacement {
+            spilled,
+            def_ops,
+            call_arg_vregs,
+            vreg_to_slot,
         }
     }
+}
 
-    *insts = new_insts;
+impl SpillPlacement<'_> {
+    /// Rewrite one instruction list: a reload before each use, a store after
+    /// each def.
+    fn apply_to(
+        &self,
+        insts: &mut Vec<ScheduledInst>,
+        next_vreg: &mut u32,
+        vreg_classes: &BTreeMap<VReg, crate::x86::reg::RegClass>,
+        reload_map: &mut BTreeMap<VReg, Vec<VReg>>,
+    ) {
+        let spilled = self.spilled;
+        let def_ops = &self.def_ops;
+        let call_arg_vregs = &self.call_arg_vregs;
+        let vreg_to_slot = &self.vreg_to_slot;
 
-    // Build reload_map entries for rematerialized VRegs (already handled inline above).
-    reload_map
+        // We need to process the instruction list and insert spill/reload code.
+        // We do a single pass, building a new instruction list.
+        let old_insts = std::mem::take(insts);
+        let mut new_insts: Vec<ScheduledInst> = Vec::with_capacity(old_insts.len() * 2);
+
+        for mut inst in old_insts {
+            // Before this instruction, insert reloads for any spilled operands.
+            let mut new_operands = Vec::with_capacity(inst.operands.len());
+            for &op in &inst.operands {
+                let op_idx = op.0 as usize;
+                if spilled.contains(&op_idx) {
+                    // Replace with a reload VReg. Call-arg VRegs must NOT use
+                    // rematerialization: the original def must stay alive at the
+                    // call point with proper interference against call clobbers.
+                    let reload_vreg = if let Some(def) = def_ops.get(&op_idx)
+                        && is_rematerializable(def)
+                        && !call_arg_vregs.contains(&op_idx)
+                    {
+                        // Rematerialization: re-emit the defining instruction.
+                        let new_vreg = VReg(*next_vreg);
+                        *next_vreg += 1;
+                        let remat_inst = ScheduledInst {
+                            op: def.op.clone(),
+                            dst: new_vreg,
+                            operands: def.operands.clone(),
+                        };
+                        new_insts.push(remat_inst);
+                        new_vreg
+                    } else if let Some(&slot) = vreg_to_slot.get(&op_idx) {
+                        // Check if we already inserted a reload for this use.
+                        // Each use gets its own reload VReg (short-lived).
+                        let new_vreg = VReg(*next_vreg);
+                        *next_vreg += 1;
+                        let is_xmm = super::is_xmm_vreg(op, vreg_classes);
+                        let load_op = if is_xmm {
+                            Op::XmmSpillLoad(slot as i64)
+                        } else {
+                            Op::SpillLoad(slot as i64)
+                        };
+                        let load_inst = ScheduledInst {
+                            op: load_op,
+                            dst: new_vreg,
+                            operands: vec![],
+                        };
+                        new_insts.push(load_inst);
+                        reload_map.entry(op).or_default().push(new_vreg);
+                        new_vreg
+                    } else {
+                        // Should not happen: spilled but no slot and not remat.
+                        op
+                    };
+                    new_operands.push(reload_vreg);
+                } else {
+                    new_operands.push(op);
+                }
+            }
+            inst.operands = new_operands;
+
+            let dst_idx = inst.dst.0 as usize;
+            let is_spill_def = spilled.contains(&dst_idx);
+
+            // For rematerializable spilled VRegs (that are NOT call args), drop
+            // the original definition — uses are replaced by fresh remat copies.
+            // Call-arg VRegs keep their def so they remain live at call points.
+            if is_spill_def
+                && def_ops.get(&dst_idx).is_some_and(is_rematerializable)
+                && !call_arg_vregs.contains(&dst_idx)
+            {
+                // Skip the original definition.
+            } else {
+                new_insts.push(inst);
+            }
+
+            // After the def of a spilled VReg, insert a SpillStore (if not remat).
+            if is_spill_def && let Some(&slot) = vreg_to_slot.get(&dst_idx) {
+                let spilled_vreg = VReg(dst_idx as u32);
+                let is_xmm = super::is_xmm_vreg(spilled_vreg, vreg_classes);
+                let store_op = if is_xmm {
+                    Op::XmmSpillStore(slot as i64)
+                } else {
+                    Op::SpillStore(slot as i64)
+                };
+                let dummy_dst = VReg(*next_vreg);
+                *next_vreg += 1;
+                let store_inst = ScheduledInst {
+                    op: store_op,
+                    dst: dummy_dst,
+                    operands: vec![spilled_vreg],
+                };
+                new_insts.push(store_inst);
+            }
+        }
+
+        *insts = new_insts;
+    }
 }
 
 #[cfg(test)]

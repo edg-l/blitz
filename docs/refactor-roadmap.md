@@ -905,6 +905,46 @@ with a round limit and treats an empty plan as convergence, so today it cannot t
 improves code rather than a gate that must succeed, and the round limit stops being
 load-bearing.
 
+### What landed, and the prediction it refuted
+
+`allocate_global` is a spill loop: build liveness, color, and where the coloring
+does not fit, spill the VRegs it could not place and do it again.
+`spill::insert_spills_global` is the function-wide form of the per-block
+`insert_spills` -- the difference that matters is that a slot is allocated **once
+per spilled VReg** rather than once per block, since a value's def and its uses
+can be in different blocks.
+
+**Stated before starting: programs that already allocate stay byte-identical, and
+`pressure` goes from 14/30 to at least 25/30. The first held exactly. The second
+was wrong, and how it was wrong is the useful part.**
+
+Over the 90-program generated corpus at both levels: **161 identical, 0 differing,
+and exactly one status change** -- `args` seed 3 at `-O0`, which had never
+compiled, now does (395 instructions in `main`, 63 spills). Everything else that
+compiled before compiles to the same bytes, which is the property the loop was
+designed to have: its body only runs where the old code returned `Err`.
+
+**`pressure` did not move at all, and a spill loop cannot move it.** Traced on
+seed 15, the overshoot *grows* with each round: 3, 9, 12, 15, 18, 21, 23, then
+flat. Spilling a value whose live range exists because it is an operand of the
+pressure instruction cannot help -- the reload lands immediately before that
+instruction and is live there too. This is shape B from
+`docs/terminator-args-next-steps.md`: a terminator passing 28 block arguments,
+where the arguments *are* what is live at the point that overflows. No allocator
+can place 28 values in 14 registers at one instruction; the arguments have to
+leave the register file, which is `SplitPlan::operand_removals` and the splitter's
+slot routing, not spilling.
+
+So the loop stops as soon as a round fails to reduce the overshoot, and says
+which of the three reasons it stopped for. Running the limit out committed 207
+slots on seed 15 to buy nothing.
+
+**What this corrects in the section above:** "every remaining corpus failure is a
+compile error rather than merely slow code" is true, but the implication that a
+spill loop turns all of them into slow code is not. It turns *shape A* into slow
+code, which is what `args` seed 3 was. Shape B needs the terminator clique broken,
+and that is the next thing to look at.
+
 ---
 
 ## Step 6: two allocators
