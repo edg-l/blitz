@@ -76,6 +76,21 @@ pub fn apply_algebraic_rules(egraph: &mut EGraph) -> bool {
 /// when overflow occurs. Equality is immune: `(a - b) == 0` iff `a == b` in
 /// wrapping arithmetic.
 fn apply_sub_zero_eq_ne_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    apply_icmp_zero_rules(egraph, snaps, Op::Sub, |_, a, b| Some((a, b)))
+}
+
+/// `Icmp(Eq/Ne, <inner_op>(x, y), 0)` → `Icmp(Eq/Ne, ..)` over whatever
+/// `rewrite` makes of `(x, y)`, and the symmetric form with the zero on the
+/// left, because `Eq`/`Ne` are symmetric in operand order.
+///
+/// `rewrite` returns the pair the new comparison names, or `None` to leave that
+/// node alone -- the scan then moves on to the next node of the class.
+fn apply_icmp_zero_rules(
+    egraph: &mut EGraph,
+    snaps: &[NodeSnap],
+    inner_op: Op,
+    rewrite: impl Fn(&mut EGraph, ClassId, ClassId) -> Option<(ClassId, ClassId)>,
+) -> bool {
     use crate::ir::condcode::CondCode;
 
     let mut changed = false;
@@ -92,25 +107,23 @@ fn apply_sub_zero_eq_ne_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let lhs = snap.children[0];
         let rhs = snap.children[1];
 
-        // Try (Sub(a, b), 0); also accept (0, Sub(a, b)) because Eq/Ne are
-        // symmetric in operand order.
-        let (sub_side, other) = if egraph.get_constant(rhs).map(|(v, _)| v) == Some(0) {
-            (lhs, rhs)
+        let inner_side = if egraph.get_constant(rhs).map(|(v, _)| v) == Some(0) {
+            lhs
         } else if egraph.get_constant(lhs).map(|(v, _)| v) == Some(0) {
-            (rhs, lhs)
+            rhs
         } else {
             continue;
         };
-        let _ = other; // retained for clarity; we only needed to confirm the zero side
 
-        let sub_canon = egraph.unionfind.find_immutable(sub_side);
-        let sub_nodes = egraph.class(sub_canon).nodes.clone();
-        for node in sub_nodes {
-            if node.op != Op::Sub || node.children.len() != 2 {
+        let inner_canon = egraph.unionfind.find_immutable(inner_side);
+        let inner_nodes = egraph.class(inner_canon).nodes.clone();
+        for node in inner_nodes {
+            if node.op != inner_op || node.children.len() != 2 {
                 continue;
             }
-            let a = node.children[0];
-            let b = node.children[1];
+            let Some((a, b)) = rewrite(egraph, node.children[0], node.children[1]) else {
+                continue;
+            };
             let new_icmp = egraph.add(ENode {
                 op: Op::Icmp(*cc),
                 children: smallvec![a, b],
@@ -140,70 +153,21 @@ fn apply_sub_zero_eq_ne_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 /// isel rule fires and the compare lowers to `cmp r, imm` with no separate
 /// materialized iconst.
 fn apply_add_const_zero_eq_ne_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
-    use crate::ir::condcode::CondCode;
-
-    let mut changed = false;
-
-    for snap in snaps {
-        let class_id = snap.class_id;
-        let Op::Icmp(cc) = &snap.op else { continue };
-        if !matches!(cc, CondCode::Eq | CondCode::Ne) {
-            continue;
-        }
-        if snap.children.len() != 2 {
-            continue;
-        }
-        let lhs = snap.children[0];
-        let rhs = snap.children[1];
-
-        // Pick whichever side is the zero constant; the other side must
-        // contain an Add with a constant operand.
-        let add_side = if egraph.get_constant(rhs).map(|(v, _)| v) == Some(0) {
-            lhs
-        } else if egraph.get_constant(lhs).map(|(v, _)| v) == Some(0) {
-            rhs
-        } else {
-            continue;
+    apply_icmp_zero_rules(egraph, snaps, Op::Add, |egraph, x, y| {
+        let (var, k_class) = match (egraph.get_constant(x), egraph.get_constant(y)) {
+            (Some(_), None) => (y, x),
+            (None, Some(_)) => (x, y),
+            _ => return None, // both const (already folded) or neither
         };
+        let (k, k_ty) = egraph.get_constant(k_class)?;
 
-        let add_canon = egraph.unionfind.find_immutable(add_side);
-        let add_nodes = egraph.class(add_canon).nodes.clone();
-        for node in add_nodes {
-            if node.op != Op::Add || node.children.len() != 2 {
-                continue;
-            }
-            let (var, k_class) = match (
-                egraph.get_constant(node.children[0]),
-                egraph.get_constant(node.children[1]),
-            ) {
-                (Some(_), None) => (node.children[1], node.children[0]),
-                (None, Some(_)) => (node.children[0], node.children[1]),
-                _ => continue, // both const (already folded) or neither
-            };
-            let Some((k, k_ty)) = egraph.get_constant(k_class) else {
-                continue;
-            };
-
-            // `-k` with two's-complement wraparound keeps the identity correct.
-            let neg_k_val = k.wrapping_neg();
-            let neg_k = egraph.add(ENode {
-                op: Op::Iconst(neg_k_val, k_ty),
-                children: smallvec![],
-            });
-            let new_icmp = egraph.add(ENode {
-                op: Op::Icmp(*cc),
-                children: smallvec![var, neg_k],
-            });
-            let canon = egraph.unionfind.find_immutable(class_id);
-            let new_canon = egraph.unionfind.find_immutable(new_icmp);
-            if canon != new_canon {
-                egraph.merge(class_id, new_icmp);
-                changed = true;
-            }
-            break;
-        }
-    }
-    changed
+        // `-k` with two's-complement wraparound keeps the identity correct.
+        let neg_k = egraph.add(ENode {
+            op: Op::Iconst(k.wrapping_neg(), k_ty),
+            children: smallvec![],
+        });
+        Some((var, neg_k))
+    })
 }
 
 // ── Identity rules ────────────────────────────────────────────────────────────

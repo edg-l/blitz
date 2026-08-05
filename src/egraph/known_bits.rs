@@ -1,6 +1,6 @@
 use smallvec::smallvec;
 
-use crate::egraph::egraph::{EGraph, snapshot_all};
+use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::op::Op;
 use crate::ir::types::Type;
@@ -91,6 +91,40 @@ pub fn type_mask(ty: &Type) -> u64 {
     }
 }
 
+/// A shift whose amount is a constant in range for the result type.
+struct ShiftByConst {
+    /// Known bits of the value being shifted.
+    bits: KnownBits,
+    /// The shift amount.
+    n: u32,
+    /// All bits of the result type.
+    mask: u64,
+    /// The result type's width in bits.
+    width: u32,
+}
+
+/// Read a shift-by-constant node, or `None` when nothing can be derived.
+///
+/// An amount outside `0..width` yields `None`: x86 masks the count (CL mod 64),
+/// so the result is not the shift the IR names.
+fn shift_by_constant(egraph: &EGraph, snap: &NodeSnap) -> Option<ShiftByConst> {
+    let bits = egraph.get_known_bits(snap.children[0]);
+    let (shift_amt, _) = egraph.get_constant(snap.children[1])?;
+    let ty = &egraph
+        .class(egraph.unionfind.find_immutable(snap.class_id))
+        .ty;
+    let width = ty.bit_width();
+    if shift_amt < 0 || shift_amt >= width as i64 {
+        return None;
+    }
+    Some(ShiftByConst {
+        bits,
+        n: shift_amt as u32,
+        mask: type_mask(ty),
+        width,
+    })
+}
+
 /// Propagate known-bits information through the e-graph.
 /// Computes output known bits from children's known bits for supported ops.
 /// Returns true if any class's known bits were refined.
@@ -128,85 +162,41 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
                 })
             }
             // Shift left by constant: shift known bits left, low bits become known-zero
-            Op::Shl if snap.children.len() == 2 => {
-                let a = egraph.get_known_bits(snap.children[0]);
-                if let Some((shift_amt, _)) = egraph.get_constant(snap.children[1]) {
-                    let ty = &egraph
-                        .class(egraph.unionfind.find_immutable(snap.class_id))
-                        .ty;
-                    let width = ty.bit_width();
-                    // Out-of-range shift: x86 uses CL mod 64; don't derive known bits
-                    if shift_amt < 0 || shift_amt >= width as i64 {
-                        None
-                    } else {
-                        let n = shift_amt as u32;
-                        let mask = type_mask(ty);
-                        let low_mask = if n == 0 { 0 } else { (1u64 << n) - 1 };
-                        Some(KnownBits {
-                            known_ones: (a.known_ones << n) & mask,
-                            known_zeros: ((a.known_zeros << n) | low_mask) & mask,
-                        })
-                    }
-                } else {
-                    None
+            Op::Shl if snap.children.len() == 2 => shift_by_constant(egraph, snap).map(|s| {
+                let low_mask = if s.n == 0 { 0 } else { (1u64 << s.n) - 1 };
+                KnownBits {
+                    known_ones: (s.bits.known_ones << s.n) & s.mask,
+                    known_zeros: ((s.bits.known_zeros << s.n) | low_mask) & s.mask,
                 }
-            }
+            }),
             // Logical shift right by constant: shift right, high bits become known-zero
-            Op::Shr if snap.children.len() == 2 => {
-                let a = egraph.get_known_bits(snap.children[0]);
-                if let Some((shift_amt, _)) = egraph.get_constant(snap.children[1]) {
-                    let ty = &egraph
-                        .class(egraph.unionfind.find_immutable(snap.class_id))
-                        .ty;
-                    let width = ty.bit_width();
-                    if shift_amt < 0 || shift_amt >= width as i64 {
-                        None
-                    } else {
-                        let n = shift_amt as u32;
-                        let mask = type_mask(ty);
-                        let high_mask = mask & !(mask >> n);
-                        Some(KnownBits {
-                            known_ones: (a.known_ones >> n) & mask,
-                            known_zeros: ((a.known_zeros >> n) | high_mask) & mask,
-                        })
-                    }
-                } else {
-                    None
+            Op::Shr if snap.children.len() == 2 => shift_by_constant(egraph, snap).map(|s| {
+                let high_mask = s.mask & !(s.mask >> s.n);
+                KnownBits {
+                    known_ones: (s.bits.known_ones >> s.n) & s.mask,
+                    known_zeros: ((s.bits.known_zeros >> s.n) | high_mask) & s.mask,
                 }
-            }
+            }),
             // Arithmetic shift right by constant: high bits replicate sign bit
             Op::Sar if snap.children.len() == 2 => {
-                let a = egraph.get_known_bits(snap.children[0]);
-                if let Some((shift_amt, _)) = egraph.get_constant(snap.children[1]) {
-                    let ty = &egraph
-                        .class(egraph.unionfind.find_immutable(snap.class_id))
-                        .ty;
-                    let width = ty.bit_width();
-                    if shift_amt < 0 || shift_amt >= width as i64 {
-                        None
-                    } else {
-                        let n = shift_amt as u32;
-                        let mask = type_mask(ty);
-                        let sign_bit = 1u64 << (width - 1);
-                        let high_mask = mask & !(mask >> n);
-                        let mut ones = (a.known_ones >> n) & mask;
-                        let mut zeros = (a.known_zeros >> n) & mask;
-                        // If sign bit is known-one, high bits are all ones
-                        if a.known_ones & sign_bit != 0 {
-                            ones |= high_mask;
-                        }
-                        // If sign bit is known-zero, high bits are all zeros
-                        if a.known_zeros & sign_bit != 0 {
-                            zeros |= high_mask;
-                        }
-                        Some(KnownBits {
-                            known_ones: ones,
-                            known_zeros: zeros,
-                        })
+                shift_by_constant(egraph, snap).map(|s| {
+                    let sign_bit = 1u64 << (s.width - 1);
+                    let high_mask = s.mask & !(s.mask >> s.n);
+                    let mut ones = (s.bits.known_ones >> s.n) & s.mask;
+                    let mut zeros = (s.bits.known_zeros >> s.n) & s.mask;
+                    // If sign bit is known-one, high bits are all ones
+                    if s.bits.known_ones & sign_bit != 0 {
+                        ones |= high_mask;
                     }
-                } else {
-                    None
-                }
+                    // If sign bit is known-zero, high bits are all zeros
+                    if s.bits.known_zeros & sign_bit != 0 {
+                        zeros |= high_mask;
+                    }
+                    KnownBits {
+                        known_ones: ones,
+                        known_zeros: zeros,
+                    }
+                })
             }
             // Zero-extend: upper bits are known-zero
             Op::Zext(target_ty) if snap.children.len() == 1 => {
