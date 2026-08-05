@@ -1172,6 +1172,35 @@ which resolves parameter VRegs through the class map where the multi-block path 
 algorithm means one derivation of the copy set, which is the same "two passes deriving
 it separately" hazard as everywhere else in this document.
 
+### Measured: the general path handles them, and emits worse code
+
+Sending every single-block function down the multi-block path is **correct** --
+474 lit and 299 differential comparisons pass unchanged, and 686 of 708
+disassemblies are byte-identical, so only the functions that actually take the
+fast path move at all.
+
+**It costs 12 lit rows.** `regalloc/array_spill_frame_corruption.c` is the worst:
++60% instructions, 1 spill becoming 9 and 2 reloads becoming 33 at `-O0`, with
+`float/basic_arithmetic.c`, `stack/multi_stack_slot.c` and
+`globals/multiple_globals.c` each gaining a spill they did not have.
+
+**And the coloring is not the reason.** `BLITZ_DEBUG=slots` attributes the seven
+slots on that program: five to **early-barrier live-range shortening** and two to
+the **splitter**, neither of which the fast path runs. One splitter slot is
+stored once and reloaded 23 times. The block's pressure does reach the budget of
+14, so those passes are not firing on a phantom -- they are pre-spilling where
+the per-block allocator's coloring succeeds with a single spill.
+
+So the sentence above ("a single-block function is a special case of the general
+one, not a separate algorithm") is right about the allocators and wrong about the
+pipeline. **What blocks step 6 is not the merge; it is that the passes in front
+of the allocator spill before knowing whether the allocator needs them to.** The
+fold should follow a change that makes the splitter and the early-barrier pass
+act only where a colouring actually fails -- which is the same shape as step 5's
+lesson, that a splitter behind a real spill loop is a quality knob rather than a
+gate. Attempting the merge first buys one file and loses a measurable amount of
+code quality on every small function.
+
 This is also the natural place for soundness gap 2 above: the merge-versus-liveness
 check needs to sit inside whichever allocator survives.
 
