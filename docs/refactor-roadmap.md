@@ -658,36 +658,56 @@ point of the step, but it means stopping to explain the diff rather than
 recording a new baseline. Step 2's estimate went unchecked for a year because
 nothing could check it; every step from here says what it expects first.
 
-### Step 3b notes — block parameters get VRegs
+### Step 3b notes — block parameters get VRegs — DONE
 
-The phi seam has two ends and step 1 fixed one. `cfg::resolve_block_param_vreg` still
-answers "which VReg does this parameter live in" from **four** ordered fallbacks, and
-three call sites consult it (`build_phi_copies`,
-`compute_copy_pairs_from_schedules`, `collect_block_param_vregs_per_block`). Two
-passes deriving it separately is what `021d4ed` and `29e796d` were.
+The phi seam has two ends and step 1 fixed one. `BasicBlock::param_vregs` sits beside
+`param_types`, written by `cfg::commit_block_param_vregs` at the end of linearization
+with the other commits and cleared by `phi_removal` with the rest, since a removal
+changes the positions themselves.
 
-Linearization already decides it once, in one place, and records it in
-`block_param_vregs` — so this is the same move step 1 made: give `BasicBlock` a
-`param_vregs` beside `param_types`, write it where the decision is made, and collapse
-the four sources to one.
+**The four ordered fallbacks are three, and which ones survive was measured rather
+than argued.** A `BLITZ_DEBUG=paramsrc` probe over the regalloc and bench corpora and
+30 generated programs at both levels, 123595 resolutions:
 
-It is listed after step 3 rather than before because **step 2 does not need it**: the
-self-reference test is a class question (see step 2's two tiers), so step 2 can land
-without touching this chain. It is listed *before* step 4 because step 4's deletion
-list already contains `block_param_vregs` and `block_param_vreg_overrides`, and
-deleting them needs something to have replaced them.
+| source | answers | note |
+| --- | --- | --- |
+| the target block's own `Op::BlockParam` | 122223 | the only one that survives coalescing |
+| the override linearization minted | **0** | deleted |
+| the class map at the target's entry | 442 | of the 1372 the schedule leaves |
+| what linearization recorded | 1370 | now `BasicBlock::param_vregs` |
 
-One thing to get right, learned from step 1: the splitter truncates a parameter's
-segment but never renumbers its `Op::BlockParam` dst, so a committed parameter VReg
-stays valid modulo coalesce aliases, which are already applied downstream. The
-`param_vregs` list is therefore stable the way `TermArgs::Committed` is — and, like
-it, is not the post-split authority for a parameter routed through a slot.
+The override answered nothing because linearization gives exactly those parameters a
+`BlockParam` instruction of their own, so the schedule answers first every time. That
+is a fourth measurement of the same fact: `ba3f1be` found the parameter overrides
+inert in `commit_terminator_arg_vregs` and in `append_terminator_args`, and this is
+the third consumer to lose them. What still reads them is Phase 7's snapshot
+patching.
+
+**Why it cannot collapse to one source, which the plan above assumed it could.** Split
+by call site, `compute_copy_pairs_from_schedules` (post-split, pre-coalesce) has the
+schedule and the CFG's record agreeing on **all 61592** resolutions where both
+answer, so the record is exact through the splitter — as this section predicted. But
+`build_phi_copies` (Phase 7, post-coalesce) has them differing on **49646 of 60631**,
+because coalescing renames and the CFG's record is the pre-merge VReg. So the
+schedule stays the first source and the CFG's record is the fallback, exactly as
+`TermArgs::Committed` is not the post-split authority for an argument routed through
+a slot. The class map keeps its place between them for the 442, where a reload
+covering block entry is what the block reads; it differs from the record in 2 of
+them.
+
+Byte-identical: 768 identity comparisons against step 3, 0 differing; 888 codesize
+rows unchanged.
 
 ### Step 4 notes — what to delete
 
-Per-block snapshots, the three-times-patched map, `block_param_vregs`,
+Per-block snapshots, the three-times-patched map, `Linearized::block_param_vregs`
+(now a copy into `BasicBlock::param_vregs` and read nowhere else),
 `block_param_vreg_overrides`, `class_emitted_in`, and the `value_defs` guard in
 `split.rs`. Judged by LOC removed with no behaviour change.
+
+`block_param_vreg_overrides` has one consumer left after step 3b -- Phase 7's
+snapshot patching -- and three measurements say it answers nothing anywhere else, so
+probe that one before writing code to preserve it.
 
 It also unblocks the **slot-level verifier**: a reload must produce the class that was
 stored. That check cannot be built on the current map, which reports false positives

@@ -82,7 +82,6 @@ pub(super) fn find_trivial_params(
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     tier2: bool,
 ) -> Removal {
-    let block_param_vregs = &lin.block_param_vregs;
     let depths = super::cfg::block_loop_depths(func);
     let entry = func.blocks.first().map(|b| b.id);
 
@@ -137,7 +136,7 @@ pub(super) fn find_trivial_params(
                 survivors.push(pidx);
                 continue;
             }
-            let own = block_param_vregs.get(&(block.id, pidx)).copied();
+            let own = block.param_vreg(pidx);
             let own_class = block_param_map
                 .get(&(block.id, pidx))
                 .map(|&c| egraph.unionfind.find_immutable(c));
@@ -307,7 +306,9 @@ pub(super) fn apply(func: &mut Function, egraph: &mut EGraph, removal: &Removal)
         // Every VReg the CFG holds describes a linearization this removal is
         // about to replace, so none of them outlives the removal: the classes
         // are still what the operands are, and the VRegs are an answer the next
-        // linearization re-asks.
+        // linearization re-asks. The parameters lose theirs outright, since the
+        // positions themselves are changing.
+        block.param_vregs.clear();
         for op in block.ops.iter_mut() {
             match op {
                 EffectfulOp::Load { addr, result, .. } => {

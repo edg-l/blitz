@@ -385,6 +385,7 @@ mod tests {
         BasicBlock {
             id,
             param_types: vec![],
+            param_vregs: vec![],
             ops,
         }
     }

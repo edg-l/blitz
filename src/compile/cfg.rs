@@ -539,7 +539,23 @@ pub(super) fn commit_effectful_vregs(
     Ok(())
 }
 
-/// The VReg block `target`'s parameter `pidx` is written into, from the four
+/// Commit linearization's choice of VReg for every block parameter into the CFG.
+///
+/// The destination end of the phi seam, as [`commit_terminator_arg_vregs`] is
+/// the argument end. Linearization decides this in one place and it was recorded
+/// in a side map threaded through six signatures; the block is where it belongs.
+pub(super) fn commit_block_param_vregs(
+    func: &mut Function,
+    block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
+) {
+    for block in func.blocks.iter_mut() {
+        block.param_vregs = (0..block.param_types.len() as u32)
+            .map(|pidx| block_param_vregs.get(&(block.id, pidx)).copied())
+            .collect();
+    }
+}
+
+/// The VReg block `target`'s parameter `pidx` is written into, from the three
 /// places that can name it, in the order that matters.
 ///
 /// Every pass that touches a phi copy has to agree on this answer: the copy that
@@ -551,40 +567,59 @@ pub(super) fn commit_effectful_vregs(
 ///    reads, so a copy into anything else writes a register nobody looks at. One
 ///    class can name several VRegs and here the two answers came apart: the class
 ///    resolved to a VReg in RAX while the block's schedule read RSI, so a loop
-///    counter started at whatever RSI held and the loop was skipped entirely.
-/// 2. **The override linearization minted**, for a parameter whose class was
-///    already emitted by a non-dominating earlier block.
-/// 3. **The class map at the target's entry**, because where a reload covers that
-///    point the reload is what the block reads.
-/// 4. **What linearization recorded.** A parameter passing a dominating definition
-///    straight through gets no `BlockParam` of its own, so once the splitter
-///    cross-block-spills that definition and truncates its segment to the defining
-///    block, nothing else names the value here -- 9 of 40 generated programs
-///    failed to compile at -O1 on exactly that.
+///    counter started at whatever RSI held and the loop was skipped entirely. It
+///    answers 122223 of 123595 resolutions measured, and is the only source that
+///    survives coalescing: past that point the other two name the pre-merge VReg.
+/// 2. **The class map at the target's entry**, because where a reload covers that
+///    point the reload is what the block reads. It answers 442 of the 1372 where
+///    the schedule does not, and differs from 3 in 2 of them.
+/// 3. **The VReg the CFG states**, `BasicBlock::param_vregs`. A parameter passing
+///    a dominating definition straight through gets no `BlockParam` of its own,
+///    so once the splitter cross-block-spills that definition and truncates its
+///    segment to the defining block, nothing else names the value here -- 9 of 40
+///    generated programs failed to compile at -O1 on exactly that.
+///
+/// A fourth source was here and is gone: the override linearization minted for a
+/// parameter whose class an earlier non-dominating block emitted. It answered
+/// **0 of 123595** resolutions, because linearization gives such a parameter a
+/// `BlockParam` instruction of its own and source 1 then answers first.
 pub(super) fn resolve_block_param_vreg(
-    target: BlockId,
+    target_block: &BasicBlock,
     pidx: u32,
     target_idx: usize,
     target_schedule: &[ScheduledInst],
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
-    param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
-    block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
 ) -> Option<VReg> {
-    target_schedule
-        .iter()
-        .find_map(|inst| match inst.op {
-            Op::BlockParam(bid, i, _) if bid == target && i == pidx => Some(inst.dst),
-            _ => None,
-        })
-        .or_else(|| param_vreg_overrides.get(&(target, pidx)).copied())
-        .or_else(|| {
-            let param_cid = *block_param_map.get(&(target, pidx))?;
-            let canon = egraph.unionfind.find_immutable(param_cid);
-            class_to_vreg.lookup(canon, ProgramPoint::block_entry(target_idx))
-        })
-        .or_else(|| block_param_vregs.get(&(target, pidx)).copied())
+    let target = target_block.id;
+    let from_schedule = target_schedule.iter().find_map(|inst| match inst.op {
+        Op::BlockParam(bid, i, _) if bid == target && i == pidx => Some(inst.dst),
+        _ => None,
+    });
+    let from_map = || -> Option<VReg> {
+        let param_cid = *block_param_map.get(&(target, pidx))?;
+        let canon = egraph.unionfind.find_immutable(param_cid);
+        class_to_vreg.lookup(canon, ProgramPoint::block_entry(target_idx))
+    };
+    let from_cfg = target_block.param_vreg(pidx);
+    if crate::trace::is_enabled("paramsrc") {
+        let answer = from_schedule.or_else(from_map).or(from_cfg);
+        let disagree = [from_schedule, from_map(), from_cfg]
+            .iter()
+            .any(|v| v.is_some() && *v != answer);
+        if disagree {
+            tracing::debug!(
+                target: "blitz::paramsrc",
+                "b{target}.p{pidx} -> {:?}: schedule={:?} map={:?} cfg={:?}",
+                answer.map(|v| v.0),
+                from_schedule.map(|v| v.0),
+                from_map().map(|v| v.0),
+                from_cfg.map(|v| v.0),
+            );
+        }
+    }
+    from_schedule.or_else(from_map).or(from_cfg)
 }
 
 /// Build phi copy pairs from the schedules, as `(arg_vreg, param_vreg)`.
@@ -606,8 +641,6 @@ pub(super) fn compute_copy_pairs_from_schedules(
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
-    param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
-    block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
 ) -> Vec<(VReg, VReg)> {
     let id_to_idx = block_id_to_idx(func);
 
@@ -616,15 +649,13 @@ pub(super) fn compute_copy_pairs_from_schedules(
     let param_vreg = |target: BlockId, pidx: u32| -> Option<VReg> {
         let target_idx = *id_to_idx.get(&target)?;
         resolve_block_param_vreg(
-            target,
+            func.blocks.get(target_idx)?,
             pidx,
             target_idx,
             block_schedules.get(target_idx)?,
             egraph,
             class_to_vreg,
             block_param_map,
-            param_vreg_overrides,
-            block_param_vregs,
         )
     };
 

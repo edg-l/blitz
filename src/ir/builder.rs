@@ -748,6 +748,7 @@ impl FunctionBuilder {
             .map(|bd| BasicBlock {
                 id: bd.id,
                 param_types: bd.param_types,
+                param_vregs: Vec::new(),
                 ops: bd.ops,
             })
             .collect();

@@ -45,9 +45,9 @@ pub(crate) mod cfg;
 mod linearize;
 mod phi_removal;
 use cfg::{
-    collect_externals, collect_phi_source_vregs, collect_roots, commit_effectful_vregs,
-    commit_terminator_arg_vregs, compute_copy_pairs, compute_copy_pairs_from_schedules,
-    compute_loop_depths,
+    collect_externals, collect_phi_source_vregs, collect_roots, commit_block_param_vregs,
+    commit_effectful_vregs, commit_terminator_arg_vregs, compute_copy_pairs,
+    compute_copy_pairs_from_schedules, compute_loop_depths,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -351,6 +351,7 @@ fn commit_args(
         &rpo_pos,
     )
     .map_err(fail("terminator-args"))?;
+    commit_block_param_vregs(func, &lin.block_param_vregs);
     commit_effectful_vregs(func, egraph, &lin.block_snapshots).map_err(fail("effectful-operands"))
 }
 
@@ -557,7 +558,6 @@ pub fn compile(
         block_vreg_insts,
         block_snapshots: mut block_class_to_vreg_snapshot,
         block_param_vreg_overrides,
-        block_param_vregs,
         vreg_types,
         ..
     } = lin;
@@ -1241,11 +1241,14 @@ pub fn compile(
         // coalescing is free to merge two parameters of one block into a single
         // register. Both phi copies then target that register and the second
         // overwrites the first.
-        for (&(bid, pidx), &vreg) in &block_param_vregs {
-            if slot_spilled_params.contains_key(&(bid, pidx)) {
-                continue;
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            for (pidx, vreg) in block.param_vregs.iter().enumerate() {
+                let Some(&vreg) = vreg.as_ref() else { continue };
+                if slot_spilled_params.contains_key(&(block.id, pidx as u32)) {
+                    continue;
+                }
+                block_param_vregs_per_block[block_idx].insert(vreg);
             }
-            block_param_vregs_per_block[block_id_to_idx[&bid]].insert(vreg);
         }
 
         // Remove slot-spilled params from block_param_vregs_per_block.
@@ -1280,8 +1283,6 @@ pub fn compile(
             &egraph,
             &class_to_vreg,
             &block_param_map,
-            &block_param_vreg_overrides,
-            &block_param_vregs,
         );
 
         // `phi_uses` covers every VReg a terminator consumes -- a Jump's and a
@@ -1680,8 +1681,6 @@ pub fn compile(
             &class_to_vreg,
             &block_class_to_vreg,
             &block_param_map,
-            &block_param_vreg_overrides,
-            &block_param_vregs,
             // Straight off the final schedule: post-split, post-coalesce, the
             // VRegs the allocator actually assigned registers to.
             &barrier::terminator_arg_operands(&block_rewritten[block_idx])

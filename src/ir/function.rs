@@ -1,4 +1,5 @@
 use crate::egraph::EGraph;
+use crate::egraph::extract::VReg;
 #[cfg(test)]
 use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffectfulOp};
@@ -28,6 +29,22 @@ pub struct BasicBlock {
     pub id: BlockId,
     /// Types of this block's parameters (phi-node arguments from predecessors).
     pub param_types: Vec<Type>,
+    /// The VReg each parameter lives in, once linearization has chosen it.
+    ///
+    /// Empty until `cfg::commit_block_param_vregs` writes it, and one entry per
+    /// parameter from then on -- `None` where linearization found no VReg for
+    /// that position. The destination end of the seam `TermArgs::Committed`
+    /// fixed at the argument end: every pass that touches a phi copy has to
+    /// agree on which VReg the copy writes, and two passes deriving it
+    /// separately is what `021d4ed` and `29e796d` were.
+    ///
+    /// Exact through the splitter, which truncates a parameter's segment but
+    /// never renumbers its `Op::BlockParam` dst; measured over 62367 resolutions
+    /// on the regalloc, bench and generated corpora, this and the schedule agree
+    /// everywhere both answer. Coalescing then renames, so past that point the
+    /// target block's own `Op::BlockParam` is the authority -- see
+    /// [`crate::compile::cfg::resolve_block_param_vreg`], which asks it first.
+    pub param_vregs: Vec<Option<VReg>>,
     /// Effectful operations, including the terminator as the final element.
     pub ops: Vec<EffectfulOp>,
 }
@@ -38,8 +55,14 @@ impl BasicBlock {
         Self {
             id,
             param_types,
+            param_vregs: Vec::new(),
             ops: Vec::new(),
         }
+    }
+
+    /// The VReg parameter `pidx` lives in, as the CFG states it.
+    pub fn param_vreg(&self, pidx: u32) -> Option<VReg> {
+        self.param_vregs.get(pidx as usize).copied().flatten()
     }
 
     /// Number of non-terminator operations (all ops except the last).

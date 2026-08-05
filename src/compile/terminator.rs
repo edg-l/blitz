@@ -229,8 +229,6 @@ pub(super) fn lower_terminator(
     class_to_vreg: &ClassVRegMap,
     ret_class_to_vreg: &ClassVRegMap,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
-    param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
-    block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
     term_args: &BTreeMap<u32, VReg>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
     regalloc: &RegAllocResult,
@@ -343,8 +341,6 @@ pub(super) fn lower_terminator(
                 egraph,
                 class_to_vreg,
                 block_param_map,
-                param_vreg_overrides,
-                block_param_vregs,
                 term_args,
                 0,
                 coalesce_aliases,
@@ -384,8 +380,6 @@ pub(super) fn lower_terminator(
                 egraph,
                 class_to_vreg,
                 block_param_map,
-                param_vreg_overrides,
-                block_param_vregs,
                 term_args,
                 0,
                 coalesce_aliases,
@@ -401,8 +395,6 @@ pub(super) fn lower_terminator(
                 egraph,
                 class_to_vreg,
                 block_param_map,
-                param_vreg_overrides,
-                block_param_vregs,
                 term_args,
                 true_args.len(),
                 coalesce_aliases,
@@ -493,8 +485,6 @@ fn build_phi_copies(
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
-    param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
-    block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
     term_args: &BTreeMap<u32, VReg>,
     arg_base: usize,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
@@ -655,20 +645,18 @@ fn build_phi_copies(
             continue;
         }
 
-        // The destination, from the four places that can name it -- see
+        // The destination, from the three places that can name it -- see
         // `cfg::resolve_block_param_vreg`, which every pass touching a phi copy
         // resolves through so they cannot disagree about which VReg the copy
         // writes.
         let param_vreg = super::cfg::resolve_block_param_vreg(
-            target,
+            target_block,
             param_idx as u32,
             target_block_idx,
             target_schedule,
             egraph,
             class_to_vreg,
             block_param_map,
-            param_vreg_overrides,
-            block_param_vregs,
         )
         .ok_or_else(|| CompileError {
             phase: "phi-elim".into(),
