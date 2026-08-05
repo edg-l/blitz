@@ -988,15 +988,7 @@ pub fn verify_register_sharing(
     // register. And `phi_uses` was built before coalescing, so a renamed VReg
     // there is a use with no def in any schedule -- liveness would carry it back
     // to the function entry and report a clash at every point on the way.
-    let canon = |mut v: VReg| -> VReg {
-        for _ in 0..coalesce_aliases.len() + 1 {
-            match coalesce_aliases.get(&v) {
-                Some(&next) if next != v => v = next,
-                _ => break,
-            }
-        }
-        v
-    };
+    let canon = |v: VReg| -> VReg { crate::regalloc::coalesce::chase_alias(v, coalesce_aliases) };
     let phi_uses_canon: Vec<std::collections::BTreeSet<VReg>> = phi_uses
         .iter()
         .map(|set| set.iter().map(|&v| canon(v)).collect())

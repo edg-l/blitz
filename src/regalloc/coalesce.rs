@@ -1,5 +1,24 @@
+use std::collections::BTreeMap;
+
 use super::interference::InterferenceGraph;
+use crate::egraph::extract::VReg;
 use crate::x86::reg::RegClass;
+
+/// Follow a coalescing alias chain to the VReg that survived the merge.
+///
+/// The map is transitive, and stopping after one step leaves a VReg with no
+/// register assignment -- which reads as "no answer" and drops whatever copy was
+/// being emitted. The step count is bounded by the map's size so a cycle
+/// terminates instead of hanging the compiler.
+pub fn chase_alias(mut vreg: VReg, coalesce_aliases: &BTreeMap<VReg, VReg>) -> VReg {
+    for _ in 0..coalesce_aliases.len() + 1 {
+        match coalesce_aliases.get(&vreg) {
+            Some(&aliased) if aliased != vreg => vreg = aliased,
+            _ => break,
+        }
+    }
+    vreg
+}
 
 /// Conservative (Briggs) coalescing on the SSA interference graph.
 ///

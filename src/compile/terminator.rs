@@ -10,6 +10,7 @@ use crate::ir::effectful::{BlockId, EffectfulOp, TermArgs};
 use crate::ir::function::Function;
 use crate::ir::op::ClassId;
 use crate::regalloc::allocator::RegAllocResult;
+use crate::regalloc::coalesce::chase_alias;
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::{FP_RETURN_REG, FrameLayout, GPR_RETURN_REG};
 use crate::x86::addr::Addr;
@@ -204,21 +205,6 @@ fn ret_value_reg(
         .map(|v| chase_alias(v, coalesce_aliases))
         .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
         .or_else(|| get_reg(ret_cid, ret_class_to_vreg))
-}
-
-/// Follow a coalescing alias chain to the VReg that survived the merge.
-///
-/// The map is transitive, and a single step leaves a VReg with no register
-/// assignment -- which reads as "no answer" and drops whatever copy was being
-/// emitted.
-pub(super) fn chase_alias(mut vreg: VReg, coalesce_aliases: &BTreeMap<VReg, VReg>) -> VReg {
-    while let Some(&aliased) = coalesce_aliases.get(&vreg) {
-        if aliased == vreg {
-            break;
-        }
-        vreg = aliased;
-    }
-    vreg
 }
 
 /// Lower a block terminator, including phi copies for block-parameter passing.

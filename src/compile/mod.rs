@@ -1650,7 +1650,7 @@ pub fn compile(
                 for (cid, vreg, start, end) in map.iter_segments() {
                     aliased_map.insert_segment_shared(
                         cid,
-                        terminator::chase_alias(vreg, &coalesce_aliases),
+                        crate::regalloc::coalesce::chase_alias(vreg, &coalesce_aliases),
                         start,
                         end,
                     );
