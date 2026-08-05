@@ -3,7 +3,8 @@
 //! Phases:
 //!  1. E-graph rewrite rules (algebraic, strength reduction, isel)
 //!  2. Cost-based extraction
-//!  3. VRegInst linearization
+//!  3. VRegInst linearization, then trivial block-parameter removal, which
+//!     re-extracts and runs phase 3 again over the reduced CFG
 //!  4. DAG scheduling
 //!  5. Register allocation
 //!  6. VReg-to-phys rewrite

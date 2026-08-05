@@ -30,20 +30,25 @@ rather than overhead against it.
   atomics, sanitizers, LTO, PGO. These are what a *shipping* compiler needs, not
   what a *good* optimizer needs. Revisit only if one blocks measurement.
 
-## Current state (2026-08-03)
+## Current state (2026-08-05)
 
-- 924 Rust tests + 440 lit tests, all green. `cargo fmt` clean.
+- 934 Rust tests + 474 lit tests, all green. `cargo fmt` clean.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 281 tests compared O0-vs-O1 and against a
+- `bash tests/lit/run_diff.sh`: 298 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
-- Generated programs, 60 seeds per shape, per (seed, level) pair: `mixed` 58/60,
-  `args` 53/60, `pressure` 24/60. **Every remaining failure on every shape is
-  capacity** (`register pressure overshoot`); no wrong-value program is open and
-  `tests/fuzz/findings/` is empty.
+- Generated programs, per (seed, level) pair at 30 seeds per shape: `mixed`
+  29/30, `args` 29/30, `pressure` 14/30. **Every remaining failure on every shape
+  is capacity** (`register pressure overshoot`); no wrong-value program is open
+  and `tests/fuzz/findings/` is empty. (The 60-seed figures this section used to
+  quote were `mixed` 58/60, `args` 53/60, `pressure` 24/60 -- the same picture.)
+- Code quality has a baseline: `bash tests/run_codesize.sh --check`, 888 rows
+  across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
+  the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
-  e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> DAG
-  schedule -> live-range splitter -> function-scope Chaitin-Briggs regalloc ->
-  terminator lowering -> MachInst lowering -> branch relaxation -> ELF.
+  e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> trivial
+  block-parameter removal (re-extract + linearize again) -> DAG schedule ->
+  live-range splitter -> function-scope Chaitin-Briggs regalloc -> terminator
+  lowering -> MachInst lowering -> branch relaxation -> ELF.
 - Implemented e-graph rules: see `docs/egraph-optimization-roadmap.md`.
 - Splitter design: see `docs/split-pass-plan.md`.
 
@@ -54,15 +59,26 @@ Read it before starting anything in the register allocator, the splitter, or the
 block-parameter machinery. The two that matter:
 
 - **The CFG should hold VRegs, not ClassIds** (steps 1-4). The root cause behind the
-  seven wrong-code bugs that seam has produced, behind both failed attempts at
-  rematerialization, and behind 36 of the 46 remaining capacity failures; and it is
-  what makes redundant block-parameter elimination possible, worth 85-94% of every
-  function's parameters.
-- **The function-scope allocator cannot spill** (step 5). `run_phase5` is
-  `Ok`-or-`Err` with no spill loop, so "the splitter must be perfect" and every
-  capacity failure is a compile error rather than slow code. It comes *after* the
-  steps above on purpose -- a spiller mints new VRegs for existing classes, which is
-  exactly what the current representation handles worst.
+  seven wrong-code bugs that seam has produced -- nine now, after two more of the
+  same shape on 2026-08-05 -- and behind both failed attempts at rematerialization.
+  Steps 0, 1 and 2 are done; step 3 is next and `docs/refactor-roadmap.md` says
+  which slice first.
+
+  **It is *not* behind the capacity failures, which this plan used to claim.**
+  Step 2 shipped and cleared none of them: on the failing programs 57 of 97
+  parameters are real phis and 27 carry a value already placed in a register, so
+  neither of its conditions binds. The 85-94% figure is measured on the
+  pre-extraction IR by a tool asking a weaker question than soundness does. What
+  step 2 did buy is fewer spills and reloads everywhere (`fuzz` -8.3% spills).
+- **The function-scope allocator cannot spill** (step 5), and this is where the
+  capacity failures actually live. `run_phase5` is `Ok`-or-`Err` with no spill
+  loop, so "the splitter must be perfect" and every capacity failure is a compile
+  error rather than slow code. It comes *after* the steps above on purpose -- a
+  spiller mints new VRegs for existing classes, which is exactly what the current
+  representation handles worst. Evidence that it is the right target: removing
+  block parameters more aggressively than step 2 does made a program stop
+  compiling, because the parameter had been holding apart a live range the
+  allocator could not colour.
 
 ## Priorities
 

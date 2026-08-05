@@ -777,12 +777,16 @@ stops being a hazard the pipeline has to remember.
 
 ---
 
-## State when this was written (2026-08-03, `81c0f2e`)
+## State at 2026-08-05 (`6e315ac`), after steps 0, 1 and 2
 
-Gates: 924 unit, 440 lit at `BLITZ_VERIFY` off/1/strict, 281 differential + `cc`.
-51.9k lines of Rust across 98 files.
+Gates: 934 unit, 474 lit at `BLITZ_VERIFY` off/1/strict, 298 differential + `cc`.
+Code quality has a baseline too: `bash tests/run_codesize.sh --check`, 888 rows.
 
-Generated corpus, release build, 60 seeds per shape, per (seed, level) pair:
+Generated corpus, per (seed, level) pair at 30 seeds per shape: `mixed` 29/30,
+`args` 29/30, `pressure` 14/30. Every failure is capacity, and **step 2 moved
+none of them** -- see its notes for the count of why.
+
+The 60-seed figures this section quoted before steps 1 and 2, for comparison:
 
 | shape | passing | failures |
 | --- | --- | --- |
