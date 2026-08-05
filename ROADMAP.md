@@ -166,12 +166,20 @@ type handling** (the `X86CmpI` `ty` bug was exactly this class).
 
 Without numbers, "most optimized" is unfalsifiable and every session drifts.
 
-- [ ] Benchmark harness: a corpus of C files, compiled by tinyc/blitz and by
-      `gcc -O2` / `clang -O2`, comparing instruction count, `.text` bytes,
-      spill/reload count, and wall-clock via hyperfine. Checked-in baselines so
-      regressions are visible in a diff.
-- [ ] Per-function codegen stats behind a flag (instructions, spills, reloads,
-      stack frame size) so a pass's effect is one command away.
+- [x] Benchmark harness: `bash tests/run_codesize.sh [--check|--update]`, over
+      three corpora with a baseline each in `tests/baselines/`. Instruction
+      count, `.text` bytes, spill stores and reloads per (program, level);
+      `--check` prints every change and exits non-zero on any increase. 888
+      rows: 678 `lit`, 30 `bench`, 180 `fuzz`. A generated program that does not
+      compile is a `-` row rather than an omission, so the 11 holes stay
+      visible.
+- [x] Per-function codegen stats behind a flag: `BLITZ_DEBUG=stats` prints
+      `name= insts= bytes= spills= reloads= frame= slots=` per function, counted
+      off the final instruction stream.
+- [ ] Wall-clock via hyperfine, and the same table for `gcc -O2` / `clang -O2`
+      beside blitz's own numbers. Deferred deliberately: blitz-against-itself is
+      what refereed the decisions so far, and an external column moves when the
+      system compiler updates.
 
 ### P1 -- Optimizer gaps with the largest measured impact
 

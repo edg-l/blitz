@@ -1,0 +1,32 @@
+# program	level	insts	bytes	spills	reloads
+# corpus: bench -- written by tests/run_codesize.sh --update
+binary_search.c	O0	107	367	1	6
+binary_search.c	O1	136	505	12	39
+bitcount.c	O0	121	397	3	10
+bitcount.c	O1	102	313	0	0
+crc32.c	O0	99	323	0	0
+crc32.c	O1	91	292	0	0
+dot_product.c	O0	121	556	5	6
+dot_product.c	O1	115	532	5	6
+fib_memo.c	O0	157	576	1	1
+fib_memo.c	O1	188	708	3	33
+hash_table.c	O0	223	833	9	41
+hash_table.c	O1	415	1831	41	150
+loop_nest.c	O0	161	531	0	0
+loop_nest.c	O1	169	580	2	21
+matmul.c	O0	163	597	0	0
+matmul.c	O1	172	612	2	23
+nbody_step.c	O0	233	1057	6	8
+nbody_step.c	O1	219	950	6	10
+queens.c	O0	235	894	11	56
+queens.c	O1	235	879	11	55
+sieve.c	O0	78	276	0	0
+sieve.c	O1	75	263	0	0
+sort_insert.c	O0	162	549	0	0
+sort_insert.c	O1	163	559	0	0
+sort_quick.c	O0	187	634	0	0
+sort_quick.c	O1	188	652	0	0
+strops.c	O0	194	688	0	0
+strops.c	O1	251	951	2	40
+struct_walk.c	O0	123	478	0	0
+struct_walk.c	O1	118	462	0	0

@@ -2007,6 +2007,27 @@ pub fn compile(
         s.phase_stats("encoding", &format!("bytes={func_size}"));
     }
 
+    // One line per function, in a shape `tests/run_codesize.sh` parses into the
+    // checked-in baselines. `insts` counts the body: the prologue and epilogue
+    // are encoded from the frame layout rather than emitted as instructions, and
+    // they are in `bytes`.
+    if crate::trace::is_enabled("stats") && crate::trace::fn_matches(&func.name) {
+        let (spills, reloads) = crate::trace::count_slot_traffic(
+            &flat_insts,
+            frame_layout.spill_base,
+            frame_layout.spill_offset,
+            &slots,
+        );
+        tracing::debug!(
+            target: "blitz::stats",
+            "name={} insts={} bytes={func_size} spills={spills} reloads={reloads} frame={} slots={}",
+            func.name,
+            flat_insts.len(),
+            frame_layout.frame_size,
+            slots.count(),
+        );
+    }
+
     if crate::trace::is_enabled("asm") && crate::trace::fn_matches(&func.name) {
         let code_bytes = &encoder.buf[func_start..];
         if let Some(disasm) = crate::test_utils::objdump_disasm(code_bytes) {

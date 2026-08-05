@@ -4,7 +4,7 @@
 //!
 //! - `BLITZ_DEBUG`: comma-separated list of categories to enable.
 //!   Categories: `sched`, `liveness`, `regalloc`, `asm`, `licm`, `egraph`, `dce`, `alias`,
-//!   `split`, `phi`, `coalesce`, `slots`, `all`.
+//!   `split`, `phi`, `coalesce`, `slots`, `stats`, `all`.
 //!
 //! - `BLITZ_DEBUG_FN`: optional substring filter on function names.
 //!   When set, only functions whose name contains this string produce output.
@@ -32,9 +32,9 @@ struct BlitzDebugConfig {
 }
 
 /// Every valid `BLITZ_DEBUG` category. `all` enables the lot.
-const CATEGORIES: [&str; 12] = [
+const CATEGORIES: [&str; 13] = [
     "sched", "liveness", "regalloc", "asm", "licm", "egraph", "dce", "alias", "split", "phi",
-    "coalesce", "slots",
+    "coalesce", "slots", "stats",
 ];
 
 fn start_time() -> &'static Instant {
@@ -211,6 +211,52 @@ pub fn format_vreg_to_reg(map: &BTreeMap<VReg, crate::x86::reg::Reg>) -> String 
 /// after a reload put it somewhere else, which fired on a third of the slots in
 /// the first program tried. The store registers are in the line; judge them
 /// there.
+/// The displacement a memory operand names, if it is a spill slot.
+///
+/// A plain `[spill_base + disp]` inside the slot region. An indexed address is
+/// not a slot reference: nothing addresses a spill slot that way.
+fn slot_disp(
+    addr: &crate::x86::addr::Addr,
+    spill_base: crate::x86::reg::Reg,
+    spill_offset: i32,
+    spill_slots: u32,
+) -> Option<i32> {
+    if addr.base != Some(spill_base) || addr.index.is_some() {
+        return None;
+    }
+    let spill_hi = spill_offset + (spill_slots as i32) * 8;
+    (addr.disp >= spill_offset && addr.disp < spill_hi).then_some(addr.disp)
+}
+
+/// How many spill stores and reloads the emitted code performs.
+///
+/// Counted off the instruction stream rather than off the passes that planned
+/// them, so a spill three passes disagree about is still counted once, the way
+/// the processor will execute it.
+pub fn count_slot_traffic(
+    insts: &[crate::x86::inst::MachInst],
+    spill_base: crate::x86::reg::Reg,
+    spill_offset: i32,
+    slots: &crate::regalloc::SlotAllocator,
+) -> (usize, usize) {
+    let spill_slots = slots.count();
+    let mut stores = 0;
+    let mut loads = 0;
+    for inst in insts {
+        if let Some(addr) = inst.mem_store_addr()
+            && slot_disp(addr, spill_base, spill_offset, spill_slots).is_some()
+        {
+            stores += 1;
+        }
+        if let Some(addr) = inst.mem_load_addr()
+            && slot_disp(addr, spill_base, spill_offset, spill_slots).is_some()
+        {
+            loads += 1;
+        }
+    }
+    (stores, loads)
+}
+
 pub fn format_slot_traffic(
     insts: &[crate::x86::inst::MachInst],
     spill_base: crate::x86::reg::Reg,
@@ -221,15 +267,8 @@ pub fn format_slot_traffic(
 
     let spill_slots = slots.count();
 
-    let spill_hi = spill_offset + (spill_slots as i32) * 8;
-    // A plain `[spill_base + disp]` inside the slot region. An indexed address is
-    // not a slot reference: nothing addresses a spill slot that way.
-    let slot_of = |addr: &crate::x86::addr::Addr| -> Option<i32> {
-        if addr.base != Some(spill_base) || addr.index.is_some() {
-            return None;
-        }
-        (addr.disp >= spill_offset && addr.disp < spill_hi).then_some(addr.disp)
-    };
+    let slot_of =
+        |addr: &crate::x86::addr::Addr| slot_disp(addr, spill_base, spill_offset, spill_slots);
 
     // disp -> accesses, in instruction order.
     let mut traffic: BTreeMap<i32, Vec<(usize, bool, Vec<crate::x86::reg::Reg>)>> = BTreeMap::new();
