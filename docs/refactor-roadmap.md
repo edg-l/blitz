@@ -738,11 +738,19 @@ Per-block snapshots, the three-times-patched map, `Linearized::block_param_vregs
   *value*, and the predecessor's own initialising store becomes a reload of the
   slot it was about to write. What removes the guard is giving every parameter its
   own VReg, which is a design change, not a deletion.
-- **Still to do: the per-block snapshots and the function-wide map.** The
-  remaining reader is `lower_terminator`'s `get_reg`, measured at **463 hits** on
-  the same corpus -- the `Ret` path, where a value with no `TerminatorArgs` operand
-  carrying a register falls back to the map. That one path is what now stands
-  between the tree and deleting the map.
+- **The three-times-patched per-block map -- DONE.** `lower_terminator`'s
+  `get_reg` was the last lowering reader, at **463 hits**, all of them the
+  single-block path where `append_terminator_args` never runs so the schedule
+  names nothing. All 463 name the register `Ret.val`'s *committed* VReg names, so
+  `ret_value_reg` reads that instead and the map goes. With it went the whole
+  `block_class_to_vreg` construction in Phase 7: the snapshot clone, the
+  block-parameter patch and the coalesce-alias rename, 56 lines whose comments
+  described three bugs each fix had to avoid. **Phase 7 no longer resolves a class
+  to a VReg at all.**
+- **Still to do: `block_class_to_vreg_snapshot` itself.** Its readers are now
+  `build_barrier_context` (which asks a point-free question -- which VRegs of a
+  class this block defines) and the splitter. Neither is a per-point resolution,
+  so what is left may be a different data structure rather than a deletion.
 
 **`block_param_vreg_overrides` is gone.** DONE, as step 4's first slice. It had five
 consumers left after step 3b, and a probe over the whole lit corpus at both levels

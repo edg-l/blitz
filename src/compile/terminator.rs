@@ -189,22 +189,24 @@ enum PhiCopy {
 /// it fails silently -- no register means no move, so the function returns
 /// whatever the ABI register already held.
 ///
-/// The class map stays as the fallback for the single-block path, where
-/// `append_terminator_args` never ran and `term_args` is empty.
+/// The VReg the CFG committed answers where the schedule has no operand, which
+/// is the single-block path: `append_terminator_args` never runs there, so
+/// `term_args` is empty. It is linearization's choice and the splitter does not
+/// run on that path, so it needs only the coalesce aliases the schedule's own
+/// answer needs. Measured over the whole lit corpus and 30 generated programs at
+/// both levels: 463 fallbacks, all naming the register the class map named.
 fn ret_value_reg(
-    ret_cid: ClassId,
+    committed: Option<VReg>,
     term_args: &BTreeMap<u32, VReg>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
     regalloc: &RegAllocResult,
-    ret_class_to_vreg: &ClassVRegMap,
-    get_reg: &impl Fn(ClassId, &ClassVRegMap) -> Option<Reg>,
 ) -> Option<Reg> {
     term_args
         .get(&0)
         .copied()
+        .or(committed)
         .map(|v| chase_alias(v, coalesce_aliases))
         .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
-        .or_else(|| get_reg(ret_cid, ret_class_to_vreg))
 }
 
 /// Lower a block terminator, including phi copies for block-parameter passing.
@@ -227,7 +229,6 @@ pub(super) fn lower_terminator(
     next_block_id: Option<BlockId>,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
-    ret_class_to_vreg: &ClassVRegMap,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     term_args: &BTreeMap<u32, VReg>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
@@ -238,18 +239,6 @@ pub(super) fn lower_terminator(
     frame_layout: &FrameLayout,
     block_schedules: &[Vec<ScheduledInst>],
 ) -> Result<Vec<BlockItem>, CompileError> {
-    let exit_point = ProgramPoint::block_exit(block_idx);
-    let get_reg = |cid: ClassId, ctv: &ClassVRegMap| -> Option<Reg> {
-        let canon = egraph.unionfind.find_immutable(cid);
-        let r = ctv
-            .lookup(canon, exit_point)
-            .and_then(|v| regalloc.vreg_to_reg.get(&v).copied());
-        if r.is_some() && crate::trace::is_enabled("paramsrc") {
-            tracing::debug!(target: "blitz::paramsrc", "MAPFALL terminator-get_reg {canon:?}");
-        }
-        r
-    };
-
     match op {
         EffectfulOp::Ret { val } => {
             let mut items = Vec::new();
@@ -287,26 +276,18 @@ pub(super) fn lower_terminator(
                 // move at all, so the function returned whatever the ABI register
                 // happened to hold -- a wrong answer with nothing downstream able
                 // to see it. There is no correct code to emit here, so say so.
-                let ret_reg = ret_value_reg(
-                    ret_cid.class(),
-                    term_args,
-                    coalesce_aliases,
-                    regalloc,
-                    ret_class_to_vreg,
-                    &get_reg,
-                )
-                .ok_or_else(|| CompileError {
-                    phase: "lowering".into(),
-                    message: format!(
-                        "Ret: no register for value class {:?}; the terminator names {:?} \
-                         and the class map says {:?} at {exit_point:?}",
-                        egraph.unionfind.find_immutable(ret_cid.class()),
-                        term_args.get(&0),
-                        ret_class_to_vreg
-                            .lookup(egraph.unionfind.find_immutable(ret_cid.class()), exit_point),
-                    ),
-                    location: None,
-                })?;
+                let ret_reg = ret_value_reg(ret_cid.vreg(), term_args, coalesce_aliases, regalloc)
+                    .ok_or_else(|| CompileError {
+                        phase: "lowering".into(),
+                        message: format!(
+                            "Ret: no register for value class {:?}; the terminator names {:?} \
+                         and the CFG states {:?}",
+                            egraph.unionfind.find_immutable(ret_cid.class()),
+                            term_args.get(&0),
+                            ret_cid.vreg(),
+                        ),
+                        location: None,
+                    })?;
                 let is_float_ret = func.return_types.first().is_some_and(|t| t.is_float());
                 let abi_reg = if is_float_ret {
                     FP_RETURN_REG

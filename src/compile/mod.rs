@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::cost::{CostModel, OptGoal};
-use crate::egraph::extract::{ClassVRegMap, VReg, extract};
+use crate::egraph::extract::{VReg, extract};
 use crate::egraph::phases::{CompileOptions as EGraphOptions, run_phases};
 use crate::emit::object::{FunctionInfo, ObjectFile};
 use crate::emit::peephole::peephole;
@@ -39,7 +39,6 @@ use barrier::{
     assign_barrier_groups, build_barrier_context, insert_early_barrier_spills,
     populate_effectful_operands,
 };
-use program_point::ProgramPoint;
 mod canon;
 use canon::canonicalize_class_refs;
 pub(crate) mod cfg;
@@ -1425,62 +1424,6 @@ pub fn compile(
             .get(rpo_pos + 1)
             .map(|&next_idx| func.blocks[next_idx].id);
 
-        // Build a block-local class_to_vreg using the per-block snapshot.
-        // Use the per-block snapshot (captured post-emission, pre-restore) so
-        // classes re-emitted in this block resolve to THIS block's VReg — not
-        // a stale one from a non-dominating prior block that was restored into
-        // the global `class_to_vreg`.
-        let block_class_to_vreg: ClassVRegMap = {
-            let snapshot = &block_class_to_vreg_snapshot[block_idx];
-            let mut map: ClassVRegMap = snapshot.clone();
-            // Apply override VRegs for block params: update class_to_vreg mapping
-            // so phi copy source lookups find the correct register.
-            // Only where the block's own VReg is not what the snapshot answers
-            // with: `insert_single` replaces the class's segments, so patching a
-            // class the snapshot already resolves correctly would discard what
-            // the splitter recorded for it.
-            for (pidx, own) in block.param_vregs.iter().enumerate() {
-                let (Some(&own), Some(&param_cid)) =
-                    (own.as_ref(), block_param_map.get(&(block.id, pidx as u32)))
-                else {
-                    continue;
-                };
-                let canon = egraph.unionfind.find_immutable(param_cid);
-                if map.lookup(canon, ProgramPoint::block_entry(block_idx)) != Some(own) {
-                    map.insert_single(canon, own);
-                }
-            }
-            // Rename every VReg to the one that survived coalescing, keeping the
-            // range it was recorded with. `apply_coalescing` renamed the
-            // schedules and not this map, so a merged-away VReg has no register
-            // assignment and reads as no answer at all.
-            //
-            // Renaming in place, rather than collapsing each class to a single
-            // full-range VReg: the collapse discarded everything the splitter
-            // recorded, so with a class holding a value plus a reload per block,
-            // one segment won every lookup and a phi copy in one block read the
-            // copy belonging to another. The full-range entries linearization
-            // made are still here and still act as the fallback where a class
-            // has no narrower segment covering the point; what is gone is
-            // fabricating one.
-            //
-            // The chase is transitive. A single step leaves a VReg that Phase 3
-            // merged twice still pointing at an intermediate with no register.
-            if !coalesce_aliases.is_empty() {
-                let mut aliased_map = ClassVRegMap::new();
-                for (cid, vreg, start, end) in map.iter_segments() {
-                    aliased_map.insert_segment_shared(
-                        cid,
-                        crate::regalloc::coalesce::chase_alias(vreg, &coalesce_aliases),
-                        start,
-                        end,
-                    );
-                }
-                map = aliased_map;
-            }
-            map
-        };
-
         // Handle non-terminator effectful ops (loads, stores, calls).
         let non_term_count = block.non_term_count();
         let non_term_ops = &block.ops[..non_term_count];
@@ -1654,7 +1597,6 @@ pub fn compile(
             next_block_id,
             &egraph,
             &class_to_vreg,
-            &block_class_to_vreg,
             &block_param_map,
             // Straight off the final schedule: post-split, post-coalesce, the
             // VRegs the allocator actually assigned registers to.
