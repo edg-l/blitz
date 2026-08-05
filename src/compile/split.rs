@@ -404,10 +404,6 @@ fn find_call_crossing_overshoot(
 
 // ── Plan construction ─────────────────────────────────────────────────────────
 
-/// Apply splits for a set of victims at an overshoot point in a single block.
-///
-/// Used by both the standard pressure path and the call-crossing path so the
-/// same logic is not duplicated.
 /// Whether the overshoot requires cross-block spill (call-crossing) or per-block split.
 ///
 /// - `PerBlock`: victim's uses are in the same block; use `apply_split_planned`.
@@ -418,33 +414,86 @@ enum SplitScope {
     CrossBlock,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn apply_splits_for_overshoot(
-    fn_name: &str,
-    block_idx: usize,
-    overshoot_inst_idx: usize,
-    overshoot_class: RegClass,
-    overshoot_excess: u32,
+/// What every overshoot in a round reads. Fixed for the whole `plan_splits` call.
+struct RoundCtx<'a> {
+    fn_name: &'a str,
+    block_schedules: &'a [Vec<ScheduledInst>],
+    /// Built from every block, not just the one being scanned: a value live
+    /// *through* a block appears in none of its instructions.
+    vreg_classes: &'a BTreeMap<VReg, RegClass>,
+    loop_depths: &'a BTreeMap<VReg, u32>,
+    class_to_vreg: &'a ClassVRegMap,
+    egraph: &'a EGraph,
+    cost_model: &'a CostModel,
+    extraction: &'a ExtractionResult,
+}
+
+/// What one block's liveness scan produced, rebuilt for each block.
+struct BlockCtx<'a> {
+    idx: usize,
+    live_sets: &'a [VRegSet],
+    def_inst_map: &'a BTreeMap<VReg, usize>,
+    call_arg_vregs: &'a BTreeSet<VReg>,
+    range_lengths: &'a BTreeMap<VReg, usize>,
+}
+
+/// The plan under construction: everything a split writes to.
+struct PlanAccum<'a> {
+    next_vreg: &'a mut u32,
+    slots: &'a mut SlotAllocator,
+    per_block_insertions: &'a mut [Vec<(usize, ScheduledInst)>],
+    new_segments: &'a mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
+    operand_rewrites: &'a mut Vec<(usize, usize, usize, VReg)>,
+    segment_end_truncations: &'a mut Vec<(VReg, ProgramPoint)>,
+    /// VRegs already claimed by an earlier path this round, so the two pressure
+    /// paths cannot both spill one value.
+    planned_victims: &'a mut BTreeSet<VReg>,
+}
+
+/// One pressure overshoot: where it is, in which class, by how much, and which
+/// shape of split the path that found it wants.
+#[derive(Clone, Copy)]
+struct Overshoot {
+    inst_idx: usize,
+    class: RegClass,
+    excess: u32,
     scope: SplitScope,
-    live_sets: &[VRegSet],
-    all_block_schedules: &[Vec<ScheduledInst>],
-    vreg_classes: &BTreeMap<VReg, RegClass>,
-    call_arg_vregs: &BTreeSet<VReg>,
-    def_inst_map: &BTreeMap<VReg, usize>,
-    range_lengths: &BTreeMap<VReg, usize>,
-    loop_depths: &BTreeMap<VReg, u32>,
-    class_to_vreg: &ClassVRegMap,
-    egraph: &EGraph,
-    cost_model: &CostModel,
-    extraction: &ExtractionResult,
-    next_vreg: &mut u32,
-    slots: &mut SlotAllocator,
-    all_per_block_insertions: &mut [Vec<(usize, ScheduledInst)>],
-    new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
-    operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
-    segment_end_truncations: &mut Vec<(VReg, ProgramPoint)>,
-    planned_victims: &mut BTreeSet<VReg>,
+}
+
+/// Apply splits for a set of victims at an overshoot point in a single block.
+///
+/// Used by both the standard pressure path and the call-crossing path so the
+/// same logic is not duplicated.
+fn apply_splits_for_overshoot(
+    ctx: &RoundCtx,
+    block: &BlockCtx,
+    plan: &mut PlanAccum,
+    overshoot: Overshoot,
 ) {
+    let RoundCtx {
+        fn_name,
+        block_schedules: all_block_schedules,
+        vreg_classes,
+        loop_depths,
+        class_to_vreg,
+        egraph,
+        cost_model,
+        extraction,
+    } = *ctx;
+    let BlockCtx {
+        idx: block_idx,
+        live_sets,
+        def_inst_map,
+        call_arg_vregs,
+        range_lengths,
+    } = *block;
+    let Overshoot {
+        inst_idx: overshoot_inst_idx,
+        class: overshoot_class,
+        excess: overshoot_excess,
+        scope,
+    } = overshoot;
+
     let block_schedule = &all_block_schedules[block_idx];
     let live_at = &live_sets[overshoot_inst_idx];
     let overshoot_point = if overshoot_inst_idx == 0 {
@@ -458,7 +507,7 @@ fn apply_splits_for_overshoot(
     let mut candidates: Vec<VReg> = live_at
         .iter()
         .filter(|v| vreg_classes.get(v).copied() == Some(overshoot_class))
-        .filter(|v| !planned_victims.contains(v))
+        .filter(|v| !plan.planned_victims.contains(v))
         .filter(|&v| {
             if let Some(&def_idx) = def_inst_map.get(&v) {
                 let op = &block_schedule[def_idx].op;
@@ -522,7 +571,7 @@ fn apply_splits_for_overshoot(
                 .iter()
                 .filter(|v| vreg_classes.get(v).copied() == Some(overshoot_class))
                 .map(|v| {
-                    let why = if planned_victims.contains(&v) {
+                    let why = if plan.planned_victims.contains(&v) {
                         "already a victim".to_string()
                     } else {
                         match def_inst_map.get(&v) {
@@ -562,7 +611,7 @@ fn apply_splits_for_overshoot(
         .collect();
 
     for &victim in victims {
-        planned_victims.insert(victim);
+        plan.planned_victims.insert(victim);
         // The scope is per victim, not per call site. A per-block split rewrites
         // the victim's uses in this block, so it needs both a def and a use here;
         // with either one missing there is nothing to split at locally, whichever
@@ -603,11 +652,11 @@ fn apply_splits_for_overshoot(
                     kind,
                     block_schedule,
                     overshoot_class,
-                    next_vreg,
-                    slots,
-                    &mut all_per_block_insertions[block_idx],
-                    new_segments,
-                    operand_rewrites,
+                    plan.next_vreg,
+                    plan.slots,
+                    &mut plan.per_block_insertions[block_idx],
+                    plan.new_segments,
+                    plan.operand_rewrites,
                     class_to_vreg,
                 );
             }
@@ -616,12 +665,12 @@ fn apply_splits_for_overshoot(
                     victim,
                     overshoot_class,
                     all_block_schedules,
-                    next_vreg,
-                    slots,
-                    all_per_block_insertions,
-                    new_segments,
-                    operand_rewrites,
-                    segment_end_truncations,
+                    plan.next_vreg,
+                    plan.slots,
+                    plan.per_block_insertions,
+                    plan.new_segments,
+                    plan.operand_rewrites,
+                    plan.segment_end_truncations,
                     class_to_vreg,
                 );
             }
@@ -715,8 +764,27 @@ pub fn plan_splits(
         already_slot_spilled,
     );
 
-    for block_idx in 0..n_blocks {
-        let schedule = &block_schedules[block_idx];
+    let ctx = RoundCtx {
+        fn_name: &func.name,
+        block_schedules,
+        vreg_classes: &function_vreg_classes,
+        loop_depths,
+        class_to_vreg,
+        egraph,
+        cost_model,
+        extraction,
+    };
+    let mut plan_accum = PlanAccum {
+        next_vreg: &mut next_vreg,
+        slots,
+        per_block_insertions: &mut per_block_insertions,
+        new_segments: &mut new_segments,
+        operand_rewrites: &mut operand_rewrites,
+        segment_end_truncations: &mut segment_end_truncations,
+        planned_victims: &mut planned_victims,
+    };
+
+    for (block_idx, schedule) in block_schedules.iter().enumerate() {
         if schedule.is_empty() {
             continue;
         }
@@ -733,15 +801,7 @@ pub fn plan_splits(
             continue;
         }
 
-        // VReg -> RegClass, built from EVERY block rather than just this one.
-        //
-        // A value that is live *through* this block appears in no instruction
-        // here, so a per-block map has no entry for it and every pressure count
-        // silently skips it -- while the allocator, which uses a function-wide
-        // map, sees it interfering with the call-clobber phantoms. That
-        // disagreement is what let an XMM value live across a call reach the
-        // allocator unsplit.
-        let vreg_classes = &function_vreg_classes;
+        let vreg_classes = ctx.vreg_classes;
 
         // Compute per-instruction live-before sets.
         let live_sets = compute_local_liveness(block_idx, schedule, live_out_seed, vreg_count);
@@ -758,6 +818,14 @@ pub fn plan_splits(
             .collect();
         let call_arg_vregs = collect_call_arg_vregs_set(schedule);
         let range_lengths = compute_live_range_lengths(&live_sets);
+
+        let block_ctx = BlockCtx {
+            idx: block_idx,
+            live_sets: &live_sets,
+            def_inst_map: &def_inst_map,
+            call_arg_vregs: &call_arg_vregs,
+            range_lengths: &range_lengths,
+        };
 
         // ── Standard pressure path ────────────────────────────────────────────
         //
@@ -808,30 +876,15 @@ pub fn plan_splits(
                 );
             }
             apply_splits_for_overshoot(
-                &func.name,
-                block_idx,
-                inst_idx,
-                class,
-                excess,
-                SplitScope::PerBlock,
-                &live_sets,
-                block_schedules,
-                vreg_classes,
-                &call_arg_vregs,
-                &def_inst_map,
-                &range_lengths,
-                loop_depths,
-                class_to_vreg,
-                egraph,
-                cost_model,
-                extraction,
-                &mut next_vreg,
-                slots,
-                &mut per_block_insertions,
-                &mut new_segments,
-                &mut operand_rewrites,
-                &mut segment_end_truncations,
-                &mut planned_victims,
+                &ctx,
+                &block_ctx,
+                &mut plan_accum,
+                Overshoot {
+                    inst_idx,
+                    class,
+                    excess,
+                    scope: SplitScope::PerBlock,
+                },
             );
         }
 
@@ -860,30 +913,15 @@ pub fn plan_splits(
                 );
             }
             apply_splits_for_overshoot(
-                &func.name,
-                block_idx,
-                call_inst_idx,
-                RegClass::GPR,
-                excess,
-                SplitScope::CrossBlock,
-                &live_sets,
-                block_schedules,
-                vreg_classes,
-                &call_arg_vregs,
-                &def_inst_map,
-                &range_lengths,
-                loop_depths,
-                class_to_vreg,
-                egraph,
-                cost_model,
-                extraction,
-                &mut next_vreg,
-                slots,
-                &mut per_block_insertions,
-                &mut new_segments,
-                &mut operand_rewrites,
-                &mut segment_end_truncations,
-                &mut planned_victims,
+                &ctx,
+                &block_ctx,
+                &mut plan_accum,
+                Overshoot {
+                    inst_idx: call_inst_idx,
+                    class: RegClass::GPR,
+                    excess,
+                    scope: SplitScope::CrossBlock,
+                },
             );
         }
 
@@ -914,30 +952,15 @@ pub fn plan_splits(
                 );
             }
             apply_splits_for_overshoot(
-                &func.name,
-                block_idx,
-                call_inst_idx,
-                RegClass::XMM,
-                excess,
-                SplitScope::CrossBlock,
-                &live_sets,
-                block_schedules,
-                vreg_classes,
-                &call_arg_vregs,
-                &def_inst_map,
-                &range_lengths,
-                loop_depths,
-                class_to_vreg,
-                egraph,
-                cost_model,
-                extraction,
-                &mut next_vreg,
-                slots,
-                &mut per_block_insertions,
-                &mut new_segments,
-                &mut operand_rewrites,
-                &mut segment_end_truncations,
-                &mut planned_victims,
+                &ctx,
+                &block_ctx,
+                &mut plan_accum,
+                Overshoot {
+                    inst_idx: call_inst_idx,
+                    class: RegClass::XMM,
+                    excess,
+                    scope: SplitScope::CrossBlock,
+                },
             );
         }
     }
