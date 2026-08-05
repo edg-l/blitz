@@ -188,6 +188,11 @@ run_one_file() {
 }
 
 if [ "$1" = "--one" ]; then
+    # `set +e` so a failing check inside cannot end the job before its verdict
+    # is written: the verdict file is how the parent learns this test ran at
+    # all, and a job that dies early takes the test out of the count rather
+    # than into the failure list.
+    set +e
     run_one_file "$2"
     exit 0
 fi
@@ -210,13 +215,18 @@ done < "$WORK/files" > "$WORK/jobs"
 
 # Absolute, and run through `sh`, so a job does not depend on the cwd it
 # inherited or on this file carrying an execute bit.
+#
+# `|| true` because a failing job makes xargs exit 123, which under `set -e`
+# ends the run before the loop below reads a single verdict: the output was
+# then a wall of dots ending in `F` with no summary and no test named. The
+# verdicts live in files, so the exit status here carries nothing.
 SELF="$SCRIPT_DIR/run_tests.sh"
 export SELF
 xargs -d '\n' -P "$JOBS" -n1 sh -c '
     out="${1%%|*}"
     file="${1#*|}"
     sh "$SELF" --one "$file" > "$out"
-' _ < "$WORK/jobs"
+' _ < "$WORK/jobs" || true
 
 passed=0
 failed=0
