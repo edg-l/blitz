@@ -1477,6 +1477,83 @@ fn detect_blockparam_slot_routing(
         }
     }
 
+    // Ordinary points, where a parameter is live and nothing else can move it.
+    //
+    // The two rules above count the places a parameter's *position* is decided --
+    // a block's entry and an edge's argument list. A parameter is also live
+    // everywhere between its block and its last use, and where the values there
+    // outnumber the budget the pressure loop below can spill all of them EXCEPT
+    // the parameters: a phi copy on the edge writes those, so a store placed in
+    // the block would store whatever the register held before the copy. That is
+    // the shape the function-scope allocator reports as "spilling did not reduce
+    // it" with most of its over-budget VRegs unspillable -- a clique of values
+    // that are parameters of several different blocks, each within budget on its
+    // own.
+    //
+    // A group spanning more than one block is refused here, and the reason is
+    // this document's root cause rather than a heuristic. One slot per group is
+    // right when the group is one value, and the group is keyed by VReg with the
+    // positions' shared e-class as the argument that they are one. But an e-class
+    // is one *expression*, not one value: two blocks' parameters can share a class
+    // and hold different values at their respective entries, and one cell cannot
+    // carry both. The rules above never reach that shape; this one does.
+    let vreg_count = *next_vreg as usize;
+    for (block_idx, schedule) in block_schedules.iter().enumerate() {
+        let Some(live_out) = global_liveness.live_out.get(block_idx) else {
+            continue;
+        };
+        if schedule.is_empty() {
+            continue;
+        }
+        let live_sets = compute_local_liveness(block_idx, schedule, live_out, vreg_count);
+        for (class, budget) in [(RegClass::GPR, gpr_budget), (RegClass::XMM, xmm_budget)] {
+            let mask = class_mask(vreg_classes, class, vreg_count);
+            let pressure = compute_pressure_for_class(&live_sets, schedule, &mask);
+            for (point, &at_point) in pressure.iter().enumerate() {
+                if at_point <= budget {
+                    continue;
+                }
+                // Only where spilling cannot do it. Every value live here that is
+                // not a parameter is one the pressure loop below can spill, so
+                // the excess this rule has to answer for is what is left after
+                // those: a point with room to spill ordinary values is not this
+                // rule's business, and routing there costs reloads the allocator
+                // never needed.
+                let spillable = live_sets[point]
+                    .iter()
+                    .filter(|v| {
+                        vreg_classes.get(v).copied() == Some(class) && !groups.contains_key(v)
+                    })
+                    .count();
+                if (at_point as usize).saturating_sub(budget as usize) * 2 <= spillable {
+                    continue;
+                }
+                let mut candidates: Vec<VReg> = groups
+                    .iter()
+                    .filter(|(vreg, group)| {
+                        group.reg_class == class
+                            && !route.contains(*vreg)
+                            && live_sets[point].contains(**vreg)
+                            && stores_reach_every_use(**vreg, group)
+                            && group.positions.iter().all(|p| p.0 == group.positions[0].0)
+                    })
+                    .map(|(vreg, _)| *vreg)
+                    .collect();
+                // Cheapest first: a parameter read fewer times costs fewer reloads.
+                candidates.sort_by_key(|v| (use_counts.get(v).copied().unwrap_or(0), v.0));
+                let mut holding = at_point;
+                for vreg in candidates {
+                    if holding <= budget {
+                        break;
+                    }
+                    if route.insert(vreg) {
+                        holding -= 1;
+                    }
+                }
+            }
+        }
+    }
+
     for vreg in route {
         let group = &groups[&vreg];
         // One slot for the value, whatever number of parameter positions name it.

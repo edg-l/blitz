@@ -1247,6 +1247,32 @@ itself wrong: the remaining miscompile is most likely a separate latent defect
 that the changed allocation exposes, consistent with it being wrong at `-O1` and
 right at `-O0`.
 
+### Step 5c: the third rule lands, and the corpus is clean
+
+**`mixed` 30/30, `args` 30/30, `pressure` 30/30 at 30 seeds a shape -- every
+generated program compiles and prints what the generator predicted, for the first
+time.** The rule that does it is the third trigger, with the one guard the hunt
+below produced.
+
+Two dials, both measured rather than chosen:
+
+- **When it fires.** Only where spilling cannot answer the overshoot: every value
+  live at the point that is not a parameter is one the pressure loop can spill,
+  so the rule stands down unless the excess is more than half of them. That
+  factor is the dial. At 1 the corpus is `mixed` 29/30 and `pressure` 29/30 with
+  44 regressed fuzz rows; at 1.5, 30/30 and 29/30 with 113; at 2, 30/30 and 30/30
+  with 119. Turn it down to trade capacity back for size.
+- **How far it routes.** Down to the budget. Stopping at "budget plus what the
+  pressure loop can spill" is cheaper -- 45 regressed rows instead of 119 -- and
+  costs a program on each of `mixed` and `pressure`, so it is not what landed.
+
+**The cost is real and is the reason to keep the dial visible**: 119 of 180 fuzz
+rows and 22 lit rows get bigger, the worst at +33% bytes and +97% spills on a
+pressure test. That is the trade this rule makes -- a program that does not
+compile is worse than a large one, and every one of these is a register-pressure
+stress program. On the `bench` kernels, which are what code quality is judged on,
+2 rows move.
+
 ### The wrong term is named, and it is one value reading another's storage
 
 `read_frame.py --sum-chain` run against both binaries -- the correct one and the
@@ -1263,19 +1289,28 @@ exactly 1788 - 1730. **One term reads -58 where 0 belongs, and -58 is the value
 term 22 legitimately adds in the same sum.** So this is not arithmetic going
 wrong: a value is reading storage that belongs to another value.
 
-That is the backend's most common wrong-code shape, and with routing in the
-picture the specific thing to check first is the slot. `ParamGroup` is keyed by
-**VReg** and gives every position naming that VReg **one** slot, on the grounds
-that one VReg is one value. Rule 3 widens which parameters become candidates,
-and `find_block_param_vreg` now falls back to the CFG's `param_vregs` -- so the
-question to answer before anything else is whether two parameters of *different*
-blocks, carrying different values, can reach the same group and therefore the
-same cell. If they can, the fix is to key the group by something that is one
-value rather than by a name that two values can share.
+That is the backend's most common wrong-code shape, and the slot was where it
+was. `ParamGroup` is keyed by **VReg** and gives every position naming that VReg
+**one** slot, on the grounds that one VReg is one value. On this program exactly
+one routed group spans two blocks -- `VReg(167)`, parameter 0 of block 42 and
+parameter 0 of block 43 -- and **both positions carry the same e-class**, which
+is what the grouping takes as proof that they are one value.
 
-The tools for it are all present: the bisection harness (`BLITZ_RULE3_LIMIT`
-around `route.insert`) names the routing, `BLITZ_DEBUG=slots` prints every slot's
-traffic with its owner, and `read_frame.py --sum-chain` names the term.
+They are not. **An e-class is one expression, not one value**, and a block
+parameter is position-dependent -- the root-cause statement this whole document
+opens with. Two blocks' parameters can share a class and hold different values at
+their own entries, and one cell cannot carry both. Refusing a group that spans
+more than one block turns 1730 back into 1788, and takes `mixed` from 29/30 to
+30/30 in the same change: the long-standing `mixed` seed 24 failure was this too.
+
+The rules that decide at a block entry or an edge never reach that shape, which
+is why the guard sits on the third rule alone. The reproducer is
+`tests/lit/regalloc/multi_block_param_group.c`.
+
+The tools that found it, in the order they were used: the bisection harness
+(`BLITZ_RULE3_LIMIT` around `route.insert`) named the routing, `read_frame.py
+--sum-chain` named the term and its wrong value, and `BLITZ_DEBUG=slots` showed
+the cell they shared.
 
 ### A store must not overwrite a slot its own block still reads
 
@@ -1459,12 +1494,12 @@ Steps 0, 1, 2, 3, 3b, 4, 5 and 5b are done. What each measured is in its own
 notes above, including the predictions that were stated first and the ones that
 were wrong.
 
-Generated corpus at 30 seeds a shape: `mixed` 29/30, `args` 30/30,
-`pressure` 28/30. Every failure is capacity. **Steps 2, 3, 3b and 4 moved none of
+Generated corpus at 30 seeds a shape: **`mixed` 30/30, `args` 30/30,
+`pressure` 30/30** -- every generated program compiles and prints what the
+generator predicted. **Steps 2, 3, 3b and 4 moved none of
 them; step 5 moved `args` from 14/15 to 15/15, and step 5b moved `pressure` from
-14/30 to 28/30.** The two that remain are shape A -- values live across a point,
-not an argument clique -- so the terminator shape this document has tracked since
-step 1 is closed.
+14/30 to 28/30.** Both the terminator shape this document has tracked since
+step 1 and the shape-A residue after it are closed.
 
 The 60-seed figures this section quoted before steps 1 and 2, for comparison:
 
