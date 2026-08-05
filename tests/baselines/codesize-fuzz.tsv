@@ -129,13 +129,13 @@ pressure-seed11	O1	2183	11725	301	690
 pressure-seed12	O0	1133	6137	119	323
 pressure-seed12	O1	927	5110	132	281
 pressure-seed13	O0	1235	7871	361	421
-pressure-seed13	O1	1419	8170	514	210
+pressure-seed13	O1	1419	8171	514	209
 pressure-seed14	O0	1748	10572	371	537
-pressure-seed14	O1	-	-	-	-
+pressure-seed14	O1	1229	6752	244	248
 pressure-seed15	O0	1595	6209	59	154
 pressure-seed15	O1	-	-	-	-
 pressure-seed16	O0	1908	11733	520	604
-pressure-seed16	O1	2500	14863	855	533
+pressure-seed16	O1	2493	14821	852	530
 pressure-seed17	O0	2006	13295	617	757
 pressure-seed17	O1	-	-	-	-
 pressure-seed18	O0	3465	23855	1186	1397
@@ -147,9 +147,9 @@ pressure-seed1	O1	-	-	-	-
 pressure-seed20	O0	2531	16661	742	938
 pressure-seed20	O1	-	-	-	-
 pressure-seed21	O0	1499	5732	57	130
-pressure-seed21	O1	-	-	-	-
+pressure-seed21	O1	864	4203	94	167
 pressure-seed22	O0	1356	9130	456	506
-pressure-seed22	O1	-	-	-	-
+pressure-seed22	O1	1301	7293	426	189
 pressure-seed23	O0	2679	15601	616	761
 pressure-seed23	O1	-	-	-	-
 pressure-seed24	O0	2122	8865	164	226
@@ -169,7 +169,7 @@ pressure-seed2	O1	541	2739	70	110
 pressure-seed3	O0	2163	9517	106	303
 pressure-seed3	O1	2934	16573	567	861
 pressure-seed4	O0	8123	51629	2584	2629
-pressure-seed4	O1	3130	18216	1276	426
+pressure-seed4	O1	3124	18168	1273	423
 pressure-seed5	O0	2045	13618	643	792
 pressure-seed5	O1	-	-	-	-
 pressure-seed6	O0	2329	15975	772	941

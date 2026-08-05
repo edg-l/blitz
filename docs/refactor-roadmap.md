@@ -1050,11 +1050,10 @@ budget. **Nothing can relieve a block parameter under ordinary pressure**, and
 that is a gap independent of shape B: the spill loop should be able to hand a
 parameter to slot routing rather than skip it.
 
-### Four attempts on shape B, all measured, all reverted
+### Five attempts on shape B, and what the fifth found
 
-For the next session, so none of these is tried a fifth time. The corpus baseline
-they are all measured against is `mixed` 15/15, `args` 15/15, `pressure` 9/15 at
-15 seeds a shape.
+The corpus baseline they are all measured against is `mixed` 15/15, `args` 15/15,
+`pressure` 9/15 at 15 seeds a shape.
 
 | attempt | result |
 | --- | --- |
@@ -1062,21 +1061,39 @@ they are all measured against is `mixed` 15/15, `args` 15/15, `pressure` 9/15 at
 | Narrow `phi_removal`'s placed-value veto to tier 2 | `args` 15/15 -> 14/15, nothing gained |
 | Give every parameter position its own VReg | `args` -> 11/15, `mixed` -> 10/15, nothing gained |
 | Let routing take a value-aliasing parameter, keeping the defining block in registers | 10 lit failures, 1 differential, `pressure` -> 5/15 |
+| The same, plus the store the identity tests were dropping | **kept**: `pressure` 9/15 -> 10/15 at 15 seeds, 14/30 -> 17/30 at 30 |
 
-The last one is worth one more line because its reasoning looked airtight. The
-`value_defs` guard's comment describes exactly one hazard -- the predecessor's
-initialising store having its source rewritten to a reload of the slot it was
-about to fill -- and skipping the defining block's uses answers precisely that.
-It still broke ten tests, so **the guard is protecting more than its comment
-says**, and finding out what would be the first job of any fifth attempt.
+**What the guard was protecting, which is not what its comment said.** The
+comment names one hazard: the predecessor's initialising store has its source
+rewritten to a reload of the slot it was about to fill, so nothing fills it.
+Skipping the defining block's reloads answers exactly that, and it is not
+enough -- the slot still ends up unwritten, by a second route.
 
-What none of the four touched: the values at seed 15's peak genuinely number 17
+Two identity tests decide whether a predecessor stores an argument to a routed
+parameter's slot: `compile::mod`'s, by VReg (`arg != info.vreg`), and
+`terminator::build_phi_copies`'s, by class (`canon_arg != canon_param`). Both
+read "the argument IS the parameter" as *a back edge whose slot the forward edge
+already filled*. For a parameter that names the value it carries, that equality
+is instead the signature of **the one edge that must store**, so both tests
+suppressed the only store there was. Measured on
+`regalloc/shared_vreg_two_arg_positions.c`: three parameters of block 30 routed
+to slots 6, 7 and 8, and every predecessor reporting `kept=false`. The program
+compiled and printed 117 where `cc` says 106.
+
+`SlotSpilledParamInfo::value_alias` now says which kind of parameter it is, and
+both tests defer to it. The reproducer compiles at `-O1` for the first time and
+prints 106, so its `-O0` pin is gone and it is back in the differential harness
+at both levels.
+
+**What it costs, and what it buys.** 703 of 708 identity comparisons unchanged;
+2 differ, and both get smaller. Four programs that had never compiled now do --
+the reproducer plus `pressure` seeds 14, 21 and 22 -- and `pressure` seed 4 loses
+6 instructions and 3 spills. One row is a byte larger for one reload fewer.
+
+What none of the five touched: the values at seed 15's peak genuinely number 17
 against a budget of 14, so *some* of them must live in memory across that edge.
-Every mechanism for putting them there runs through `slot_spilled_params`, and
-every route into it is blocked by the parameter aliasing its value. The next idea
-worth trying is probably not another way to unblock that, but to stop the
-aliasing from being load-bearing: make the phi copy able to store an *argument*
-to a slot without the target's parameter having to be a distinct VReg at all.
+Routing now reaches 1-4 of them per program, which is what moved three seeds; the
+rest of the peak is values no parameter names.
 
 ---
 
@@ -1137,9 +1154,9 @@ stops being a hazard the pipeline has to remember.
 
 ---
 
-## State at 2026-08-05 (`3160d5e`), after steps 0 through 5
+## State after steps 0 through 5
 
-Gates: 934 unit, 474 lit at `BLITZ_VERIFY` off/1/strict, 298 differential + `cc`.
+Gates: 934 unit, 474 lit at `BLITZ_VERIFY` off/1/strict, 299 differential + `cc`.
 Code quality has a baseline too: `bash tests/run_codesize.sh --check`, 888 rows.
 
 Steps 0, 1, 2, 3, 3b, 4 and 5 are done. What each measured is in its own notes
@@ -1147,9 +1164,11 @@ above, including the four predictions that were stated first and the three that
 were wrong.
 
 Generated corpus at 15 seeds a shape: `mixed` 15/15, `args` 15/15,
-`pressure` 9/15. Every failure is capacity, all at `-O1`, and all one shape --
-a `TerminatorArgs` reading more values than the budget holds. **Steps 2, 3, 3b
-and 4 moved none of them; step 5 moved `args` from 14/15 to 15/15.**
+`pressure` 10/15; at 30 seeds, `mixed` 29/30, `args` 30/30, `pressure` 17/30.
+Every failure is capacity and all but one are `-O1`, all one shape -- a
+`TerminatorArgs` reading more values than the budget holds. **Steps 2, 3, 3b and
+4 moved none of them; step 5 moved `args` from 14/15 to 15/15, and routing a
+value-aliasing parameter moved `pressure` by three programs at 30 seeds.**
 
 The 60-seed figures this section quoted before steps 1 and 2, for comparison:
 

@@ -1115,10 +1115,16 @@ pub fn compile(
                         // parameter is the one its own `BlockParam` defines, so
                         // a store of it into the slot would store the value the
                         // block is about to receive.
-                        *vreg != info.vreg
-                            && func.blocks[block_id_to_idx[dest_bid]]
-                                .param_vreg(*dest_pidx)
-                                .is_none_or(|own| *vreg != own)
+                        //
+                        // Unless the parameter has no storage of its own and
+                        // names the value it carries: then this equality is what
+                        // an edge feeding the value into the parameter looks
+                        // like, and it is the one edge that MUST store.
+                        info.value_alias
+                            || (*vreg != info.vreg
+                                && func.blocks[block_id_to_idx[dest_bid]]
+                                    .param_vreg(*dest_pidx)
+                                    .is_none_or(|own| *vreg != own))
                     })
                     .map(|(_, vreg, _, info)| (*vreg, info.clone()))
                     .collect();

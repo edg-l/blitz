@@ -13,9 +13,11 @@
 // target block read whatever the register happened to hold: -3, another variable's
 // initialiser.
 //
-// Pinned at -O0 because -O1 still cannot allocate this function
-// (`gpr_overshoot=3`), which is register pressure and tracked separately. The
-// opt-level pin excludes it from the differential harness, by design.
+// At -O1 the same function is also where slot routing takes a parameter that
+// names the value it carries: three of block 30's parameters share block 0's
+// VRegs, and the edge feeding them is the one edge that must store to their
+// slots. Read as a back edge instead, the slots stay unwritten and the sum is
+// 117.
 //
 // 88 lines, reduced from gen_c.py seed 18, shape pressure. The reducer's output had
 // lost `arr[4] = 5;` while the sum still reads arr[4], an uninitialised read; it is
@@ -23,7 +25,6 @@
 //
 // EXIT: 0
 // OUTPUT: 106
-// FLAGS: -O0
 extern int printf(char* fmt, int x);
 double f0(double p0, double p1, double p2, int p3, double p4, int p5, int p6) {
     return (((p3 & 1023) & 768) & 63);

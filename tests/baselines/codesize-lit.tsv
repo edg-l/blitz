@@ -593,9 +593,9 @@ regalloc/nested_loops_deep_pressure.c	O1	40	138	0	0
 regalloc/param_shadow_const_v7.c	O0	1920	13764	776	834
 regalloc/param_shadow_const_v7.c	O1	-	-	-	-
 regalloc/param_shadow_seed13.c	O0	1235	7871	361	421
-regalloc/param_shadow_seed13.c	O1	1419	8170	514	210
+regalloc/param_shadow_seed13.c	O1	1419	8171	514	209
 regalloc/param_shadow_seed16.c	O0	1908	11733	520	604
-regalloc/param_shadow_seed16.c	O1	2500	14863	855	533
+regalloc/param_shadow_seed16.c	O1	2493	14821	852	530
 regalloc/param_shadow_seed3.c	O0	2163	9517	106	303
 regalloc/param_shadow_seed3.c	O1	2934	16573	567	861
 regalloc/phi_dest_from_target_schedule.c	O0	371	1131	0	0
@@ -603,7 +603,7 @@ regalloc/phi_dest_from_target_schedule.c	O1	428	1316	0	0
 regalloc/seed6_truncated_guard_values.c	O0	197	787	2	6
 regalloc/seed6_truncated_guard_values.c	O1	148	608	0	0
 regalloc/shared_vreg_two_arg_positions.c	O0	2740	19956	1169	1212
-regalloc/shared_vreg_two_arg_positions.c	O1	-	-	-	-
+regalloc/shared_vreg_two_arg_positions.c	O1	2839	17437	1276	534
 regalloc/spill_store_into_read_slot.c	O0	373	1749	43	85
 regalloc/spill_store_into_read_slot.c	O1	282	1275	40	69
 regalloc/split_blockparam_across_call.c	O0	34	159	2	2

@@ -67,6 +67,14 @@ pub struct SlotSpilledParamInfo {
     pub reg_class: RegClass,
     /// The block index (for `truncate_segment_start`).
     pub block_idx: usize,
+    /// The parameter shares an ordinary value's VReg rather than having storage
+    /// of its own, so an argument equal to `vreg` is the value arriving on a
+    /// forward edge, not the parameter arriving back on a back edge. The two
+    /// identity tests that decide whether a predecessor stores -- by VReg in
+    /// `compile::mod`, by class in `terminator::build_phi_copies` -- cannot tell
+    /// those apart on their own, and reading a forward edge as a back edge
+    /// leaves the slot unwritten while every use reloads from it.
+    pub value_alias: bool,
 }
 
 /// Output of `plan_splits`: new instructions to insert and new segments to add.
@@ -1196,18 +1204,17 @@ fn detect_blockparam_slot_routing(
 
     // A parameter that passes a dominating definition straight through has no
     // `BlockParam` of its own: the class map names the definition, so the
-    // parameter and the value are one VReg. Routing that VReg does not move a
-    // parameter into a slot, it moves the VALUE -- and then every use of the
-    // value is rewritten to a reload, including the predecessor's own
-    // initialising store, which ends up reloading the slot it was about to
-    // write. Nothing ever fills the slot and the block reads whatever the frame
-    // held. A VReg defined by an ordinary instruction anywhere is therefore not
-    // routable.
-    let value_defs: BTreeSet<VReg> = block_schedules
+    // parameter and the value are one VReg. Routing that VReg moves the VALUE,
+    // and two things then have to hold that do not for a parameter with storage
+    // of its own -- the block defining it keeps it in a register rather than
+    // reloading it, and every predecessor stores it. Both are conditioned on
+    // this map below.
+    let value_defs: BTreeMap<VReg, usize> = block_schedules
         .iter()
-        .flatten()
-        .filter(|inst| !matches!(inst.op, Op::BlockParam(..)) && !inst.op.has_no_result())
-        .map(|inst| inst.dst)
+        .enumerate()
+        .flat_map(|(bi, sched)| sched.iter().map(move |inst| (bi, inst)))
+        .filter(|(_, inst)| !matches!(inst.op, Op::BlockParam(..)) && !inst.op.has_no_result())
+        .map(|(bi, inst)| (inst.dst, bi))
         .collect();
 
     for block_idx in 0..n_blocks.min(func.blocks.len()) {
@@ -1231,9 +1238,6 @@ fn detect_blockparam_slot_routing(
             ) else {
                 continue;
             };
-            if value_defs.contains(&vreg) {
-                continue;
-            }
             let reg_class = if block.param_types[pidx as usize].is_float() {
                 RegClass::XMM
             } else {
@@ -1333,10 +1337,29 @@ fn detect_blockparam_slot_routing(
         let group = &groups[&vreg];
         // One slot for the value, whatever number of parameter positions name it.
         let slot = slots.alloc(SlotOwner::Splitter) as i64;
+        // The block defining the value this parameter aliases, if it aliases one.
+        let value_def_block = value_defs.get(&vreg).copied();
+        // An aliasing parameter names a definition that dominates its block, so
+        // the definition is in another block and skipping that block's reloads
+        // leaves the parameter's own uses reloaded. A block defining the value it
+        // receives would read its own definition where the incoming value belongs.
+        debug_assert!(
+            value_def_block.is_none_or(|dbi| !group.positions.iter().any(|&(_, _, p)| p == dbi)),
+            "{}: {vreg:?} is a parameter of the block that defines it",
+            func.name,
+        );
 
         // Insert a reload before each use in EVERY block where it appears as a
         // schedule operand -- the block defining it and any where it is live-in.
+        //
+        // Except the block that defines the value an aliasing parameter carries:
+        // its uses there are uses of the value before the edge, and rewriting
+        // them points the predecessor's own store at the slot it is about to
+        // fill.
         for other_block_idx in 0..n_blocks {
+            if value_def_block == Some(other_block_idx) {
+                continue;
+            }
             let use_positions: Vec<(usize, usize)> = block_schedules[other_block_idx]
                 .iter()
                 .enumerate()
@@ -1381,6 +1404,7 @@ fn detect_blockparam_slot_routing(
                     slot,
                     reg_class: group.reg_class,
                     block_idx,
+                    value_alias: value_def_block.is_some(),
                 },
             );
         }

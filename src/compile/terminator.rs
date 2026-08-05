@@ -606,7 +606,12 @@ fn build_phi_copies(
         // param class (e.g. an immutable loop-carried value like `base`), the
         // slot already contains the correct value from the forward-edge store.
         // Skip the store; re-storing from an incorrect register would clobber it.
+        //
+        // Unless the parameter names the value it carries rather than storage of
+        // its own: then that equality is the signature of the edge that feeds the
+        // value in, and it is the one edge that must store.
         if let Some(info) = slot_spilled_params.get(&(target, param_idx as u32)) {
+            let store = canon_arg != canon_param || info.value_alias;
             if trace {
                 tracing::debug!(
                     target: "blitz::phi",
@@ -614,10 +619,10 @@ fn build_phi_copies(
                      {arg_vreg:?} src={src_reg:?} -> slot {} {}",
                     func.name,
                     info.slot,
-                    if canon_arg == canon_param { "(skipped: back-edge identity)" } else { "" },
+                    if store { "" } else { "(skipped: back-edge identity)" },
                 );
             }
-            if canon_arg != canon_param {
+            if store {
                 // Arg differs from param: emit slot store with current src_reg.
                 copies.push(PhiCopy::Slot {
                     src_reg,
