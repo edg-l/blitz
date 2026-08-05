@@ -1243,12 +1243,30 @@ the per-block allocator's coloring succeeds with a single spill.
 So the sentence above ("a single-block function is a special case of the general
 one, not a separate algorithm") is right about the allocators and wrong about the
 pipeline. **What blocks step 6 is not the merge; it is that the passes in front
-of the allocator spill before knowing whether the allocator needs them to.** The
-fold should follow a change that makes the splitter and the early-barrier pass
-act only where a colouring actually fails -- which is the same shape as step 5's
-lesson, that a splitter behind a real spill loop is a quality knob rather than a
-gate. Attempting the merge first buys one file and loses a measurable amount of
-code quality on every small function.
+of the allocator spill before knowing whether the allocator needs them to.**
+
+### And the pre-passes cannot simply be skipped
+
+Two follow-up probes, both measured:
+
+- **Skip the splitter for single-block functions and let the global allocator's
+  spill loop cope**: 159 of 474 lit tests fail, most of them compilation
+  failures. The spill loop is not a substitute for the splitter even on one
+  block.
+- **Keep the splitter, skip only the early-barrier pass** (which owned 5 of the 7
+  slots): all 474 lit and 299 differential pass, and the cost drops from 12
+  regressed rows to 8 -- but `regalloc/array_spill_frame_corruption.c` is still
+  +55% instructions with 29 reloads against 2, because the two remaining slots
+  are the splitter's and one of them is reloaded 23 times.
+
+**So the splitter's victim choice is the thing to fix, and the obvious fix is
+wrong.** `score_victim` is `live_range_length / loop_penalty`, which cannot tell
+a long-lived value read twice from one read twenty times. Dividing by the use
+count -- the standard Chaitin ratio -- is a **large** loss: `pressure` 28/30 ->
+24/30, `mixed` 29/30 -> 28/30, 30 regressed lit rows and 157 regressed fuzz rows.
+Reverted. Preferring long ranges outright beats preferring cheap ones here, and
+whatever replaces it has to be measured against those numbers rather than
+reasoned from first principles.
 
 This is also the natural place for soundness gap 2 above: the merge-versus-liveness
 check needs to sit inside whichever allocator survives.
@@ -1270,7 +1288,24 @@ the type system has stopped helping.
 It also ends a duplication the type system is currently unable to prevent: the set of
 generic IR ops that must have been lowered before extraction is enumerated twice, 24
 variants each, in `lower.rs` (which rejects them) and `egraph/cost.rs` (which prices
-them as unlowerable). That list *is* `PureOp`. After the split both sites match on the
+them as unlowerable).
+
+**The two lists have already drifted, which is the argument for this step rather
+than a prediction of it.** `lower.rs` rejects every `Op::Fcmp(_)`; `cost.rs` gives
+`Fcmp(OrdEq)` and `Fcmp(UnordNe)` a *finite* cost, on the grounds that they are
+lowered directly and skip isel. Extraction may therefore pick a node the lowering
+match refuses. It does not today -- a double `==` and `!=` compile and run
+correctly at both levels, because the branch path consumes those nodes before
+`lower_op` sees them -- so the divergence is latent, not live. It is exactly the
+shape this step exists to make unrepresentable.
+
+**Sharing the list without the enum split is not an improvement.** Replacing the
+two explicit variant lists with a predicate on `Op` moves the enumeration to one
+place but costs both sites their exhaustiveness check, since a guard arm tells the
+compiler nothing about which variants it covers. The value here is in the types,
+not in the deduplication, so the step is worth doing whole or not at all.
+
+That list *is* `PureOp`. After the split both sites match on the
 type, and a new pure op cannot be added to one list and forgotten in the other — which
 is the same failure mode as `has_no_result()` being consulted in six places instead of
 being a property of the type.
