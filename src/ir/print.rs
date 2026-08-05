@@ -188,13 +188,13 @@ fn fmt_effectful(
 ) -> String {
     match op {
         EffectfulOp::Load { addr, ty, result } => {
-            let addr_s = resolve_cid(*addr, class_to_vreg, egraph_uf);
+            let addr_s = resolve_cid(addr.class(), class_to_vreg, egraph_uf);
             let result_s = resolve_cid(*result, class_to_vreg, egraph_uf);
             format!("load {ty:?} {addr_s} -> {result_s}")
         }
         EffectfulOp::Store { addr, val, ty } => {
-            let addr_s = resolve_cid(*addr, class_to_vreg, egraph_uf);
-            let val_s = resolve_cid(*val, class_to_vreg, egraph_uf);
+            let addr_s = resolve_cid(addr.class(), class_to_vreg, egraph_uf);
+            let val_s = resolve_cid(val.class(), class_to_vreg, egraph_uf);
             format!("store {ty:?} {addr_s}, {val_s}")
         }
         EffectfulOp::Call {

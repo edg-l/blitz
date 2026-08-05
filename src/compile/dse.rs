@@ -32,7 +32,7 @@ pub fn run_dse(func: &mut Function, egraph: &EGraph, alias: &AliasInfo) -> usize
         for (i, op) in block.ops.iter().enumerate() {
             match op {
                 EffectfulOp::Store { addr, ty, .. } => {
-                    let canon = egraph.unionfind.find_immutable(*addr);
+                    let canon = egraph.unionfind.find_immutable(addr.class());
                     // A later store at a must-aliasing address kills earlier
                     // pending stores whose width it fully covers.
                     pending.retain(|(idx, paddr, pty)| {
@@ -53,7 +53,7 @@ pub fn run_dse(func: &mut Function, egraph: &EGraph, alias: &AliasInfo) -> usize
                 }
 
                 EffectfulOp::Load { addr, ty, .. } => {
-                    let canon = egraph.unionfind.find_immutable(*addr);
+                    let canon = egraph.unionfind.find_immutable(addr.class());
                     // Any pending store whose value this load may read is now
                     // observed — keep it.
                     pending.retain(|(_, paddr, pty)| {
@@ -99,7 +99,7 @@ mod tests {
     use super::*;
     use crate::egraph::egraph::EGraph;
     use crate::egraph::enode::ENode;
-    use crate::ir::effectful::EffectfulOp;
+    use crate::ir::effectful::{EffOperand, EffectfulOp};
     use crate::ir::function::{BasicBlock, Function};
     use crate::ir::op::Op;
     use crate::ir::types::Type;
@@ -142,13 +142,13 @@ mod tests {
 
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(a),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: b,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(b),
                 ty: Type::I64,
             },
             EffectfulOp::Ret { val: None },
@@ -168,13 +168,13 @@ mod tests {
         let b = iconst(&mut eg, 20);
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(a),
                 ty: Type::I32,
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: b,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(b),
                 ty: Type::I64,
             },
             EffectfulOp::Ret { val: None },
@@ -194,13 +194,13 @@ mod tests {
         let b = iconst(&mut eg, 20);
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(a),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: b,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(b),
                 ty: Type::I32,
             },
             EffectfulOp::Ret { val: None },
@@ -221,18 +221,18 @@ mod tests {
         let r = load_result_class(&mut eg, 1, Type::I64);
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(a),
                 ty: Type::I64,
             },
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: r,
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: b,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(b),
                 ty: Type::I64,
             },
             EffectfulOp::Ret { val: None },
@@ -252,8 +252,8 @@ mod tests {
         let b = iconst(&mut eg, 20);
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(a),
                 ty: Type::I64,
             },
             EffectfulOp::Call {
@@ -264,8 +264,8 @@ mod tests {
                 results: vec![],
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: b,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(b),
                 ty: Type::I64,
             },
             EffectfulOp::Ret { val: None },
@@ -287,18 +287,18 @@ mod tests {
         let c = iconst(&mut eg, 30);
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(a),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s1,
-                val: b,
+                addr: EffOperand::Class(s1),
+                val: EffOperand::Class(b),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: c,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(c),
                 ty: Type::I64,
             },
             EffectfulOp::Ret { val: None },
@@ -309,7 +309,7 @@ mod tests {
         // Order must be preserved for the surviving ops: s1 store + s0 store + ret.
         assert_eq!(func.blocks[0].ops.len(), 3);
         match &func.blocks[0].ops[0] {
-            EffectfulOp::Store { addr, .. } => assert_eq!(*addr, s1),
+            EffectfulOp::Store { addr, .. } => assert_eq!(addr.class(), s1),
             _ => panic!("expected s1 store"),
         }
     }
@@ -328,13 +328,13 @@ mod tests {
         let val = iconst(&mut eg, 42);
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: a0,
-                val,
+                addr: EffOperand::Class(a0),
+                val: EffOperand::Class(val),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: a8,
-                val,
+                addr: EffOperand::Class(a8),
+                val: EffOperand::Class(val),
                 ty: Type::I64,
             },
             EffectfulOp::Ret { val: None },
@@ -355,18 +355,18 @@ mod tests {
         let c = iconst(&mut eg, 30);
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(a),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: b,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(b),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: c,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(c),
                 ty: Type::I64,
             },
             EffectfulOp::Ret { val: None },
@@ -377,7 +377,7 @@ mod tests {
         // Surviving ops: final store + ret.
         assert_eq!(func.blocks[0].ops.len(), 2);
         match &func.blocks[0].ops[0] {
-            EffectfulOp::Store { val, .. } => assert_eq!(*val, c),
+            EffectfulOp::Store { val, .. } => assert_eq!(val.class(), c),
             _ => panic!("expected store of c"),
         }
     }
@@ -395,23 +395,23 @@ mod tests {
         let d = iconst(&mut eg, 4);
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(a),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s1,
-                val: b,
+                addr: EffOperand::Class(s1),
+                val: EffOperand::Class(b),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: c,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(c),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s1,
-                val: d,
+                addr: EffOperand::Class(s1),
+                val: EffOperand::Class(d),
                 ty: Type::I64,
             },
             EffectfulOp::Ret { val: None },
@@ -435,13 +435,13 @@ mod tests {
         let b = iconst(&mut eg, 20);
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: p,
-                val: a,
+                addr: EffOperand::Class(p),
+                val: EffOperand::Class(a),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: p,
-                val: b,
+                addr: EffOperand::Class(p),
+                val: EffOperand::Class(b),
                 ty: Type::I64,
             },
             EffectfulOp::Ret { val: None },
@@ -464,19 +464,19 @@ mod tests {
         let r = load_result_class(&mut eg, 1, Type::I64);
         let mut func = make_func(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(a),
                 ty: Type::I64,
             },
             // Load from s1 must NOT save the pending store to s0.
             EffectfulOp::Load {
-                addr: s1,
+                addr: EffOperand::Class(s1),
                 ty: Type::I64,
                 result: r,
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: b,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(b),
                 ty: Type::I64,
             },
             EffectfulOp::Ret { val: None },

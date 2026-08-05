@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ExtractionResult, VReg};
-use crate::ir::effectful::BlockId;
+use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 
@@ -303,6 +303,20 @@ pub(super) fn apply(func: &mut Function, egraph: &mut EGraph, removal: &Removal)
                 pidx += 1;
                 keep_this
             });
+        }
+        // Every VReg the CFG holds describes a linearization this removal is
+        // about to replace, so none of them outlives the removal: the classes
+        // are still what the operands are, and the VRegs are an answer the next
+        // linearization re-asks.
+        for op in block.ops.iter_mut() {
+            match op {
+                EffectfulOp::Load { addr, .. } => addr.uncommit(),
+                EffectfulOp::Store { addr, val, .. } => {
+                    addr.uncommit();
+                    val.uncommit();
+                }
+                _ => {}
+            }
         }
         let Some(term) = block.ops.last_mut() else {
             continue;

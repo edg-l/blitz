@@ -227,7 +227,7 @@ pub(super) fn lower_effectful_op(
     match op {
         EffectfulOp::Load { addr, result, ty } => {
             let is_float = matches!(ty, Type::F32 | Type::F64);
-            let canon_addr = uf.find_immutable(*addr);
+            let canon_addr = uf.find_immutable(addr.class());
             let addr_reg =
                 role_reg(0)
                     .or_else(|| get_reg(canon_addr))
@@ -311,7 +311,7 @@ pub(super) fn lower_effectful_op(
         }
         EffectfulOp::Store { addr, val, ty } => {
             let is_float = matches!(ty, Type::F32 | Type::F64);
-            let canon_addr = uf.find_immutable(*addr);
+            let canon_addr = uf.find_immutable(addr.class());
             let addr_reg =
                 role_reg(0)
                     .or_else(|| get_reg(canon_addr))
@@ -333,7 +333,7 @@ pub(super) fn lower_effectful_op(
             // If val was spilled, its original VReg has no register. Find the
             // StoreBarrier for this Store and read the (possibly renamed) val
             // operand from it — that VReg points at the reload/remat copy.
-            let canon_val = uf.find_immutable(*val);
+            let canon_val = uf.find_immutable(val.class());
             let val_reg =
                 role_reg(1)
                     .or_else(|| get_reg(canon_val))

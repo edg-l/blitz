@@ -173,7 +173,7 @@ impl Function {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::effectful::{EffectfulOp, TermArgs};
+    use crate::ir::effectful::{EffOperand, EffectfulOp, TermArgs};
     use crate::ir::op::ClassId;
     use crate::ir::types::Type;
 
@@ -207,7 +207,7 @@ mod tests {
     fn block_with_load_then_ret() {
         let mut bb = BasicBlock::new(0, vec![]);
         bb.ops.push(EffectfulOp::Load {
-            addr: ClassId(0),
+            addr: EffOperand::Class(ClassId(0)),
             ty: Type::I64,
             result: ClassId::NONE,
         });
@@ -220,7 +220,7 @@ mod tests {
     fn block_missing_terminator_panics_on_validate() {
         let mut bb = BasicBlock::new(0, vec![]);
         bb.ops.push(EffectfulOp::Load {
-            addr: ClassId(0),
+            addr: EffOperand::Class(ClassId(0)),
             ty: Type::I64,
             result: ClassId::NONE,
         });
@@ -233,7 +233,7 @@ mod tests {
         let mut bb = BasicBlock::new(0, vec![]);
         bb.ops.push(ret_none());
         bb.ops.push(EffectfulOp::Load {
-            addr: ClassId(0),
+            addr: EffOperand::Class(ClassId(0)),
             ty: Type::I64,
             result: ClassId::NONE,
         });
@@ -293,8 +293,8 @@ mod tests {
     fn branch_terminator_test() {
         let mut bb = BasicBlock::new(0, vec![]);
         bb.ops.push(EffectfulOp::Store {
-            addr: ClassId(1),
-            val: ClassId(2),
+            addr: EffOperand::Class(ClassId(1)),
+            val: EffOperand::Class(ClassId(2)),
             ty: Type::I64,
         });
         bb.ops.push(EffectfulOp::Branch {

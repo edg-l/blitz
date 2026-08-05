@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
-use crate::ir::effectful::{BlockId, EffectfulOp, TermArg, TermArgs};
+use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp, TermArg, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
 use crate::schedule::scheduler::ScheduledInst;
@@ -436,6 +436,57 @@ pub(super) fn commit_terminator_arg_vregs(
                 committed.push(TermArg { class: canon, vreg });
             }
             *args = TermArgs::Committed(committed);
+        }
+    }
+    Ok(())
+}
+
+/// Commit linearization's choice of VReg for every `Load` and `Store` operand
+/// into the CFG.
+///
+/// The sibling of [`commit_terminator_arg_vregs`] for the operands an effectful
+/// op reads, and the same move for the same reason: the address a `Load` reads
+/// is a register in a block, while the CFG named it by `ClassId`, which is an
+/// expression and has no position. Committing here leaves
+/// `populate_effectful_operands` copying the answer instead of resolving it a
+/// second time.
+///
+/// Resolved through the *block's own* snapshot, since a class re-emitted per
+/// block has one VReg per block and the function-wide map holds whichever block
+/// restored it last. Every segment linearization makes is full-range, so the
+/// point inside the block cannot distinguish two answers -- the block is what
+/// selects, and the point is asked for only because `lookup` takes one.
+///
+/// An operand with no VReg is an error naming the op, not a skip: the barrier's
+/// role operands are positional, so an operand silently dropped there takes a
+/// `Store`'s value for its address.
+pub(super) fn commit_effectful_operand_vregs(
+    func: &mut Function,
+    egraph: &EGraph,
+    block_snapshots: &[ClassVRegMap],
+) -> Result<(), String> {
+    for (block_idx, block) in func.blocks.iter_mut().enumerate() {
+        let snapshot = &block_snapshots[block_idx];
+        let point = ProgramPoint::block_exit(block_idx);
+        let non_term_count = block.non_term_count();
+        for (op_idx, op) in block.ops[..non_term_count].iter_mut().enumerate() {
+            let roles: Vec<(&str, &mut EffOperand)> = match op {
+                EffectfulOp::Load { addr, .. } => vec![("Load address", addr)],
+                EffectfulOp::Store { addr, val, .. } => {
+                    vec![("Store address", addr), ("Store value", val)]
+                }
+                _ => continue,
+            };
+            for (what, operand) in roles {
+                let canon = egraph.unionfind.find_immutable(operand.class());
+                let vreg = snapshot.lookup(canon, point).ok_or_else(|| {
+                    format!(
+                        "block {block_idx}, effectful op {op_idx}: {what} class {canon:?} \
+                         has no VReg in that block"
+                    )
+                })?;
+                *operand = EffOperand::Committed { class: canon, vreg };
+            }
         }
     }
     Ok(())

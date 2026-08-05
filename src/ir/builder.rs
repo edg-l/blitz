@@ -4,7 +4,7 @@ use smallvec::smallvec;
 
 use crate::egraph::{EGraph, ENode};
 use crate::ir::condcode::CondCode;
-use crate::ir::effectful::{BlockId, EffectfulOp, TermArgs};
+use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function, StackSlot, StackSlotData};
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
@@ -503,7 +503,7 @@ impl FunctionBuilder {
         let load_result = Value(self.egraph.add(node));
         let block = self.current_block_mut();
         block.ops.push(EffectfulOp::Load {
-            addr: addr.0,
+            addr: EffOperand::Class(addr.0),
             ty,
             result: load_result.0,
         });
@@ -515,8 +515,8 @@ impl FunctionBuilder {
         let ty = self.type_of(val);
         let block = self.current_block_mut();
         block.ops.push(EffectfulOp::Store {
-            addr: addr.0,
-            val: val.0,
+            addr: EffOperand::Class(addr.0),
+            val: EffOperand::Class(val.0),
             ty,
         });
     }

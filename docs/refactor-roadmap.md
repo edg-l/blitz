@@ -555,8 +555,7 @@ it both of the post-splitter disagreement shapes recorded under prereq A.
 **Do it in this order, one commit each, gates between.** The fields are
 independent, and the cheap ones first buy the shape before the hard one needs it:
 
-1. `Load.addr`, `Store.addr`, `Store.val` -- one carrier each, and the barrier
-   already holds the VReg positionally, so the commit has somewhere to read from.
+1. `Load.addr`, `Store.addr`, `Store.val` -- one carrier each. **DONE.**
 2. `Call.args` -- a list, the same shape as `TermArgs::Committed`.
 3. `Load.result`, `Call.results` -- *defs*, not uses. The barrier instruction's
    own `dst` is the VReg, so these commit from the schedule rather than from the
@@ -567,6 +566,31 @@ independent, and the cheap ones first buy the shape before the hard one needs it
    settled on the four above.
 5. `Ret.val` -- last, because it needs the both-fields shape *and* a decision
    about the constant fold described above.
+
+**Slice 1, as it landed.** `EffOperand` is the carrier: `Class(ClassId)` while
+the IR is still being transformed, `Committed { class, vreg }` from
+`cfg::commit_effectful_operand_vregs` onward, which runs beside
+`commit_terminator_arg_vregs` at the end of linearization and resolves through
+the *block's own* snapshot for the same reason that one does. Every segment
+linearization makes is full-range, so the point inside the block cannot
+distinguish two answers -- the block is what selects. `populate_effectful_operands`
+now reads the committed VReg for a `Load`'s address and a `Store`'s operands
+instead of resolving the class at the barrier point; `Call` still resolves, which
+is slice 2. An operand with no VReg is a compile error naming the op rather than
+a dropped operand, since the barrier's roles are positional and a dropped one
+takes a `Store`'s value for its address.
+
+Two things followed. `phi_removal` uncommits the operands along with the
+terminator arguments, because a removal hands the CFG back to linearization and a
+VReg from the previous one is an answer to a question the next one re-asks. And
+`verify_cfg_schedule_agreement` keeps only its post-splitter half for these
+roles: before the splitter the barrier is now a copy of what the CFG states, so
+the two sides agree by construction.
+
+Judged as predicted: **768 identity comparisons byte-identical** (708 lit, 60
+generated at both levels), 0 differing and 0 differing in status;
+`run_codesize.sh --check` 888 rows unchanged. 934 unit, 474 lit at `BLITZ_VERIFY`
+off/1/strict, 298 differential + `cc`.
 
 **State the prediction before each one.** These resolutions all run before the
 splitter, where they are correct today, so each slice should be byte-identical on

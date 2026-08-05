@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use smallvec::smallvec;
 
 use crate::egraph::enode::ENode;
-use crate::ir::effectful::{EffectfulOp, TermArgs};
+use crate::ir::effectful::{EffOperand, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
 
@@ -15,11 +15,11 @@ fn collect_referenced_ids(ops: &[EffectfulOp]) -> BTreeSet<ClassId> {
     for op in ops {
         match op {
             EffectfulOp::Load { addr, .. } => {
-                ids.insert(*addr);
+                ids.insert(addr.class());
             }
             EffectfulOp::Store { addr, val, .. } => {
-                ids.insert(*addr);
-                ids.insert(*val);
+                ids.insert(addr.class());
+                ids.insert(val.class());
             }
             EffectfulOp::Call { args, .. } => {
                 ids.extend(args);
@@ -234,13 +234,13 @@ fn substitute_class_ids(op: &EffectfulOp, subst: &[(ClassId, ClassId)]) -> Effec
 
     match op {
         EffectfulOp::Load { addr, ty, result } => EffectfulOp::Load {
-            addr: sub(*addr),
+            addr: EffOperand::Class(sub(addr.class())),
             ty: ty.clone(),
             result: *result, // Don't substitute result ClassIds
         },
         EffectfulOp::Store { addr, val, ty } => EffectfulOp::Store {
-            addr: sub(*addr),
-            val: sub(*val),
+            addr: EffOperand::Class(sub(addr.class())),
+            val: EffOperand::Class(sub(val.class())),
             ty: ty.clone(),
         },
         EffectfulOp::Call {

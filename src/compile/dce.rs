@@ -172,11 +172,11 @@ fn collect_consumed_class_ids(
             match op {
                 EffectfulOp::Load { addr, .. } => {
                     // addr is an input; result is an output (not seeded)
-                    seeds.push(*addr);
+                    seeds.push(addr.class());
                 }
                 EffectfulOp::Store { addr, val, .. } => {
-                    seeds.push(*addr);
-                    seeds.push(*val);
+                    seeds.push(addr.class());
+                    seeds.push(val.class());
                 }
                 EffectfulOp::Call { args, .. } => {
                     // args are inputs; results are outputs (not seeded)

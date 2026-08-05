@@ -87,13 +87,13 @@ pub fn run_forwarding(func: &mut Function, egraph: &mut EGraph, alias: &AliasInf
         for (i, op) in block.ops.iter().enumerate() {
             match op {
                 EffectfulOp::Store { addr, val, ty } => {
-                    let canon_addr = egraph.unionfind.find_immutable(*addr);
+                    let canon_addr = egraph.unionfind.find_immutable(addr.class());
                     mem.invalidate_may_alias(canon_addr, ty, alias, egraph);
-                    mem.record(canon_addr, *val, ty.clone(), egraph);
+                    mem.record(canon_addr, val.class(), ty.clone(), egraph);
                 }
 
                 EffectfulOp::Load { addr, ty, result } => {
-                    let canon_addr = egraph.unionfind.find_immutable(*addr);
+                    let canon_addr = egraph.unionfind.find_immutable(addr.class());
                     if let Some(fwd_val) = mem.lookup(canon_addr, ty, alias, egraph) {
                         // Forward: union the load result with the stored value.
                         if crate::trace::is_enabled("alias") {
@@ -179,7 +179,7 @@ mod tests {
     use crate::compile::alias::AliasInfo;
     use crate::egraph::egraph::EGraph;
     use crate::egraph::enode::ENode;
-    use crate::ir::effectful::EffectfulOp;
+    use crate::ir::effectful::{EffOperand, EffectfulOp};
     use crate::ir::function::{BasicBlock, Function};
     use crate::ir::op::Op;
     use crate::ir::types::Type;
@@ -221,12 +221,12 @@ mod tests {
         let load_res = load_result_class(&mut eg, 1, Type::I64);
 
         let store_op = EffectfulOp::Store {
-            addr: s0,
-            val: val42,
+            addr: EffOperand::Class(s0),
+            val: EffOperand::Class(val42),
             ty: Type::I64,
         };
         let load_op = EffectfulOp::Load {
-            addr: s0,
+            addr: EffOperand::Class(s0),
             ty: Type::I64,
             result: load_res,
         };
@@ -256,12 +256,12 @@ mod tests {
 
         let mut func = make_func_with_block(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: val42,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(val42),
                 ty: Type::I64,
             },
             EffectfulOp::Load {
-                addr: s1,
+                addr: EffOperand::Class(s1),
                 ty: Type::I64,
                 result: load_res,
             },
@@ -284,8 +284,8 @@ mod tests {
 
         let mut func = make_func_with_block(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: val42,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(val42),
                 ty: Type::I64,
             },
             EffectfulOp::Call {
@@ -296,7 +296,7 @@ mod tests {
                 results: vec![],
             },
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: load_res,
             },
@@ -319,12 +319,12 @@ mod tests {
 
         let mut func = make_func_with_block(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(val),
                 ty: Type::I64,
             },
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I32,
                 result: load_res,
             },
@@ -351,12 +351,12 @@ mod tests {
 
         let mut func = make_func_with_block(vec![
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: load1,
             },
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: load2,
             },
@@ -383,17 +383,17 @@ mod tests {
 
         let mut func = make_func_with_block(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: val_a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(val_a),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s0,
-                val: val_b,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(val_b),
                 ty: Type::I64,
             },
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: load_res,
             },
@@ -422,12 +422,12 @@ mod tests {
 
         let mut func = make_func_with_block(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(val),
                 ty: Type::I64,
             },
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: load_res,
             },
@@ -469,17 +469,17 @@ mod tests {
 
         let mut func = make_func_with_block(vec![
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: r1,
             },
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: r2,
             },
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: r3,
             },
@@ -510,17 +510,17 @@ mod tests {
 
         let mut func = make_func_with_block(vec![
             EffectfulOp::Store {
-                addr: s0,
-                val: a,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(a),
                 ty: Type::I64,
             },
             EffectfulOp::Store {
-                addr: s1,
-                val: b,
+                addr: EffOperand::Class(s1),
+                val: EffOperand::Class(b),
                 ty: Type::I64,
             },
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: r,
             },
@@ -551,25 +551,25 @@ mod tests {
         let mut func = make_func_with_block(vec![
             // store s0 <- 7
             EffectfulOp::Store {
-                addr: s0,
-                val,
+                addr: EffOperand::Class(s0),
+                val: EffOperand::Class(val),
                 ty: Type::I64,
             },
             // load s0 -> r1 (forwards to 7)
             EffectfulOp::Load {
-                addr: s0,
+                addr: EffOperand::Class(s0),
                 ty: Type::I64,
                 result: r1,
             },
             // store s1 <- r1 (which is now forwarded to 7)
             EffectfulOp::Store {
-                addr: s1,
-                val: r1,
+                addr: EffOperand::Class(s1),
+                val: EffOperand::Class(r1),
                 ty: Type::I64,
             },
             // load s1 -> r2 (forwards to r1, which forwards to 7)
             EffectfulOp::Load {
-                addr: s1,
+                addr: EffOperand::Class(s1),
                 ty: Type::I64,
                 result: r2,
             },

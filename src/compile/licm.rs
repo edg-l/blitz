@@ -328,38 +328,8 @@ pub(super) fn is_class_loop_invariant(
 fn collect_effectful_operands(func: &Function, block_indices: &BTreeSet<usize>) -> Vec<ClassId> {
     let mut out = Vec::new();
     for &block_idx in block_indices {
-        let block = &func.blocks[block_idx];
-        for op in &block.ops {
-            match op {
-                EffectfulOp::Load { addr, result, .. } => {
-                    out.push(*addr);
-                    out.push(*result);
-                }
-                EffectfulOp::Store { addr, val, .. } => {
-                    out.push(*addr);
-                    out.push(*val);
-                }
-                EffectfulOp::Call { args, results, .. } => {
-                    out.extend_from_slice(args);
-                    out.extend_from_slice(results);
-                }
-                EffectfulOp::Branch {
-                    cond,
-                    true_args,
-                    false_args,
-                    ..
-                } => {
-                    out.push(*cond);
-                    out.extend_from_slice(true_args.expect_classes());
-                    out.extend_from_slice(false_args.expect_classes());
-                }
-                EffectfulOp::Jump { args, .. } => out.extend_from_slice(args.expect_classes()),
-                EffectfulOp::Ret { val } => {
-                    if let Some(v) = val {
-                        out.push(*v);
-                    }
-                }
-            }
+        for op in &func.blocks[block_idx].ops {
+            op.for_each_class_id(|cid| out.push(cid));
         }
     }
     out

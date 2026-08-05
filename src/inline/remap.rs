@@ -4,7 +4,7 @@ use smallvec::SmallVec;
 
 use crate::egraph::EGraph;
 use crate::egraph::enode::ENode;
-use crate::ir::effectful::{BlockId, EffectfulOp, TermArgs};
+use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
 
@@ -150,13 +150,13 @@ impl RemapContext {
     pub fn remap_effectful_op(&self, op: &EffectfulOp) -> EffectfulOp {
         match op {
             EffectfulOp::Load { addr, ty, result } => EffectfulOp::Load {
-                addr: self.remap_class_id(*addr),
+                addr: EffOperand::Class(self.remap_class_id(addr.class())),
                 ty: ty.clone(),
                 result: self.remap_class_id(*result),
             },
             EffectfulOp::Store { addr, val, ty } => EffectfulOp::Store {
-                addr: self.remap_class_id(*addr),
-                val: self.remap_class_id(*val),
+                addr: EffOperand::Class(self.remap_class_id(addr.class())),
+                val: EffOperand::Class(self.remap_class_id(val.class())),
                 ty: ty.clone(),
             },
             EffectfulOp::Call {

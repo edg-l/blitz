@@ -19,6 +19,69 @@ pub struct TermArg {
     pub vreg: VReg,
 }
 
+/// One operand of a non-terminator effectful op, after linearization has chosen
+/// which register carries it.
+///
+/// The single-operand form of [`TermArgs`], for the same reason and with the
+/// same discriminant: a `ClassId` is expression identity and has no position,
+/// while "which register holds this value here" is a per-block fact. Committing
+/// linearization's choice into the CFG leaves one resolution instead of one per
+/// consumer.
+///
+/// `Committed` keeps the class beside the VReg because they answer different
+/// questions and neither is derivable from the other: the class is what every
+/// pass before linearization reads and what canonicalization rewrites, the VReg
+/// is what the schedule carries.
+///
+/// Like `TermArgs::Committed`, this records what linearization decided and is
+/// not the authority past the splitter, which routes an operand through a slot
+/// or a reload. The post-split carrier is the barrier instruction's role
+/// operands, which every rewrite preserves by index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffOperand {
+    Class(ClassId),
+    Committed { class: ClassId, vreg: VReg },
+}
+
+impl EffOperand {
+    /// The class, whichever form the operand is in.
+    pub fn class(&self) -> ClassId {
+        match self {
+            EffOperand::Class(cid) => *cid,
+            EffOperand::Committed { class, .. } => *class,
+        }
+    }
+
+    /// The class, mutably, whichever form the operand is in.
+    pub fn class_mut(&mut self) -> &mut ClassId {
+        match self {
+            EffOperand::Class(cid) => cid,
+            EffOperand::Committed { class, .. } => class,
+        }
+    }
+
+    /// The VReg linearization chose, or `None` before the commit.
+    ///
+    /// Every caller runs after it and could unwrap; returning an option keeps a
+    /// pass that is moved before it from reading the absence as "this op has no
+    /// operand".
+    pub fn vreg(&self) -> Option<VReg> {
+        match self {
+            EffOperand::Class(_) => None,
+            EffOperand::Committed { vreg, .. } => Some(*vreg),
+        }
+    }
+
+    /// Drop back to `Class`, keeping the class the operand carries.
+    ///
+    /// For a pass that changes the CFG after the commit and hands it back to
+    /// linearization: the class is still what the operand *is*, while the VReg
+    /// describes a linearization that is about to be replaced.
+    pub fn uncommit(&mut self) {
+        *self = EffOperand::Class(self.class());
+    }
+}
+
 /// The values a terminator passes to one successor, as block arguments.
 ///
 /// `Classes` while the IR is still being transformed, `Committed` once
@@ -140,7 +203,7 @@ pub enum EffectfulOp {
     /// `result` is the e-graph ClassId of the `Op::LoadResult` node that
     /// represents the loaded value in the pure-op world.
     Load {
-        addr: ClassId,
+        addr: EffOperand,
         ty: Type,
         result: ClassId,
     },
@@ -148,8 +211,8 @@ pub enum EffectfulOp {
     /// Store a value e-class to an address e-class.
     /// `ty` is the type of the value being stored (determines store width).
     Store {
-        addr: ClassId,
-        val: ClassId,
+        addr: EffOperand,
+        val: EffOperand,
         ty: Type,
     },
 
@@ -193,12 +256,12 @@ impl EffectfulOp {
     pub fn for_each_class_id(&self, mut f: impl FnMut(ClassId)) {
         match self {
             EffectfulOp::Load { addr, result, .. } => {
-                f(*addr);
+                f(addr.class());
                 f(*result);
             }
             EffectfulOp::Store { addr, val, .. } => {
-                f(*addr);
-                f(*val);
+                f(addr.class());
+                f(val.class());
             }
             EffectfulOp::Call { args, results, .. } => {
                 args.iter().copied().for_each(&mut f);
@@ -230,12 +293,12 @@ impl EffectfulOp {
     pub fn for_each_class_id_mut(&mut self, mut f: impl FnMut(&mut ClassId)) {
         match self {
             EffectfulOp::Load { addr, result, .. } => {
-                f(addr);
+                f(addr.class_mut());
                 f(result);
             }
             EffectfulOp::Store { addr, val, .. } => {
-                f(addr);
-                f(val);
+                f(addr.class_mut());
+                f(val.class_mut());
             }
             EffectfulOp::Call { args, results, .. } => {
                 args.iter_mut().for_each(&mut f);

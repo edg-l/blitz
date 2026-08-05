@@ -46,8 +46,9 @@ pub(crate) mod cfg;
 mod linearize;
 mod phi_removal;
 use cfg::{
-    collect_externals, collect_phi_source_vregs, collect_roots, commit_terminator_arg_vregs,
-    compute_copy_pairs, compute_copy_pairs_from_schedules, compute_loop_depths,
+    collect_externals, collect_phi_source_vregs, collect_roots, commit_effectful_operand_vregs,
+    commit_terminator_arg_vregs, compute_copy_pairs, compute_copy_pairs_from_schedules,
+    compute_loop_depths,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -310,12 +311,14 @@ pub(super) fn extract_from_egraph(
     Ok((block_param_map, extraction))
 }
 
-/// Write linearization's choice of VReg for every block argument into the CFG.
+/// Write linearization's choice of VReg for every block argument and every
+/// effectful-op operand into the CFG.
 ///
 /// From here a block argument is a VReg the terminator names, not a class every
-/// consumer resolves for itself. Before scheduling, so the schedules are built
-/// from what this wrote, and before the splitter, whose operand rewriting is
-/// what makes a pressure decision stick.
+/// consumer resolves for itself, and the same holds for the address a `Load`
+/// reads. Before scheduling, so the schedules are built from what this wrote,
+/// and before the splitter, whose operand rewriting is what makes a pressure
+/// decision stick.
 fn commit_args(
     func: &mut Function,
     egraph: &EGraph,
@@ -327,6 +330,18 @@ fn commit_args(
         rpo_pos[idx] = pos;
     }
     let name = func.name.clone();
+    let fail = |phase: &str| {
+        let (phase, name) = (phase.to_string(), name.clone());
+        move |message: String| CompileError {
+            phase,
+            message,
+            location: Some(IrLocation {
+                function: name,
+                block: None,
+                inst: None,
+            }),
+        }
+    };
     commit_terminator_arg_vregs(
         func,
         egraph,
@@ -336,15 +351,9 @@ fn commit_args(
         &lin.block_param_vreg_overrides,
         &rpo_pos,
     )
-    .map_err(|message| CompileError {
-        phase: "terminator-args".into(),
-        message,
-        location: Some(IrLocation {
-            function: name,
-            block: None,
-            inst: None,
-        }),
-    })
+    .map_err(fail("terminator-args"))?;
+    commit_effectful_operand_vregs(func, egraph, &lin.block_snapshots)
+        .map_err(fail("effectful-operands"))
 }
 
 /// What the IR-level passes hand to the machine-level half of the pipeline.

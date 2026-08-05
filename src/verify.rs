@@ -237,12 +237,12 @@ impl Verifier<'_> {
 
         match op {
             EffectfulOp::Load { addr, result, .. } => {
-                self.check_class(*addr, &format!("{at}: Load addr"));
+                self.check_class(addr.class(), &format!("{at}: Load addr"));
                 self.check_class(*result, &format!("{at}: Load result"));
             }
             EffectfulOp::Store { addr, val, .. } => {
-                self.check_class(*addr, &format!("{at}: Store addr"));
-                self.check_class(*val, &format!("{at}: Store val"));
+                self.check_class(addr.class(), &format!("{at}: Store addr"));
+                self.check_class(val.class(), &format!("{at}: Store val"));
             }
             EffectfulOp::Call {
                 func,
@@ -668,6 +668,12 @@ use crate::x86::reg::Reg;
 /// VReg, and `Op::TerminatorArgs` is a copy of that list rather than a second
 /// resolution of it.
 ///
+/// A `Load`'s address and a `Store`'s operands are now VRegs in the CFG too, so
+/// before the splitter the barrier is a copy of what the CFG states and the two
+/// sides agree by construction. What is left to catch there is a disagreement
+/// the splitter opens: it rewrites the barrier's operand and patches the class
+/// map separately, and only one of the two is what the emitted code reads.
+///
 /// Only positions where *both* sides have an answer are compared. A class the map
 /// cannot resolve at that point has no second answer to disagree with.
 pub fn verify_cfg_schedule_agreement(
@@ -715,9 +721,12 @@ pub fn verify_cfg_schedule_agreement(
 
         for (barrier_k, op) in block.ops[..block.non_term_count()].iter().enumerate() {
             let roles: Vec<(&str, ClassId)> = match op {
-                EffectfulOp::Load { addr, .. } => vec![("Load address", *addr)],
+                EffectfulOp::Load { addr, .. } => vec![("Load address", addr.class())],
                 EffectfulOp::Store { addr, val, .. } => {
-                    vec![("Store address", *addr), ("Store value", *val)]
+                    vec![
+                        ("Store address", addr.class()),
+                        ("Store value", val.class()),
+                    ]
                 }
                 EffectfulOp::Call { args, .. } => {
                     args.iter().map(|&cid| ("Call argument", cid)).collect()
