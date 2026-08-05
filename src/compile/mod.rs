@@ -1142,7 +1142,7 @@ pub fn compile(
                 // at the end keep sixteen registers occupied until the end,
                 // exactly as the terminator operands did.
                 let last_needed = |vreg: VReg, sched: &[ScheduledInst]| -> usize {
-                    sched
+                    let mut at = sched
                         .iter()
                         .enumerate()
                         .filter(|(_, inst)| {
@@ -1151,7 +1151,17 @@ pub fn compile(
                         })
                         .map(|(i, _)| i + 1)
                         .max()
-                        .unwrap_or(0)
+                        .unwrap_or(0);
+                    // A projection reads a register its producer still owns, so
+                    // nothing goes between a division and the projections taking
+                    // its quotient and remainder out of RAX and RDX.
+                    while sched
+                        .get(at)
+                        .is_some_and(|inst| matches!(inst.op, Op::Proj0 | Op::Proj1))
+                    {
+                        at += 1;
+                    }
+                    at
                 };
                 let mut planned: Vec<(usize, ScheduledInst)> = stores
                     .into_iter()

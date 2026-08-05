@@ -1608,7 +1608,16 @@ fn apply_cross_block_slot_spill(
     let mut def_block_idx: Option<usize> = None;
     for (bi, block_sched) in all_block_schedules.iter().enumerate() {
         if let Some(def_pos) = block_sched.iter().position(|i| i.dst == victim) {
-            // Step 1: SpillStore after def.
+            // Step 1: SpillStore after def -- and after any projection reading
+            // it, since a projection takes its value out of a register its
+            // producer still owns and nothing may come between them.
+            let mut store_at = def_pos + 1;
+            while block_sched
+                .get(store_at)
+                .is_some_and(|inst| matches!(inst.op, Op::Proj0 | Op::Proj1))
+            {
+                store_at += 1;
+            }
             let store_vreg = VReg(*next_vreg);
             *next_vreg += 1;
             let store_inst = ScheduledInst {
@@ -1616,7 +1625,7 @@ fn apply_cross_block_slot_spill(
                 dst: store_vreg,
                 operands: vec![victim],
             };
-            per_block_insertions[bi].push((def_pos + 1, store_inst));
+            per_block_insertions[bi].push((store_at, store_inst));
 
             // Look up the victim's ClassId for segment registration.
             let entry_point = ProgramPoint::block_entry(bi);
@@ -1627,7 +1636,7 @@ fn apply_cross_block_slot_spill(
                 // rather than a value, holds no register, and its point is
                 // already covered by the victim's segment, truncated to end
                 // exactly here.
-                let store_point = ProgramPoint::inst_point(bi, def_pos + 1);
+                let store_point = ProgramPoint::inst_point(bi, store_at);
 
                 // Step 2: truncate the original VReg's segment to end at
                 // store_point, so nothing downstream resolves the class to a
