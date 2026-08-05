@@ -1155,32 +1155,40 @@ clique. The spill loop stops there reporting no progress with 4 of 5 over-budget
 VRegs spillable, so the next question is why spilling those four does not reduce
 the overshoot, not how to route more parameters.
 
-### The next lead: some of that overshoot may not be real
+### What the two remaining failures actually are
 
-Established on `pressure` seed 28 at `-O1`, from the over-budget dump
-(`BLITZ_DEBUG=split`) and the coalescing trace:
+The `BLITZ_DEBUG=split` over-budget dump is misleading and cost a detour worth
+recording: it lists nodes like `v939` with `def=<phantom or coalesced away>` and
+degree 506, and `v939` is an `XmmSpillLoad` result that coalescing merged away
+(`v241` into `v939`, then `v939` into `v190`). None of those reach the decision.
+The list the spill loop acts on is built from the **post-coalesce**
+`per_block_insts`, and on `pressure` seed 28 it holds six nodes, every one of
+them real, unaliased and of the class it is counted in. **The overshoot is not
+inflated by phantoms.**
 
-- Three of the over-budget nodes -- `v939`, `v944`, `v955` -- are reported as
-  **GPR** with **degree 506** and colours 14, 15 and 16 against a GPR budget of
-  14, each with `def=<phantom or coalesced away>`.
-- `v939`'s only definition is `XmmSpillLoad(136)` in block 11, where it is also a
-  `TerminatorArgs` operand. `Op::is_fp_op` is true for `XmmSpillLoad`, so its
-  class is XMM, not GPR.
-- Coalescing merged `v241` into `v939`, then `v939` into `v190`, so `v939` is not
-  a live node after coalescing at all.
+Those six say what the shape is:
 
-So the three nodes carrying the colours that put this function over budget are
-neither of the class they are counted in nor present after coalescing. **If the
-overshoot is counted on nodes like these, the compiler is refusing programs it
-can allocate**, and no amount of extra spilling or routing will move them --
-which is exactly the "spilling did not reduce it" the loop reports.
+| VReg | class | colour | def | clique |
+| --- | --- | --- | --- | --- |
+| v332 | XMM | 16 | `b33 X86Addsd` | >=16 |
+| v253 | XMM | 17 | `b9 BlockParam(9, 16, F64)` | >=12 |
+| v269 | XMM | 16 | `b25 BlockParam(25, 0, F64)` | >=12 |
+| v61, v64 | XMM | 17, 16 | `b27 X86Subsd`, `b27 X86Addsd` | >=11 |
+| v19 | GPR | 18 | `b0 Iconst(4, I32)` | >=7 |
 
-Not yet established: how such a node reaches the coloring. `real_vreg_indices`
-(and with it `over_budget`) is built from `phase3.per_block_insts`, which is the
-**post-coalesce** list -- `apply_coalescing` has already renamed operands there.
-The first thing to check is therefore whether that list still names `v939`: if it
-does, the alias chain is not being applied transitively; if it does not, the
-over-budget path is reading a different index space than the one it reports.
+So it is **XMM pressure with block parameters inside the clique** -- a 16-wide
+XMM clique against a budget of 16, two of whose members are parameters of
+*different* blocks. The spill loop reports 2 spillable of 5 for exactly that
+reason, and this is the gap already named above: nothing can relieve a block
+parameter under ordinary pressure. Slot routing declines because each of those
+blocks is within budget on its own parameters, and the XMM/call rule declines
+because the pressure point is not a call.
+
+The two candidate answers, neither tried: let the spill loop hand a parameter to
+slot routing rather than skip it, or give the splitter a third trigger that
+counts *ordinary* points, not just block entries and edges, and routes the
+parameters it finds there. The second is the same move step 5b made for the
+terminator, one level more general.
 
 ---
 
