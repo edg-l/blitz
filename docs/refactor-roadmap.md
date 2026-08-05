@@ -1155,6 +1155,33 @@ clique. The spill loop stops there reporting no progress with 4 of 5 over-budget
 VRegs spillable, so the next question is why spilling those four does not reduce
 the overshoot, not how to route more parameters.
 
+### The next lead: some of that overshoot may not be real
+
+Established on `pressure` seed 28 at `-O1`, from the over-budget dump
+(`BLITZ_DEBUG=split`) and the coalescing trace:
+
+- Three of the over-budget nodes -- `v939`, `v944`, `v955` -- are reported as
+  **GPR** with **degree 506** and colours 14, 15 and 16 against a GPR budget of
+  14, each with `def=<phantom or coalesced away>`.
+- `v939`'s only definition is `XmmSpillLoad(136)` in block 11, where it is also a
+  `TerminatorArgs` operand. `Op::is_fp_op` is true for `XmmSpillLoad`, so its
+  class is XMM, not GPR.
+- Coalescing merged `v241` into `v939`, then `v939` into `v190`, so `v939` is not
+  a live node after coalescing at all.
+
+So the three nodes carrying the colours that put this function over budget are
+neither of the class they are counted in nor present after coalescing. **If the
+overshoot is counted on nodes like these, the compiler is refusing programs it
+can allocate**, and no amount of extra spilling or routing will move them --
+which is exactly the "spilling did not reduce it" the loop reports.
+
+Not yet established: how such a node reaches the coloring. `real_vreg_indices`
+(and with it `over_budget`) is built from `phase3.per_block_insts`, which is the
+**post-coalesce** list -- `apply_coalescing` has already renamed operands there.
+The first thing to check is therefore whether that list still names `v939`: if it
+does, the alias chain is not being applied transitively; if it does not, the
+over-budget path is reading a different index space than the one it reports.
+
 ---
 
 ## Step 6: two allocators
