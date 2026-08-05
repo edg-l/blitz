@@ -975,7 +975,25 @@ marker in the e-graph, and on `pressure` seed 22's 28-argument edge 16 of the 28
 parameters have none -- linearization skips the marker for a parameter whose class
 is already emitted when the block has at most one predecessor. **Step 3b changed
 what is available here**: `BasicBlock::param_vregs` records a VReg for *every*
-parameter, marker or not. That is the next thing to try.
+parameter, marker or not.
+
+**Tried, and it is not the blocker.** With `find_block_param_vreg` falling back to
+the CFG's `param_vregs`, `pressure` seed 15 goes from **0 of its 92 parameters
+findable to all 92** -- and emits byte-identical code, on the whole corpus.
+The routing decision rejects every one of them, because it routes a parameter
+only where a block's parameters of one class outnumber that class's budget, and
+no block on this program has that many. Reverted; nothing speculative kept.
+
+**Which corrects the recorded diagnosis for this program.** The old note in
+`docs/terminator-args-next-steps.md` describes shape B as a 28-parameter block
+clique that slot routing cannot see. On seed 15 the parameters are not the
+clique: 50 of the 92 have no VReg in the class map at block entry at all, and the
+other 42 share an ordinary value's VReg -- the pass-through case, where routing
+the VReg would move the *value* and the `value_defs` guard correctly refuses. So
+whatever is live at seed 15's pressure point, it is not a block's parameter list,
+and the next step is to name that instruction rather than assume it. The spill
+loop's own message ("one instruction whose own operands are what is live there")
+is the place to start: make it print the instruction.
 
 ---
 
