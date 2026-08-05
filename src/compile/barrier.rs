@@ -659,6 +659,20 @@ pub(crate) fn terminator_arg_destinations(terminator: &EffectfulOp) -> Vec<(Bloc
         .collect()
 }
 
+/// The `ClassId` each terminator argument names, in the same numbering as
+/// [`terminator_arg_destinations`].
+///
+/// The class outlives the VReg here: `TermArgs::Committed` stops being
+/// maintained at the splitter, but which *expression* an argument is does not
+/// change, and that is the only question a store-versus-no-store decision on an
+/// edge can be answered by.
+pub(crate) fn terminator_arg_classes(terminator: &EffectfulOp) -> Vec<ClassId> {
+    terminator_edges(terminator)
+        .into_iter()
+        .flat_map(|(_, args)| args.class_ids().collect::<Vec<_>>())
+        .collect()
+}
+
 /// Append the block's terminator arguments to its schedule as a single
 /// [`Op::TerminatorArgs`] pseudo-instruction.
 ///

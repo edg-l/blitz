@@ -1195,14 +1195,50 @@ that work each decide *at an edge*, where the store's source register is known;
 this one decides anywhere, so the guess was that some predecessor's store reads a
 register nothing wrote there. Requiring every edge into the parameter to pass the
 same `defined_here` test the edge rule applies changes nothing -- the same five
-programs fail identically. So the difference between routing a parameter at an
-edge and routing the same parameter elsewhere is not the store side, and the next
-attempt should find out what it is before adding another guard. The method for
-that is `DEBUGGING-NOTES.md`'s first technique: one `printf` per term against
-`cc`, then `read_frame.py --sum-chain` on the unmodified binary.
+programs fail identically.
+
+**Bisected instead, and it named one parameter.** Capping how many parameters the
+rule routes and walking the cap up, `mixed` seed 14 turns from 224 into 225 at
+exactly one routing: block 6's parameter 0. At that cap the parameter gets *no
+phi copy and no slot store* -- nothing writes it, and the block reads whatever
+the register held.
+
+That found a real defect in the store decision, which is now fixed and kept (see
+below). It is **not** the whole of rule 3's miscompile: with the store decision
+corrected, seed 14 still turns at the same parameter, and the traffic on its slot
+shows one store where the block has two predecessors passing that parameter. So
+one edge's store is still missing, and finding which is where the next attempt
+starts -- the bisection harness is three lines of `route.insert` accounting and
+worth rebuilding.
 
 The other candidate is still untried: let the spill loop hand a parameter to slot
 routing rather than skip it.
+
+### What the bisection fixed: a back edge is not "the VRegs are equal"
+
+An argument whose destination parameter is slot-routed needs no store on exactly
+one kind of edge -- a **back** edge, where the forward edge into that block filled
+the slot before the loop began. `compile::mod` decided that by asking whether the
+argument's VReg equalled the parameter's, and `build_phi_copies` by asking whether
+their classes were equal. Both are proxies for identity, and identity is not the
+question:
+
+- **VReg equality is not identity.** Two values share a VReg whenever
+  linearization had no reason to give them separate storage. On seed 14 the
+  argument is `ClassId(300)`, the constant 0, and the parameter is
+  `ClassId(178)`; they share `VReg(667)`, so the test suppressed the only store
+  that parameter had.
+- **Class equality is not "already filled".** Replacing the VReg test with the
+  class test breaks 2 lit tests and a differential comparison, because an
+  argument that IS its parameter on a *forward* edge is the one edge that must
+  store.
+
+The criterion is now stated directly: skip the store only when the argument is the
+parameter **and** the edge is a back edge, which `cfg::dominates` answers. It
+costs nothing and pays: 47 codesize rows change, **every one of them smaller**,
+with `regalloc/param_shadow_seed13.c` at `-O0` losing 4.4% of its instructions and
+21% of its spills. All gates green and the corpus unmoved at `mixed` 29/30, `args`
+30/30, `pressure` 28/30.
 
 ---
 

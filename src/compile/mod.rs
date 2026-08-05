@@ -1090,6 +1090,11 @@ pub fn compile(
             // `build_phi_copies` needs no matching change: an argument index with
             // no operand is already the signal that the value travels through a
             // slot and the store is already in this block.
+            // A back edge is one whose target dominates its source, which is what
+            // says the slot was filled before the loop began.
+            let dom_rpo = cfg::compute_rpo(func);
+            let dom_idom = cfg::compute_idom(func, &dom_rpo);
+            let compile_dominates = |a: usize, b: usize| cfg::dominates(a, b, &dom_idom);
             for (block_idx, block) in func.blocks.iter().enumerate() {
                 let terminator = block.ops.last().expect("block must have terminator");
                 let dests = barrier::terminator_arg_destinations(terminator);
@@ -1108,23 +1113,35 @@ pub fn compile(
                 if routed.is_empty() {
                     continue;
                 }
+                // Which edge needs no store: a BACK edge whose argument is the
+                // parameter itself, because the forward edge into that block
+                // filled the slot before the loop began. Identity alone is not
+                // the question -- an argument equal to its parameter on a forward
+                // edge is the one edge that must store, and reading identity as
+                // "already filled" leaves the slot unwritten while every use
+                // reloads it. Nor is identity by VReg: two values share a VReg
+                // whenever linearization had no reason to give them separate
+                // storage, so the class is what says whether this argument IS the
+                // parameter.
+                let arg_classes = barrier::terminator_arg_classes(terminator);
                 let stores: Vec<(VReg, split::SlotSpilledParamInfo)> = routed
                     .iter()
-                    .filter(|(_, vreg, (dest_bid, dest_pidx), info)| {
-                        // The VReg the destination block states for that
-                        // parameter is the one its own `BlockParam` defines, so
-                        // a store of it into the slot would store the value the
-                        // block is about to receive.
-                        //
-                        // Unless the parameter has no storage of its own and
-                        // names the value it carries: then this equality is what
-                        // an edge feeding the value into the parameter looks
-                        // like, and it is the one edge that MUST store.
-                        info.value_alias
-                            || (*vreg != info.vreg
-                                && func.blocks[block_id_to_idx[dest_bid]]
-                                    .param_vreg(*dest_pidx)
-                                    .is_none_or(|own| *vreg != own))
+                    .filter(|(arg_idx, vreg, (dest_bid, dest_pidx), info)| {
+                        let dest_idx = block_id_to_idx[dest_bid];
+                        let back_edge = compile_dominates(dest_idx, block_idx);
+                        let is_param = arg_classes
+                            .get(*arg_idx as usize)
+                            .copied()
+                            .zip(block_param_map.get(&(*dest_bid, *dest_pidx)).copied())
+                            .is_some_and(|(arg_class, param_class)| {
+                                egraph.unionfind.find_immutable(arg_class)
+                                    == egraph.unionfind.find_immutable(param_class)
+                            })
+                            || *vreg == info.vreg
+                            || func.blocks[dest_idx]
+                                .param_vreg(*dest_pidx)
+                                .is_some_and(|own| *vreg == own);
+                        !(back_edge && is_param)
                     })
                     .map(|(_, vreg, _, info)| (*vreg, info.clone()))
                     .collect();

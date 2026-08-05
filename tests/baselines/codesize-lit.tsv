@@ -573,7 +573,7 @@ regalloc/double_array_base_shares_counter.c	O1	38	141	2	2
 regalloc/dup_const_block_params.c	O0	365	1554	27	59
 regalloc/dup_const_block_params.c	O1	465	2448	80	148
 regalloc/float_sum_guard_seed23.c	O0	1345	5625	93	218
-regalloc/float_sum_guard_seed23.c	O1	1039	5275	145	302
+regalloc/float_sum_guard_seed23.c	O1	1033	5239	139	302
 regalloc/folded_addr_under_pressure.c	O0	1013	5020	90	255
 regalloc/folded_addr_under_pressure.c	O1	892	4441	103	210
 regalloc/high_pressure_with_calls.c	O0	29	90	0	0
@@ -592,10 +592,10 @@ regalloc/nested_loops_deep_pressure.c	O0	42	150	0	0
 regalloc/nested_loops_deep_pressure.c	O1	40	138	0	0
 regalloc/param_shadow_const_v7.c	O0	1150	7577	386	456
 regalloc/param_shadow_const_v7.c	O1	1049	6730	384	339
-regalloc/param_shadow_seed13.c	O0	884	5072	183	248
-regalloc/param_shadow_seed13.c	O1	824	4856	214	203
-regalloc/param_shadow_seed16.c	O0	1425	7854	266	369
-regalloc/param_shadow_seed16.c	O1	1627	9979	417	518
+regalloc/param_shadow_seed13.c	O0	845	4769	144	248
+regalloc/param_shadow_seed13.c	O1	797	4646	187	203
+regalloc/param_shadow_seed16.c	O0	1412	7766	253	369
+regalloc/param_shadow_seed16.c	O1	1613	9870	403	518
 regalloc/param_shadow_seed3.c	O0	2163	9517	106	303
 regalloc/param_shadow_seed3.c	O1	2813	15828	509	835
 regalloc/phi_dest_from_target_schedule.c	O0	371	1131	0	0
@@ -617,7 +617,7 @@ regalloc/split_passthrough_xmm.c	O1	17	77	0	0
 regalloc/split_xmm_across_call_shadow.c	O0	24	119	1	2
 regalloc/split_xmm_across_call_shadow.c	O1	24	116	1	2
 regalloc/xmm_loop_crossing.c	O0	40	197	3	3
-regalloc/xmm_loop_crossing.c	O1	41	196	4	5
+regalloc/xmm_loop_crossing.c	O1	40	190	3	5
 regalloc/xmm_pressure_mixed_calls.c	O0	36	159	0	0
 regalloc/xmm_pressure_mixed_calls.c	O1	28	133	1	2
 stack/addr_taken_param.c	O0	8	31	0	0

@@ -6,8 +6,8 @@ bitcount.c	O0	121	397	3	10
 bitcount.c	O1	101	311	0	0
 crc32.c	O0	99	323	0	0
 crc32.c	O1	91	292	0	0
-dot_product.c	O0	121	556	5	6
-dot_product.c	O1	115	532	5	6
+dot_product.c	O0	120	550	4	6
+dot_product.c	O1	114	526	4	6
 fib_memo.c	O0	157	576	1	1
 fib_memo.c	O1	187	704	3	33
 hash_table.c	O0	223	825	8	37
