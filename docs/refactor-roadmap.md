@@ -1042,6 +1042,34 @@ budget. **Nothing can relieve a block parameter under ordinary pressure**, and
 that is a gap independent of shape B: the spill loop should be able to hand a
 parameter to slot routing rather than skip it.
 
+### Four attempts on shape B, all measured, all reverted
+
+For the next session, so none of these is tried a fifth time. The corpus baseline
+they are all measured against is `mixed` 15/15, `args` 15/15, `pressure` 9/15 at
+15 seeds a shape.
+
+| attempt | result |
+| --- | --- |
+| Spill loop in the function-scope allocator (step 5) | **kept**: `args` 14/15 -> 15/15, `pressure` unmoved. The overshoot *grows* per round on the pressure shape |
+| Narrow `phi_removal`'s placed-value veto to tier 2 | `args` 15/15 -> 14/15, nothing gained |
+| Give every parameter position its own VReg | `args` -> 11/15, `mixed` -> 10/15, nothing gained |
+| Let routing take a value-aliasing parameter, keeping the defining block in registers | 10 lit failures, 1 differential, `pressure` -> 5/15 |
+
+The last one is worth one more line because its reasoning looked airtight. The
+`value_defs` guard's comment describes exactly one hazard -- the predecessor's
+initialising store having its source rewritten to a reload of the slot it was
+about to fill -- and skipping the defining block's uses answers precisely that.
+It still broke ten tests, so **the guard is protecting more than its comment
+says**, and finding out what would be the first job of any fifth attempt.
+
+What none of the four touched: the values at seed 15's peak genuinely number 17
+against a budget of 14, so *some* of them must live in memory across that edge.
+Every mechanism for putting them there runs through `slot_spilled_params`, and
+every route into it is blocked by the parameter aliasing its value. The next idea
+worth trying is probably not another way to unblock that, but to stop the
+aliasing from being load-bearing: make the phi copy able to store an *argument*
+to a slot without the target's parameter having to be a distinct VReg at all.
+
 ---
 
 ## Step 6: two allocators
