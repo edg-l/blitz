@@ -8,7 +8,7 @@ use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 
-use super::cfg::{compute_idom, compute_rpo, dominates};
+use super::cfg::{block_id_to_idx, compute_idom, compute_rpo, dominates};
 
 /// Extra roots to add to specific blocks during linearization.
 /// Maps block_index -> Vec<ClassId> of invariant classes to emit there.
@@ -28,12 +28,7 @@ pub(super) fn build_predecessor_map(
     func: &Function,
 ) -> (Vec<Vec<usize>>, BTreeMap<BlockId, usize>) {
     let n = func.blocks.len();
-    let id_to_idx: BTreeMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let id_to_idx = block_id_to_idx(func);
 
     let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
 
@@ -75,12 +70,7 @@ pub(super) fn detect_back_edges(
     rpo: &[usize],
     idom: &[Option<usize>],
 ) -> Vec<(usize, usize)> {
-    let id_to_idx: BTreeMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let id_to_idx = block_id_to_idx(func);
 
     let mut back_edges = Vec::new();
 
@@ -862,14 +852,7 @@ mod tests {
 
     // ── insert_preheader ──────────────────────────────────────────────────────
 
-    /// Helper: build id_to_idx map from a function.
-    fn id_to_idx(func: &Function) -> BTreeMap<BlockId, usize> {
-        func.blocks
-            .iter()
-            .enumerate()
-            .map(|(i, b)| (b.id, i))
-            .collect()
-    }
+    use super::block_id_to_idx as id_to_idx;
 
     /// Preheader is inserted between bb0 and the loop header bb1.
     /// After insertion, bb0 should jump to the preheader, bb2 (back-edge) still

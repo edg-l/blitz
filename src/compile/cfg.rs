@@ -10,6 +10,19 @@ use crate::schedule::scheduler::ScheduledInst;
 
 // ── RPO helpers ───────────────────────────────────────────────────────────────
 
+/// Map each block's `BlockId` to its index in `func.blocks`.
+///
+/// A terminator names its successors by `BlockId`; the schedules, the liveness
+/// sets and every helper here are keyed on the index. This is the one place
+/// that translation is written.
+pub(crate) fn block_id_to_idx(func: &Function) -> BTreeMap<BlockId, usize> {
+    func.blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect()
+}
+
 /// Compute a reverse post-order traversal of the CFG starting from block 0.
 ///
 /// Returns a `Vec<usize>` of block *indices* into `func.blocks` (not block IDs)
@@ -24,13 +37,7 @@ pub(super) fn compute_rpo(func: &Function) -> Vec<usize> {
     // Build a successor map: block index -> list of successor block indices.
     let n = func.blocks.len();
 
-    // Map block id -> block index for fast lookup.
-    let id_to_idx: BTreeMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let id_to_idx = block_id_to_idx(func);
 
     let successors: Vec<Vec<usize>> = func
         .blocks
@@ -102,12 +109,7 @@ pub(super) fn compute_idom(func: &Function, rpo: &[usize]) -> Vec<Option<usize>>
         return vec![];
     }
 
-    let id_to_idx: BTreeMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let id_to_idx = block_id_to_idx(func);
     let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, block) in func.blocks.iter().enumerate() {
         if let Some(term) = block.ops.last() {
@@ -285,20 +287,14 @@ pub(super) fn compute_copy_pairs(
 ) -> Vec<(VReg, VReg)> {
     let mut pairs: Vec<(VReg, VReg)> = Vec::new();
 
-    // Build block_id -> block_index map for point computation.
-    let block_id_to_idx: BTreeMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let id_to_idx = block_id_to_idx(func);
 
     for block in &func.blocks {
         let Some(term) = block.ops.last() else {
             continue;
         };
         for (target, args) in super::barrier::terminator_edges(term) {
-            let Some(&target_idx) = block_id_to_idx.get(&target) else {
+            let Some(&target_idx) = id_to_idx.get(&target) else {
                 continue;
             };
             let entry_point = ProgramPoint::block_entry(target_idx);
@@ -366,12 +362,7 @@ pub(super) fn commit_terminator_arg_vregs(
     block_param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     rpo_pos: &[usize],
 ) -> Result<(), String> {
-    let block_id_to_idx: BTreeMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let id_to_idx = block_id_to_idx(func);
 
     let overrides: Vec<BTreeMap<ClassId, VReg>> = func
         .blocks
@@ -390,7 +381,7 @@ pub(super) fn commit_terminator_arg_vregs(
                 return overrides;
             };
             for (target, args) in super::barrier::terminator_edges(term) {
-                let Some(&target_idx) = block_id_to_idx.get(&target) else {
+                let Some(&target_idx) = id_to_idx.get(&target) else {
                     continue;
                 };
                 if rpo_pos[block_idx] < rpo_pos[target_idx] {
@@ -533,17 +524,12 @@ pub(super) fn compute_copy_pairs_from_schedules(
     param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     block_param_vregs: &BTreeMap<(BlockId, u32), VReg>,
 ) -> Vec<(VReg, VReg)> {
-    let block_id_to_idx: BTreeMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let id_to_idx = block_id_to_idx(func);
 
     // Resolved exactly as the copy that writes the parameter resolves it, so
     // coalescing merges onto the VReg that copy targets and not another.
     let param_vreg = |target: BlockId, pidx: u32| -> Option<VReg> {
-        let target_idx = *block_id_to_idx.get(&target)?;
+        let target_idx = *id_to_idx.get(&target)?;
         resolve_block_param_vreg(
             target,
             pidx,
@@ -591,13 +577,7 @@ pub(super) fn compute_loop_depths(
     // Compute per-block loop depth using back-edge counting.
     let mut block_depth: Vec<u32> = vec![0u32; n];
 
-    // Build BlockId -> index map for O(1) lookups.
-    let block_id_to_idx: std::collections::HashMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let id_to_idx = block_id_to_idx(func);
 
     // For each block, check its terminator for back-edges.
     for (src_idx, block) in func.blocks.iter().enumerate() {
@@ -611,7 +591,7 @@ pub(super) fn compute_loop_depths(
             };
             for target in targets {
                 // Find target block index.
-                if let Some(&target_idx) = block_id_to_idx.get(&target)
+                if let Some(&target_idx) = id_to_idx.get(&target)
                     && target_idx <= src_idx
                 {
                     // Back-edge: all blocks from target_idx to src_idx are in the loop.

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use super::cfg::block_id_to_idx;
 use crate::egraph::egraph::EGraph;
 use crate::egraph::extract::ExtractionResult;
 use crate::ir::effectful::{BlockId, EffectfulOp};
@@ -18,13 +19,7 @@ pub(super) fn eliminate_unreachable_blocks(func: &mut Function) -> usize {
         return 0;
     }
 
-    // Build BlockId -> index map.
-    let id_to_idx: BTreeMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let id_to_idx = block_id_to_idx(func);
 
     // BFS from entry block (index 0).
     let mut reachable: BTreeSet<BlockId> = BTreeSet::new();

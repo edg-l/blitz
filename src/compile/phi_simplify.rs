@@ -59,7 +59,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::cfg::{compute_idom, compute_rpo, dominates};
+use super::cfg::{block_id_to_idx, compute_idom, compute_rpo, dominates};
 use crate::egraph::EGraph;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
@@ -99,12 +99,7 @@ pub fn simplify_block_params(func: &mut Function, egraph: &mut EGraph) -> usize 
         }
     }
 
-    let block_idx: BTreeMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let block_idx = block_id_to_idx(func);
     let idom = compute_idom(func, &compute_rpo(func));
 
     // A block whose predecessors disagree about arity, or whose parameters no edge

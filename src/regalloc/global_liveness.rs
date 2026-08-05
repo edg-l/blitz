@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::compile::cfg::block_id_to_idx;
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::ir::effectful::{BlockId, EffectfulOp};
@@ -163,12 +164,7 @@ pub fn compute_global_liveness_with_block_params(
 /// Returns `successors[i]` = list of block indices that block `i` can jump to.
 /// Indices are into `func.blocks` (not block IDs).
 pub fn cfg_successors(func: &Function) -> Vec<Vec<usize>> {
-    let id_to_idx: BTreeMap<u32, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    let id_to_idx = block_id_to_idx(func);
 
     func.blocks
         .iter()

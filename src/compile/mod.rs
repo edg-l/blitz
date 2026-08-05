@@ -13,7 +13,7 @@
 //! 10. Encoding
 //! 11. ELF emission
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::cost::{CostModel, OptGoal};
 use crate::egraph::extract::{
@@ -44,7 +44,7 @@ use barrier::{
 use program_point::ProgramPoint;
 mod canon;
 use canon::canonicalize_class_refs;
-mod cfg;
+pub(crate) mod cfg;
 use cfg::{
     collect_block_roots, collect_externals, collect_phi_source_vregs, collect_roots,
     commit_terminator_arg_vregs, compute_copy_pairs, compute_copy_pairs_from_schedules,
@@ -428,13 +428,8 @@ pub fn compile(
     // argument and `commit_terminator_arg_vregs` has written that choice into the
     // terminators; from there the CFG is read-only.
 
-    // Build BlockId -> index map for O(1) lookups (must be after DCE2).
-    let block_id_to_idx: HashMap<BlockId, usize> = func
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
+    // Must be after DCE2, which changes what the indices are.
+    let block_id_to_idx = cfg::block_id_to_idx(&func);
 
     // Detect whether this function contains any call instructions (must be after DCE2).
     let has_calls = func_has_calls(&func);
