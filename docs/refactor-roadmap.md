@@ -1090,10 +1090,70 @@ at both levels.
 the reproducer plus `pressure` seeds 14, 21 and 22 -- and `pressure` seed 4 loses
 6 instructions and 3 spills. One row is a byte larger for one reload fewer.
 
-What none of the five touched: the values at seed 15's peak genuinely number 17
-against a budget of 14, so *some* of them must live in memory across that edge.
-Routing now reaches 1-4 of them per program, which is what moved three seeds; the
-rest of the peak is values no parameter names.
+### Step 5b: the edge is counted too, and that is what shape B was
+
+The rule above counts a *block's parameters* against the budget. The other end
+of the same edge went uncounted, and it is where the generated loops actually
+overflow: `Op::TerminatorArgs` carries an edge's arguments as one instruction
+because the phi copies it lowers to are a parallel copy, so 17 GPR arguments
+occupy 17 registers at one point exactly as 17 GPR parameters do. Those
+arguments' destination parameters are spread over blocks that are each within
+budget, so the parameter rule never sees them, and nothing else can help: the
+pressure loop spills values live *across* a point, and these are live there
+because the instruction reads them.
+
+**So slot routing gained a second trigger: an edge whose distinct arguments of
+one class outnumber that class's budget must put the excess in slots.** Two
+things had to be right for it to be sound, and the machine verifier caught the
+absence of each:
+
+- **Every use of a routed VReg has to sit where the edge's stores have run** --
+  in a block one of the parameter's blocks dominates, or in the block defining
+  the value an aliasing parameter names, which keeps that value in a register.
+  A use anywhere else reloads a slot nothing wrote.
+- **The store has to be able to read its value.** It goes in the source block, so
+  the value must be defined there or live in on every path into it.
+
+A third fix was needed underneath: a parameter routed by an earlier round was
+skipped by the next but never claimed in `planned_victims`, so the pressure paths
+were free to pick one as a victim and store a register it had given up rounds
+ago.
+
+**Candidacy is by destination, not by VReg.** The first version asked whether the
+*argument's* VReg was a routable parameter, which holds only where the parameter
+names the value it carries -- a phi copy stands between them otherwise. On the
+wide edges that rejected 16 arguments of 16, and the rule fired on almost
+nothing. An argument gives up its register when *every* position it feeds is
+routable, since one position left in registers keeps the value there.
+`find_block_param_vreg` falls back to the CFG's `param_vregs`, the only place a
+pass-through parameter's VReg is stated; that fallback was measured as inert on
+its own before this trigger existed, and is what makes it work now.
+
+| | at session start | after step 5b |
+| --- | --- | --- |
+| `pressure` at 30 seeds | 14/30 | **28/30** |
+| `mixed`, `args` at 30 seeds | 29/30, 30/30 | unchanged |
+
+Code quality moves with capacity, since a routed argument stops forcing spills
+around it: `pressure` seed 4 at `-O1` loses 55% of its instructions and 68% of
+its spills, seed 16 34% and 51%. The cost is 1-4% more code on 9 generated
+programs and 2 lit rows, where routing now fires and the allocator had coped.
+Excluding rematerializable arguments was tried both ways to cut that -- as a
+reason to route and as a candidate -- and both are worse (4-5 lit regressions
+against 2), so neither is kept.
+
+One bug came out of it that was not about routing at all: a store placed after
+the last point its value is needed lands between a division and its projections,
+which `lower.rs` asserts against because a projection reads a register its
+producer still owns. Both store-placement sites skip projections now; the
+splitter's own store after a def had the same latent hazard.
+
+**What is left, and it is a different shape.** Two `pressure` seeds still fail,
+both peaking at a `SpillStore` with 15 GPR live of which the instruction reads
+*one* -- values live *across* a point, which is shape A, not the terminator
+clique. The spill loop stops there reporting no progress with 4 of 5 over-budget
+VRegs spillable, so the next question is why spilling those four does not reduce
+the overshoot, not how to route more parameters.
 
 ---
 
@@ -1154,21 +1214,22 @@ stops being a hazard the pipeline has to remember.
 
 ---
 
-## State after steps 0 through 5
+## State after steps 0 through 5b
 
-Gates: 934 unit, 474 lit at `BLITZ_VERIFY` off/1/strict, 299 differential + `cc`.
-Code quality has a baseline too: `bash tests/run_codesize.sh --check`, 888 rows.
+Gates: 934 unit, 474 lit at `BLITZ_VERIFY` off/1/strict, 299 differential + `cc`,
+and 0 machine-verifier violations over 180 generated program-levels. Code quality
+has a baseline too: `bash tests/run_codesize.sh --check`, 888 rows.
 
-Steps 0, 1, 2, 3, 3b, 4 and 5 are done. What each measured is in its own notes
-above, including the four predictions that were stated first and the three that
+Steps 0, 1, 2, 3, 3b, 4, 5 and 5b are done. What each measured is in its own
+notes above, including the predictions that were stated first and the ones that
 were wrong.
 
-Generated corpus at 15 seeds a shape: `mixed` 15/15, `args` 15/15,
-`pressure` 10/15; at 30 seeds, `mixed` 29/30, `args` 30/30, `pressure` 17/30.
-Every failure is capacity and all but one are `-O1`, all one shape -- a
-`TerminatorArgs` reading more values than the budget holds. **Steps 2, 3, 3b and
-4 moved none of them; step 5 moved `args` from 14/15 to 15/15, and routing a
-value-aliasing parameter moved `pressure` by three programs at 30 seeds.**
+Generated corpus at 30 seeds a shape: `mixed` 29/30, `args` 30/30,
+`pressure` 28/30. Every failure is capacity. **Steps 2, 3, 3b and 4 moved none of
+them; step 5 moved `args` from 14/15 to 15/15, and step 5b moved `pressure` from
+14/30 to 28/30.** The two that remain are shape A -- values live across a point,
+not an argument clique -- so the terminator shape this document has tracked since
+step 1 is closed.
 
 The 60-seed figures this section quoted before steps 1 and 2, for comparison:
 
@@ -1180,7 +1241,9 @@ The 60-seed figures this section quoted before steps 1 and 2, for comparison:
 
 **Every remaining failure on every shape is `register pressure overshoot`.** No
 wrong-value program is open and `tests/fuzz/findings/` is empty — a first for this
-corpus. Do not widen the generator past 60 seeds per shape until these are fixed.
+corpus. Widening the generator past 30 seeds per shape is now worth doing: three
+of the four remaining failures are a shape no seed exercised until step 5b closed
+the terminator one.
 
 Redundant block parameters, `tests/fuzz/count_trivial_phis.py`:
 
