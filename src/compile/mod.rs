@@ -39,6 +39,7 @@ use barrier::{
     assign_barrier_groups, build_barrier_context, insert_early_barrier_spills,
     populate_effectful_operands,
 };
+use program_point::ProgramPoint;
 mod canon;
 use canon::canonicalize_class_refs;
 pub(crate) mod cfg;
@@ -341,17 +342,19 @@ fn commit_args(
             }),
         }
     };
+    // The parameters first: a terminator argument that *is* a parameter of its
+    // target resolves through the VReg that block states, so the destination end
+    // has to be committed before the argument end reads it.
+    commit_block_param_vregs(func, &lin.block_param_vregs);
     commit_terminator_arg_vregs(
         func,
         egraph,
         &lin.class_to_vreg,
         &lin.block_snapshots,
         block_param_map,
-        &lin.block_param_vreg_overrides,
         &rpo_pos,
     )
     .map_err(fail("terminator-args"))?;
-    commit_block_param_vregs(func, &lin.block_param_vregs);
     commit_effectful_vregs(func, egraph, &lin.block_snapshots).map_err(fail("effectful-operands"))
 }
 
@@ -557,7 +560,6 @@ pub fn compile(
         rpo_order,
         block_vreg_insts,
         block_snapshots: mut block_class_to_vreg_snapshot,
-        block_param_vreg_overrides,
         vreg_types,
         ..
     } = lin;
@@ -816,13 +818,7 @@ pub fn compile(
         add_call_precolors_for_block(&func.blocks[0], &mut all_param_vregs, &mut live_out);
         // Coalescing's copy pairs. One block reaches no other, so the only edge
         // this can find is a self-loop.
-        let copy_pairs = compute_copy_pairs(
-            func,
-            &class_to_vreg,
-            &egraph,
-            &block_param_map,
-            &block_param_vreg_overrides,
-        );
+        let copy_pairs = compute_copy_pairs(func, &class_to_vreg, &egraph, &block_param_map);
         let result = allocate(
             &all_scheduled,
             &all_param_vregs,
@@ -1138,11 +1134,15 @@ pub fn compile(
                 }
                 let stores: Vec<(VReg, split::SlotSpilledParamInfo)> = routed
                     .iter()
-                    .filter(|(_, vreg, dest, info)| {
+                    .filter(|(_, vreg, (dest_bid, dest_pidx), info)| {
+                        // The VReg the destination block states for that
+                        // parameter is the one its own `BlockParam` defines, so
+                        // a store of it into the slot would store the value the
+                        // block is about to receive.
                         *vreg != info.vreg
-                            && block_param_vreg_overrides
-                                .get(dest)
-                                .is_none_or(|&ov| *vreg != ov)
+                            && func.blocks[block_id_to_idx[dest_bid]]
+                                .param_vreg(*dest_pidx)
+                                .is_none_or(|own| *vreg != own)
                     })
                     .map(|(_, vreg, _, info)| (*vreg, info.clone()))
                     .collect();
@@ -1226,12 +1226,6 @@ pub fn compile(
                 &class_to_vreg,
             );
 
-        // Include fresh block param VRegs in the per-block sets.
-        for (&(bid, _pidx), &fresh_vreg) in &block_param_vreg_overrides {
-            let block_idx = block_id_to_idx[&bid];
-            block_param_vregs_per_block[block_idx].insert(fresh_vreg);
-        }
-
         // And what linearization recorded, for every param the class map cannot
         // name. `collect_block_param_vregs_per_block` finds a param only where a
         // segment still covers the block entry, but `lower_terminator` falls back
@@ -1261,8 +1255,8 @@ pub fn compile(
             for (&(bid, pidx), info) in &slot_spilled_params {
                 let block_idx = block_id_to_idx[&bid];
                 block_param_vregs_per_block[block_idx].remove(&info.vreg);
-                if let Some(&ov) = block_param_vreg_overrides.get(&(bid, pidx)) {
-                    block_param_vregs_per_block[block_idx].remove(&ov);
+                if let Some(own) = func.blocks[block_idx].param_vreg(pidx) {
+                    block_param_vregs_per_block[block_idx].remove(&own);
                 }
             }
         }
@@ -1465,13 +1459,19 @@ pub fn compile(
             let mut map: ClassVRegMap = snapshot.clone();
             // Apply override VRegs for block params: update class_to_vreg mapping
             // so phi copy source lookups find the correct register.
-            for (&(bid, pidx), &fresh_vreg) in &block_param_vreg_overrides {
-                if let Some(&param_cid) = block_param_map.get(&(bid, pidx)) {
-                    let canon = egraph.unionfind.find_immutable(param_cid);
-                    if bid == block.id {
-                        // This block defines the override VReg.
-                        map.insert_single(canon, fresh_vreg);
-                    }
+            // Only where the block's own VReg is not what the snapshot answers
+            // with: `insert_single` replaces the class's segments, so patching a
+            // class the snapshot already resolves correctly would discard what
+            // the splitter recorded for it.
+            for (pidx, own) in block.param_vregs.iter().enumerate() {
+                let (Some(&own), Some(&param_cid)) =
+                    (own.as_ref(), block_param_map.get(&(block.id, pidx as u32)))
+                else {
+                    continue;
+                };
+                let canon = egraph.unionfind.find_immutable(param_cid);
+                if map.lookup(canon, ProgramPoint::block_entry(block_idx)) != Some(own) {
+                    map.insert_single(canon, own);
                 }
             }
             // Rename every VReg to the one that survived coalescing, keeping the

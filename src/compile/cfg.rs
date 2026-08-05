@@ -270,7 +270,6 @@ pub(super) fn compute_copy_pairs(
     class_to_vreg: &ClassVRegMap,
     egraph: &EGraph,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
-    param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
 ) -> Vec<(VReg, VReg)> {
     let mut pairs: Vec<(VReg, VReg)> = Vec::new();
 
@@ -286,11 +285,12 @@ pub(super) fn compute_copy_pairs(
             };
             let entry_point = ProgramPoint::block_entry(target_idx);
             for (idx, arg) in args.as_committed().unwrap_or_default().iter().enumerate() {
-                // The destination VReg for a block param, preferring the
-                // per-block override (fresh VReg) over the global class map.
-                let param_v = param_vreg_overrides
-                    .get(&(target, idx as u32))
-                    .copied()
+                // The destination VReg for a block param: the one the target
+                // block states, and the global class map where it states none.
+                let param_v = func
+                    .blocks
+                    .get(target_idx)
+                    .and_then(|b| b.param_vreg(idx as u32))
                     .or_else(|| {
                         let param_cid = *block_param_map.get(&(target, idx as u32))?;
                         let canon = egraph.unionfind.find_immutable(param_cid);
@@ -346,22 +346,20 @@ pub(super) fn commit_terminator_arg_vregs(
     class_to_vreg: &ClassVRegMap,
     block_snapshots: &[ClassVRegMap],
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
-    block_param_vreg_overrides: &BTreeMap<(BlockId, u32), VReg>,
     rpo_pos: &[usize],
 ) -> Result<(), String> {
     let id_to_idx = block_id_to_idx(func);
+    let func_blocks = &func.blocks;
 
-    let overrides: Vec<BTreeMap<ClassId, VReg>> = func
-        .blocks
+    let overrides: Vec<BTreeMap<ClassId, VReg>> = func_blocks
         .iter()
         .enumerate()
         .map(|(block_idx, block)| {
-            let mut overrides: BTreeMap<ClassId, VReg> = block_param_vreg_overrides
-                .iter()
-                .filter(|((bid, _), _)| *bid == block.id)
-                .filter_map(|(&(bid, pidx), &fresh)| {
-                    let cid = block_param_map.get(&(bid, pidx))?;
-                    Some((egraph.unionfind.find_immutable(*cid), fresh))
+            let mut overrides: BTreeMap<ClassId, VReg> = (0..block.param_types.len() as u32)
+                .filter_map(|pidx| {
+                    let vreg = block.param_vreg(pidx)?;
+                    let cid = block_param_map.get(&(block.id, pidx))?;
+                    Some((egraph.unionfind.find_immutable(*cid), vreg))
                 })
                 .collect();
             let Some(term) = block.ops.last() else {
@@ -382,10 +380,8 @@ pub(super) fn commit_terminator_arg_vregs(
                     if egraph.unionfind.find_immutable(arg_cid) != canon_param {
                         continue;
                     }
-                    let param_vreg = block_param_vreg_overrides
-                        .get(&(target, pidx as u32))
-                        .copied()
-                        .or_else(|| {
+                    let param_vreg =
+                        func_blocks[target_idx].param_vreg(pidx as u32).or_else(|| {
                             class_to_vreg.lookup(canon_param, ProgramPoint::block_entry(target_idx))
                         });
                     if let Some(v) = param_vreg {

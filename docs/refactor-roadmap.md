@@ -705,9 +705,25 @@ Per-block snapshots, the three-times-patched map, `Linearized::block_param_vregs
 `block_param_vreg_overrides`, `class_emitted_in`, and the `value_defs` guard in
 `split.rs`. Judged by LOC removed with no behaviour change.
 
-`block_param_vreg_overrides` has one consumer left after step 3b -- Phase 7's
-snapshot patching -- and three measurements say it answers nothing anywhere else, so
-probe that one before writing code to preserve it.
+**`block_param_vreg_overrides` is gone.** DONE, as step 4's first slice. It had five
+consumers left after step 3b, and a probe over the whole lit corpus at both levels
+(708 compilations, 11716 trace lines proving the channel live) found that **the map
+is never populated at all** -- linearization's fresh-VReg branch does not fire on
+anything we test, and zero of the five consumers ever changed an answer.
+
+Deleting it needed more than that measurement, because "unreachable on the corpus" is
+not "unreachable by construction". The construction argument is what made it safe:
+the branch that mints a fresh VReg also pushes an `Op::BlockParam` instruction for it
+*and* records it in `block_param_vregs`, so the fresh VReg reaches every consumer
+through the schedule and through `BasicBlock::param_vregs` regardless. The map was a
+third copy of a fact those two already carry. Each consumer now reads the block:
+`commit_terminator_arg_vregs` (which is why `commit_block_param_vregs` runs first),
+the slot-store filter, the allocator's per-block parameter sets, and Phase 7's
+snapshot patch -- the last restricted to parameters whose stated VReg is not what the
+snapshot answers with, since `insert_single` replaces a class's segments and patching
+one the snapshot already resolves correctly would discard what the splitter recorded.
+
+Byte-identical: 768 identity comparisons, 0 differing; 888 codesize rows unchanged.
 
 It also unblocks the **slot-level verifier**: a reload must produce the class that was
 stored. That check cannot be built on the current map, which reports false positives
