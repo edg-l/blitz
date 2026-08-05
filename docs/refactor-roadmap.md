@@ -1013,13 +1013,34 @@ the old note blamed. It is that those parameters are the **pass-through** kind -
 the parameter shares the incoming value's VReg, so routing it would move the
 *value*, and `split.rs`'s `value_defs` guard is right to refuse.
 
-**Which makes the next change a specific one with a known cost:** give every
-parameter position a VReg of its own, so a pass-through parameter is a parameter
-rather than an alias of the value, and routing can take it. That is the
-"principled alternative" the `aa91e96` note names, and it costs a copy per
-pass-through parameter on every program -- so it wants the codesize harness
-pointed at it, and it is the first change in this whole sequence expected to make
-healthy programs *worse* in exchange for making these compile at all.
+**The obvious next change is to give every parameter position a VReg of its own**,
+so a pass-through parameter is a parameter rather than an alias of the value and
+routing can take it -- the "principled alternative" the `aa91e96` note names.
+
+**Tried, and it is a clear loss: `args` 15/15 -> 11/15, `mixed` 15/15 -> 10/15,
+`pressure` unchanged at 9/15.** Nine programs lost, none gained. Reverted.
+
+Two things came out of it that are worth keeping written down.
+
+**It is not just a cost, it changes what a phi copy has to do.** Dropping the
+pass-through branch alone broke 33 lit tests and 31 differential comparisons,
+because `build_phi_copies` deduplicates its copies on the parameter's *class* --
+"one value, one copy". That is only sound while positions sharing a class share
+storage, which is exactly what the pass-through branch arranges. With distinct
+VRegs the second position's VReg was never written and its block read whatever
+the register held. Re-keying the dedup on the destination VReg took it to 1 lit
+failure and 1 differential, so that is the real fix for that half, but it is a
+change to a delicate pass and it buys nothing on its own.
+
+**The one residual failure names the next question.** With every parameter owning
+a VReg, `regalloc/folded_addr_under_pressure.c` fails with all three of its
+over-budget VRegs being block parameters, at a peak of 12 GPR live at a
+`StoreBarrier` reading 4 of them -- not a terminator clique at all. The spill loop
+excludes block parameters by design, because a phi copy on the edge writes them,
+and slot routing declines because the block's parameters do not outnumber the
+budget. **Nothing can relieve a block parameter under ordinary pressure**, and
+that is a gap independent of shape B: the spill loop should be able to hand a
+parameter to slot routing rather than skip it.
 
 ---
 
