@@ -942,8 +942,40 @@ slots on seed 15 to buy nothing.
 **What this corrects in the section above:** "every remaining corpus failure is a
 compile error rather than merely slow code" is true, but the implication that a
 spill loop turns all of them into slow code is not. It turns *shape A* into slow
-code, which is what `args` seed 3 was. Shape B needs the terminator clique broken,
-and that is the next thing to look at.
+code, which is what `args` seed 3 was. Shape B needs the terminator clique broken.
+
+### Removing block parameters does not break the clique, and this is why step 2 bought nothing
+
+The obvious next lever after step 5 was the placed-value veto in `phi_removal`,
+which the handoff had flagged to revisit "after step 5": it refuses to remove a
+parameter whose source is a load result, a call result or a function parameter,
+*even where the source's emitter dominates the block* and so nothing would be
+re-emitted. Lifting the dominating case had been measured once before, taking
+seed 22's removals from 13 to 40 and costing `pressure` seed 19 at -O0, which was
+read at the time as the allocator being unable to spill.
+
+**Retried with the spill loop in place, and it is still a loss**: `args` seed 15
+at -O0 stops compiling and nothing is gained, on exactly the shape the spill loop
+cannot answer. Reverted, with the measurement in the code so it is not tried a
+third time.
+
+The mechanism is the part worth keeping. **Removing a block parameter does not
+shrink the live set at the edge.** It converts a value that was copied into a
+parameter into one the block names directly, and that value is live across the
+same edge either way -- the parameter was never the thing occupying a register,
+the value was. Which answers a question this document has carried since step 2:
+why removing 85-94% of a program's block parameters moved capacity by nothing.
+
+So the lever is not fewer parameters. It is fewer *values live at the edge*,
+which means taking some of them out of the register file: `SplitPlan::operand_removals`
+and `slot_spilled_params`, the splitter's slot routing. What limits that today is
+recorded in `docs/terminator-args-next-steps.md`: `detect_blockparam_slot_routing`
+finds a parameter through `find_block_param_vreg`, which needs an `Op::BlockParam`
+marker in the e-graph, and on `pressure` seed 22's 28-argument edge 16 of the 28
+parameters have none -- linearization skips the marker for a parameter whose class
+is already emitted when the block has at most one predecessor. **Step 3b changed
+what is available here**: `BasicBlock::param_vregs` records a VReg for *every*
+parameter, marker or not. That is the next thing to try.
 
 ---
 

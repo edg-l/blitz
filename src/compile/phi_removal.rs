@@ -161,11 +161,21 @@ pub(super) fn find_trivial_params(
             // no re-emission available, so no tier may take it.
             //
             // Vetoing these even where the source's emitter *dominates*, which
-            // needs no re-emission, is stricter than soundness requires. It was
-            // measured: allowing them took seed 22's removals from 13 to 40 and
-            // cost pressure seed 19 at -O0, which stopped compiling. The
-            // parameter was holding a live range apart that the allocator then
-            // could not colour. Worth revisiting with the splitter, not before.
+            // needs no re-emission, is stricter than soundness requires. It is
+            // still what happens, and the reason is measured twice.
+            //
+            // Allowing them took seed 22's removals from 13 to 40 and cost
+            // `pressure` seed 19 at -O0. That was first read as the allocator
+            // being unable to spill, so it was retried once the function-scope
+            // allocator had a spill loop: it then cost `args` seed 15 at -O0 and
+            // gained nothing, on the same shape the loop cannot answer -- one
+            // instruction whose own operands are what is live at it.
+            //
+            // Removing a block parameter does not shrink the live set at the
+            // edge. It converts a value that was copied into a parameter into
+            // one the block names directly, and that value is live across the
+            // same edge either way. Which is also why step 2 removed 85-94% of
+            // this program's parameters and moved capacity by nothing.
             if is_placed_value(extraction, src) {
                 survivors.push(pidx);
                 continue;
