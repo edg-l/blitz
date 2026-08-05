@@ -1764,10 +1764,23 @@ pub fn allocate_global(
             } else {
                 "the round limit ran out"
             };
+            let class = if phase4.gpr_overshoot > 0 {
+                RegClass::GPR
+            } else {
+                RegClass::XMM
+            };
+            let peak = pressure_peak(
+                &phase4.per_block_insts,
+                &global_liveness,
+                &vreg_class_map(&phase4.per_block_insts, block_param_vregs_per_block),
+                class,
+            )
+            .unwrap_or_else(|| "no instructions".to_string());
             return Err(format!(
                 "global regalloc: register pressure overshoot for function '{func_name}' \
                  after {round} spill round(s): {why} (gpr_overshoot={}, xmm_overshoot={}, \
-                 over-budget VRegs={}, of which spillable={}, spill slots committed={})",
+                 over-budget VRegs={}, of which spillable={}, spill slots committed={}); \
+                 {peak}",
                 phase4.gpr_overshoot,
                 phase4.xmm_overshoot,
                 phase4.over_budget.len(),
@@ -1814,6 +1827,47 @@ pub fn allocate_global(
     }
 
     unreachable!("the spill loop returns before exhausting its rounds")
+}
+
+/// Where the most values of one class are live at once, and what instruction is
+/// there.
+///
+/// The question the spill loop's failure has to answer: spilling relieves a
+/// value that is live *across* a point, and cannot relieve one the instruction
+/// at that point is reading. So the report names the instruction, how many of
+/// its own operands are of the class that overflowed, and how many values are
+/// live there -- which is what separates "too many values in flight" from "one
+/// instruction wants more registers than exist".
+fn pressure_peak(
+    block_schedules: &[Vec<ScheduledInst>],
+    global_liveness: &crate::regalloc::global_liveness::GlobalLiveness,
+    vreg_classes: &BTreeMap<VReg, RegClass>,
+    class: RegClass,
+) -> Option<String> {
+    let of_class = |v: &&VReg| vreg_classes.get(*v).copied() == Some(class);
+    let mut best: Option<(usize, usize, usize, &ScheduledInst)> = None;
+    for (block_idx, sched) in block_schedules.iter().enumerate() {
+        let live_out = global_liveness
+            .live_out
+            .get(block_idx)
+            .cloned()
+            .unwrap_or_default();
+        let liveness = crate::regalloc::liveness::compute_liveness(sched, &live_out);
+        for (i, inst) in sched.iter().enumerate() {
+            let live = liveness.live_at[i].iter().filter(of_class).count();
+            if best.is_none_or(|(b, _, _, _)| live > b) {
+                let operands = inst.operands.iter().filter(of_class).count();
+                best = Some((live, operands, block_idx, inst));
+            }
+        }
+    }
+    let (live, operands, block_idx, inst) = best?;
+    Some(format!(
+        "peak {live} {class:?} value(s) live at block {block_idx}'s {:?}, which reads \
+         {operands} of them as its own operands ({} operands in total)",
+        inst.op,
+        inst.operands.len(),
+    ))
 }
 
 /// How many times the global allocator will spill and recolor before giving up.

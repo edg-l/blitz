@@ -990,10 +990,36 @@ clique that slot routing cannot see. On seed 15 the parameters are not the
 clique: 50 of the 92 have no VReg in the class map at block entry at all, and the
 other 42 share an ordinary value's VReg -- the pass-through case, where routing
 the VReg would move the *value* and the `value_defs` guard correctly refuses. So
-whatever is live at seed 15's pressure point, it is not a block's parameter list,
-and the next step is to name that instruction rather than assume it. The spill
-loop's own message ("one instruction whose own operands are what is live there")
-is the place to start: make it print the instruction.
+whatever is live at seed 15's pressure point, it is not a block's parameter list.
+
+### The instruction, named
+
+The spill loop's failure now reports where pressure peaks and what is there.
+Every one of the six failing `pressure` seeds gives the same answer:
+
+| seed | peak instruction | GPR live | of which its own operands |
+| --- | --- | --- | --- |
+| 15 | block 0 `TerminatorArgs`, 17 args | 20 | 17 |
+| 19 | block 1 `TerminatorArgs`, 28 args | 18 | 16 |
+| 21 | block 0 `TerminatorArgs`, 17 args | 20 | 17 |
+| 23 | block 39 `TerminatorArgs`, 29 args | 20 | 17 |
+| 24 | block 49 `TerminatorArgs`, 16 args | 18 | 16 |
+| 25 | block 0 `TerminatorArgs`, 29 args | 19 | 17 |
+
+So it *is* the terminator, against a GPR budget of 14 or 15. What the previous
+entry established stands beside it rather than against it: the arguments feed
+parameters slot routing will not touch, and the reason is not the missing marker
+the old note blamed. It is that those parameters are the **pass-through** kind --
+the parameter shares the incoming value's VReg, so routing it would move the
+*value*, and `split.rs`'s `value_defs` guard is right to refuse.
+
+**Which makes the next change a specific one with a known cost:** give every
+parameter position a VReg of its own, so a pass-through parameter is a parameter
+rather than an alias of the value, and routing can take it. That is the
+"principled alternative" the `aa91e96` note names, and it costs a copy per
+pass-through parameter on every program -- so it wants the codesize harness
+pointed at it, and it is the first change in this whole sequence expected to make
+healthy programs *worse* in exchange for making these compile at all.
 
 ---
 
