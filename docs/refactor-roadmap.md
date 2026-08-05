@@ -747,10 +747,32 @@ Per-block snapshots, the three-times-patched map, `Linearized::block_param_vregs
   block-parameter patch and the coalesce-alias rename, 56 lines whose comments
   described three bugs each fix had to avoid. **Phase 7 no longer resolves a class
   to a VReg at all.**
-- **Still to do: `block_class_to_vreg_snapshot` itself.** Its readers are now
-  `build_barrier_context` (which asks a point-free question -- which VRegs of a
-  class this block defines) and the splitter. Neither is a per-point resolution,
-  so what is left may be a different data structure rather than a deletion.
+- **`AppliedSplits` and the snapshot replay -- DONE.** `apply_plan_to` accumulated
+  every segment and truncation it committed so they could be replayed onto each
+  per-block snapshot, and the comment said exactly why: Phase 7 resolved
+  effectful-op operands through those snapshots, so without the replay a spilled
+  address resolved to its pre-spill register. Phase 7 stopped doing that one
+  commit earlier, and every other snapshot read happens *before* the splitter --
+  so the replay was mutating data nothing subsequently read. The struct, its
+  `replay_onto`, both accumulators and the loop are gone, and the snapshots are
+  now read-only pre-splitter data.
+
+**What is left of the class map, and why none of it is dead.** Five readers, each
+measured:
+
+| reader | what it answers | why it stays |
+| --- | --- | --- |
+| `split::plan_splits` / `apply_plan_to` | the segments themselves | the splitter owns the map |
+| `assign_param_vregs_from_map` | the function's own parameters at entry | no CFG field states these |
+| `collect_block_param_vregs_per_block` | which VRegs are parameters, post-split | contributes **68** VRegs `BasicBlock::param_vregs` does not, all of them splitter reloads covering block entry |
+| `resolve_block_param_vreg`, source 2 | a parameter's VReg where the schedule has none | answers **442** of 1372, and differs from the CFG field in 2 |
+| the per-block snapshots | which VRegs of a class a block defines | `build_barrier_maps` wants *all* of them, which is point-free by design |
+
+So **the function-wide map cannot be deleted**, and step 4's list was wrong to
+say it could -- for the same reason step 3b's "collapse to one source" was wrong.
+The splitter's segments are per-point facts about reloads, and no field on a CFG
+node expresses them. What step 4 could remove was every *reconstruction* built on
+top of the map, which is now gone.
 
 **`block_param_vreg_overrides` is gone.** DONE, as step 4's first slice. It had five
 consumers left after step 3b, and a probe over the whole lit corpus at both levels

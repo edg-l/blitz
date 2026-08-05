@@ -558,7 +558,7 @@ pub fn compile(
         mut next_vreg,
         rpo_order,
         block_vreg_insts,
-        block_snapshots: mut block_class_to_vreg_snapshot,
+        block_snapshots: block_class_to_vreg_snapshot,
         vreg_types,
         ..
     } = lin;
@@ -1042,24 +1042,12 @@ pub fn compile(
                 }
             }
 
-            let applied = split::apply_plan_to(
+            split::apply_plan_to(
                 &mut block_schedules,
                 &mut class_to_vreg,
                 &mut next_vreg,
                 plan,
             );
-
-            // The per-block snapshots were taken during linearization, before
-            // the splitter ran, so they still map every class to the VReg it
-            // had before any spill. Phase 7 resolves effectful-op operands (a
-            // Load's address, a Store's value, a call argument) through them,
-            // and those operands are ClassIds in the CFG that no operand
-            // rewrite reaches -- so without the splitter's segments a spilled
-            // address resolves to the register it occupied *before* the spill,
-            // and the load reads a register the reload never wrote.
-            for snapshot in block_class_to_vreg_snapshot.iter_mut() {
-                applied.replay_onto(snapshot);
-            }
 
             if crate::trace::is_enabled("split") && crate::trace::fn_matches(&func.name) {
                 for (block_idx, sched) in block_schedules.iter().enumerate() {

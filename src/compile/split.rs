@@ -1653,7 +1653,7 @@ pub fn apply_plan_to(
     class_to_vreg: &mut ClassVRegMap,
     next_vreg: &mut u32,
     plan: SplitPlan,
-) -> AppliedSplits {
+) {
     // Apply operand rewrites first (before inserting instructions shifts indices).
     // We collect rewrites per block and apply them before insertions.
     let mut per_block_rewrites: BTreeMap<usize, Vec<(usize, usize, VReg)>> = BTreeMap::new();
@@ -1715,8 +1715,6 @@ pub fn apply_plan_to(
     // to its last reference. Segments the plan marked as reaching block exit
     // keep that end, since `compute_phi_uses` resolves terminator args there.
     let refs = VRegRefs::of(block_schedules);
-    let mut committed_segments: Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)> =
-        Vec::with_capacity(plan.new_segments.len());
     for (class, vreg, start, end) in plan.new_segments {
         let (start, end) = match refs.range_of(vreg) {
             Some((s, _)) if end.inst == u32::MAX => (s, ProgramPoint::block_exit(refs.block(vreg))),
@@ -1724,7 +1722,6 @@ pub fn apply_plan_to(
             None => (start, end),
         };
         class_to_vreg.insert_segment(class, vreg, start, end);
-        committed_segments.push((class, vreg, start, end));
     }
 
     // Truncate block-param segments so they start AFTER block entry.
@@ -1746,12 +1743,9 @@ pub fn apply_plan_to(
     // The new end is recomputed from the final schedule for the same reason the
     // segments above are: the spilled VReg's last reference is its SpillStore,
     // and insertions moved it.
-    let mut committed_truncations: Vec<(VReg, ProgramPoint)> =
-        Vec::with_capacity(plan.segment_end_truncations.len());
     for (vreg, planned_end) in plan.segment_end_truncations {
         let new_end = refs.range_of(vreg).map(|(_, e)| e).unwrap_or(planned_end);
         class_to_vreg.truncate_segment_end(vreg, new_end);
-        committed_truncations.push((vreg, new_end));
     }
 
     // Advance next_vreg to the highest freshly-allocated VReg + 1.
@@ -1768,37 +1762,6 @@ pub fn apply_plan_to(
 
     // Bump split_generation to mark that splitter output has been committed.
     class_to_vreg.split_generation += 1;
-
-    AppliedSplits {
-        segments: committed_segments,
-        truncations: committed_truncations,
-    }
-}
-
-/// The segment edits `apply_plan_to` committed, in final schedule coordinates.
-///
-/// Phase 7 lowering resolves effectful-op operands through per-block snapshots
-/// of `class_to_vreg` taken during linearization, long before the splitter runs.
-/// Replaying these onto each snapshot is what keeps a spilled address resolving
-/// to its reload instead of its pre-spill register.
-pub struct AppliedSplits {
-    pub segments: Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
-    pub truncations: Vec<(VReg, ProgramPoint)>,
-}
-
-impl AppliedSplits {
-    /// Replay the committed edits onto a snapshot taken before the split.
-    ///
-    /// Truncations run first: an untruncated original segment would otherwise
-    /// overlap the reload segment that replaces its tail.
-    pub fn replay_onto(&self, snapshot: &mut ClassVRegMap) {
-        for &(vreg, new_end) in &self.truncations {
-            snapshot.truncate_segment_end(vreg, new_end);
-        }
-        for &(class, vreg, start, end) in &self.segments {
-            snapshot.insert_segment(class, vreg, start, end);
-        }
-    }
 }
 
 /// Where each VReg is defined and last referenced in the final schedules.
