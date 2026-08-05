@@ -333,11 +333,12 @@ chain for its self-reference test.
 
 `src/compile/phi_removal.rs`, on by default. What shipped and what did not:
 
-- **Tier 1 is in**, with the dominance condition made explicit: a parameter goes
-  when every predecessor passes the same VReg *and* the source class's emitter
-  dominates the block, so nothing has to be re-emitted. Tier 2 (predecessors
-  passing different VRegs of one class, paid for by a re-emission the cost model
-  approves) is not written.
+- **Both tiers are in.** Tier 1: the source class's emitter dominates the block,
+  so nothing is re-emitted and only the copies go. Tier 2: it does not, the block
+  recomputes, and the dial decides -- removal when the class's extraction cost is
+  at most one copy per incoming edge plus the parameter's slot in the clique.
+  Tier 2 is tried first and tier 1 is the fallback, since the acceptance test
+  below is a property of the whole removal.
 - **The removal is not local, and the pass now proves its own result.** Removing
   a parameter means unioning its class with the source's -- the block's own uses
   still name the parameter, and a class whose only node was that parameter has
@@ -357,10 +358,26 @@ chain for its self-reference test.
   `sort_insert` is +11% and `queens` +9%. Removing a parameter replaces a copy
   per edge with a live range that spans to the use, and on a recursive function
   that range now crosses a call.
-- **Capacity is unchanged**: 180 (seed, level) pairs on all three shapes, 0
-  regressed and 0 fixed. The 85-94% figure counts parameters this pass could
-  remove; tier 1 alone does not reach the 36 capacity failures the step claims,
-  and whether tier 2 does is now a measurable question rather than an estimate.
+- **Capacity is unchanged, with both tiers**: 180 (seed, level) pairs on all
+  three shapes, 0 regressed and 0 fixed. The step's claim that this clears 36 of
+  the 46 capacity failures does not survive measurement.
+
+  **Why, counted on pressure seed 22** (97 parameters, which
+  `count_trivial_phis.py` calls 90% redundant): 57 have predecessors passing
+  *different classes* -- real phis, nothing can stand in for them -- and 27 carry
+  a placed value (a `LoadResult`, `CallResult`, `Param` or `BlockParam`), which
+  has no re-emission available. 13 were removed. The dominance and cost gates
+  rejected nothing at all, so neither tier's condition is what binds. The 85-94%
+  figure is measured on the pre-extraction IR by a tool that asks a weaker
+  question than soundness does; at the point where the removal is sound, most of
+  those parameters are not trivial.
+
+  **The one lead worth following**, measured and then reverted: vetoing placed
+  values even where the emitter *dominates* is stricter than soundness needs, and
+  lifting that took seed 22 from 13 removals to 40. It also stopped pressure seed
+  19 compiling at -O0 -- the parameter was holding apart a live range the
+  allocator could then not colour. That is a splitter question, so it belongs
+  after step 5 rather than here.
 - `propagate_block_params` is still in place. It was to be subsumed, and tier 1
   does not subsume it: it merges a single-predecessor block's parameter with a
   *constant* argument, which is a class-level merge this pass does not make.

@@ -551,6 +551,26 @@ pub(super) fn compute_copy_pairs_from_schedules(
     pairs
 }
 
+/// Loop depth per block index, by back-edge counting.
+///
+/// A target at or before its source is a back edge, and every block between the
+/// two is in the loop. A heuristic rather than a dominator-tree loop forest,
+/// which is what the callers weight costs by: how many times a block's code is
+/// expected to run, relative to the rest.
+pub(super) fn block_loop_depths(func: &Function) -> Vec<u32> {
+    let mut depth = vec![0u32; func.blocks.len()];
+    for (src_idx, succs) in successor_indices(func).into_iter().enumerate() {
+        for target_idx in succs {
+            if target_idx <= src_idx {
+                for d in depth[target_idx..=src_idx].iter_mut() {
+                    *d += 1;
+                }
+            }
+        }
+    }
+    depth
+}
+
 /// Compute loop depth for each VReg based on the CFG back-edges.
 ///
 /// A back-edge is a jump/branch to a block with a lower (or equal) index,
@@ -560,21 +580,7 @@ pub(super) fn compute_loop_depths(
     func: &Function,
     block_schedules: &[Vec<ScheduledInst>],
 ) -> BTreeMap<VReg, u32> {
-    let n = func.blocks.len();
-    // Compute per-block loop depth using back-edge counting.
-    let mut block_depth: Vec<u32> = vec![0u32; n];
-
-    // A target at or before its source is a back edge, and every block between
-    // the two is in the loop.
-    for (src_idx, succs) in successor_indices(func).into_iter().enumerate() {
-        for target_idx in succs {
-            if target_idx <= src_idx {
-                for d in block_depth[target_idx..=src_idx].iter_mut() {
-                    *d += 1;
-                }
-            }
-        }
-    }
+    let block_depth = block_loop_depths(func);
 
     // Map each VReg to its block's loop depth.
     let mut result: BTreeMap<VReg, u32> = BTreeMap::new();

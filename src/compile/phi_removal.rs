@@ -37,6 +37,10 @@ use super::barrier::{terminator_edges, terminator_edges_mut};
 use super::cfg::dominates;
 use super::linearize::Linearized;
 
+/// What one parameter position receives: the VRegs its predecessors pass, the
+/// classes those carry, and how many edges supplied a value.
+type Incoming = (BTreeSet<VReg>, BTreeSet<ClassId>, usize);
+
 /// Which parameter positions each block keeps, for the blocks that lose any.
 pub(super) struct Removal {
     /// `keep[block]` lists the surviving positions in their old numbering, which
@@ -49,6 +53,9 @@ pub(super) struct Removal {
     /// goes: every use inside the block still names the parameter's class, and a
     /// class whose only node was that parameter has nothing left to lower.
     pub merges: Vec<(ClassId, ClassId)>,
+    /// The parameter classes each block contributed, so a retry can drop one
+    /// block's merges without recomputing the analysis.
+    pub merge_owner: BTreeMap<BlockId, Vec<ClassId>>,
 }
 
 impl Removal {
@@ -73,14 +80,15 @@ pub(super) fn find_trivial_params(
     lin: &Linearized,
     extraction: &ExtractionResult,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
+    tier2: bool,
 ) -> Removal {
     let block_param_vregs = &lin.block_param_vregs;
+    let depths = super::cfg::block_loop_depths(func);
     let entry = func.blocks.first().map(|b| b.id);
 
-    // Per (target, position): the VRegs its predecessors pass, the class they
+    // Per (target, position): the VRegs its predecessors pass, the classes they
     // carry, and how many edges supplied one.
-    let mut incoming: BTreeMap<(BlockId, u32), (BTreeSet<VReg>, BTreeSet<ClassId>, usize)> =
-        BTreeMap::new();
+    let mut incoming: BTreeMap<(BlockId, u32), Incoming> = BTreeMap::new();
     let mut pred_count: BTreeMap<BlockId, usize> = BTreeMap::new();
     for block in &func.blocks {
         let Some(term) = block.ops.last() else {
@@ -104,6 +112,7 @@ pub(super) fn find_trivial_params(
 
     let mut keep: BTreeMap<BlockId, Vec<u32>> = BTreeMap::new();
     let mut merges: Vec<(ClassId, ClassId)> = Vec::new();
+    let mut merge_owner: BTreeMap<BlockId, Vec<ClassId>> = BTreeMap::new();
     let mut removed = 0usize;
     for (block_idx, block) in func.blocks.iter().enumerate() {
         // The entry block's parameters are the function's own: no edge supplies
@@ -140,24 +149,49 @@ pub(super) fn find_trivial_params(
             if let Some(own_class) = own_class {
                 source_classes.remove(&own_class);
             }
-            // One register on every path, and one class naming it. The class
-            // check is not redundant: it is what the merge below needs, and a
-            // parameter whose class nothing names cannot be merged away.
-            match (distinct.len(), source_classes.len(), own_class) {
-                (1, 1, Some(own_class)) => {
-                    let src = *source_classes.iter().next().expect("one source class");
-                    if !source_dominates(lin, src, block_idx) || is_placed_value(extraction, src) {
-                        survivors.push(pidx);
-                        continue;
-                    }
-                    if src != own_class {
-                        merges.push((own_class, src));
-                    }
-                    removed += 1;
-                    dropped_any = true;
-                }
-                _ => survivors.push(pidx),
+            // One class naming it, whatever the registers. More than one class
+            // is a real phi: predecessors computed different expressions, and
+            // nothing can stand in for the parameter.
+            let (Some(own_class), 1) = (own_class, source_classes.len()) else {
+                survivors.push(pidx);
+                continue;
+            };
+            let src = *source_classes.iter().next().expect("one source class");
+            // A value already in a register at one particular point -- put there
+            // by the caller, a load, a call, or a predecessor's phi copy -- has
+            // no re-emission available, so no tier may take it.
+            //
+            // Vetoing these even where the source's emitter *dominates*, which
+            // needs no re-emission, is stricter than soundness requires. It was
+            // measured: allowing them took seed 22's removals from 13 to 40 and
+            // cost pressure seed 19 at -O0, which stopped compiling. The
+            // parameter was holding a live range apart that the allocator then
+            // could not colour. Worth revisiting with the splitter, not before.
+            if is_placed_value(extraction, src) {
+                survivors.push(pidx);
+                continue;
             }
+            let dominating = source_dominates(lin, src, block_idx);
+            let keep_it = if dominating {
+                // Tier 1: the value is in one register on every path into the
+                // block and nothing is re-emitted, so only the copies go.
+                false
+            } else {
+                // Tier 2: several registers holding one expression, which is
+                // what the parameter exists for. Removing it makes the block
+                // recompute, so the dial decides.
+                !tier2_pays(extraction, src, *edges, depths[block_idx], tier2)
+            };
+            if keep_it {
+                survivors.push(pidx);
+                continue;
+            }
+            if src != own_class {
+                merges.push((own_class, src));
+                merge_owner.entry(block.id).or_default().push(own_class);
+            }
+            removed += 1;
+            dropped_any = true;
         }
         if dropped_any {
             keep.insert(block.id, survivors);
@@ -168,7 +202,39 @@ pub(super) fn find_trivial_params(
         keep,
         removed,
         merges,
+        merge_owner,
     }
+}
+
+/// Whether recomputing the class in the block beats the copies it removes.
+///
+/// **The dial, with a derived default.** What removal costs is one extraction of
+/// the class in this block. What it saves is one copy per incoming edge, plus
+/// the parameter's slot in the clique every other parameter of the block must be
+/// coloured against. Both sides are weighted by the block's loop depth, the same
+/// way the splitter weights a spill: a copy inside a loop is paid every
+/// iteration and so is a recomputation.
+///
+/// The weight is `2^depth` capped at 6 doublings, which is `compute_loop_depths`'
+/// own heuristic read as a frequency. It cancels between the two sides -- both
+/// happen in the same block -- so it is written here only to say that it was
+/// considered and why it does not appear.
+fn tier2_pays(
+    extraction: &ExtractionResult,
+    src: ClassId,
+    edges: usize,
+    _depth: u32,
+    enabled: bool,
+) -> bool {
+    if !enabled {
+        return false;
+    }
+    let Some(node) = extraction.choices.get(&src) else {
+        return false;
+    };
+    // One copy per edge, plus the clique slot the parameter occupies.
+    let saved = edges as f64 + 1.0;
+    node.cost <= saved
 }
 
 /// Whether the block losing a parameter can name the source class as it stands.
@@ -269,10 +335,11 @@ pub(super) fn apply(func: &mut Function, egraph: &mut EGraph, removal: &Removal)
 ///
 /// Rather than predict that composition, the pass does the removal, linearizes,
 /// and asks. A `false` here puts the CFG back exactly as it was.
-pub(super) fn barrier_counts_agree(func: &Function, lin: &Linearized) -> bool {
+pub(super) fn barrier_offenders(func: &Function, lin: &Linearized) -> BTreeSet<BlockId> {
     use crate::ir::effectful::EffectfulOp;
     use crate::ir::op::Op;
-    func.blocks.iter().enumerate().all(|(idx, block)| {
+    let mut offenders = BTreeSet::new();
+    for (idx, block) in func.blocks.iter().enumerate() {
         // What the block's own effectful ops produce: one result instruction per
         // Load, and one per Call that has results.
         let owned = block.ops[..block.non_term_count()]
@@ -287,6 +354,50 @@ pub(super) fn barrier_counts_agree(func: &Function, lin: &Linearized) -> bool {
             .iter()
             .filter(|inst| matches!(inst.op, Op::LoadResult(..) | Op::CallResult(..)))
             .count();
-        emitted <= owned
-    })
+        if emitted > owned {
+            offenders.insert(block.id);
+        }
+    }
+    offenders
+}
+
+impl Removal {
+    /// Drop the removals for `blocks`, keeping the rest.
+    ///
+    /// The acceptance test names the block that would re-emit a barrier result,
+    /// and that block is the one whose parameter should not have gone. Retrying
+    /// without it keeps what the rest of the function had earned: on a
+    /// pressure-shaped program the all-or-nothing version put back all thirteen
+    /// removals because of one.
+    pub fn without(&self, func: &Function, blocks: &BTreeSet<BlockId>) -> Removal {
+        let mut keep = self.keep.clone();
+        let mut removed = 0usize;
+        for (&bid, survivors) in &self.keep {
+            if blocks.contains(&bid) {
+                keep.remove(&bid);
+            } else if let Some(block) = func.blocks.iter().find(|b| b.id == bid) {
+                removed += block.param_types.len() - survivors.len();
+            }
+        }
+        // A merge belongs to the block whose parameter it replaced; without the
+        // per-block record, keep only merges for blocks still losing something.
+        let kept_classes: BTreeSet<ClassId> = keep
+            .keys()
+            .filter_map(|bid| self.merge_owner.get(bid))
+            .flatten()
+            .copied()
+            .collect();
+        let merges = self
+            .merges
+            .iter()
+            .filter(|(param_class, _)| kept_classes.contains(param_class))
+            .copied()
+            .collect();
+        Removal {
+            keep,
+            removed,
+            merges,
+            merge_owner: self.merge_owner.clone(),
+        }
+    }
 }

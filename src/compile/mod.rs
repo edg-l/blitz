@@ -232,6 +232,9 @@ fn func_has_calls(func: &Function) -> bool {
 use crate::egraph::egraph::EGraph;
 use crate::egraph::extract::ExtractionResult;
 
+/// Which class names each block parameter, beside the chosen node per class.
+type ExtractionOutput = (BTreeMap<(BlockId, u32), ClassId>, ExtractionResult);
+
 /// Run the e-graph rewrite rules and cost-based extraction (phases 1-2).
 ///
 /// Shared between `compile()` and `compile_to_ir_string()`.
@@ -239,7 +242,7 @@ pub(super) fn run_egraph_and_extract(
     func: &Function,
     egraph: &mut EGraph,
     opts: &CompileOptions,
-) -> Result<(BTreeMap<(BlockId, u32), ClassId>, ExtractionResult), CompileError> {
+) -> Result<ExtractionOutput, CompileError> {
     let egraph_opts = EGraphOptions {
         iteration_limit: opts.saturation_limit,
         max_classes: 500_000,
@@ -284,7 +287,7 @@ pub(super) fn extract_from_egraph(
     func: &Function,
     egraph: &EGraph,
     opts: &CompileOptions,
-) -> Result<(BTreeMap<(BlockId, u32), ClassId>, ExtractionResult), CompileError> {
+) -> Result<ExtractionOutput, CompileError> {
     let block_param_map = egraph.block_param_classes();
 
     let mut all_roots = collect_roots(func, egraph);
@@ -479,42 +482,62 @@ pub fn compile(
     commit_args(&mut func, &egraph, &lin, &block_param_map)?;
 
     if opts.enable_phi_removal {
-        let removal =
-            phi_removal::find_trivial_params(&func, &egraph, &lin, &extraction, &block_param_map);
-        if !removal.is_empty() {
-            // Kept so the removal can be undone: whether it was legal is a
-            // question only the re-linearization answers.
-            let saved_func = func.clone();
-            let saved_egraph = egraph.clone();
+        // Tier 2 first, tier 1 as the fallback, and within each a few rounds of
+        // dropping whichever block the acceptance test names. The test is a
+        // property of the whole removal, so without the retry one bad parameter
+        // costs the function every removal the rest of it had earned.
+        const RETRIES: usize = 3;
+        'tiers: for tier2 in [true, false] {
+            let mut removal = phi_removal::find_trivial_params(
+                &func,
+                &egraph,
+                &lin,
+                &extraction,
+                &block_param_map,
+                tier2,
+            );
+            for round in 0..=RETRIES {
+                if removal.is_empty() {
+                    continue 'tiers;
+                }
+                // Kept so the removal can be undone: whether it was legal is a
+                // question only the re-linearization answers.
+                let saved_func = func.clone();
+                let saved_egraph = egraph.clone();
 
-            phi_removal::apply(&mut func, &mut egraph, &removal);
-            canonicalize_class_refs(&mut func, &egraph);
-            crate::verify::verify_stage("phi-removal", &func, &egraph);
-            // The chosen node for a parameter's class carried its old position,
-            // and a removed parameter has no node at all now.
-            let (new_map, new_extraction) = extract_from_egraph(&func, &egraph, opts)?;
-            let new_lin =
-                linearize::linearize(&func, &egraph, &new_extraction, &new_map, &extra_roots);
+                phi_removal::apply(&mut func, &mut egraph, &removal);
+                canonicalize_class_refs(&mut func, &egraph);
+                crate::verify::verify_stage("phi-removal", &func, &egraph);
+                // The chosen node for a parameter's class carried its old
+                // position, and a removed parameter has no node at all now.
+                let (new_map, new_extraction) = extract_from_egraph(&func, &egraph, opts)?;
+                let new_lin =
+                    linearize::linearize(&func, &egraph, &new_extraction, &new_map, &extra_roots);
 
-            let accepted = phi_removal::barrier_counts_agree(&func, &new_lin);
-            if accepted {
-                block_param_map = new_map;
-                extraction = new_extraction;
-                lin = new_lin;
-                commit_args(&mut func, &egraph, &lin, &block_param_map)?;
-            } else {
+                let offenders = phi_removal::barrier_offenders(&func, &new_lin);
+                if offenders.is_empty() {
+                    block_param_map = new_map;
+                    extraction = new_extraction;
+                    lin = new_lin;
+                    commit_args(&mut func, &egraph, &lin, &block_param_map)?;
+                    if crate::trace::is_enabled("phi") && crate::trace::fn_matches(&func.name) {
+                        tracing::debug!(
+                            target: "blitz::phi",
+                            "[{}] tier{}: removed {} parameter(s) across {} block(s) in round {round}",
+                            func.name,
+                            if tier2 { "1+2" } else { "1" },
+                            removal.removed,
+                            removal.keep.len(),
+                        );
+                    }
+                    break 'tiers;
+                }
                 func = saved_func;
                 egraph = saved_egraph;
-            }
-            if crate::trace::is_enabled("phi") && crate::trace::fn_matches(&func.name) {
-                tracing::debug!(
-                    target: "blitz::phi",
-                    "[{}] {} trivial block parameter(s) across {} block(s): {}",
-                    func.name,
-                    removal.removed,
-                    removal.keep.len(),
-                    if accepted { "removed" } else { "put back, re-emission would have moved a barrier result" },
-                );
+                if round == RETRIES {
+                    break;
+                }
+                removal = removal.without(&func, &offenders);
             }
         }
     }
