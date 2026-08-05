@@ -39,7 +39,7 @@ fn collect_referenced_ids(ops: &[EffectfulOp]) -> BTreeSet<ClassId> {
             }
             EffectfulOp::Ret { val } => {
                 if let Some(v) = val {
-                    ids.insert(*v);
+                    ids.insert(v.class());
                 }
             }
         }
@@ -182,8 +182,7 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
         if let Some(op) = block.ops.get_mut(last_idx) {
             match op {
                 EffectfulOp::Ret { val: Some(v) } => {
-                    let val = *v;
-                    let mut args = vec![val];
+                    let mut args = vec![v.class()];
                     args.extend(external_ids.iter().copied());
                     *op = EffectfulOp::Jump {
                         target: cont_id,
@@ -279,6 +278,8 @@ fn substitute_class_ids(op: &EffectfulOp, subst: &[(ClassId, ClassId)]) -> Effec
             target: *target,
             args: TermArgs::classes(args.expect_classes().iter().map(|&a| sub(a))),
         },
-        EffectfulOp::Ret { val } => EffectfulOp::Ret { val: val.map(sub) },
+        EffectfulOp::Ret { val } => EffectfulOp::Ret {
+            val: val.map(|v| EffOperand::Class(sub(v.class()))),
+        },
     }
 }

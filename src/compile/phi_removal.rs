@@ -323,6 +323,11 @@ pub(super) fn apply(func: &mut Function, egraph: &mut EGraph, removal: &Removal)
                     .chain(results.iter_mut())
                     .for_each(EffOperand::uncommit),
                 EffectfulOp::Branch { cond, .. } => cond.uncommit(),
+                EffectfulOp::Ret { val } => {
+                    if let Some(val) = val {
+                        val.uncommit();
+                    }
+                }
                 _ => {}
             }
         }

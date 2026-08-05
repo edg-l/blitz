@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp, TermArgs};
@@ -700,10 +699,6 @@ pub(crate) fn terminator_arg_destinations(terminator: &EffectfulOp) -> Vec<(Bloc
 pub(super) fn append_terminator_args(
     schedule: &mut Vec<ScheduledInst>,
     terminator: &EffectfulOp,
-    block_idx: usize,
-    egraph: &EGraph,
-    class_to_vreg: &ClassVRegMap,
-    param_override_vregs: &BTreeMap<ClassId, VReg>,
     next_vreg: &mut u32,
 ) -> Result<(), String> {
     let mut operands: Vec<VReg> = Vec::new();
@@ -716,17 +711,16 @@ pub(super) fn append_terminator_args(
                 operands.extend(committed.iter().map(|a| a.vreg));
             }
         }
-        EffectfulOp::Ret { val: Some(cid) } => {
-            let canon = egraph.unionfind.find_immutable(*cid);
-            // A value with no VReg at the block exit has nothing for the return
-            // move to read, wherever the question is asked. Reporting it here
-            // names the argument; skipping it silently leaves the function
-            // returning whatever the ABI register happened to hold.
-            let vreg = param_override_vregs
-                .get(&canon)
-                .copied()
-                .or_else(|| class_to_vreg.lookup(canon, ProgramPoint::block_exit(block_idx)))
-                .ok_or_else(|| format!("Ret value class {canon:?} has no VReg at block exit"))?;
+        EffectfulOp::Ret { val: Some(val) } => {
+            // A value with no VReg has nothing for the return move to read.
+            // Reporting it here names it; skipping it silently leaves the
+            // function returning whatever the ABI register happened to hold.
+            let vreg = val.vreg().ok_or_else(|| {
+                format!(
+                    "Ret value class {:?} was never committed to a VReg",
+                    val.class()
+                )
+            })?;
             operands.push(vreg);
         }
         _ => {}

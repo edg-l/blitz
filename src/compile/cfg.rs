@@ -437,12 +437,34 @@ pub(super) fn commit_terminator_arg_vregs(
             }
             *args = TermArgs::Committed(committed);
         }
+        // A `Ret`'s value is not a block argument, but it is resolved with the
+        // same two answers in the same order: a parameter of this block whose
+        // VReg linearization minted fresh is not in the snapshot, which predates
+        // it. The blocks that end in a `Ret` have no successors, so the back-edge
+        // half of `overrides` is empty for them and this sees the fresh-parameter
+        // half alone.
+        if let EffectfulOp::Ret { val: Some(val) } = term {
+            let canon = egraph.unionfind.find_immutable(val.class());
+            let vreg = overrides
+                .get(&canon)
+                .copied()
+                .or_else(|| snapshot.lookup(canon, exit_point))
+                .ok_or_else(|| {
+                    format!(
+                        "block {block_idx}: Ret value class {canon:?} has no VReg at block exit"
+                    )
+                })?;
+            *val = EffOperand::Committed { class: canon, vreg };
+        }
     }
     Ok(())
 }
 
-/// Commit linearization's choice of VReg for everything an effectful op reads or
-/// defines, except a `Ret`'s value.
+/// Commit linearization's choice of VReg for everything a non-terminator
+/// effectful op reads or defines, and for a `Branch`'s condition.
+///
+/// A `Ret`'s value is committed by [`commit_terminator_arg_vregs`] instead,
+/// which already holds the parameter overrides its resolution needs.
 ///
 /// The sibling of [`commit_terminator_arg_vregs`], and the same move for the
 /// same reason: the address a `Load` reads is a register in a block, while the

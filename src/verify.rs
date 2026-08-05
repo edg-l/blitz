@@ -297,7 +297,7 @@ impl Verifier<'_> {
                     ));
                 }
                 if let Some(v) = val {
-                    self.check_class(*v, &format!("{at}: Ret val"));
+                    self.check_class(v.class(), &format!("{at}: Ret val"));
                 }
             }
         }
@@ -528,7 +528,7 @@ mod tests {
     fn detects_out_of_range_class() {
         let (mut func, egraph) = simple_function();
         *func.blocks[0].ops.last_mut().unwrap() = EffectfulOp::Ret {
-            val: Some(ClassId(9999)),
+            val: Some(EffOperand::Class(ClassId(9999))),
         };
         let errors = verify_function(&func, &egraph);
         assert!(
@@ -590,16 +590,16 @@ mod tests {
             op: Op::Iconst(4242, Type::I64),
             children: smallvec![],
         });
-        egraph.merge(returned, other);
+        egraph.merge(returned.class(), other);
         egraph.rebuild();
-        let stale = if egraph.find_immutable(returned) != returned {
+        let stale = if egraph.find_immutable(returned.class()) != returned.class() {
             returned
         } else {
-            other
+            EffOperand::Class(other)
         };
         assert_ne!(
-            egraph.find_immutable(stale),
-            stale,
+            egraph.find_immutable(stale.class()),
+            stale.class(),
             "merge should have left one of the two ids non-canonical"
         );
         *func.blocks[0].ops.last_mut().unwrap() = EffectfulOp::Ret { val: Some(stale) };

@@ -249,7 +249,7 @@ fn fmt_effectful(
             format!("jump block{target}({})", arg_strs.join(", "))
         }
         EffectfulOp::Ret { val: Some(cid) } => {
-            let val_s = resolve_cid(*cid, class_to_vreg, egraph_uf);
+            let val_s = resolve_cid(cid.class(), class_to_vreg, egraph_uf);
             format!("ret {val_s}")
         }
         EffectfulOp::Ret { val: None } => "ret".into(),

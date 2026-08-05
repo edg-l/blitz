@@ -197,7 +197,7 @@ fn collect_consumed_class_ids(
                 }
                 EffectfulOp::Ret { val } => {
                     if let Some(v) = val {
-                        seeds.push(*v);
+                        seeds.push(v.class());
                     }
                 }
             }

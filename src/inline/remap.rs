@@ -212,7 +212,7 @@ impl RemapContext {
                 ),
             },
             EffectfulOp::Ret { val } => EffectfulOp::Ret {
-                val: val.map(|v| self.remap_class_id(v)),
+                val: val.map(|v| EffOperand::Class(self.remap_class_id(v.class()))),
             },
         }
     }

@@ -39,7 +39,6 @@ use barrier::{
     assign_barrier_groups, build_barrier_context, insert_early_barrier_spills,
     populate_effectful_operands,
 };
-use program_point::ProgramPoint;
 mod canon;
 use canon::canonicalize_class_refs;
 pub(crate) mod cfg;
@@ -802,11 +801,10 @@ pub fn compile(
         collect_phi_source_vregs(func, &mut live_out);
         // Add Ret operands to live_out. Ret is the terminator (no barrier
         // instruction) so its operands must survive until end of block.
-        if let Some(EffectfulOp::Ret { val: Some(cid) }) = func.blocks[0].ops.last() {
-            let canon = egraph.unionfind.find_immutable(*cid);
-            if let Some(vreg) = class_to_vreg.lookup(canon, ProgramPoint::block_exit(0)) {
-                live_out.insert(vreg);
-            }
+        if let Some(EffectfulOp::Ret { val: Some(val) }) = func.blocks[0].ops.last()
+            && let Some(vreg) = val.vreg()
+        {
+            live_out.insert(vreg);
         }
         for &(vreg, _reg) in &param_vregs {
             live_out.insert(vreg);
@@ -940,25 +938,9 @@ pub fn compile(
             // passes mutate. A copy of what the CFG names, not a second
             // resolution of it.
             if let Some(term) = block.ops.last() {
-                // A `Ret`'s value is the one argument still named by class, so
-                // this is the one still resolved. A parameter of this block that
-                // linearization gave a fresh VReg is not in the snapshot, which
-                // predates it, so the overrides answer first.
-                let param_override_vregs: BTreeMap<ClassId, VReg> = block_param_vreg_overrides
-                    .iter()
-                    .filter(|((bid, _), _)| *bid == block.id)
-                    .filter_map(|(&(bid, pidx), &fresh)| {
-                        let cid = block_param_map.get(&(bid, pidx))?;
-                        Some((egraph.unionfind.find_immutable(*cid), fresh))
-                    })
-                    .collect();
                 crate::compile::barrier::append_terminator_args(
                     &mut block_schedules[block_idx],
                     term,
-                    block_idx,
-                    &egraph,
-                    &block_class_to_vreg_snapshot[block_idx],
-                    &param_override_vregs,
                     &mut next_vreg,
                 )
                 .map_err(|message| CompileError {

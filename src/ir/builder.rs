@@ -655,7 +655,7 @@ impl FunctionBuilder {
             block.id
         );
         block.ops.push(EffectfulOp::Ret {
-            val: val.map(|v| v.0),
+            val: val.map(|v| EffOperand::Class(v.0)),
         });
         block.terminated = true;
     }

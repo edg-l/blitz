@@ -19,8 +19,8 @@ A, B and C were done before step 1; **D was a prerequisite of step 2** and is do
 representations name, the VReg a class resolves to through the map against the VReg
 the schedule carries as an operand: an effectful op's role operands against the
 barrier consuming it. Enforced at construction, where it is clean over the whole
-suite; reported after the splitter, where it is not. Step 3 makes it vacuous, at
-which point it goes.
+suite; reported after the splitter, where it is not. It was expected to go with
+step 3; it does not -- see the step 3 notes for what actually retires it.
 
 **The number when it was written, over the 440-test lit suite: 0 disagreements at
 construction, 16 programs disagreeing after the splitter.** Two shapes, and neither
@@ -43,12 +43,16 @@ Step 1 removed the terminator half of this check outright: block arguments no
 longer have two answers to compare. What the check covers now is the effectful-op
 role operands alone, and both shapes above are still reachable through those.
 
-Also found and left alone, since it is a behaviour change and this step is not:
-`populate_effectful_operands` resolves at `ProgramPoint::barrier_point`, which is the
-barrier's index **plus one**, while `lower_effectful_op` resolves at the raw index.
-The splitter's segments run `[def .. last reference]` over raw indices, so only the
-second lands inside a reload's segment. Harmless today because the first runs before
-the splitter, where every segment is full-range.
+Step 3 makes the construction-time half agree by construction as well -- the
+barrier's role operands are now copied from the CFG rather than resolved -- but
+the post-splitter half still measures something real, because `lower_effectful_op`
+falls back to the class map wherever a role operand has no register.
+
+Also found and left alone at the time, since it was a behaviour change and that
+step was not: `populate_effectful_operands` resolved at
+`ProgramPoint::barrier_point`, the barrier's index **plus one**, while
+`lower_effectful_op` resolves at the raw index. Step 3 removed the question:
+`populate_effectful_operands` resolves nothing at all now.
 
 **B. Delete the stale plan references.** DONE. All 65 `Task N.N` references are gone.
 A `Phase N` stays only where the repo defines the number: the pipeline's list in
@@ -530,7 +534,7 @@ Expect step 2 to move the parameter counts and the `fuzz` capacity failures, and
 expect the `bench` reload counts to stay put until the hoist decision consults
 the same pressure the splitter measures. Judge it on the rows it should move.
 
-### Step 3 notes — the remaining operands
+### Step 3 notes — the remaining operands -- DONE
 
 `Load.addr`, `Store.addr` and `.val`, `Call.args`, and the result classes
 (`Load.result`, `Call.results`), the same `TermArgs` treatment step 1 gave block
@@ -565,8 +569,7 @@ independent, and the cheap ones first buy the shape before the hard one needs it
 2. `Call.args` -- a list of the same carrier. **DONE.**
 3. `Load.result`, `Call.results` -- *defs*, not uses. **DONE.**
 4. `Branch.cond` -- one field, wide to land. **DONE.**
-5. `Ret.val` -- last, because it needs the both-fields shape *and* a decision
-   about the constant fold described above.
+5. `Ret.val` -- last. **DONE.**
 
 **Slice 1, as it landed.** `EffOperand` is the carrier: `Class(ClassId)` while
 the IR is still being transformed, `Committed { class, vreg }` from
@@ -619,6 +622,23 @@ regressed: `hash_table.c` -O0 224 -> 223 insts, `mixed-seed28` -O1 6199 -> 6196,
 generated (seed, level) pairs with 0 regressed, 0 fixed, 0 changed kind.
 
 Slice 3 is byte-identical to slice 2: 768 identity comparisons, 0 differing.
+
+**Slice 5 needed no decision after all.** This step's open question was whether
+`Ret.val` could become a VReg at all, since lowering reads the *class* to fold a
+constant return straight into the ABI register -- so it wanted "the both-fields
+shape `TermArg` has, or the constant decided at commit time and carried". The
+carrier slice 1 introduced already keeps the class beside the VReg, so
+`egraph.get_constant` still has what it asks for and nothing had to be decided
+early. `Ret.val` is committed by `commit_terminator_arg_vregs` rather than by
+`commit_effectful_vregs`, because its resolution needs the parameter overrides
+that function already holds -- a `Ret` of this block's own parameter whose VReg
+linearization minted fresh is not in the snapshot, which predates it.
+
+`append_terminator_args` lost its block index, the e-graph, the class map and the
+override map with it. **No point lookup survives in `compile/barrier.rs` or
+`compile/mod.rs`**: neither file imports `ProgramPoint` any more. What
+`build_barrier_maps` still takes the class map for is a different question --
+which VRegs of a class this block defines, deliberately point-free.
 
 **Slice 4 replaced the two derivations of the branch condition with one**, and
 they turned out to agree everywhere measured. `mark_branch_cond_barrier` asked

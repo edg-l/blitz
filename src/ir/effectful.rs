@@ -244,7 +244,7 @@ pub enum EffectfulOp {
     Jump { target: BlockId, args: TermArgs },
 
     /// Return from the function, optionally with a value.
-    Ret { val: Option<ClassId> },
+    Ret { val: Option<EffOperand> },
 }
 
 impl EffectfulOp {
@@ -281,7 +281,7 @@ impl EffectfulOp {
             EffectfulOp::Jump { args, .. } => args.class_ids().for_each(&mut f),
             EffectfulOp::Ret { val } => {
                 if let Some(v) = val {
-                    f(*v);
+                    f(v.class());
                 }
             }
         }
@@ -321,7 +321,7 @@ impl EffectfulOp {
             EffectfulOp::Jump { args, .. } => args.class_ids_mut().for_each(&mut f),
             EffectfulOp::Ret { val } => {
                 if let Some(v) = val {
-                    f(v);
+                    f(v.class_mut());
                 }
             }
         }

@@ -272,7 +272,7 @@ pub(super) fn lower_terminator(
                 .as_ref()
                 .filter(|_| func_has_calls)
                 .filter(|_| !func.return_types.first().is_some_and(|t| t.is_float()))
-                .and_then(|&cid| egraph.get_constant(cid));
+                .and_then(|&cid| egraph.get_constant(cid.class()));
             if let Some((value, ty)) = const_ret {
                 items.push(BlockItem::Inst(MachInst::MovRI {
                     size: OpSize::from_int_type(&ty),
@@ -285,7 +285,7 @@ pub(super) fn lower_terminator(
                 // happened to hold -- a wrong answer with nothing downstream able
                 // to see it. There is no correct code to emit here, so say so.
                 let ret_reg = ret_value_reg(
-                    ret_cid,
+                    ret_cid.class(),
                     term_args,
                     coalesce_aliases,
                     regalloc,
@@ -297,10 +297,10 @@ pub(super) fn lower_terminator(
                     message: format!(
                         "Ret: no register for value class {:?}; the terminator names {:?} \
                          and the class map says {:?} at {exit_point:?}",
-                        egraph.unionfind.find_immutable(ret_cid),
+                        egraph.unionfind.find_immutable(ret_cid.class()),
                         term_args.get(&0),
                         ret_class_to_vreg
-                            .lookup(egraph.unionfind.find_immutable(ret_cid), exit_point),
+                            .lookup(egraph.unionfind.find_immutable(ret_cid.class()), exit_point),
                     ),
                     location: None,
                 })?;

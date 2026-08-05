@@ -46,7 +46,7 @@ mod tests {
     use super::*;
     use crate::egraph::enode::ENode;
     use crate::ir::builder::FunctionBuilder;
-    use crate::ir::effectful::EffectfulOp;
+    use crate::ir::effectful::{EffOperand, EffectfulOp};
     use crate::ir::op::Op;
     use crate::ir::types::Type;
     use crate::verify::{VerifyLevel, verify_function_at};
@@ -73,13 +73,13 @@ mod tests {
             op: Op::Iconst(4242, Type::I64),
             children: smallvec![],
         });
-        egraph.merge(returned, other);
+        egraph.merge(returned.class(), other);
         egraph.rebuild();
 
-        let stale = if egraph.find_immutable(returned) != returned {
+        let stale = if egraph.find_immutable(returned.class()) != returned.class() {
             returned
         } else {
-            other
+            EffOperand::Class(other)
         };
         *func.blocks[0].ops.last_mut().unwrap() = EffectfulOp::Ret { val: Some(stale) };
         (func, egraph)
@@ -94,7 +94,7 @@ mod tests {
             EffectfulOp::Ret { val } => val.expect("has return value"),
             other => panic!("expected Ret, got {other:?}"),
         };
-        assert_eq!(egraph.find_immutable(val), val);
+        assert_eq!(egraph.find_immutable(val.class()), val.class());
     }
 
     #[test]
