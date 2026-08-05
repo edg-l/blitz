@@ -12,7 +12,7 @@ use crate::egraph::EGraph;
 use crate::egraph::cost::CostModel;
 use crate::egraph::extract::{ClassVRegMap, ExtractionResult, extract_at_with_memo};
 use crate::ir::effectful::BlockId;
-use crate::ir::function::Function;
+use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 use crate::regalloc::global_liveness::GlobalLiveness;
@@ -1097,19 +1097,25 @@ fn format_plan(plan: &SplitPlan, slots: &SlotAllocator) -> String {
 /// The VReg and canonical e-class naming block `bid`'s parameter `pidx` at
 /// `entry_point`.
 ///
-/// `None` when no `BlockParam` node names the position, or when no segment covers
-/// the entry point -- both are a parameter passing a dominating definition
-/// straight through, which has no storage of its own to route.
+/// The class map answers first, and the block's own record second: a parameter
+/// passing a dominating definition straight through has no `BlockParam` node and
+/// no segment covering the entry point, and `param_vregs` is where linearization
+/// states which VReg it shares -- see `cfg::commit_block_param_vregs`. Without
+/// that fallback such a parameter cannot be named here at all, which is most of
+/// the arguments on the wide edges the generated loops produce.
 fn find_block_param_vreg(
+    block: &BasicBlock,
     egraph: &EGraph,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     class_to_vreg: &ClassVRegMap,
-    bid: BlockId,
     pidx: u32,
     entry_point: ProgramPoint,
 ) -> Option<(VReg, ClassId)> {
-    let canon = egraph.find_immutable(*block_param_map.get(&(bid, pidx))?);
-    Some((class_to_vreg.lookup(canon, entry_point)?, canon))
+    let canon = egraph.find_immutable(*block_param_map.get(&(block.id, pidx))?);
+    let vreg = class_to_vreg
+        .lookup(canon, entry_point)
+        .or_else(|| block.param_vreg(pidx))?;
+    Some((vreg, canon))
 }
 
 /// Route block parameters through stack slots when they cannot all hold
@@ -1234,10 +1240,10 @@ fn detect_blockparam_slot_routing(
                 continue;
             }
             let Some((vreg, class_id)) = find_block_param_vreg(
+                block,
                 egraph,
                 block_param_map,
                 class_to_vreg,
-                block.id,
                 pidx,
                 entry_point,
             ) else {
@@ -1398,12 +1404,16 @@ fn detect_blockparam_slot_routing(
             if live.len() <= budget as usize {
                 continue;
             }
-            // Only an argument whose destination parameter this pass can name is
-            // routable; the rest have to keep their registers. And only one the
-            // store can read: the store goes in this block, so the value has to
-            // be defined here or on every path into here. An operand naming a
-            // value that reaches the terminator on some paths only would be
-            // stored from a register nothing wrote.
+            // What routing takes is the DESTINATION parameter, and dropping an
+            // argument's operand is decided by that destination -- the argument
+            // and the parameter are one VReg only where the parameter names the
+            // value it carries, and a phi copy stands between them otherwise.
+            //
+            // So an argument gives up its register only when every position it
+            // feeds is routable, and the store this block emits for it needs the
+            // value defined here or live in on every path into here: an operand
+            // naming a value that reaches the terminator on some paths only would
+            // be stored from a register nothing wrote.
             let defined_here = |v: &VReg| {
                 value_defs.get(v) == Some(&block_idx)
                     || global_liveness
@@ -1411,32 +1421,58 @@ fn detect_blockparam_slot_routing(
                         .get(block_idx)
                         .is_some_and(|live| live.contains(v))
             };
-            let mut by_cost: Vec<VReg> = args
-                .iter()
-                .filter(|(ai, v)| {
-                    live.contains(v)
-                        && !route.contains(v)
-                        && defined_here(v)
-                        && dests.get(*ai as usize).is_some_and(|&(bid, pidx)| {
-                            groups.get(v).is_some_and(|g| {
-                                g.reg_class == class
-                                    && g.positions.iter().any(|&(b, p, _)| b == bid && p == pidx)
-                                    && stores_reach_every_use(*v, g)
-                            })
-                        })
+            let mut by_arg: BTreeMap<VReg, Option<BTreeSet<VReg>>> = BTreeMap::new();
+            for &(arg_idx, arg_vreg) in &args {
+                if !live.contains(&arg_vreg) {
+                    continue;
+                }
+                let param = dests.get(arg_idx as usize).and_then(|&(bid, pidx)| {
+                    let (param_vreg, group) = groups.iter().find(|(_, g)| {
+                        g.positions.iter().any(|&(b, p, _)| b == bid && p == pidx)
+                    })?;
+                    (group.reg_class == class
+                        && defined_here(&arg_vreg)
+                        && stores_reach_every_use(*param_vreg, group))
+                    .then_some(*param_vreg)
+                });
+                let slot = by_arg
+                    .entry(arg_vreg)
+                    .or_insert_with(|| Some(BTreeSet::new()));
+                match param {
+                    Some(p) => {
+                        if let Some(params) = slot {
+                            params.insert(p);
+                        }
+                    }
+                    // One position of this value is not routable, so the value
+                    // keeps its register whatever happens to the others.
+                    None => *slot = None,
+                }
+            }
+            // Cheapest first: a parameter read fewer times costs fewer reloads.
+            let mut by_cost: Vec<(VReg, BTreeSet<VReg>)> = by_arg
+                .into_iter()
+                .filter_map(|(arg, params)| Some((arg, params?)))
+                .filter(|(_, params)| {
+                    !params.is_empty() && !params.iter().all(|p| route.contains(p))
                 })
-                .map(|&(_, v)| v)
                 .collect();
-            by_cost.sort_by_key(|&vreg| (use_counts.get(&vreg).copied().unwrap_or(0), vreg.0));
-            by_cost.dedup();
+            by_cost.sort_by_key(|(arg, params)| {
+                (
+                    params
+                        .iter()
+                        .map(|p| use_counts.get(p).copied().unwrap_or(0))
+                        .sum::<usize>(),
+                    arg.0,
+                )
+            });
             let mut holding = live.len();
-            for vreg in by_cost {
+            for (_, params) in by_cost {
                 if holding <= budget as usize {
                     break;
                 }
-                if route.insert(vreg) {
-                    holding -= 1;
-                }
+                route.extend(params);
+                holding -= 1;
             }
         }
     }
