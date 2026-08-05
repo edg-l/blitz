@@ -1,10 +1,10 @@
 use crate::compile::program_point::ProgramPoint;
-use crate::egraph::extract::{ClassVRegMap, VReg};
+use crate::egraph::extract::VReg;
 use crate::egraph::unionfind::UnionFind;
 use crate::ir::Type;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::Op;
 use crate::regalloc::allocator::RegAllocResult;
 use crate::x86::abi::{ArgLoc, FP_RETURN_REG, GPR_RETURN_REG, assign_args, setup_call_args};
 use crate::x86::addr::Addr;
@@ -115,7 +115,6 @@ pub(super) fn lower_effectful_op(
     op: &EffectfulOp,
     block_idx: usize,
     barrier_idx: usize,
-    class_to_vreg: &ClassVRegMap,
     regalloc: &RegAllocResult,
     func: &Function,
     uf: &UnionFind,
@@ -146,12 +145,6 @@ pub(super) fn lower_effectful_op(
         Some(pos) if pos > 0 => ProgramPoint::inst_point(block_idx, pos),
         Some(_) => ProgramPoint::block_entry(block_idx),
         None => ProgramPoint::block_exit(block_idx),
-    };
-    let get_reg = |cid: ClassId| -> Option<Reg> {
-        let canon = uf.find_immutable(cid);
-        class_to_vreg
-            .lookup(canon, point)
-            .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
     };
 
     // The register holding a role operand, read straight off the barrier.
@@ -225,28 +218,23 @@ pub(super) fn lower_effectful_op(
     };
 
     match op {
-        EffectfulOp::Load { addr, result, ty } => {
+        EffectfulOp::Load { addr, ty, .. } => {
             let is_float = matches!(ty, Type::F32 | Type::F64);
             let canon_addr = uf.find_immutable(addr.class());
-            let addr_reg =
-                role_reg(0)
-                    .or_else(|| get_reg(canon_addr))
-                    .ok_or_else(|| CompileError {
-                        phase: "lowering".into(),
-                        message: format!(
-                            "Load: no register for addr class {canon_addr:?} at {point:?} \
-                     (barrier {:?}, class map says {:?})",
-                            barrier.map(|b| &b.operands),
-                            class_to_vreg.lookup(canon_addr, point)
-                        ),
-                        location: Some(IrLocation {
-                            function: func.name.clone(),
-                            block: None,
-                            inst: None,
-                        }),
-                    })?;
+            let addr_reg = role_reg(0).ok_or_else(|| CompileError {
+                phase: "lowering".into(),
+                message: format!(
+                    "Load: no register for addr class {canon_addr:?} at {point:?} \
+                     (barrier {:?})",
+                    barrier.map(|b| &b.operands),
+                ),
+                location: Some(IrLocation {
+                    function: func.name.clone(),
+                    block: None,
+                    inst: None,
+                }),
+            })?;
             check_barrier_operand("Load address", addr_reg);
-            let canon_result = uf.find_immutable(result.class());
             // The `LoadResult` barrier's own dst names the register this load must
             // write, for the same reason a call's result does (see the Call arm):
             // the schedule's VReg is the one the splitter rewrote, coalescing
@@ -254,11 +242,6 @@ pub(super) fn lower_effectful_op(
             // VReg whose register nobody is reading.
             let result_reg = barrier
                 .and_then(|inst| regalloc.vreg_to_reg.get(&inst.dst).copied())
-                .or_else(|| {
-                    class_to_vreg
-                        .lookup(canon_result, point)
-                        .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
-                })
                 .ok_or_else(|| CompileError {
                     phase: "lowering".into(),
                     message: "Load: no register for result".into(),
@@ -269,7 +252,7 @@ pub(super) fn lower_effectful_op(
                     }),
                 })?;
             let addr = build_mem_addr(
-                role_vreg(0).or_else(|| class_to_vreg.lookup(canon_addr, point)),
+                role_vreg(0),
                 addr_reg,
                 barrier_pos,
                 regalloc,
@@ -312,46 +295,39 @@ pub(super) fn lower_effectful_op(
         EffectfulOp::Store { addr, val, ty } => {
             let is_float = matches!(ty, Type::F32 | Type::F64);
             let canon_addr = uf.find_immutable(addr.class());
-            let addr_reg =
-                role_reg(0)
-                    .or_else(|| get_reg(canon_addr))
-                    .ok_or_else(|| CompileError {
-                        phase: "lowering".into(),
-                        message: format!(
-                            "Store: no register for addr class {canon_addr:?} at {point:?} \
-                     (barrier {:?}, class map says {:?})",
-                            barrier.map(|b| &b.operands),
-                            class_to_vreg.lookup(canon_addr, point)
-                        ),
-                        location: Some(IrLocation {
-                            function: func.name.clone(),
-                            block: None,
-                            inst: None,
-                        }),
-                    })?;
+            let addr_reg = role_reg(0).ok_or_else(|| CompileError {
+                phase: "lowering".into(),
+                message: format!(
+                    "Store: no register for addr class {canon_addr:?} at {point:?} \
+                     (barrier {:?})",
+                    barrier.map(|b| &b.operands),
+                ),
+                location: Some(IrLocation {
+                    function: func.name.clone(),
+                    block: None,
+                    inst: None,
+                }),
+            })?;
             check_barrier_operand("Store address", addr_reg);
             // If val was spilled, its original VReg has no register. Find the
             // StoreBarrier for this Store and read the (possibly renamed) val
             // operand from it — that VReg points at the reload/remat copy.
             let canon_val = uf.find_immutable(val.class());
-            let val_reg =
-                role_reg(1)
-                    .or_else(|| get_reg(canon_val))
-                    .ok_or_else(|| CompileError {
-                        phase: "lowering".into(),
-                        message: format!(
-                            "Store: no register for val class {canon_val:?} at {point:?} \
+            let val_reg = role_reg(1).ok_or_else(|| CompileError {
+                phase: "lowering".into(),
+                message: format!(
+                    "Store: no register for val class {canon_val:?} at {point:?} \
                          (barrier {:?})",
-                            barrier.map(|b| &b.operands)
-                        ),
-                        location: Some(IrLocation {
-                            function: func.name.clone(),
-                            block: None,
-                            inst: None,
-                        }),
-                    })?;
+                    barrier.map(|b| &b.operands)
+                ),
+                location: Some(IrLocation {
+                    function: func.name.clone(),
+                    block: None,
+                    inst: None,
+                }),
+            })?;
             let addr = build_mem_addr(
-                role_vreg(0).or_else(|| class_to_vreg.lookup(canon_addr, point)),
+                role_vreg(0),
                 addr_reg,
                 barrier_pos,
                 regalloc,
@@ -393,17 +369,15 @@ pub(super) fn lower_effectful_op(
             let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len());
             for (i, arg) in args.iter().enumerate() {
                 let cid = arg.class();
-                let r = role_reg(i)
-                    .or_else(|| get_reg(cid))
-                    .ok_or_else(|| CompileError {
-                        phase: "lowering".into(),
-                        message: format!("Call: no register for argument class {cid:?}"),
-                        location: Some(IrLocation {
-                            function: func.name.clone(),
-                            block: None,
-                            inst: None,
-                        }),
-                    })?;
+                let r = role_reg(i).ok_or_else(|| CompileError {
+                    phase: "lowering".into(),
+                    message: format!("Call: no register for argument class {cid:?}"),
+                    location: Some(IrLocation {
+                        function: func.name.clone(),
+                        block: None,
+                        inst: None,
+                    }),
+                })?;
                 arg_regs.push(r);
             }
 
@@ -467,8 +441,7 @@ pub(super) fn lower_effectful_op(
             // was in XMM0, because no copy was emitted at all.
             let result_reg = barrier_pos
                 .and_then(|pos| schedule.get(pos))
-                .and_then(|inst| regalloc.vreg_to_reg.get(&inst.dst).copied())
-                .or_else(|| results.first().and_then(|&cid| get_reg(cid.class())));
+                .and_then(|inst| regalloc.vreg_to_reg.get(&inst.dst).copied());
             if let Some(&_result_cid) = results.first()
                 && let Some(result_reg) = result_reg
             {

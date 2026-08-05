@@ -241,8 +241,13 @@ pub(super) fn lower_terminator(
     let exit_point = ProgramPoint::block_exit(block_idx);
     let get_reg = |cid: ClassId, ctv: &ClassVRegMap| -> Option<Reg> {
         let canon = egraph.unionfind.find_immutable(cid);
-        ctv.lookup(canon, exit_point)
-            .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
+        let r = ctv
+            .lookup(canon, exit_point)
+            .and_then(|v| regalloc.vreg_to_reg.get(&v).copied());
+        if r.is_some() && crate::trace::is_enabled("paramsrc") {
+            tracing::debug!(target: "blitz::paramsrc", "MAPFALL terminator-get_reg {canon:?}");
+        }
+        r
     };
 
     match op {

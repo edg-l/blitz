@@ -951,17 +951,6 @@ pub fn compile(
             }
         }
 
-        // Every effectful-op role operand now exists in both representations and
-        // must name the same VReg. Checked here, before the splitter, so a
-        // disagreement is attributable to construction.
-        crate::verify::verify_cfg_schedule_agreement_stage(
-            "effectful-operands",
-            func,
-            &egraph,
-            &block_schedules,
-            &block_class_to_vreg_snapshot,
-        );
-
         // Terminator uses, read straight off the schedules. `Op::TerminatorArgs`
         // is the record of what each terminator consumes: the splitter rewrites
         // its operands and coalescing renames them, so recomputing this after
@@ -1202,19 +1191,6 @@ pub fn compile(
                 break;
             }
         }
-
-        // And again on the splitter's output, which is the state Phase 7 asks
-        // about. Reported rather than enforced: the splitter's segments do not
-        // reliably cover the point its own reload is consumed at, so the map is
-        // already the weaker of the two answers here. See
-        // `verify::report_cfg_schedule_agreement`.
-        crate::verify::report_cfg_schedule_agreement(
-            "split",
-            func,
-            &egraph,
-            &block_schedules,
-            &block_class_to_vreg_snapshot,
-        );
 
         // Step 3: Determine block params per block (passed to allocate_global).
         // CRITICAL ORDER: must run AFTER apply_plan_to (splitter output committed).
@@ -1619,7 +1595,6 @@ pub fn compile(
                     op,
                     block_idx,
                     barrier_k,
-                    &block_class_to_vreg,
                     &regalloc_result,
                     func,
                     &egraph.unionfind,

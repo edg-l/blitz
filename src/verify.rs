@@ -38,14 +38,6 @@
 //! means a pass that reintroduces stale ids is caught immediately rather than
 //! waiting for a consumer to mishandle one.
 //!
-//! # CFG versus schedule
-//!
-//! [`verify_cfg_schedule_agreement`] compares the two answers the pipeline holds
-//! for "which register carries this value here": the `ClassId` the CFG names,
-//! resolved through the class map, and the VReg the schedule carries as an
-//! operand. Two answers to one question is the defect behind most wrong-code bugs
-//! here, and this is the invariant that says they agree.
-//!
 //! # Machine level
 //!
 //! [`verify_machinsts`] checks the emitted instruction stream: no virtual
@@ -70,7 +62,7 @@ use std::sync::OnceLock;
 use crate::egraph::EGraph;
 use crate::ir::effectful::{EffectfulOp, TermArgs};
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::ClassId;
 use crate::ir::types::Type;
 
 static LEVEL: OnceLock<VerifyLevel> = OnceLock::new();
@@ -638,211 +630,10 @@ mod tests {
     }
 }
 
-// ── CFG versus schedule ──────────────────────────────────────────────────────
-
-use crate::compile::barrier;
-use crate::compile::program_point::ProgramPoint;
-use crate::egraph::extract::{ClassVRegMap, VReg};
+use crate::egraph::extract::VReg;
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::inst::MachInst;
 use crate::x86::reg::Reg;
-
-/// Compare the two answers the pipeline holds for "which register carries this
-/// value here": the `ClassId` the CFG names, resolved through the class map, and
-/// the VReg the schedule carries as an operand.
-///
-/// The CFG names pure values by `ClassId`, which is expression identity and has
-/// no position; every consumer after extraction needs occurrence identity. So
-/// each consumer resolves a class through a map keyed by program point, while the
-/// schedule already records the VReg that pass rewrote. Where the two disagree
-/// the emitted code reads a register holding some other value, and nothing else
-/// can see it: the register is written, so def-before-use holds, and no two
-/// modelled live ranges overlap, so the sharing check holds.
-///
-/// Checked where both representations exist: an effectful op's role operands (a
-/// `Load`'s address, a `Store`'s address and value, a `Call`'s arguments in ABI
-/// order) against the leading operands of the barrier instruction consuming that
-/// op, by index.
-///
-/// Block arguments are not checked and cannot disagree: the CFG names them by
-/// VReg, and `Op::TerminatorArgs` is a copy of that list rather than a second
-/// resolution of it.
-///
-/// A `Load`'s address and a `Store`'s operands are now VRegs in the CFG too, so
-/// before the splitter the barrier is a copy of what the CFG states and the two
-/// sides agree by construction. What is left to catch there is a disagreement
-/// the splitter opens: it rewrites the barrier's operand and patches the class
-/// map separately, and only one of the two is what the emitted code reads.
-///
-/// Only positions where *both* sides have an answer are compared. A class the map
-/// cannot resolve at that point has no second answer to disagree with.
-pub fn verify_cfg_schedule_agreement(
-    func: &Function,
-    egraph: &EGraph,
-    block_schedules: &[Vec<ScheduledInst>],
-    block_snapshots: &[ClassVRegMap],
-) -> Vec<String> {
-    let mut errors = Vec::new();
-    if block_schedules.len() != func.blocks.len() || block_snapshots.len() != func.blocks.len() {
-        return errors;
-    }
-
-    for (block_idx, block) in func.blocks.iter().enumerate() {
-        let schedule = &block_schedules[block_idx];
-        let snapshot = &block_snapshots[block_idx];
-        // An ambiguity is a finding in its own right: two segments of one class
-        // covering a point without nesting means the map cannot say which VReg
-        // holds the value there, and `lookup` asserts rather than choosing. It
-        // stays latent while no pass asks at that point.
-        let resolve = |cid: ClassId, point: ProgramPoint| -> Result<Option<VReg>, String> {
-            let canon = egraph.unionfind.find_immutable(cid);
-            match snapshot.lookup_ambiguity(canon, point) {
-                Some(why) => Err(why),
-                None => Ok(snapshot.lookup(canon, point)),
-            }
-        };
-
-        // The schedule position of each barrier instruction, in effectful-op
-        // order. `lower_effectful_op` finds its barrier the same way.
-        let barrier_positions: Vec<usize> = schedule
-            .iter()
-            .enumerate()
-            .filter(|(_, inst)| {
-                matches!(
-                    inst.op,
-                    Op::LoadResult(..)
-                        | Op::CallResult(..)
-                        | Op::VoidCallBarrier
-                        | Op::StoreBarrier
-                )
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        for (barrier_k, op) in block.ops[..block.non_term_count()].iter().enumerate() {
-            let roles: Vec<(&str, ClassId)> = match op {
-                EffectfulOp::Load { addr, .. } => vec![("Load address", addr.class())],
-                EffectfulOp::Store { addr, val, .. } => {
-                    vec![
-                        ("Store address", addr.class()),
-                        ("Store value", val.class()),
-                    ]
-                }
-                EffectfulOp::Call { args, .. } => {
-                    args.iter().map(|a| ("Call argument", a.class())).collect()
-                }
-                _ => continue,
-            };
-            let Some(&barrier_pos) = barrier_positions.get(barrier_k) else {
-                continue;
-            };
-            let Some(barrier) = schedule.get(barrier_pos) else {
-                continue;
-            };
-            // The point `lower_effectful_op` asks at, which is the barrier's own
-            // instruction index. `ProgramPoint::barrier_point` would give one
-            // more, and the splitter's segments run `[def .. last reference]` over
-            // raw indices -- so a reload consumed by this barrier has a segment
-            // ending exactly here, and asking one point later falls through to the
-            // pre-spill VReg's full-range entry instead.
-            let point = if barrier_pos > 0 {
-                ProgramPoint::inst_point(block_idx, barrier_pos)
-            } else {
-                ProgramPoint::block_entry(block_idx)
-            };
-            let role_count = barrier::role_operand_count(op);
-            for (i, (what, cid)) in roles.iter().enumerate() {
-                if i >= role_count {
-                    break;
-                }
-                let Some(&from_schedule) = barrier.operands.get(i) else {
-                    continue;
-                };
-                let from_map = match resolve(*cid, point) {
-                    Err(why) => {
-                        errors.push(format!("block {block_idx}: {what} {i}: {why}"));
-                        continue;
-                    }
-                    Ok(None) => continue,
-                    Ok(Some(v)) => v,
-                };
-                if from_map != from_schedule {
-                    errors.push(format!(
-                        "block {block_idx}: {what} {i} (class {:?}) resolves to VReg {} \
-                         through the class map at {point:?}, but the {:?} operand at that \
-                         index is VReg {}",
-                        egraph.unionfind.find_immutable(*cid),
-                        from_map.0,
-                        barrier.op,
-                        from_schedule.0,
-                    ));
-                }
-            }
-        }
-    }
-
-    errors
-}
-
-/// Run [`verify_cfg_schedule_agreement`] and report the count on stderr. No-op
-/// unless `BLITZ_VERIFY` is set, or when the two representations agree.
-///
-/// For the stages where they do *not* agree today, so the number is visible and
-/// a regression in it is visible, without failing the suite on a defect that is
-/// latent. It is latent because the consumer does not trust the map first: an
-/// effectful op reads the barrier's own operand and falls back to the map only
-/// where there is no operand at that index. Committing the per-block VReg choice
-/// into the CFG is what removes the second answer, as it already has for block
-/// arguments; until the remaining `EffectfulOp` operands follow, a reload whose
-/// segment does not reach the barrier consuming it leaves the map answering with
-/// the pre-spill VReg.
-pub fn report_cfg_schedule_agreement(
-    stage: &str,
-    func: &Function,
-    egraph: &EGraph,
-    block_schedules: &[Vec<ScheduledInst>],
-    block_snapshots: &[ClassVRegMap],
-) {
-    if !is_enabled() {
-        return;
-    }
-    let errors = verify_cfg_schedule_agreement(func, egraph, block_schedules, block_snapshots);
-    if errors.is_empty() {
-        return;
-    }
-    eprintln!(
-        "BLITZ_VERIFY: {} CFG/schedule disagreement(s) in function '{}' after stage '{}':\n  - {}",
-        errors.len(),
-        func.name,
-        stage,
-        errors.join("\n  - ")
-    );
-}
-
-/// Run [`verify_cfg_schedule_agreement`] and panic if the two representations
-/// disagree. No-op unless `BLITZ_VERIFY` is set.
-pub fn verify_cfg_schedule_agreement_stage(
-    stage: &str,
-    func: &Function,
-    egraph: &EGraph,
-    block_schedules: &[Vec<ScheduledInst>],
-    block_snapshots: &[ClassVRegMap],
-) {
-    if !is_enabled() {
-        return;
-    }
-    let errors = verify_cfg_schedule_agreement(func, egraph, block_schedules, block_snapshots);
-    if !errors.is_empty() {
-        panic!(
-            "BLITZ_VERIFY: {} CFG/schedule disagreement(s) in function '{}' after stage \
-             '{}':\n  - {}",
-            errors.len(),
-            func.name,
-            stage,
-            errors.join("\n  - ")
-        );
-    }
-}
 
 // ── Machine level ────────────────────────────────────────────────────────────
 

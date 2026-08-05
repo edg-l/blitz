@@ -14,7 +14,9 @@ None of these changes behaviour. Each one shrinks the surface or the risk of the
 steps below, and they are worth doing first rather than carrying through a rewrite.
 A, B and C were done before step 1; **D was a prerequisite of step 2** and is done.
 
-**A. A CFG-versus-schedule agreement check, under `BLITZ_VERIFY`.** DONE.
+**A. A CFG-versus-schedule agreement check, under `BLITZ_VERIFY`.** DONE, and
+**deleted in step 4** once the fallback it guarded was measured dead. What
+follows is what it found while it existed.
 `verify::verify_cfg_schedule_agreement` compares, at every position both
 representations name, the VReg a class resolves to through the map against the VReg
 the schedule carries as an operand: an effectful op's role operands against the
@@ -43,10 +45,12 @@ Step 1 removed the terminator half of this check outright: block arguments no
 longer have two answers to compare. What the check covers now is the effectful-op
 role operands alone, and both shapes above are still reachable through those.
 
-Step 3 makes the construction-time half agree by construction as well -- the
-barrier's role operands are now copied from the CFG rather than resolved -- but
-the post-splitter half still measures something real, because `lower_effectful_op`
-falls back to the class map wherever a role operand has no register.
+Step 3 made the construction-time half agree by construction as well, and step 4
+retired the check outright: the fallback it guarded was measured to fire **0
+times** over the whole lit corpus and 30 generated programs at both levels, so
+`lower_effectful_op` no longer has one. The barrier is the only answer, and an
+absent role operand is a `CompileError` naming the op instead of a quiet lookup
+that may name a stale register.
 
 Also found and left alone at the time, since it was a behaviour change and that
 step was not: `populate_effectful_operands` resolved at
@@ -207,7 +211,16 @@ during them, which is annoying and not a regression.
 
 ---
 
-## Steps 1-4: the CFG should hold VRegs, not ClassIds
+## Steps 1-4: the CFG should state which register holds each value
+
+**Not "the CFG should hold VRegs, not ClassIds", which is what this heading said
+and which the design settled against in step 1.** A committed operand carries
+both: the `ClassId` because expression identity is what `build_phi_copies` asks
+to tell an argument that *is* its target parameter from one that merely equals
+it, what `Ret` lowering asks to fold a constant return, and what DCE and
+canonicalization walk; the VReg because none of those answer "which register,
+here". What steps 1-4 remove is the *resolution machinery* between the two, not
+the class. Whether the class itself can leave is step 7's question.
 
 ### Root cause
 
@@ -704,6 +717,32 @@ Per-block snapshots, the three-times-patched map, `Linearized::block_param_vregs
 (now a copy into `BasicBlock::param_vregs` and read nowhere else),
 `block_param_vreg_overrides`, `class_emitted_in`, and the `value_defs` guard in
 `split.rs`. Judged by LOC removed with no behaviour change.
+
+**Progress, and two items that are not deletable.**
+
+- **`block_param_vreg_overrides` -- DONE**, see below.
+- **The class map's readers in effectful lowering -- DONE.** Instrumenting every
+  `.or_else(|| get_reg(...))` in `lower_effectful_op` showed **0 hits** over the
+  whole lit corpus and 30 generated programs at both levels: after steps 1-3 the
+  barrier's role operands answer every time. All of them are gone, the function no
+  longer takes a `ClassVRegMap` at all, and `verify_cfg_schedule_agreement` went
+  with them -- it existed to compare the map's answer against the barrier's, and
+  there is no longer a consumer of the first. Net -256 lines, byte-identical.
+- **`class_emitted_in` is NOT deletable.** It has a live reader:
+  `phi_removal::source_dominates`, which is tier 1's dominance test. Deleting it
+  means answering "does this class's emitter dominate this block" some other way,
+  which is a design change rather than a deletion.
+- **The `value_defs` guard in `split.rs` is NOT dead either.** Its comment
+  describes a live miscompile it prevents: a parameter passing a dominating
+  definition through shares the value's VReg, so routing it to a slot moves the
+  *value*, and the predecessor's own initialising store becomes a reload of the
+  slot it was about to write. What removes the guard is giving every parameter its
+  own VReg, which is a design change, not a deletion.
+- **Still to do: the per-block snapshots and the function-wide map.** The
+  remaining reader is `lower_terminator`'s `get_reg`, measured at **463 hits** on
+  the same corpus -- the `Ret` path, where a value with no `TerminatorArgs` operand
+  carrying a register falls back to the map. That one path is what now stands
+  between the tree and deleting the map.
 
 **`block_param_vreg_overrides` is gone.** DONE, as step 4's first slice. It had five
 consumers left after step 3b, and a probe over the whole lit corpus at both levels
