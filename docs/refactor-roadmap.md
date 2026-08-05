@@ -1204,12 +1204,27 @@ phi copy and no slot store* -- nothing writes it, and the block reads whatever
 the register held.
 
 That found a real defect in the store decision, which is now fixed and kept (see
-below). It is **not** the whole of rule 3's miscompile: with the store decision
-corrected, seed 14 still turns at the same parameter, and the traffic on its slot
-shows one store where the block has two predecessors passing that parameter. So
-one edge's store is still missing, and finding which is where the next attempt
-starts -- the bisection harness is three lines of `route.insert` accounting and
-worth rebuilding.
+below). It is **not** the whole of rule 3's miscompile, and the hunt was carried
+past it far enough to rule several things out:
+
+- **Both predecessors do store.** With the back-edge criterion in place, block 6's
+  two incoming edges each keep their store (`b4 -> 6 p0`, `b8 -> 6 p0`), and the
+  slot's traffic shows both -- a store, two reloads, a second store, a reload.
+  The "one store for two predecessors" reading of the earlier trace was the old
+  criterion suppressing one of them, and it is gone.
+- **It is not a def-before-use fault.** `BLITZ_VERIFY=1` is silent on the
+  miscompiling program, so every register the emitted code reads is written on
+  every path. This is a *value* error, which is the differential harness's
+  department, not the verifier's.
+- **The forward edge's store is a slot-to-slot move** (`mov rax,[rsp+0x288]` then
+  `mov [rsp+0x40],rax`), and `[rsp+0x288]` is written exactly once in the whole
+  function.
+
+So the next attempt starts at "which term of seed 14's sum is wrong", not at
+another guard: `DEBUGGING-NOTES.md` technique 1, one `printf` per term against
+`cc`. The bisection harness that isolates the single routing is worth rebuilding
+first -- a `BLITZ_RULE3_LIMIT` counter around `route.insert` -- since it turns a
+whole-program miscompile into one named parameter in four compiles.
 
 The other candidate is still untried: let the spill loop hand a parameter to slot
 routing rather than skip it.
