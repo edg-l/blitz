@@ -1,5 +1,15 @@
 # Register allocation and division: what landed, what is next
 
+> **Partly superseded, 2026-08-05.** Steps 1 through 5 of `docs/refactor-roadmap.md`
+> have landed since this was written, and two of its conclusions no longer hold.
+> Shape B is *not* blocked by parameters lacking an `Op::BlockParam` marker: with
+> every parameter's VReg available (step 3b) the routing pass finds all of them and
+> still routes none, because they alias the value they carry and `split.rs`'s
+> `value_defs` guard refuses. And the function-scope allocator now has a spill loop,
+> which fixed shape A and left shape B untouched. Four attempts on shape B are
+> tabled at the end of the refactor roadmap with their numbers; read that before
+> acting on anything here.
+
 **For what to do next, read `docs/refactor-roadmap.md`** -- eight ordered structural
 steps, tracked. This file is the record of what landed and what was ruled out; the
 roadmap is the plan.

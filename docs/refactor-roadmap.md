@@ -186,12 +186,20 @@ capacity loss with no obvious cause.
 | 1 | Terminator args become VRegs in the CFG | medium | **DONE** — the representation defect, smallest slice with the biggest payoff |
 | — | Prereq D and four cleanups | small | **DONE** — behaviour-neutral, before step 2; see "Duplication: do it first, except where first makes it worse" |
 | 2 | Trivial-phi elimination over those VRegs | small-medium | **TIER 1 DONE** — measured: fewer spills and reloads everywhere, capacity unchanged. Tier 2 open |
-| 3 | The remaining `EffectfulOp` operands become VRegs | medium | finishes step 1 |
-| 3b | Block parameters get VRegs in the CFG | small | the phi seam's *destination* end; step 4 deletes its four-source resolution and needs a replacement |
-| 4 | Delete the reconstruction machinery (~312 sites) | mechanical | the payoff: the bug class goes away |
-| 5 | Give the function-scope allocator a spill loop | medium | now safe, and it converts the residual failures from errors into spill code |
+| 3 | The remaining `EffectfulOp` operands become VRegs | medium | **DONE** — five slices, four byte-identical; the one that moved code found a pre-existing disagreement |
+| 3b | Block parameters get VRegs in the CFG | small | **DONE** — four sources became three, and which survive was measured, not argued |
+| 4 | Delete the reconstruction machinery (~312 sites) | mechanical | **DONE** — −313 lines, byte-identical. The map itself stays: five readers, each measured |
+| 5 | Give the function-scope allocator a spill loop | medium | **DONE** — `args` 14/15 → 15/15 and byte-identical elsewhere. It converts *shape A* into spill code; shape B it cannot touch |
 | 6 | Fold the two allocators into one | medium | only sensible after 5, or the spill loop gets duplicated |
 | 7 | Split `Op` into pure / machine / pseudo | large | lowest priority, natural follow-on to 1-4 |
+
+**Why not the spill loop first — and what the answer turned out to be.** The
+argument below held: the spill loop landed after step 4 and was byte-identical
+everywhere it did not engage, with no wrong-code bug of the kind this feared. What
+the argument got wrong is the *prize*: it says the loop "would turn all 46
+remaining capacity failures from compile errors into merely-slow code". It turned
+one of them into slow code. The rest are shape B, where the values live at the
+pressure point are the operands of the instruction there, and no spiller can help.
 
 **Why not the spill loop first.** It is tempting: it is self-contained, the code to
 crib from already exists in `allocator.rs`, and it would turn all 46 remaining
@@ -1129,14 +1137,19 @@ stops being a hazard the pipeline has to remember.
 
 ---
 
-## State at 2026-08-05 (`6e315ac`), after steps 0, 1 and 2
+## State at 2026-08-05 (`3160d5e`), after steps 0 through 5
 
 Gates: 934 unit, 474 lit at `BLITZ_VERIFY` off/1/strict, 298 differential + `cc`.
 Code quality has a baseline too: `bash tests/run_codesize.sh --check`, 888 rows.
 
-Generated corpus, per (seed, level) pair at 30 seeds per shape: `mixed` 29/30,
-`args` 29/30, `pressure` 14/30. Every failure is capacity, and **step 2 moved
-none of them** -- see its notes for the count of why.
+Steps 0, 1, 2, 3, 3b, 4 and 5 are done. What each measured is in its own notes
+above, including the four predictions that were stated first and the three that
+were wrong.
+
+Generated corpus at 15 seeds a shape: `mixed` 15/15, `args` 15/15,
+`pressure` 9/15. Every failure is capacity, all at `-O1`, and all one shape --
+a `TerminatorArgs` reading more values than the budget holds. **Steps 2, 3, 3b
+and 4 moved none of them; step 5 moved `args` from 14/15 to 15/15.**
 
 The 60-seed figures this section quoted before steps 1 and 2, for comparison:
 
