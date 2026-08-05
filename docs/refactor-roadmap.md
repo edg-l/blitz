@@ -12,7 +12,7 @@ Judge every step on the full battery (`cargo test --all-targets --workspace`,
 
 None of these changes behaviour. Each one shrinks the surface or the risk of the
 steps below, and they are worth doing first rather than carrying through a rewrite.
-A, B and C were done before step 1; **D is a prerequisite of step 2** and is not done.
+A, B and C were done before step 1; **D was a prerequisite of step 2** and is done.
 
 **A. A CFG-versus-schedule agreement check, under `BLITZ_VERIFY`.** DONE.
 `verify::verify_cfg_schedule_agreement` compares, at every position both
@@ -74,22 +74,30 @@ the first saying it must match the second -- and they had already drifted: one
 canonicalized the parameter's class before the lookup and one did not. Coalescing
 merging onto a VReg the copy never writes is what `021d4ed` and `29e796d` were.
 
-**D. One derivation of the CFG's edges. NOT DONE, and a prerequisite of step 2.**
-There are five. `cfg::compute_rpo`'s inline closure and
-`regalloc::global_liveness::cfg_successors` are *character-identical* over 25 lines;
-`cfg::compute_idom` has a third written differently; `dce::block_successors` is a
-fourth, returning `BlockId`s rather than indices; `licm::build_predecessor_map` is a
-fifth. `barrier::terminator_edges` is already the general form — each successor with
-the arguments that edge carries — so it is the one the rest should call.
+**D. One derivation of the CFG's edges. DONE, and a prerequisite of step 2.**
+`cfg::successor_ids` answers it for one terminator, `cfg::successor_indices` for the
+whole function, and `cfg::predecessor_indices` inverts that — all three over
+`barrier::terminator_edges`, which was already the general form: each successor with
+the arguments that edge carries.
 
-This is a prerequisite rather than a cleanup because **step 2's core question is
+Eight derivations went, not the five the scan found. `cfg::compute_rpo`'s inline
+closure and `regalloc::global_liveness::cfg_successors` were *character-identical*
+over 25 lines; `cfg::compute_idom`, `licm::build_predecessor_map` and
+`licm::detect_back_edges` each had the same walk written differently;
+`dce::block_successors` returned `BlockId`s rather than indices;
+`cfg::compute_loop_depths` and `algebraic::propagate_block_params` had one apiece
+that the window scan missed because neither is named for what it does.
+`phi_simplify`'s own `terminator_edges` went with them.
+
+This was a prerequisite rather than a cleanup because **step 2's core question is
 per-predecessor**: "does every predecessor pass the same VReg at this position". Left
-alone, step 2 reaches for `build_predecessor_map` and becomes the *sixth* consumer of
-a fact five passes already derive separately — which is the defect the rest of this
-document exists to remove, reintroduced by the step meant to benefit from removing it.
+alone, step 2 would have reached for `build_predecessor_map` and become the *sixth*
+consumer of a fact five passes already derived separately — the defect the rest of
+this document exists to remove, reintroduced by the step meant to benefit from
+removing it.
 
-Same shape as A, B and C: behaviour-neutral, so judged by byte identity with
-`tests/run_identity.sh` rather than by a pass count.
+Same shape as A, B and C: behaviour-neutral, and byte-identical over the lit corpus
+at both levels (`tests/run_identity.sh`, 671 identical of 674).
 
 Not worth doing first: splitting the large files (no evidence of harm), and the `Op`
 split -- that is step 7, and doing it early fights steps 1-4, which change what the
@@ -112,35 +120,40 @@ paid a rewrite for the privilege.
 
 | what | when | why |
 | --- | --- | --- |
-| Five derivations of the CFG's edges | **now** (prereq D) | step 2's core question is per-predecessor; left alone it becomes the sixth consumer |
-| `apply_splits_for_overshoot`'s 25 parameters | **now** | steps 2 and 5 both add state to the splitter, and each new piece threads through 25-argument signatures |
-| `verify.rs`'s private `chase_alias` | **now** | one line, and a verifier's own copy of what it verifies is the worst place for a drift |
-| `block_id_to_idx` rebuilt in six files | **now** | trivial, and steps 3b/4 churn that area |
-| Two pairs of near-identical rule bodies | **now**, lowest priority | `egraph/` only, no interaction with any step |
+| Five derivations of the CFG's edges | **DONE** (prereq D) | step 2's core question is per-predecessor; left alone it becomes the sixth consumer |
+| `apply_splits_for_overshoot`'s 25 parameters | **DONE** | steps 2 and 5 both add state to the splitter, and each new piece threads through 25-argument signatures |
+| `verify.rs`'s private `chase_alias` | **DONE** | one line, and a verifier's own copy of what it verifies is the worst place for a drift |
+| `block_id_to_idx` rebuilt in six files | **DONE** | trivial, and steps 3b/4 churn that area |
+| Two pairs of near-identical rule bodies | **DONE** | `egraph/` only, no interaction with any step |
 | The generic-IR-op set in `lower.rs` and `cost.rs` | **wait for step 7** | the list *is* `PureOp`; a shared constant now is a third copy the split deletes |
 | `allocator.rs:319` / `global_allocator.rs:531` | **wait for step 6** | a shared helper now is deleted by the fold |
 
-So five of the seven before step 2, in five commits. The two that wait are written up
-under the steps that own them.
+Five of the seven landed before step 2, in five commits, each byte-identical over the
+lit corpus at both levels. The two that wait are written up under the steps that own
+them.
 
-The three "now" items not already covered as prereq D:
+The three items not covered as prereq D, and what each turned out to be:
 
-**`split::apply_splits_for_overshoot` takes 25 parameters and is called 4 times, with
-21 of the 25 identical at every site.** Only the overshoot's index, class, excess and
-`SplitScope` vary. A context struct built once per round leaves four calls of five
-arguments. This is a large part of why `split.rs` resists change, and both step 2 and
-step 5 add state to the splitter — so paying for it once now beats threading two new
-fields through 25-argument signatures twice.
+**`split::apply_splits_for_overshoot` took 25 parameters at 3 call sites, with 21
+identical at every one.** Now four: a `RoundCtx` of what is fixed for the whole
+`plan_splits` call, a `BlockCtx` of what the current block's liveness scan produced, a
+`PlanAccum` of everything a split writes to, and the `Overshoot` itself — index,
+class, excess and the `SplitScope` the finding path wants. The accumulator is what
+steps 2 and 5 add their state to; before, each new field meant a 26th parameter at
+three sites.
 
-**`block_id_to_idx` is rebuilt inline in six files, fourteen sites**, always the same
-map. Minor, and the sort of minor that shows up in a profile: O(blocks) each time, and
-`commit_terminator_arg_vregs` builds a second one while `compile/mod.rs` already holds
-it.
+**`block_id_to_idx` was rebuilt inline in six files, fourteen sites**, always the same
+map. `cfg::block_id_to_idx` is the one builder. Minor, and the sort of minor that
+shows up in a profile: O(blocks) each time, and `commit_terminator_arg_vregs` built a
+second one while `compile/mod.rs` already held it.
 
 **Two pairs of near-identical rule bodies.** `algebraic.rs`'s
-`apply_sub_zero_eq_ne_rules` / `apply_add_const_zero_eq_ne_rules` share 36 lines, and
-`known_bits.rs`'s `Shr` and `Sar` by-constant arms share 25. A long rule set is fine —
-these are the *same* rule with one operation swapped, which is not the same thing.
+`apply_sub_zero_eq_ne_rules` / `apply_add_const_zero_eq_ne_rules` shared 36 lines and
+are now one `apply_icmp_zero_rules` taking the inner operation and a closure from its
+two children to the pair the new comparison names; the Sub rule is a one-liner and the
+Add rule is its constant negation. `known_bits.rs`'s `Shl`, `Shr` and `Sar`
+by-constant arms shared the same 25-line preamble, now `shift_by_constant`, which is
+also the one place the out-of-range amount is rejected.
 
 ### Do not merge the two local liveness passes
 
@@ -163,7 +176,7 @@ capacity loss with no obvious cause.
 | --- | --- | --- | --- |
 | 0 | Slot numbering gets a real representation | small | **DONE** — was a documented landmine, and a prerequisite for step 5 |
 | 1 | Terminator args become VRegs in the CFG | medium | **DONE** — the representation defect, smallest slice with the biggest payoff |
-| — | Prereq D and four cleanups | small | behaviour-neutral, before step 2; see "Duplication: do it first, except where first makes it worse" |
+| — | Prereq D and four cleanups | small | **DONE** — behaviour-neutral, before step 2; see "Duplication: do it first, except where first makes it worse" |
 | 2 | Trivial-phi elimination over those VRegs | small-medium | 85-94% of every function's parameters; removes 36 of the 46 capacity failures |
 | 3 | The remaining `EffectfulOp` operands become VRegs | medium | finishes step 1 |
 | 3b | Block parameters get VRegs in the CFG | small | the phi seam's *destination* end; step 4 deletes its four-source resolution and needs a replacement |
