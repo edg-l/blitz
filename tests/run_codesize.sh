@@ -65,8 +65,21 @@ if [ "$1" = "--one" ]; then
     level="$4"
     # shellcheck disable=SC2086 -- FLAGS is a list of flags on purpose.
     out="$(BLITZ_DEBUG=stats "$TINYC" "$level" $FLAGS "$file" -o "$5/a.out" 2>&1 >/dev/null || true)"
-    # A program that does not compile is a hole in the table, kept visible.
-    if ! printf '%s' "$out" | grep -q 'blitz::stats'; then
+    # A program the compiler could not compile is a hole in the table, kept
+    # visible.
+    #
+    # A compiler diagnostic decides it, not the exit status and not the presence
+    # of stats lines. Neither of those alone is right: `stats` prints per
+    # function as each is emitted, so a compile failing on the last function has
+    # already printed rows for the others, and summing those recorded a partial
+    # program as a real one -- the row then moved when the failing function
+    # started compiling, which read as a twelvefold regression when what had
+    # happened was a function appearing for the first time. The exit status is
+    # not right either: the multifile tests and `dce/no_fold_dynamic.c` compile
+    # completely and fail at the *link*, on a symbol another file defines, and
+    # their code size is a real measurement.
+    if printf '%s' "$out" | grep -q "phase '" ||
+        ! printf '%s' "$out" | grep -q 'blitz::stats'; then
         printf '%s\t%s\t-\t-\t-\t-\n' "$name" "${level#-}"
         exit 0
     fi
