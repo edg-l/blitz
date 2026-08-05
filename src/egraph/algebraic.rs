@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 
 use smallvec::smallvec;
 
+use crate::compile::barrier::terminator_edges;
 use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::condcode::CondCode;
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::BlockId;
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
@@ -1174,32 +1175,14 @@ pub fn propagate_block_params(func: &Function, egraph: &mut EGraph) {
     // Step 1: Build predecessor map: block -> vec of (source_block, args).
     let mut pred_map: BTreeMap<BlockId, Vec<(BlockId, Vec<ClassId>)>> = BTreeMap::new();
     for block in &func.blocks {
-        for op in &block.ops {
-            match op {
-                EffectfulOp::Jump { target, args } => {
-                    pred_map
-                        .entry(*target)
-                        .or_default()
-                        .push((block.id, args.expect_classes().to_vec()));
-                }
-                EffectfulOp::Branch {
-                    bb_true,
-                    bb_false,
-                    true_args,
-                    false_args,
-                    ..
-                } => {
-                    pred_map
-                        .entry(*bb_true)
-                        .or_default()
-                        .push((block.id, true_args.expect_classes().to_vec()));
-                    pred_map
-                        .entry(*bb_false)
-                        .or_default()
-                        .push((block.id, false_args.expect_classes().to_vec()));
-                }
-                _ => {}
-            }
+        let Some(term) = block.ops.last() else {
+            continue;
+        };
+        for (target, args) in terminator_edges(term) {
+            pred_map
+                .entry(target)
+                .or_default()
+                .push((block.id, args.expect_classes().to_vec()));
         }
     }
 

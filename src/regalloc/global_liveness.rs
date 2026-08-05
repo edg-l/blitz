@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::compile::cfg::block_id_to_idx;
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::extract::{ClassVRegMap, VReg};
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::BlockId;
 use crate::ir::function::Function;
 use crate::ir::op::ClassId;
 use crate::schedule::scheduler::ScheduledInst;
@@ -157,42 +156,6 @@ pub fn compute_global_liveness_with_block_params(
     }
 
     GlobalLiveness { live_in, live_out }
-}
-
-/// Extract CFG successor block indices from each block's terminator.
-///
-/// Returns `successors[i]` = list of block indices that block `i` can jump to.
-/// Indices are into `func.blocks` (not block IDs).
-pub fn cfg_successors(func: &Function) -> Vec<Vec<usize>> {
-    let id_to_idx = block_id_to_idx(func);
-
-    func.blocks
-        .iter()
-        .map(|block| {
-            let mut succs = Vec::new();
-            if let Some(term) = block.ops.last() {
-                match term {
-                    EffectfulOp::Jump { target, .. } => {
-                        if let Some(&idx) = id_to_idx.get(target) {
-                            succs.push(idx);
-                        }
-                    }
-                    EffectfulOp::Branch {
-                        bb_true, bb_false, ..
-                    } => {
-                        if let Some(&idx) = id_to_idx.get(bb_true) {
-                            succs.push(idx);
-                        }
-                        if let Some(&idx) = id_to_idx.get(bb_false) {
-                            succs.push(idx);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            succs
-        })
-        .collect()
 }
 
 /// Collect the set of VRegs that are block parameters for each block.

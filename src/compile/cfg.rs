@@ -23,6 +23,50 @@ pub(crate) fn block_id_to_idx(func: &Function) -> BTreeMap<BlockId, usize> {
         .collect()
 }
 
+/// The successor `BlockId`s a terminator names, in its own order: a `Jump`'s
+/// target, or a `Branch`'s true target then its false target.
+///
+/// A block with no terminator has no successors.
+pub(crate) fn successor_ids(terminator: Option<&EffectfulOp>) -> Vec<BlockId> {
+    terminator.map_or_else(Vec::new, |term| {
+        super::barrier::terminator_edges(term)
+            .into_iter()
+            .map(|(target, _)| target)
+            .collect()
+    })
+}
+
+/// The successor block indices of each block, in terminator order.
+///
+/// A target that names no block in this function is dropped, which is what every
+/// caller wants: the CFG passes are index-keyed and cannot represent it.
+pub(crate) fn successor_indices(func: &Function) -> Vec<Vec<usize>> {
+    let id_to_idx = block_id_to_idx(func);
+    func.blocks
+        .iter()
+        .map(|block| {
+            successor_ids(block.ops.last())
+                .into_iter()
+                .filter_map(|target| id_to_idx.get(&target).copied())
+                .collect()
+        })
+        .collect()
+}
+
+/// The predecessor block indices of each block, each list in block order.
+///
+/// A block reached twice by one predecessor -- both arms of a `Branch` -- appears
+/// twice, so a list's length is the block's in-edge count.
+pub(crate) fn predecessor_indices(func: &Function) -> Vec<Vec<usize>> {
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); func.blocks.len()];
+    for (src_idx, succs) in successor_indices(func).into_iter().enumerate() {
+        for succ_idx in succs {
+            preds[succ_idx].push(src_idx);
+        }
+    }
+    preds
+}
+
 /// Compute a reverse post-order traversal of the CFG starting from block 0.
 ///
 /// Returns a `Vec<usize>` of block *indices* into `func.blocks` (not block IDs)
@@ -34,39 +78,8 @@ pub(super) fn compute_rpo(func: &Function) -> Vec<usize> {
         return vec![];
     }
 
-    // Build a successor map: block index -> list of successor block indices.
     let n = func.blocks.len();
-
-    let id_to_idx = block_id_to_idx(func);
-
-    let successors: Vec<Vec<usize>> = func
-        .blocks
-        .iter()
-        .map(|block| {
-            let mut succs = Vec::new();
-            if let Some(term) = block.ops.last() {
-                match term {
-                    EffectfulOp::Jump { target, .. } => {
-                        if let Some(&idx) = id_to_idx.get(target) {
-                            succs.push(idx);
-                        }
-                    }
-                    EffectfulOp::Branch {
-                        bb_true, bb_false, ..
-                    } => {
-                        if let Some(&idx) = id_to_idx.get(bb_true) {
-                            succs.push(idx);
-                        }
-                        if let Some(&idx) = id_to_idx.get(bb_false) {
-                            succs.push(idx);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            succs
-        })
-        .collect();
+    let successors = successor_indices(func);
 
     // Iterative DFS post-order, then reverse.
     let mut post_order: Vec<usize> = Vec::with_capacity(n);
@@ -109,33 +122,7 @@ pub(super) fn compute_idom(func: &Function, rpo: &[usize]) -> Vec<Option<usize>>
         return vec![];
     }
 
-    let id_to_idx = block_id_to_idx(func);
-    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (i, block) in func.blocks.iter().enumerate() {
-        if let Some(term) = block.ops.last() {
-            let succs: Vec<usize> = match term {
-                EffectfulOp::Jump { target, .. } => {
-                    id_to_idx.get(target).copied().into_iter().collect()
-                }
-                EffectfulOp::Branch {
-                    bb_true, bb_false, ..
-                } => {
-                    let mut v = Vec::new();
-                    if let Some(&idx) = id_to_idx.get(bb_true) {
-                        v.push(idx);
-                    }
-                    if let Some(&idx) = id_to_idx.get(bb_false) {
-                        v.push(idx);
-                    }
-                    v
-                }
-                _ => vec![],
-            };
-            for s in succs {
-                preds[s].push(i);
-            }
-        }
-    }
+    let preds = predecessor_indices(func);
 
     let mut rpo_idx = vec![0usize; n];
     for (pos, &block) in rpo.iter().enumerate() {
@@ -577,27 +564,13 @@ pub(super) fn compute_loop_depths(
     // Compute per-block loop depth using back-edge counting.
     let mut block_depth: Vec<u32> = vec![0u32; n];
 
-    let id_to_idx = block_id_to_idx(func);
-
-    // For each block, check its terminator for back-edges.
-    for (src_idx, block) in func.blocks.iter().enumerate() {
-        if let Some(terminator) = block.ops.last() {
-            let targets: Vec<BlockId> = match terminator {
-                EffectfulOp::Jump { target, .. } => vec![*target],
-                EffectfulOp::Branch {
-                    bb_true, bb_false, ..
-                } => vec![*bb_true, *bb_false],
-                _ => vec![],
-            };
-            for target in targets {
-                // Find target block index.
-                if let Some(&target_idx) = id_to_idx.get(&target)
-                    && target_idx <= src_idx
-                {
-                    // Back-edge: all blocks from target_idx to src_idx are in the loop.
-                    for d in block_depth[target_idx..=src_idx].iter_mut() {
-                        *d += 1;
-                    }
+    // A target at or before its source is a back edge, and every block between
+    // the two is in the loop.
+    for (src_idx, succs) in successor_indices(func).into_iter().enumerate() {
+        for target_idx in succs {
+            if target_idx <= src_idx {
+                for d in block_depth[target_idx..=src_idx].iter_mut() {
+                    *d += 1;
                 }
             }
         }

@@ -8,7 +8,7 @@ use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op};
 use crate::ir::types::Type;
 
-use super::cfg::{block_id_to_idx, compute_idom, compute_rpo, dominates};
+use super::cfg::{compute_idom, compute_rpo, dominates, predecessor_indices, successor_indices};
 
 /// Extra roots to add to specific blocks during linearization.
 /// Maps block_index -> Vec<ClassId> of invariant classes to emit there.
@@ -20,47 +20,6 @@ pub(super) struct LoopInfo {
     pub body: BTreeSet<usize>,
 }
 
-/// Build a predecessor map and a BlockId -> block index map for the function.
-///
-/// Returns `(preds, id_to_idx)` where `preds[i]` is the list of predecessor
-/// block indices for block `i`, and `id_to_idx` maps `BlockId` to block index.
-pub(super) fn build_predecessor_map(
-    func: &Function,
-) -> (Vec<Vec<usize>>, BTreeMap<BlockId, usize>) {
-    let n = func.blocks.len();
-    let id_to_idx = block_id_to_idx(func);
-
-    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
-
-    for (src_idx, block) in func.blocks.iter().enumerate() {
-        if let Some(term) = block.ops.last() {
-            let succs: Vec<usize> = match term {
-                EffectfulOp::Jump { target, .. } => {
-                    id_to_idx.get(target).copied().into_iter().collect()
-                }
-                EffectfulOp::Branch {
-                    bb_true, bb_false, ..
-                } => {
-                    let mut v = Vec::new();
-                    if let Some(&idx) = id_to_idx.get(bb_true) {
-                        v.push(idx);
-                    }
-                    if let Some(&idx) = id_to_idx.get(bb_false) {
-                        v.push(idx);
-                    }
-                    v
-                }
-                _ => vec![],
-            };
-            for succ in succs {
-                preds[succ].push(src_idx);
-            }
-        }
-    }
-
-    (preds, id_to_idx)
-}
-
 /// Detect back edges in the CFG using the dominator tree.
 ///
 /// A back edge is an edge `(src, tgt)` where `tgt` dominates `src`.
@@ -70,36 +29,14 @@ pub(super) fn detect_back_edges(
     rpo: &[usize],
     idom: &[Option<usize>],
 ) -> Vec<(usize, usize)> {
-    let id_to_idx = block_id_to_idx(func);
-
     let mut back_edges = Vec::new();
 
-    for (src_idx, block) in func.blocks.iter().enumerate() {
-        if let Some(term) = block.ops.last() {
-            let targets: Vec<usize> = match term {
-                EffectfulOp::Jump { target, .. } => {
-                    id_to_idx.get(target).copied().into_iter().collect()
-                }
-                EffectfulOp::Branch {
-                    bb_true, bb_false, ..
-                } => {
-                    let mut v = Vec::new();
-                    if let Some(&idx) = id_to_idx.get(bb_true) {
-                        v.push(idx);
-                    }
-                    if let Some(&idx) = id_to_idx.get(bb_false) {
-                        v.push(idx);
-                    }
-                    v
-                }
-                _ => vec![],
-            };
-            for tgt_idx in targets {
-                // A back edge exists when the target dominates (or is) the source.
-                // Self-loops where src == tgt are included via dominates(a, a) == true.
-                if dominates(tgt_idx, src_idx, idom) {
-                    back_edges.push((src_idx, tgt_idx));
-                }
+    for (src_idx, succs) in successor_indices(func).into_iter().enumerate() {
+        for tgt_idx in succs {
+            // A back edge exists when the target dominates (or is) the source.
+            // Self-loops where src == tgt are included via dominates(a, a) == true.
+            if dominates(tgt_idx, src_idx, idom) {
+                back_edges.push((src_idx, tgt_idx));
             }
         }
     }
@@ -150,7 +87,7 @@ pub(super) fn detect_loops(func: &Function) -> Vec<LoopInfo> {
 
     let rpo = compute_rpo(func);
     let idom = compute_idom(func, &rpo);
-    let (preds, _) = build_predecessor_map(func);
+    let preds = predecessor_indices(func);
     let back_edges = detect_back_edges(func, &rpo, &idom);
 
     if back_edges.is_empty() {
@@ -235,7 +172,6 @@ pub(super) fn insert_preheader(
     func: &mut Function,
     egraph: &mut EGraph,
     loop_info: &LoopInfo,
-    _id_to_idx: &BTreeMap<BlockId, usize>,
 ) -> usize {
     let header_idx = loop_info.header_idx;
 
@@ -274,7 +210,7 @@ pub(super) fn insert_preheader(
     // Determine which predecessors of the header are NOT back-edge sources
     // (i.e. they lie outside the loop body).
     let non_back_edge_preds: Vec<usize> = {
-        let (preds, _) = build_predecessor_map(func);
+        let preds = predecessor_indices(func);
         preds[header_idx]
             .iter()
             .copied()
@@ -498,10 +434,7 @@ pub fn run_licm(func: &mut Function, egraph: &mut EGraph) -> ExtraRoots {
     let mut total_hoisted = 0usize;
 
     for loop_info in &loops {
-        // Rebuild id_to_idx each iteration because insert_preheader may append blocks.
-        let (_, id_to_idx) = build_predecessor_map(func);
-
-        let preheader_idx = insert_preheader(func, egraph, loop_info, &id_to_idx);
+        let preheader_idx = insert_preheader(func, egraph, loop_info);
 
         // Entry block as header: preheader was not inserted, skip hoisting.
         if preheader_idx == loop_info.header_idx {
@@ -662,7 +595,8 @@ mod tests {
     #[test]
     fn test_predecessor_map_simple_while() {
         let f = build_simple_while();
-        let (preds, id_to_idx) = build_predecessor_map(&f);
+        let preds = predecessor_indices(&f);
+        let id_to_idx = crate::compile::cfg::block_id_to_idx(&f);
 
         // Indices: bb0=0, bb1=1, bb2=2, bb3=3
         assert_eq!(id_to_idx[&0], 0);
@@ -750,7 +684,7 @@ mod tests {
     #[test]
     fn test_collect_loop_body_simple_while() {
         let f = build_simple_while();
-        let (preds, _) = build_predecessor_map(&f);
+        let preds = predecessor_indices(&f);
         // Back edge: bb2 (idx 2) -> bb1 (idx 1)
         let body = collect_loop_body(1, 2, &preds);
         // Body must contain header (1) and back-edge source (2)
@@ -768,7 +702,7 @@ mod tests {
         bb0.ops.push(jump(0));
         f.blocks.push(bb0);
 
-        let (preds, _) = build_predecessor_map(&f);
+        let preds = predecessor_indices(&f);
         let body = collect_loop_body(0, 0, &preds);
         assert_eq!(body, BTreeSet::from([0]));
     }
@@ -852,8 +786,6 @@ mod tests {
 
     // ── insert_preheader ──────────────────────────────────────────────────────
 
-    use super::block_id_to_idx as id_to_idx;
-
     /// Preheader is inserted between bb0 and the loop header bb1.
     /// After insertion, bb0 should jump to the preheader, bb2 (back-edge) still
     /// jumps to bb1, and the preheader jumps to bb1.
@@ -868,8 +800,7 @@ mod tests {
         assert_eq!(loops.len(), 1);
         let loop_info = &loops[0];
 
-        let map = id_to_idx(&f);
-        let preheader_idx = insert_preheader(&mut f, &mut egraph, loop_info, &map);
+        let preheader_idx = insert_preheader(&mut f, &mut egraph, loop_info);
 
         // A new block should have been appended.
         assert_eq!(preheader_idx, 4, "preheader is the 5th block (index 4)");
@@ -940,8 +871,7 @@ mod tests {
         let mut egraph = crate::egraph::EGraph::new();
         let loops = detect_loops(&f);
         assert_eq!(loops.len(), 1);
-        let map = id_to_idx(&f);
-        let preheader_idx = insert_preheader(&mut f, &mut egraph, &loops[0], &map);
+        let preheader_idx = insert_preheader(&mut f, &mut egraph, &loops[0]);
 
         let header_params = f.blocks[loops[0].header_idx].param_types.clone();
         let preheader_params = f.blocks[preheader_idx].param_types.clone();
@@ -968,8 +898,7 @@ mod tests {
         assert_eq!(loops.len(), 1);
         assert_eq!(loops[0].header_idx, 0);
 
-        let map = id_to_idx(&f);
-        let result_idx = insert_preheader(&mut f, &mut egraph, &loops[0], &map);
+        let result_idx = insert_preheader(&mut f, &mut egraph, &loops[0]);
 
         // No preheader should be inserted; function unchanged.
         assert_eq!(
@@ -989,10 +918,9 @@ mod tests {
         let mut egraph = crate::egraph::EGraph::new();
 
         let loops = detect_loops(&f);
-        let map = id_to_idx(&f);
-        let preheader_idx = insert_preheader(&mut f, &mut egraph, &loops[0], &map);
+        let preheader_idx = insert_preheader(&mut f, &mut egraph, &loops[0]);
 
-        let (preds, _) = build_predecessor_map(&f);
+        let preds = predecessor_indices(&f);
         let header_idx = loops[0].header_idx; // 1
 
         // Header's predecessors: back-edge source (bb2) and preheader.

@@ -59,6 +59,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::barrier::terminator_edges;
 use super::cfg::{block_id_to_idx, compute_idom, compute_rpo, dominates};
 use crate::egraph::EGraph;
 use crate::ir::effectful::{BlockId, EffectfulOp};
@@ -90,7 +91,7 @@ pub fn simplify_block_params(func: &mut Function, egraph: &mut EGraph) -> usize 
         };
         for (target, args) in terminator_edges(term) {
             *pred_count.entry(target).or_insert(0) += 1;
-            for (i, &arg) in args.iter().enumerate() {
+            for (i, &arg) in args.expect_classes().iter().enumerate() {
                 incoming
                     .entry((target, i as u32))
                     .or_default()
@@ -217,24 +218,6 @@ pub fn simplify_block_params(func: &mut Function, egraph: &mut EGraph) -> usize 
 
     egraph.rewrite_block_params(&keep);
     trivial.len()
-}
-
-/// `(target, args)` for each edge a terminator has.
-fn terminator_edges(term: &EffectfulOp) -> Vec<(BlockId, &[ClassId])> {
-    match term {
-        EffectfulOp::Jump { target, args } => vec![(*target, args.expect_classes())],
-        EffectfulOp::Branch {
-            bb_true,
-            bb_false,
-            true_args,
-            false_args,
-            ..
-        } => vec![
-            (*bb_true, true_args.expect_classes()),
-            (*bb_false, false_args.expect_classes()),
-        ],
-        _ => Vec::new(),
-    }
 }
 
 /// Drop the arguments feeding removed positions, per edge.

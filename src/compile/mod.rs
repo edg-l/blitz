@@ -452,7 +452,7 @@ pub fn compile(
     // distinguish loop headers / merge points (multi-pred, need phi storage)
     // from pass-through blocks (single-pred, the block param IS its sole
     // predecessor's argument and doesn't need a fresh VReg).
-    let (block_preds, _) = licm::build_predecessor_map(&func);
+    let block_preds = cfg::predecessor_indices(&func);
 
     // Map (BlockId, param_idx) -> fresh VReg for block params whose canonical
     // VReg was emitted by a prior block. This prevents the e-graph from merging
@@ -993,7 +993,7 @@ pub fn compile(
 
         // Step 1: Compute CFG successors. Terminator uses come from the
         // `Op::TerminatorArgs` operands once those exist, below.
-        let cfg_succs = crate::regalloc::global_liveness::cfg_successors(func);
+        let cfg_succs = cfg::successor_indices(func);
 
         // ORDER: before `populate_effectful_operands`, which appends the trailing
         // liveness operands and dedupes them. `add_call_precolors_for_block` reads
@@ -1545,7 +1545,7 @@ pub fn compile(
     // erases, and liveness recomputed from the schedules as emitted -- asking the
     // allocator's own interference graph would be circular.
     if crate::verify::is_enabled() && func.blocks.len() > 1 {
-        let succs = crate::regalloc::global_liveness::cfg_successors(func);
+        let succs = cfg::successor_indices(func);
         let errors = crate::verify::verify_register_sharing(
             &block_rewritten,
             &verify_phi_uses,

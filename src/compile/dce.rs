@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::cfg::block_id_to_idx;
+use super::cfg::{block_id_to_idx, successor_ids};
 use crate::egraph::egraph::EGraph;
 use crate::egraph::extract::ExtractionResult;
 use crate::ir::effectful::{BlockId, EffectfulOp};
@@ -31,8 +31,7 @@ pub(super) fn eliminate_unreachable_blocks(func: &mut Function) -> usize {
 
     while let Some(idx) = worklist.pop_front() {
         let block = &func.blocks[idx];
-        let successors = block_successors(block.ops.last());
-        for target_id in successors {
+        for target_id in successor_ids(block.ops.last()) {
             if reachable.insert(target_id) {
                 let target_idx = *id_to_idx
                     .get(&target_id)
@@ -63,17 +62,6 @@ pub(super) fn eliminate_unreachable_blocks(func: &mut Function) -> usize {
 
     func.blocks.retain(|b| reachable.contains(&b.id));
     before - func.blocks.len()
-}
-
-/// Extract successor BlockIds from a terminator op.
-fn block_successors(terminator: Option<&EffectfulOp>) -> Vec<BlockId> {
-    match terminator {
-        Some(EffectfulOp::Jump { target, .. }) => vec![*target],
-        Some(EffectfulOp::Branch {
-            bb_true, bb_false, ..
-        }) => vec![*bb_true, *bb_false],
-        _ => vec![],
-    }
 }
 
 /// Fold branches with known-constant conditions into unconditional jumps.
