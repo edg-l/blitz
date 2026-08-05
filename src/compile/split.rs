@@ -1225,7 +1225,12 @@ fn detect_blockparam_slot_routing(
             // would allocate a second slot, and only the newer entry survives in
             // `slot_spilled_params` -- so predecessors would store to one slot
             // while the earlier round's reloads read the other.
-            if already_slot_spilled.contains_key(&(block.id, pidx)) {
+            //
+            // Still claimed, because a value in a slot holds no register: the
+            // pressure paths below would otherwise pick it as a victim and store
+            // a register it gave up rounds ago.
+            if let Some(info) = already_slot_spilled.get(&(block.id, pidx)) {
+                planned_victims.insert(info.vreg);
                 continue;
             }
             let Some((vreg, class_id)) = find_block_param_vreg(
@@ -1256,6 +1261,27 @@ fn detect_blockparam_slot_routing(
         }
     }
 
+    // Every use of a routed VReg becomes a reload, and what fills the slot is a
+    // store on the edges into the parameter's own block. So a use has to sit
+    // where those stores have run: in a block one of the parameter's blocks
+    // dominates, or -- for a parameter naming a value defined elsewhere -- in
+    // that defining block, which keeps the value in a register and is where the
+    // store is placed. A use anywhere else reloads a slot nothing wrote, which
+    // the machine verifier reports as a read of an unwritten frame cell.
+    let rpo = super::cfg::compute_rpo(func);
+    let idom = super::cfg::compute_idom(func, &rpo);
+    let stores_reach_every_use = |vreg: VReg, group: &ParamGroup| {
+        let def_block = value_defs.get(&vreg).copied();
+        block_schedules.iter().enumerate().all(|(use_bi, sched)| {
+            def_block == Some(use_bi)
+                || !sched.iter().any(|i| i.operands.contains(&vreg))
+                || group
+                    .positions
+                    .iter()
+                    .any(|&(_, _, param_bi)| super::cfg::dominates(param_bi, use_bi, &idom))
+        })
+    };
+
     // Which VRegs must leave the register file.
     let mut route: BTreeSet<VReg> = BTreeSet::new();
 
@@ -1268,6 +1294,7 @@ fn detect_blockparam_slot_routing(
                 call_bi < global_liveness.live_in.len()
                     && global_liveness.live_in[call_bi].contains(&vreg)
             })
+            && stores_reach_every_use(vreg, group)
         {
             route.insert(vreg);
         }
@@ -1312,7 +1339,11 @@ fn detect_blockparam_slot_routing(
         let mut by_cost: Vec<VReg> = params.iter().copied().collect();
         by_cost.sort_by_key(|&vreg| (use_counts.get(&vreg).copied().unwrap_or(0), vreg.0));
         for (class, budget) in [(RegClass::GPR, gpr_budget), (RegClass::XMM, xmm_budget)] {
-            let of_class = |v: &VReg| groups.get(v).is_some_and(|g| g.reg_class == class);
+            let of_class = |v: &VReg| {
+                groups
+                    .get(v)
+                    .is_some_and(|g| g.reg_class == class && stores_reach_every_use(*v, g))
+            };
             let others = shadow_others
                 .iter()
                 .filter(|v| vreg_classes.get(v).copied() == Some(class))
@@ -1327,6 +1358,83 @@ fn detect_blockparam_slot_routing(
                     break;
                 }
                 if route.insert(*vreg) {
+                    holding -= 1;
+                }
+            }
+        }
+    }
+
+    // The same count from the other end of the edge: arguments in excess of what
+    // their class can hold at the terminator.
+    //
+    // `Op::TerminatorArgs` carries an edge's arguments as one instruction because
+    // the phi copies it lowers to are a parallel copy, so every argument is live
+    // at that one point and they interfere exactly as a block's parameters do.
+    // An edge passing 17 GPR arguments against 14 registers is therefore
+    // uncolourable for the same reason a block with 17 GPR parameters is, and it
+    // is the shape the generated loops actually produce -- the destination
+    // parameters are spread over blocks that are each within budget, so the rule
+    // above never sees them.
+    //
+    // Nothing else can relieve it: the pressure loop below spills values live
+    // *across* the point, and these are live there because the instruction reads
+    // them, so a reload lands immediately in front of it and is live there too.
+    // That is what the function-scope allocator's spill loop reports when it
+    // stops -- the overshoot grows with each round.
+    for block_idx in 0..n_blocks.min(func.blocks.len()) {
+        let Some(terminator) = func.blocks[block_idx].ops.last() else {
+            continue;
+        };
+        let dests = super::barrier::terminator_arg_destinations(terminator);
+        let args = super::barrier::terminator_arg_operands(&block_schedules[block_idx]);
+        for (class, budget) in [(RegClass::GPR, gpr_budget), (RegClass::XMM, xmm_budget)] {
+            // Distinct VRegs, since one value passed to two parameters occupies
+            // one register and routing it relieves both positions.
+            let live: BTreeSet<VReg> = args
+                .iter()
+                .map(|&(_, v)| v)
+                .filter(|v| vreg_classes.get(v).copied() == Some(class))
+                .collect();
+            if live.len() <= budget as usize {
+                continue;
+            }
+            // Only an argument whose destination parameter this pass can name is
+            // routable; the rest have to keep their registers. And only one the
+            // store can read: the store goes in this block, so the value has to
+            // be defined here or on every path into here. An operand naming a
+            // value that reaches the terminator on some paths only would be
+            // stored from a register nothing wrote.
+            let defined_here = |v: &VReg| {
+                value_defs.get(v) == Some(&block_idx)
+                    || global_liveness
+                        .live_in
+                        .get(block_idx)
+                        .is_some_and(|live| live.contains(v))
+            };
+            let mut by_cost: Vec<VReg> = args
+                .iter()
+                .filter(|(ai, v)| {
+                    live.contains(v)
+                        && !route.contains(v)
+                        && defined_here(v)
+                        && dests.get(*ai as usize).is_some_and(|&(bid, pidx)| {
+                            groups.get(v).is_some_and(|g| {
+                                g.reg_class == class
+                                    && g.positions.iter().any(|&(b, p, _)| b == bid && p == pidx)
+                                    && stores_reach_every_use(*v, g)
+                            })
+                        })
+                })
+                .map(|&(_, v)| v)
+                .collect();
+            by_cost.sort_by_key(|&vreg| (use_counts.get(&vreg).copied().unwrap_or(0), vreg.0));
+            by_cost.dedup();
+            let mut holding = live.len();
+            for vreg in by_cost {
+                if holding <= budget as usize {
+                    break;
+                }
+                if route.insert(vreg) {
                     holding -= 1;
                 }
             }
@@ -2348,6 +2456,11 @@ mod tests {
     // When a block param is slot-spilled, ALL predecessors should see a
     // slot_spilled_params entry for the param. The entry has a single slot
     // number; both predecessors will emit stores to the same slot.
+    //
+    // The call is in the parameter's own block, which is where a parameter can
+    // be live across one: a use in a predecessor would be a use before any
+    // predecessor's store has run, and routing then reloads a slot nothing
+    // wrote.
     #[test]
     fn blockparam_split_two_predecessors_both_store() {
         use crate::egraph::enode::ENode;
@@ -2389,13 +2502,13 @@ mod tests {
         let mut class_to_vreg = ClassVRegMap::new();
         class_to_vreg.insert_full_range(param_cid, param_vreg);
 
-        // Block0: empty, block1: has a call using param_vreg, block2: empty.
+        // Block0 and block1: empty, block2: has a call using param_vreg.
         let call_inst = call_result_inst(1, vec![0]);
-        let block_schedules = vec![vec![], vec![call_inst], vec![]];
+        let block_schedules = vec![vec![], vec![], vec![call_inst]];
 
-        // param_vreg is live_in to block1 (which has the call).
+        // param_vreg is live_in to block2 (which has the call).
         let mut global_liveness = make_global_liveness(3);
-        global_liveness.live_in[1].insert(param_vreg);
+        global_liveness.live_in[2].insert(param_vreg);
 
         let mut slots = SlotAllocator::new();
         let mut next_vreg = 2u32;
