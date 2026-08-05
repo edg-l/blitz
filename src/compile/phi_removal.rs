@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ExtractionResult, VReg};
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 
@@ -315,6 +315,7 @@ pub(super) fn apply(func: &mut Function, egraph: &mut EGraph, removal: &Removal)
                     addr.uncommit();
                     val.uncommit();
                 }
+                EffectfulOp::Call { args, .. } => args.iter_mut().for_each(EffOperand::uncommit),
                 _ => {}
             }
         }

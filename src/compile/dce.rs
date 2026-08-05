@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use super::cfg::{block_id_to_idx, successor_ids};
 use crate::egraph::egraph::EGraph;
 use crate::egraph::extract::ExtractionResult;
-use crate::ir::effectful::{BlockId, EffectfulOp};
+use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 
@@ -180,7 +180,7 @@ fn collect_consumed_class_ids(
                 }
                 EffectfulOp::Call { args, .. } => {
                     // args are inputs; results are outputs (not seeded)
-                    seeds.extend(args.iter().copied());
+                    seeds.extend(args.iter().map(EffOperand::class));
                 }
                 EffectfulOp::Branch {
                     cond,

@@ -205,7 +205,7 @@ fn fmt_effectful(
         } => {
             let arg_strs: Vec<String> = args
                 .iter()
-                .map(|a| resolve_cid(*a, class_to_vreg, egraph_uf))
+                .map(|a| resolve_cid(a.class(), class_to_vreg, egraph_uf))
                 .collect();
             let result_strs: Vec<String> = results
                 .iter()

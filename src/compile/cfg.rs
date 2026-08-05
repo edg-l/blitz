@@ -441,8 +441,8 @@ pub(super) fn commit_terminator_arg_vregs(
     Ok(())
 }
 
-/// Commit linearization's choice of VReg for every `Load` and `Store` operand
-/// into the CFG.
+/// Commit linearization's choice of VReg for every `Load`, `Store` and `Call`
+/// operand into the CFG.
 ///
 /// The sibling of [`commit_terminator_arg_vregs`] for the operands an effectful
 /// op reads, and the same move for the same reason: the address a `Load` reads
@@ -470,11 +470,19 @@ pub(super) fn commit_effectful_operand_vregs(
         let point = ProgramPoint::block_exit(block_idx);
         let non_term_count = block.non_term_count();
         for (op_idx, op) in block.ops[..non_term_count].iter_mut().enumerate() {
-            let roles: Vec<(&str, &mut EffOperand)> = match op {
-                EffectfulOp::Load { addr, .. } => vec![("Load address", addr)],
+            let roles: Vec<(String, &mut EffOperand)> = match op {
+                EffectfulOp::Load { addr, .. } => vec![("Load address".to_string(), addr)],
                 EffectfulOp::Store { addr, val, .. } => {
-                    vec![("Store address", addr), ("Store value", val)]
+                    vec![
+                        ("Store address".to_string(), addr),
+                        ("Store value".to_string(), val),
+                    ]
                 }
+                EffectfulOp::Call { args, .. } => args
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(i, arg)| (format!("Call argument {i}"), arg))
+                    .collect(),
                 _ => continue,
             };
             for (what, operand) in roles {

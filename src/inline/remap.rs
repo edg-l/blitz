@@ -167,7 +167,10 @@ impl RemapContext {
                 results,
             } => EffectfulOp::Call {
                 func: func.clone(),
-                args: args.iter().map(|&a| self.remap_class_id(a)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| EffOperand::Class(self.remap_class_id(a.class())))
+                    .collect(),
                 arg_tys: arg_tys.clone(),
                 ret_tys: ret_tys.clone(),
                 results: results.iter().map(|&r| self.remap_class_id(r)).collect(),

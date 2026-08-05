@@ -10,7 +10,7 @@ dot_product.c	O0	121	556	5	6
 dot_product.c	O1	115	532	5	6
 fib_memo.c	O0	157	576	1	1
 fib_memo.c	O1	187	704	3	33
-hash_table.c	O0	224	828	8	37
+hash_table.c	O0	223	825	8	37
 hash_table.c	O1	377	1571	29	119
 loop_nest.c	O0	160	564	0	0
 loop_nest.c	O1	172	589	2	21

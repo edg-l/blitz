@@ -553,7 +553,7 @@ impl FunctionBuilder {
         let block = self.current_block_mut();
         block.ops.push(EffectfulOp::Call {
             func: func.to_string(),
-            args: args.iter().map(|v| v.0).collect(),
+            args: args.iter().map(|v| EffOperand::Class(v.0)).collect(),
             arg_tys,
             ret_tys: ret_tys.to_vec(),
             results: result_class_ids,

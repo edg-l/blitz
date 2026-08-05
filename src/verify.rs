@@ -266,7 +266,7 @@ impl Verifier<'_> {
                     ));
                 }
                 for (i, arg) in args.iter().enumerate() {
-                    self.check_class(*arg, &format!("{at}: Call '{func}' arg {i}"));
+                    self.check_class(arg.class(), &format!("{at}: Call '{func}' arg {i}"));
                 }
                 for (i, res) in results.iter().enumerate() {
                     self.check_class(*res, &format!("{at}: Call '{func}' result {i}"));
@@ -368,7 +368,7 @@ mod tests {
     use super::*;
     use crate::egraph::enode::ENode;
     use crate::ir::builder::FunctionBuilder;
-    use crate::ir::effectful::EffectfulOp;
+    use crate::ir::effectful::{EffOperand, EffectfulOp};
     use crate::ir::function::BasicBlock;
     use crate::ir::op::Op;
 
@@ -622,7 +622,7 @@ mod tests {
         let (mut func, egraph) = simple_function();
         let call = EffectfulOp::Call {
             func: "g".to_string(),
-            args: vec![ClassId(0), ClassId(0)],
+            args: vec![EffOperand::Class(ClassId(0)), EffOperand::Class(ClassId(0))],
             arg_tys: vec![Type::I64],
             ret_tys: vec![],
             results: vec![],
@@ -729,7 +729,7 @@ pub fn verify_cfg_schedule_agreement(
                     ]
                 }
                 EffectfulOp::Call { args, .. } => {
-                    args.iter().map(|&cid| ("Call argument", cid)).collect()
+                    args.iter().map(|a| ("Call argument", a.class())).collect()
                 }
                 _ => continue,
             };

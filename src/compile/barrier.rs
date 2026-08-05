@@ -118,8 +118,8 @@ pub(super) fn build_barrier_maps(
                 for &result_cid in results {
                     mark(&mut vreg_to_result, result_cid, barrier_k);
                 }
-                for &arg_cid in args {
-                    mark(&mut vreg_to_arg, arg_cid, barrier_k);
+                for arg in args {
+                    mark(&mut vreg_to_arg, arg.class(), barrier_k);
                 }
             }
             _ => {}
@@ -540,29 +540,6 @@ pub(super) fn populate_effectful_operands(
             append_addr_children(roles)
         };
 
-        // Resolve the role ClassIds to VRegs, in order, then append the Addr
-        // children they need kept alive.
-        let resolve_vregs = |cids: &[ClassId], point: ProgramPoint| -> Vec<VReg> {
-            let mut roles = Vec::with_capacity(cids.len());
-            for &cid in cids {
-                let canon = egraph.unionfind.find_immutable(cid);
-                let Some(vreg) = class_to_vreg.lookup(canon, point) else {
-                    // Dropping a role shifts every later one down an index, and
-                    // Phase 7 reads roles by index -- a Store would take its
-                    // value as its address. Every class reaching here has a VReg
-                    // at the barrier point in practice; if that ever stops being
-                    // true, this has to pad rather than skip.
-                    debug_assert!(
-                        false,
-                        "barrier role for class {canon:?} has no VReg at {point:?};                          skipping it would shift the remaining roles"
-                    );
-                    continue;
-                };
-                roles.push(vreg);
-            }
-            append_addr_children(roles)
-        };
-
         // Append role-first operands to an existing barrier result instruction,
         // keeping the role prefix contiguous at the front.
         let append_operands = |inst: &mut ScheduledInst, vregs: Vec<VReg>| {
@@ -591,7 +568,7 @@ pub(super) fn populate_effectful_operands(
                 }
             }
             EffectfulOp::Call { args, results, .. } => {
-                let vregs = resolve_vregs(args, barrier_pt);
+                let vregs = committed_roles(&args.iter().collect::<Vec<_>>());
                 if let Some(first_result) = results.first() {
                     // Non-void call: attach to existing CallResult.
                     if vregs.is_empty() {

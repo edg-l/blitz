@@ -223,7 +223,7 @@ pub enum EffectfulOp {
     /// represent the return values in the pure-op world (one per ret_ty).
     Call {
         func: Symbol,
-        args: Vec<ClassId>,
+        args: Vec<EffOperand>,
         arg_tys: Vec<Type>,
         ret_tys: Vec<Type>,
         results: Vec<ClassId>,
@@ -264,7 +264,7 @@ impl EffectfulOp {
                 f(val.class());
             }
             EffectfulOp::Call { args, results, .. } => {
-                args.iter().copied().for_each(&mut f);
+                args.iter().map(EffOperand::class).for_each(&mut f);
                 results.iter().copied().for_each(&mut f);
             }
             EffectfulOp::Branch {
@@ -301,7 +301,7 @@ impl EffectfulOp {
                 f(val.class_mut());
             }
             EffectfulOp::Call { args, results, .. } => {
-                args.iter_mut().for_each(&mut f);
+                args.iter_mut().map(EffOperand::class_mut).for_each(&mut f);
                 results.iter_mut().for_each(&mut f);
             }
             EffectfulOp::Branch {

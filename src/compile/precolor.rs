@@ -131,9 +131,15 @@ pub(super) fn add_call_precolors_for_block(
         } = op
         {
             let locs = assign_args(arg_tys);
-            for (&cid, loc) in args.iter().zip(locs.iter()) {
-                let canon = egraph.unionfind.find_immutable(cid);
-                if let Some(vreg) = class_to_vreg.lookup(canon, point) {
+            for (arg, loc) in args.iter().zip(locs.iter()) {
+                // The VReg the CFG states. This pass and
+                // `populate_effectful_operands` used to derive that answer
+                // separately, from the function-wide map at the block's entry
+                // and from the block's own snapshot at the barrier -- and a
+                // per-block question answered through the function-wide map is
+                // the shape most wrong-code bugs here have had. One derivation
+                // now, made by linearization and committed into the CFG.
+                if let Some(vreg) = arg.vreg() {
                     match loc {
                         ArgLoc::Reg(reg) => {
                             if call_count == 1

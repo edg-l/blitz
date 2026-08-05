@@ -22,7 +22,7 @@ fn collect_referenced_ids(ops: &[EffectfulOp]) -> BTreeSet<ClassId> {
                 ids.insert(val.class());
             }
             EffectfulOp::Call { args, .. } => {
-                ids.extend(args);
+                ids.extend(args.iter().map(EffOperand::class));
             }
             EffectfulOp::Branch {
                 cond,
@@ -84,7 +84,8 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
 
     // Build remap context BEFORE appending callee stack slots, so that
     // slot_offset = caller's original slot count (where callee slots will start).
-    let mut remap = RemapContext::new(caller, callee, &call_args);
+    let call_arg_classes: Vec<ClassId> = call_args.iter().map(EffOperand::class).collect();
+    let mut remap = RemapContext::new(caller, callee, &call_arg_classes);
 
     // Append callee stack slots to caller.
     caller.stack_slots.extend_from_slice(&callee.stack_slots);
@@ -120,7 +121,7 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
         avail.extend(caller.param_class_ids.iter().copied());
         avail.extend(collect_referenced_ids(&ops_before));
         avail.extend(collect_produced_ids(&ops_before));
-        avail.extend(call_args.iter().copied());
+        avail.extend(call_args.iter().map(EffOperand::class));
         avail.extend(call_results.iter().copied());
         avail
     };
@@ -251,7 +252,10 @@ fn substitute_class_ids(op: &EffectfulOp, subst: &[(ClassId, ClassId)]) -> Effec
             results,
         } => EffectfulOp::Call {
             func: func.clone(),
-            args: args.iter().map(|&a| sub(a)).collect(),
+            args: args
+                .iter()
+                .map(|a| EffOperand::Class(sub(a.class())))
+                .collect(),
             arg_tys: arg_tys.clone(),
             ret_tys: ret_tys.clone(),
             results: results.clone(), // Don't substitute result ClassIds

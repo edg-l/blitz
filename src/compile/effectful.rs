@@ -391,7 +391,8 @@ pub(super) fn lower_effectful_op(
             // values at the call point live in SpillLoad vregs, which have
             // distinct registers. Find those registers by tracing spill slots.
             let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len());
-            for (i, &cid) in args.iter().enumerate() {
+            for (i, arg) in args.iter().enumerate() {
+                let cid = arg.class();
                 let r = role_reg(i)
                     .or_else(|| get_reg(cid))
                     .ok_or_else(|| CompileError {
