@@ -549,17 +549,21 @@ obvious list:
   `printf` did. So `Ret` wants the same both-fields shape `TermArg` has, or the
   constant has to be decided at commit time and carried.
 
-Step 3 is what makes `verify_cfg_schedule_agreement` vacuous so it can go, and with
-it both of the post-splitter disagreement shapes recorded under prereq A.
+Step 3 was expected to make `verify_cfg_schedule_agreement` vacuous so it could
+go. **It does not, and the prediction was wrong about which change retires it.**
+The check compares the class map's answer against the barrier's operand; slices
+1-3 make the two agree *at construction* by seeding the barrier from the CFG, but
+after the splitter the barrier's operand is rewritten while the map is patched
+separately, and that difference still matters because `lower_effectful_op` falls
+back to the map wherever a role operand has no register. The check guards that
+fallback. It goes when the fallback does, which is step 4 deleting the map.
 
 **Do it in this order, one commit each, gates between.** The fields are
 independent, and the cheap ones first buy the shape before the hard one needs it:
 
 1. `Load.addr`, `Store.addr`, `Store.val` -- one carrier each. **DONE.**
-2. `Call.args` -- a list, the same shape as `TermArgs::Committed`.
-3. `Load.result`, `Call.results` -- *defs*, not uses. The barrier instruction's
-   own `dst` is the VReg, so these commit from the schedule rather than from the
-   class map, and they are what makes the agreement check vacuous.
+2. `Call.args` -- a list of the same carrier. **DONE.**
+3. `Load.result`, `Call.results` -- *defs*, not uses. **DONE.**
 4. `Branch.cond` -- one field, but it reaches every constructor of `Branch`: the
    inliner's remapper and transform, DCE's constant fold, LICM, the verifier and
    the builder. Cheap to describe, wide to land; do it once the carrier type has
@@ -591,6 +595,33 @@ Judged as predicted: **768 identity comparisons byte-identical** (708 lit, 60
 generated at both levels), 0 differing and 0 differing in status;
 `run_codesize.sh --check` 888 rows unchanged. 934 unit, 474 lit at `BLITZ_VERIFY`
 off/1/strict, 298 differential + `cc`.
+
+**Slices 2 and 3, as they landed.** `Call.args`, `Load.result` and
+`Call.results` take the same carrier, and the commit function is
+`cfg::commit_effectful_vregs` -- results included, because the VReg a `Load`
+writes is the `dst` of the barrier instruction linearization emitted for it, so
+committing it lets a consumer find that instruction without asking the map which
+VReg carries the result.
+
+What that deleted is the point: `populate_effectful_operands` no longer takes the
+e-graph, the class map or a block index, and `add_call_precolors_for_block` no
+longer takes any of the three either. Neither pass resolves a class any more.
+
+**Slice 2 changed emitted code, and the disagreement it found was already
+there.** `add_call_precolors_for_block` pinned each argument to its ABI register
+through the *function-wide* map at the block's entry, while the barrier resolved
+the same argument through the block's own snapshot at the barrier point -- and
+for a class re-emitted per block those answer differently, so the pin landed on a
+VReg the block does not define. It is the same stale answer `build_barrier_maps`
+had, and `regalloc/call_arg_reemitted_in_block.c`, the regression test written for
+that one, is one of the four lit programs that move. Four lit programs and one
+generated program emit different code, all at `-O0`, all a different choice of
+which block gets the ABI register directly and which keeps a `mov`. Nothing
+regressed: `hash_table.c` -O0 224 -> 223 insts, `mixed-seed28` -O1 6199 -> 6196,
+`pressure-seed1` -O0 6524 -> 6523, 885 other codesize rows unchanged, and 90
+generated (seed, level) pairs with 0 regressed, 0 fixed, 0 changed kind.
+
+Slice 3 is byte-identical to slice 2: 768 identity comparisons, 0 differing.
 
 **State the prediction before each one.** These resolutions all run before the
 splitter, where they are correct today, so each slice should be byte-identical on

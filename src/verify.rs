@@ -238,7 +238,7 @@ impl Verifier<'_> {
         match op {
             EffectfulOp::Load { addr, result, .. } => {
                 self.check_class(addr.class(), &format!("{at}: Load addr"));
-                self.check_class(*result, &format!("{at}: Load result"));
+                self.check_class(result.class(), &format!("{at}: Load result"));
             }
             EffectfulOp::Store { addr, val, .. } => {
                 self.check_class(addr.class(), &format!("{at}: Store addr"));
@@ -269,7 +269,7 @@ impl Verifier<'_> {
                     self.check_class(arg.class(), &format!("{at}: Call '{func}' arg {i}"));
                 }
                 for (i, res) in results.iter().enumerate() {
-                    self.check_class(*res, &format!("{at}: Call '{func}' result {i}"));
+                    self.check_class(res.class(), &format!("{at}: Call '{func}' result {i}"));
                 }
             }
             EffectfulOp::Branch {

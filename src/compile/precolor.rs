@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
-use crate::ir::effectful::EffectfulOp;
+use crate::ir::effectful::{EffOperand, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::Op;
 use crate::schedule::scheduler::ScheduledInst;
@@ -108,13 +108,9 @@ pub(super) fn add_div_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(
 /// register allocation.
 pub(super) fn add_call_precolors_for_block(
     block: &crate::ir::function::BasicBlock,
-    block_idx: usize,
-    egraph: &EGraph,
-    class_to_vreg: &ClassVRegMap,
     param_vregs: &mut Vec<(VReg, Reg)>,
     live_out: &mut BTreeSet<VReg>,
 ) {
-    let point = ProgramPoint::block_entry(block_idx);
     let non_term_count = block.non_term_count();
     let call_count = block.ops[..non_term_count]
         .iter()
@@ -155,11 +151,10 @@ pub(super) fn add_call_precolors_for_block(
                     }
                 }
             }
-            if call_count == 1
-                && let Some(&first_result_cid) = results.first()
-            {
-                let canon = egraph.unionfind.find_immutable(first_result_cid);
-                if let Some(vreg) = class_to_vreg.lookup(canon, point)
+            if call_count == 1 {
+                // The result's VReg, as the CFG states it: the same VReg the
+                // barrier instruction defining it carries.
+                if let Some(vreg) = results.first().and_then(EffOperand::vreg)
                     && !param_vregs.iter().any(|&(v, _)| v == vreg)
                 {
                     let is_float_ret = ret_tys.first().is_some_and(|t| t.is_float());

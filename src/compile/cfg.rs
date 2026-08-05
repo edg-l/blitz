@@ -441,15 +441,21 @@ pub(super) fn commit_terminator_arg_vregs(
     Ok(())
 }
 
-/// Commit linearization's choice of VReg for every `Load`, `Store` and `Call`
-/// operand into the CFG.
+/// Commit linearization's choice of VReg for everything a non-terminator
+/// effectful op reads or defines.
 ///
-/// The sibling of [`commit_terminator_arg_vregs`] for the operands an effectful
-/// op reads, and the same move for the same reason: the address a `Load` reads
-/// is a register in a block, while the CFG named it by `ClassId`, which is an
-/// expression and has no position. Committing here leaves
-/// `populate_effectful_operands` copying the answer instead of resolving it a
-/// second time.
+/// The sibling of [`commit_terminator_arg_vregs`], and the same move for the
+/// same reason: the address a `Load` reads is a register in a block, while the
+/// CFG named it by `ClassId`, which is an expression and has no position.
+/// Committing here leaves `populate_effectful_operands` and
+/// `add_call_precolors_for_block` copying the answer instead of each resolving
+/// it for itself -- which they did through different maps at different points.
+///
+/// The results are here too, and they are *defs*: the VReg a `Load` writes is
+/// the `dst` of the barrier instruction linearization emitted for it, which is
+/// the same VReg its class resolves to in that block. Committing it is what lets
+/// a consumer find the barrier instruction without asking the map which VReg
+/// carries the result.
 ///
 /// Resolved through the *block's own* snapshot, since a class re-emitted per
 /// block has one VReg per block and the function-wide map holds whichever block
@@ -460,7 +466,7 @@ pub(super) fn commit_terminator_arg_vregs(
 /// An operand with no VReg is an error naming the op, not a skip: the barrier's
 /// role operands are positional, so an operand silently dropped there takes a
 /// `Store`'s value for its address.
-pub(super) fn commit_effectful_operand_vregs(
+pub(super) fn commit_effectful_vregs(
     func: &mut Function,
     egraph: &EGraph,
     block_snapshots: &[ClassVRegMap],
@@ -471,17 +477,26 @@ pub(super) fn commit_effectful_operand_vregs(
         let non_term_count = block.non_term_count();
         for (op_idx, op) in block.ops[..non_term_count].iter_mut().enumerate() {
             let roles: Vec<(String, &mut EffOperand)> = match op {
-                EffectfulOp::Load { addr, .. } => vec![("Load address".to_string(), addr)],
+                EffectfulOp::Load { addr, result, .. } => vec![
+                    ("Load address".to_string(), addr),
+                    ("Load result".to_string(), result),
+                ],
                 EffectfulOp::Store { addr, val, .. } => {
                     vec![
                         ("Store address".to_string(), addr),
                         ("Store value".to_string(), val),
                     ]
                 }
-                EffectfulOp::Call { args, .. } => args
+                EffectfulOp::Call { args, results, .. } => args
                     .iter_mut()
                     .enumerate()
                     .map(|(i, arg)| (format!("Call argument {i}"), arg))
+                    .chain(
+                        results
+                            .iter_mut()
+                            .enumerate()
+                            .map(|(i, r)| (format!("Call result {i}"), r)),
+                    )
                     .collect(),
                 _ => continue,
             };

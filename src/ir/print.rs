@@ -189,7 +189,7 @@ fn fmt_effectful(
     match op {
         EffectfulOp::Load { addr, ty, result } => {
             let addr_s = resolve_cid(addr.class(), class_to_vreg, egraph_uf);
-            let result_s = resolve_cid(*result, class_to_vreg, egraph_uf);
+            let result_s = resolve_cid(result.class(), class_to_vreg, egraph_uf);
             format!("load {ty:?} {addr_s} -> {result_s}")
         }
         EffectfulOp::Store { addr, val, ty } => {
@@ -209,7 +209,7 @@ fn fmt_effectful(
                 .collect();
             let result_strs: Vec<String> = results
                 .iter()
-                .map(|r| resolve_cid(*r, class_to_vreg, egraph_uf))
+                .map(|r| resolve_cid(r.class(), class_to_vreg, egraph_uf))
                 .collect();
             format!(
                 "call {}({}) -> [{}]",

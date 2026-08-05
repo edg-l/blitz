@@ -205,7 +205,7 @@ pub enum EffectfulOp {
     Load {
         addr: EffOperand,
         ty: Type,
-        result: ClassId,
+        result: EffOperand,
     },
 
     /// Store a value e-class to an address e-class.
@@ -226,7 +226,7 @@ pub enum EffectfulOp {
         args: Vec<EffOperand>,
         arg_tys: Vec<Type>,
         ret_tys: Vec<Type>,
-        results: Vec<ClassId>,
+        results: Vec<EffOperand>,
     },
 
     /// Conditional branch to `bb_true` or `bb_false` depending on flags.
@@ -257,7 +257,7 @@ impl EffectfulOp {
         match self {
             EffectfulOp::Load { addr, result, .. } => {
                 f(addr.class());
-                f(*result);
+                f(result.class());
             }
             EffectfulOp::Store { addr, val, .. } => {
                 f(addr.class());
@@ -265,7 +265,7 @@ impl EffectfulOp {
             }
             EffectfulOp::Call { args, results, .. } => {
                 args.iter().map(EffOperand::class).for_each(&mut f);
-                results.iter().copied().for_each(&mut f);
+                results.iter().map(EffOperand::class).for_each(&mut f);
             }
             EffectfulOp::Branch {
                 cond,
@@ -294,7 +294,7 @@ impl EffectfulOp {
         match self {
             EffectfulOp::Load { addr, result, .. } => {
                 f(addr.class_mut());
-                f(result);
+                f(result.class_mut());
             }
             EffectfulOp::Store { addr, val, .. } => {
                 f(addr.class_mut());
@@ -302,7 +302,10 @@ impl EffectfulOp {
             }
             EffectfulOp::Call { args, results, .. } => {
                 args.iter_mut().map(EffOperand::class_mut).for_each(&mut f);
-                results.iter_mut().for_each(&mut f);
+                results
+                    .iter_mut()
+                    .map(EffOperand::class_mut)
+                    .for_each(&mut f);
             }
             EffectfulOp::Branch {
                 cond,

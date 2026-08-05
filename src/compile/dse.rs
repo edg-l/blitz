@@ -228,7 +228,7 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: r,
+                result: EffOperand::Class(r),
             },
             EffectfulOp::Store {
                 addr: EffOperand::Class(s0),
@@ -472,7 +472,7 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s1),
                 ty: Type::I64,
-                result: r,
+                result: EffOperand::Class(r),
             },
             EffectfulOp::Store {
                 addr: EffOperand::Class(s0),

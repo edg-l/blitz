@@ -107,7 +107,7 @@ pub(super) fn build_barrier_maps(
     for (barrier_k, op) in non_term_ops.iter().enumerate() {
         match op {
             EffectfulOp::Load { addr, result, .. } => {
-                mark(&mut vreg_to_result, *result, barrier_k);
+                mark(&mut vreg_to_result, result.class(), barrier_k);
                 mark(&mut vreg_to_arg, addr.class(), barrier_k);
             }
             EffectfulOp::Store { addr, val, .. } => {
@@ -116,7 +116,7 @@ pub(super) fn build_barrier_maps(
             }
             EffectfulOp::Call { args, results, .. } => {
                 for &result_cid in results {
-                    mark(&mut vreg_to_result, result_cid, barrier_k);
+                    mark(&mut vreg_to_result, result_cid.class(), barrier_k);
                 }
                 for arg in args {
                     mark(&mut vreg_to_arg, arg.class(), barrier_k);
@@ -463,12 +463,14 @@ pub(crate) fn role_operand_count(op: &EffectfulOp) -> usize {
 /// Duplicates are removed only from the trailing liveness operands. A role
 /// operand keeps its slot even when the same VReg fills two roles, as in
 /// `*p = p`.
+///
+/// Nothing here resolves a class. Every VReg this writes -- the roles and the
+/// result whose instruction the roles attach to -- is one linearization chose
+/// and `cfg::commit_effectful_vregs` wrote into the CFG, so there is no second
+/// answer for this to disagree with.
 pub(super) fn populate_effectful_operands(
     schedule: &mut Vec<ScheduledInst>,
     non_term_ops: &[EffectfulOp],
-    block_idx: usize,
-    egraph: &EGraph,
-    class_to_vreg: &ClassVRegMap,
     vreg_group: &mut BTreeMap<VReg, usize>,
     next_vreg: &mut u32,
 ) {
@@ -497,9 +499,6 @@ pub(super) fn populate_effectful_operands(
     );
 
     for (barrier_k, op) in non_term_ops.iter().enumerate() {
-        // Program point for this barrier: used for point-aware VReg lookup.
-        let barrier_pt = ProgramPoint::barrier_point(block_idx, barrier_k, schedule);
-
         // The folded `Addr` children a role operand needs kept alive, appended
         // after the roles. Roles stay at their own index; only these trailing
         // liveness operands are deduped.
@@ -519,7 +518,7 @@ pub(super) fn populate_effectful_operands(
 
         // The role operands of an op whose operands the CFG states. Read, not
         // resolved: linearization chose the VReg and
-        // `cfg::commit_effectful_operand_vregs` wrote it into the CFG, so there
+        // `cfg::commit_effectful_vregs` wrote it into the CFG, so there
         // is no second answer here to disagree with the first.
         let committed_roles = |ops: &[&EffOperand]| -> Vec<VReg> {
             let mut roles = Vec::with_capacity(ops.len());
@@ -558,9 +557,9 @@ pub(super) fn populate_effectful_operands(
                 if vregs.is_empty() {
                     continue;
                 }
-                // Find the LoadResult instruction by its result VReg.
-                let result_canon = egraph.unionfind.find_immutable(*result);
-                let Some(result_vreg) = class_to_vreg.lookup(result_canon, barrier_pt) else {
+                // The LoadResult instruction is the one defining the result's
+                // VReg, which the CFG states.
+                let Some(result_vreg) = result.vreg() else {
                     continue;
                 };
                 if let Some(inst) = schedule.iter_mut().find(|i| i.dst == result_vreg) {
@@ -574,8 +573,7 @@ pub(super) fn populate_effectful_operands(
                     if vregs.is_empty() {
                         continue;
                     }
-                    let result_canon = egraph.unionfind.find_immutable(*first_result);
-                    let Some(result_vreg) = class_to_vreg.lookup(result_canon, barrier_pt) else {
+                    let Some(result_vreg) = first_result.vreg() else {
                         continue;
                     };
                     if let Some(inst) = schedule.iter_mut().find(|i| i.dst == result_vreg) {

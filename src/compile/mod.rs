@@ -46,7 +46,7 @@ pub(crate) mod cfg;
 mod linearize;
 mod phi_removal;
 use cfg::{
-    collect_externals, collect_phi_source_vregs, collect_roots, commit_effectful_operand_vregs,
+    collect_externals, collect_phi_source_vregs, collect_roots, commit_effectful_vregs,
     commit_terminator_arg_vregs, compute_copy_pairs, compute_copy_pairs_from_schedules,
     compute_loop_depths,
 };
@@ -352,8 +352,7 @@ fn commit_args(
         &rpo_pos,
     )
     .map_err(fail("terminator-args"))?;
-    commit_effectful_operand_vregs(func, egraph, &lin.block_snapshots)
-        .map_err(fail("effectful-operands"))
+    commit_effectful_vregs(func, egraph, &lin.block_snapshots).map_err(fail("effectful-operands"))
 }
 
 /// What the IR-level passes hand to the machine-level half of the pipeline.
@@ -782,9 +781,6 @@ pub fn compile(
                 populate_effectful_operands(
                     &mut all_scheduled,
                     non_term_ops,
-                    0,
-                    &egraph,
-                    &class_to_vreg,
                     &mut vreg_group,
                     &mut next_vreg,
                 );
@@ -817,14 +813,7 @@ pub fn compile(
         let mut all_param_vregs = param_vregs.clone();
         add_shift_precolors(&all_scheduled, &mut all_param_vregs);
         add_div_precolors(&all_scheduled, &mut all_param_vregs);
-        add_call_precolors_for_block(
-            &func.blocks[0],
-            0,
-            &egraph,
-            &class_to_vreg,
-            &mut all_param_vregs,
-            &mut live_out,
-        );
+        add_call_precolors_for_block(&func.blocks[0], &mut all_param_vregs, &mut live_out);
         // Coalescing's copy pairs. One block reaches no other, so the only edge
         // this can find is a self-loop.
         let copy_pairs = compute_copy_pairs(
@@ -873,22 +862,14 @@ pub fn compile(
         // `Op::TerminatorArgs` operands once those exist, below.
         let cfg_succs = cfg::successor_indices(func);
 
-        // ORDER: before `populate_effectful_operands`, which appends the trailing
-        // liveness operands and dedupes them. `add_call_precolors_for_block` reads
-        // `EffectfulOp::Call`'s args positionally to pin each to its ABI register,
-        // so it needs the arg list as the CFG states it.
+        // `add_call_precolors_for_block` reads `EffectfulOp::Call`'s args
+        // positionally to pin each to its ABI register, so it needs the arg list
+        // as the CFG states it.
         let mut call_arg_precolors: Vec<(VReg, Reg)> = Vec::new();
-        for (block_idx, block) in func.blocks.iter().enumerate() {
+        for block in func.blocks.iter() {
             let mut dummy_live_out: std::collections::BTreeSet<VReg> =
                 std::collections::BTreeSet::new();
-            add_call_precolors_for_block(
-                block,
-                block_idx,
-                &egraph,
-                &class_to_vreg,
-                &mut call_arg_precolors,
-                &mut dummy_live_out,
-            );
+            add_call_precolors_for_block(block, &mut call_arg_precolors, &mut dummy_live_out);
         }
 
         // Shorten a barrier result's live range where its consumer is two or more
@@ -952,9 +933,6 @@ pub fn compile(
                 populate_effectful_operands(
                     &mut block_schedules[block_idx],
                     non_term_ops,
-                    block_idx,
-                    &egraph,
-                    block_map,
                     &mut vreg_group,
                     &mut next_vreg,
                 );

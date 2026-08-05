@@ -310,12 +310,18 @@ pub(super) fn apply(func: &mut Function, egraph: &mut EGraph, removal: &Removal)
         // linearization re-asks.
         for op in block.ops.iter_mut() {
             match op {
-                EffectfulOp::Load { addr, .. } => addr.uncommit(),
+                EffectfulOp::Load { addr, result, .. } => {
+                    addr.uncommit();
+                    result.uncommit();
+                }
                 EffectfulOp::Store { addr, val, .. } => {
                     addr.uncommit();
                     val.uncommit();
                 }
-                EffectfulOp::Call { args, .. } => args.iter_mut().for_each(EffOperand::uncommit),
+                EffectfulOp::Call { args, results, .. } => args
+                    .iter_mut()
+                    .chain(results.iter_mut())
+                    .for_each(EffOperand::uncommit),
                 _ => {}
             }
         }

@@ -54,10 +54,10 @@ fn collect_produced_ids(ops: &[EffectfulOp]) -> BTreeSet<ClassId> {
     for op in ops {
         match op {
             EffectfulOp::Load { result, .. } => {
-                ids.insert(*result);
+                ids.insert(result.class());
             }
             EffectfulOp::Call { results, .. } => {
-                ids.extend(results);
+                ids.extend(results.iter().map(EffOperand::class));
             }
             _ => {}
         }
@@ -122,11 +122,11 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
         avail.extend(collect_referenced_ids(&ops_before));
         avail.extend(collect_produced_ids(&ops_before));
         avail.extend(call_args.iter().map(EffOperand::class));
-        avail.extend(call_results.iter().copied());
+        avail.extend(call_results.iter().map(EffOperand::class));
         avail
     };
 
-    let call_result_set: BTreeSet<ClassId> = call_results.iter().copied().collect();
+    let call_result_set: BTreeSet<ClassId> = call_results.iter().map(EffOperand::class).collect();
     let external_ids: Vec<ClassId> = referenced_in_after
         .difference(&produced_in_after)
         .filter(|id| available_before.contains(id) && !call_result_set.contains(id))
@@ -210,7 +210,7 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
         };
         let block_param_class = caller_egraph.add(block_param_enode);
         let call_result_class = call_results[0];
-        caller_egraph.merge(call_result_class, block_param_class);
+        caller_egraph.merge(call_result_class.class(), block_param_class);
         caller_egraph.rebuild();
     }
 

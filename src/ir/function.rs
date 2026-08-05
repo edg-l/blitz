@@ -209,7 +209,7 @@ mod tests {
         bb.ops.push(EffectfulOp::Load {
             addr: EffOperand::Class(ClassId(0)),
             ty: Type::I64,
-            result: ClassId::NONE,
+            result: EffOperand::Class(ClassId::NONE),
         });
         bb.ops.push(ret_none());
         assert!(bb.is_well_formed());
@@ -222,7 +222,7 @@ mod tests {
         bb.ops.push(EffectfulOp::Load {
             addr: EffOperand::Class(ClassId(0)),
             ty: Type::I64,
-            result: ClassId::NONE,
+            result: EffOperand::Class(ClassId::NONE),
         });
         bb.validate();
     }
@@ -235,7 +235,7 @@ mod tests {
         bb.ops.push(EffectfulOp::Load {
             addr: EffOperand::Class(ClassId(0)),
             ty: Type::I64,
-            result: ClassId::NONE,
+            result: EffOperand::Class(ClassId::NONE),
         });
         bb.validate();
     }

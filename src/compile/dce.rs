@@ -254,7 +254,7 @@ pub(super) fn eliminate_dead_loads(
         let mut i = 0;
         while i + 1 < block.ops.len() {
             if let EffectfulOp::Load { result, .. } = &block.ops[i] {
-                let canon_result = egraph.unionfind.find_immutable(*result);
+                let canon_result = egraph.unionfind.find_immutable(result.class());
                 if !consumed.contains(&canon_result) {
                     if crate::trace::is_enabled("dce") {
                         eprintln!(

@@ -246,7 +246,7 @@ pub(super) fn lower_effectful_op(
                         }),
                     })?;
             check_barrier_operand("Load address", addr_reg);
-            let canon_result = uf.find_immutable(*result);
+            let canon_result = uf.find_immutable(result.class());
             // The `LoadResult` barrier's own dst names the register this load must
             // write, for the same reason a call's result does (see the Call arm):
             // the schedule's VReg is the one the splitter rewrote, coalescing
@@ -468,7 +468,7 @@ pub(super) fn lower_effectful_op(
             let result_reg = barrier_pos
                 .and_then(|pos| schedule.get(pos))
                 .and_then(|inst| regalloc.vreg_to_reg.get(&inst.dst).copied())
-                .or_else(|| results.first().and_then(|&cid| get_reg(cid)));
+                .or_else(|| results.first().and_then(|&cid| get_reg(cid.class())));
             if let Some(&_result_cid) = results.first()
                 && let Some(result_reg) = result_reg
             {

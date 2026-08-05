@@ -505,7 +505,7 @@ impl FunctionBuilder {
         block.ops.push(EffectfulOp::Load {
             addr: EffOperand::Class(addr.0),
             ty,
-            result: load_result.0,
+            result: EffOperand::Class(load_result.0),
         });
         load_result
     }
@@ -556,7 +556,10 @@ impl FunctionBuilder {
             args: args.iter().map(|v| EffOperand::Class(v.0)).collect(),
             arg_tys,
             ret_tys: ret_tys.to_vec(),
-            results: result_class_ids,
+            results: result_class_ids
+                .iter()
+                .map(|&c| EffOperand::Class(c))
+                .collect(),
         });
         ret_vals
     }

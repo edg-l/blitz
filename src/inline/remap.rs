@@ -152,7 +152,7 @@ impl RemapContext {
             EffectfulOp::Load { addr, ty, result } => EffectfulOp::Load {
                 addr: EffOperand::Class(self.remap_class_id(addr.class())),
                 ty: ty.clone(),
-                result: self.remap_class_id(*result),
+                result: EffOperand::Class(self.remap_class_id(result.class())),
             },
             EffectfulOp::Store { addr, val, ty } => EffectfulOp::Store {
                 addr: EffOperand::Class(self.remap_class_id(addr.class())),
@@ -173,7 +173,10 @@ impl RemapContext {
                     .collect(),
                 arg_tys: arg_tys.clone(),
                 ret_tys: ret_tys.clone(),
-                results: results.iter().map(|&r| self.remap_class_id(r)).collect(),
+                results: results
+                    .iter()
+                    .map(|r| EffOperand::Class(self.remap_class_id(r.class())))
+                    .collect(),
             },
             EffectfulOp::Branch {
                 cond,
@@ -257,8 +260,10 @@ fn max_uid_in_function(func: &Function) -> u32 {
         for block in &func.blocks {
             for op in &block.ops {
                 let result_ids: Vec<ClassId> = match op {
-                    EffectfulOp::Load { result, .. } => vec![*result],
-                    EffectfulOp::Call { results, .. } => results.clone(),
+                    EffectfulOp::Load { result, .. } => vec![result.class()],
+                    EffectfulOp::Call { results, .. } => {
+                        results.iter().map(EffOperand::class).collect()
+                    }
                     _ => continue,
                 };
                 for cid in result_ids {

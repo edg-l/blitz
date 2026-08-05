@@ -99,12 +99,13 @@ pub fn run_forwarding(func: &mut Function, egraph: &mut EGraph, alias: &AliasInf
                         if crate::trace::is_enabled("alias") {
                             eprintln!(
                                 "[alias] forward bb{b} load-at-idx={i} result={} -> val={}",
-                                result.0, fwd_val.0
+                                result.class().0,
+                                fwd_val.0
                             );
                         }
                         // Snapshot the LoadResult placeholder op for this load's
                         // result class before the merge makes it harder to find.
-                        let canon_result = egraph.unionfind.find_immutable(*result);
+                        let canon_result = egraph.unionfind.find_immutable(result.class());
                         if let Some(node) = egraph
                             .class(canon_result)
                             .nodes
@@ -113,12 +114,12 @@ pub fn run_forwarding(func: &mut Function, egraph: &mut EGraph, alias: &AliasInf
                         {
                             dead_placeholders.push(node.op.clone());
                         }
-                        pending_unions.push((*result, fwd_val));
+                        pending_unions.push((result.class(), fwd_val));
                         removals[b].push(i);
                     } else {
                         // No forward: record load result so a subsequent same-addr
                         // load can be load-to-load forwarded.
-                        mem.record(canon_addr, *result, ty.clone(), egraph);
+                        mem.record(canon_addr, result.class(), ty.clone(), egraph);
                     }
                 }
 
@@ -228,7 +229,7 @@ mod tests {
         let load_op = EffectfulOp::Load {
             addr: EffOperand::Class(s0),
             ty: Type::I64,
-            result: load_res,
+            result: EffOperand::Class(load_res),
         };
         let ret_op = EffectfulOp::Ret { val: None };
 
@@ -263,7 +264,7 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s1),
                 ty: Type::I64,
-                result: load_res,
+                result: EffOperand::Class(load_res),
             },
             EffectfulOp::Ret { val: None },
         ]);
@@ -298,7 +299,7 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: load_res,
+                result: EffOperand::Class(load_res),
             },
             EffectfulOp::Ret { val: None },
         ]);
@@ -326,7 +327,7 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I32,
-                result: load_res,
+                result: EffOperand::Class(load_res),
             },
             EffectfulOp::Ret { val: None },
         ]);
@@ -353,12 +354,12 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: load1,
+                result: EffOperand::Class(load1),
             },
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: load2,
+                result: EffOperand::Class(load2),
             },
             EffectfulOp::Ret { val: None },
         ]);
@@ -395,7 +396,7 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: load_res,
+                result: EffOperand::Class(load_res),
             },
             EffectfulOp::Ret { val: None },
         ]);
@@ -429,7 +430,7 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: load_res,
+                result: EffOperand::Class(load_res),
             },
             EffectfulOp::Ret { val: None },
         ]);
@@ -471,17 +472,17 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: r1,
+                result: EffOperand::Class(r1),
             },
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: r2,
+                result: EffOperand::Class(r2),
             },
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: r3,
+                result: EffOperand::Class(r3),
             },
             EffectfulOp::Ret { val: None },
         ]);
@@ -522,7 +523,7 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: r,
+                result: EffOperand::Class(r),
             },
             EffectfulOp::Ret { val: None },
         ]);
@@ -559,7 +560,7 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),
                 ty: Type::I64,
-                result: r1,
+                result: EffOperand::Class(r1),
             },
             // store s1 <- r1 (which is now forwarded to 7)
             EffectfulOp::Store {
@@ -571,7 +572,7 @@ mod tests {
             EffectfulOp::Load {
                 addr: EffOperand::Class(s1),
                 ty: Type::I64,
-                result: r2,
+                result: EffOperand::Class(r2),
             },
             EffectfulOp::Ret { val: None },
         ]);

@@ -246,11 +246,11 @@ pub(super) fn collect_loop_defined_classes(
         for op in &block.ops {
             match op {
                 EffectfulOp::Load { result, .. } => {
-                    defined.insert(egraph.unionfind.find_immutable(*result));
+                    defined.insert(egraph.unionfind.find_immutable(result.class()));
                 }
                 EffectfulOp::Call { results, .. } => {
                     for &r in results {
-                        defined.insert(egraph.unionfind.find_immutable(r));
+                        defined.insert(egraph.unionfind.find_immutable(r.class()));
                     }
                 }
                 // Store, Branch, Jump, Ret produce no new values.
