@@ -106,8 +106,13 @@ pub fn compile_to_ir_string(
             continue;
         }
 
-        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
-            build_barrier_context(block, block_idx, &egraph, &class_to_vreg);
+        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) = build_barrier_context(
+            block,
+            block_idx,
+            &egraph,
+            &class_to_vreg,
+            &block_schedules[block_idx],
+        );
 
         let sched = &block_schedules[block_idx];
         let vreg_group =
@@ -135,8 +140,13 @@ pub fn compile_to_ir_string(
         let non_term_ops = &block.ops[..non_term_count];
         let num_barriers = non_term_ops.len();
 
-        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) =
-            build_barrier_context(block, block_idx, &egraph, &class_to_vreg);
+        let (vreg_to_result_of_barrier, vreg_to_arg_of_barrier) = build_barrier_context(
+            block,
+            block_idx,
+            &egraph,
+            &class_to_vreg,
+            &block_schedules[block_idx],
+        );
         let vreg_group = assign_barrier_groups(
             &block_schedules[block_idx],
             &vreg_to_result_of_barrier,

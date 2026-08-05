@@ -44,11 +44,12 @@ pub(super) fn build_barrier_context(
     block_idx: usize,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
+    schedule: &[ScheduledInst],
 ) -> (BTreeMap<VReg, usize>, BTreeMap<VReg, usize>) {
     let non_term_count = block.non_term_count();
     let non_term_ops = &block.ops[..non_term_count];
     let (result_map, mut arg_map) =
-        build_barrier_maps(non_term_ops, block_idx, egraph, class_to_vreg);
+        build_barrier_maps(non_term_ops, egraph, class_to_vreg, schedule);
     mark_branch_cond_barrier(
         block.ops.last(),
         non_term_count,
@@ -61,45 +62,64 @@ pub(super) fn build_barrier_context(
 }
 
 /// Build barrier maps: which VRegs are produced/consumed by each effectful op.
+///
+/// Every VReg *this block's schedule defines* for an argument's class is
+/// constrained, rather than the one a point lookup answers with. The point is
+/// the thing that cannot be asked for here: resolving a class to a VReg needs a
+/// program point, the point depends on the instruction order, and the order is
+/// what this map exists to constrain. Asking at block entry answered with the
+/// VReg some earlier block emitted, so a class the block re-emitted carried no
+/// constraint at all -- the scheduler was free to place its definition after the
+/// call that reads it, and the emitted code passed whatever the register held on
+/// entry. A class with more than one copy in a block gets all of them
+/// constrained, which is what the copies being the same value permits.
 pub(super) fn build_barrier_maps(
     non_term_ops: &[EffectfulOp],
-    block_idx: usize,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
+    schedule: &[ScheduledInst],
 ) -> (BTreeMap<VReg, usize>, BTreeMap<VReg, usize>) {
-    let point = ProgramPoint::block_entry(block_idx);
     let mut vreg_to_result: BTreeMap<VReg, usize> = BTreeMap::new();
     let mut vreg_to_arg: BTreeMap<VReg, usize> = BTreeMap::new();
-    // Helper: mark a ClassId as consumed by barrier_k (earliest consumer wins).
-    let mut mark_arg = |cid: ClassId, barrier_k: usize| {
+
+    // Which class each of this block's VRegs carries. A VReg belongs to one
+    // class, so the direction inverts without an ambiguity to resolve.
+    let defined: BTreeSet<VReg> = schedule.iter().map(|inst| inst.dst).collect();
+    let mut vreg_class: BTreeMap<VReg, ClassId> = BTreeMap::new();
+    for (class, vreg) in class_to_vreg.iter() {
+        if defined.contains(&vreg) {
+            vreg_class.insert(vreg, egraph.unionfind.find_immutable(class));
+        }
+    }
+    let mut class_vregs: BTreeMap<ClassId, Vec<VReg>> = BTreeMap::new();
+    for (&vreg, &class) in &vreg_class {
+        class_vregs.entry(class).or_default().push(vreg);
+    }
+
+    // Mark every VReg of a ClassId as consumed by barrier_k (earliest wins).
+    let mark = |target: &mut BTreeMap<VReg, usize>, cid: ClassId, barrier_k: usize| {
         let canon = egraph.unionfind.find_immutable(cid);
-        if let Some(vreg) = class_to_vreg.lookup(canon, point) {
-            let entry = vreg_to_arg.entry(vreg).or_insert(barrier_k);
+        for &vreg in class_vregs.get(&canon).into_iter().flatten() {
+            let entry = target.entry(vreg).or_insert(barrier_k);
             *entry = (*entry).min(barrier_k);
         }
     };
     for (barrier_k, op) in non_term_ops.iter().enumerate() {
         match op {
             EffectfulOp::Load { addr, result, .. } => {
-                let canon = egraph.unionfind.find_immutable(*result);
-                if let Some(vreg) = class_to_vreg.lookup(canon, point) {
-                    vreg_to_result.insert(vreg, barrier_k);
-                }
-                mark_arg(*addr, barrier_k);
+                mark(&mut vreg_to_result, *result, barrier_k);
+                mark(&mut vreg_to_arg, *addr, barrier_k);
             }
             EffectfulOp::Store { addr, val, .. } => {
-                mark_arg(*addr, barrier_k);
-                mark_arg(*val, barrier_k);
+                mark(&mut vreg_to_arg, *addr, barrier_k);
+                mark(&mut vreg_to_arg, *val, barrier_k);
             }
             EffectfulOp::Call { args, results, .. } => {
                 for &result_cid in results {
-                    let canon = egraph.unionfind.find_immutable(result_cid);
-                    if let Some(vreg) = class_to_vreg.lookup(canon, point) {
-                        vreg_to_result.insert(vreg, barrier_k);
-                    }
+                    mark(&mut vreg_to_result, result_cid, barrier_k);
                 }
                 for &arg_cid in args {
-                    mark_arg(arg_cid, barrier_k);
+                    mark(&mut vreg_to_arg, arg_cid, barrier_k);
                 }
             }
             _ => {}
