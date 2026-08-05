@@ -1220,11 +1220,47 @@ past it far enough to rule several things out:
   `mov [rsp+0x40],rax`), and `[rsp+0x288]` is written exactly once in the whole
   function.
 
-So the next attempt starts at "which term of seed 14's sum is wrong", not at
-another guard: `DEBUGGING-NOTES.md` technique 1, one `printf` per term against
-`cc`. The bisection harness that isolates the single routing is worth rebuilding
-first -- a `BLITZ_RULE3_LIMIT` counter around `route.insert` -- since it turns a
-whole-program miscompile into one named parameter in four compiles.
+Carrying the hunt on from there found the second defect, and it is also a real
+one in shipping code (see "A store must not overwrite a slot its own block still
+reads", below): `mixed` seed 14 now compiles correctly under rule 3.
+
+**Rule 3 is still not landable.** With both defects fixed it takes `pressure`
+from 28/30 to 30/30 -- seeds 24 and 28, the two this document has been tracking,
+both compile -- and it costs `pressure` seed 14 and `mixed` seed 15, which print
+wrong answers at `-O1` while staying right at `-O0`. Bisected the same way,
+`pressure` seed 14 turns at routing #94, block 43's parameter 1, at a pressure
+point in that parameter's own block.
+
+Both known culprits sit at a point inside their block's run of `BlockParam`
+markers, which is the region the first rule already accounts for -- so the
+obvious third guard is to skip those points and leave them to it. **Measured, and
+it does not fix either program**: the same two still print the same wrong
+answers. So the marker shadow is not the distinguishing property either, and the
+next attempt should stop proposing guards and find the wrong term with
+`DEBUGGING-NOTES.md` technique 1 -- one `printf` per term against `cc`, then
+`read_frame.py --sum-chain`. The bisection harness is a `BLITZ_RULE3_LIMIT`
+counter around `route.insert`; it turns a whole-program miscompile into one named
+parameter in about eight compiles.
+
+### A store must not overwrite a slot its own block still reads
+
+Found by the bisection above and fixed independently of it, because it is a
+defect in code that ships.
+
+A slot-routed argument's store goes after the last point its value is needed.
+That accounted for the *argument's* uses and not for the block's reloads of the
+**same slot**: the store carries the value the next iteration receives, so a
+reload standing after it reads this iteration's parameter out of a cell already
+holding the next one. On `mixed` seed 14 the slot's traffic is store, reload,
+reload, store, reload -- and that last reload is one iteration ahead, which is
+the whole of 224 becoming 225.
+
+The store's position is now the later of the argument's last use and the block's
+last reload of that slot. No output changes today (888 codesize rows unchanged,
+474 lit, 299 differential), because nothing currently routes a parameter whose
+block reloads it after the store -- the corpus reaches that shape only with the
+third rule enabled. It is a latent bug fixed with its reproducer recorded rather
+than a quality change.
 
 The other candidate is still untried: let the spill loop hand a parameter to slot
 routing rather than skip it.

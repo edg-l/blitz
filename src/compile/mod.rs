@@ -1158,7 +1158,7 @@ pub fn compile(
                 // is live until the instruction that reads it, so sixteen stores
                 // at the end keep sixteen registers occupied until the end,
                 // exactly as the terminator operands did.
-                let last_needed = |vreg: VReg, sched: &[ScheduledInst]| -> usize {
+                let last_needed = |vreg: VReg, slot: i64, sched: &[ScheduledInst]| -> usize {
                     let mut at = sched
                         .iter()
                         .enumerate()
@@ -1169,6 +1169,22 @@ pub fn compile(
                         .map(|(i, _)| i + 1)
                         .max()
                         .unwrap_or(0);
+                    // And after the block's own reads of that slot. The store
+                    // carries the value the NEXT iteration receives; a reload
+                    // standing after it reads this iteration's parameter, and
+                    // overwriting the cell first hands it the new value one
+                    // iteration early.
+                    at = at.max(
+                        sched
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, inst)| {
+                                matches!(inst.op, Op::SpillLoad(s) | Op::XmmSpillLoad(s) if s == slot)
+                            })
+                            .map(|(i, _)| i + 1)
+                            .max()
+                            .unwrap_or(0),
+                    );
                     // A projection reads a register its producer still owns, so
                     // nothing goes between a division and the projections taking
                     // its quotient and remainder out of RAX and RDX.
@@ -1192,7 +1208,7 @@ pub fn compile(
                             operands: vec![vreg],
                         };
                         next_vreg += 1;
-                        (last_needed(vreg, schedule), store)
+                        (last_needed(vreg, info.slot, schedule), store)
                     })
                     .collect();
                 // Descending, so an insertion never moves a position not yet used.
