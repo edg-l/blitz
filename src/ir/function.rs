@@ -88,9 +88,14 @@ impl BasicBlock {
 
 /// A function in the Blitz IR, consisting of a CFG skeleton of `BasicBlock`s.
 ///
+/// `Clone` so a pass that rewrites the CFG can keep the version it started from
+/// and put it back: `phi_removal` only learns whether its removal was legal by
+/// linearizing the result.
+///
 /// The first block is the entry block (no block parameters by convention).
 /// Pure operations live in the e-graph (not here); effectful ops reference
 /// e-class IDs for their pure operands.
+#[derive(Clone)]
 pub struct Function {
     pub name: String,
     pub param_types: Vec<Type>,

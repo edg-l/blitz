@@ -50,7 +50,7 @@ fn main() {
     let mut override_dce: Option<bool> = None;
     let mut override_store_forwarding: Option<bool> = None;
     let mut override_dse: Option<bool> = None;
-    let mut override_phi_simplify: Option<bool> = None;
+    let mut override_phi_removal: Option<bool> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -119,12 +119,12 @@ fn main() {
                 override_dse = Some(false);
                 i += 1;
             }
-            "--enable-phi-simplify" => {
-                override_phi_simplify = Some(true);
+            "--enable-phi-removal" => {
+                override_phi_removal = Some(true);
                 i += 1;
             }
-            "--disable-phi-simplify" => {
-                override_phi_simplify = Some(false);
+            "--disable-phi-removal" => {
+                override_phi_removal = Some(false);
                 i += 1;
             }
             "-c" => {
@@ -169,8 +169,8 @@ fn main() {
     if let Some(v) = override_dse {
         opts.enable_dse = v;
     }
-    if let Some(v) = override_phi_simplify {
-        opts.enable_phi_simplify = v;
+    if let Some(v) = override_phi_removal {
+        opts.enable_phi_removal = v;
     }
 
     if input_paths.is_empty() {

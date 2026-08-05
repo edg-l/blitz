@@ -43,6 +43,7 @@ mod canon;
 use canon::canonicalize_class_refs;
 pub(crate) mod cfg;
 mod linearize;
+mod phi_removal;
 use cfg::{
     collect_externals, collect_phi_source_vregs, collect_roots, commit_terminator_arg_vregs,
     compute_copy_pairs, compute_copy_pairs_from_schedules, compute_loop_depths,
@@ -52,7 +53,6 @@ use effectful::lower_effectful_op;
 mod dce;
 mod licm;
 mod lower;
-mod phi_simplify;
 use lower::lower_block_pure_ops;
 mod precolor;
 use precolor::{
@@ -101,12 +101,13 @@ pub struct CompileOptions {
     pub enable_store_forwarding: bool,
     /// Enable intra-block dead store elimination.
     pub enable_dse: bool,
-    /// Eliminate block parameters that are trivial phis (`phi(x, ..., x) -> x`).
+    /// Remove block parameters whose predecessors all pass one VReg, and
+    /// linearize again over the reduced CFG.
     ///
     /// A canonicalization rather than an optimization: SSA construction creates a
     /// parameter for every variable live across an edge and never revisits it, and
     /// 85-94% of them turn out to name a single value.
-    pub enable_phi_simplify: bool,
+    pub enable_phi_removal: bool,
     /// Enable function inlining before optimization.
     pub enable_inlining: bool,
     /// Maximum inlining rescan iterations per caller function. Each rescan inlines one level
@@ -145,7 +146,7 @@ impl CompileOptions {
             enable_dce: false,
             enable_store_forwarding: false,
             enable_dse: false,
-            enable_phi_simplify: false,
+            enable_phi_removal: true,
             enable_inlining: false,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -166,7 +167,7 @@ impl CompileOptions {
             enable_dce: true,
             enable_store_forwarding: true,
             enable_dse: true,
-            enable_phi_simplify: false,
+            enable_phi_removal: true,
             enable_inlining: true,
             max_inline_depth: 3,
             max_inline_nodes: 50,
@@ -270,6 +271,20 @@ pub(super) fn run_egraph_and_extract(
         }),
     })?;
 
+    extract_from_egraph(func, egraph, opts)
+}
+
+/// Choose one node per class, and say which class names each block parameter.
+///
+/// Separate from the rewriting above because removing a block parameter changes
+/// both answers -- the numbering the `BlockParam` nodes carry and the roots the
+/// CFG names -- without changing anything the rules would rewrite. Step 2 runs
+/// this again rather than re-saturating.
+pub(super) fn extract_from_egraph(
+    func: &Function,
+    egraph: &EGraph,
+    opts: &CompileOptions,
+) -> Result<(BTreeMap<(BlockId, u32), ClassId>, ExtractionResult), CompileError> {
     let block_param_map = egraph.block_param_classes();
 
     let mut all_roots = collect_roots(func, egraph);
@@ -289,6 +304,43 @@ pub(super) fn run_egraph_and_extract(
     })?;
 
     Ok((block_param_map, extraction))
+}
+
+/// Write linearization's choice of VReg for every block argument into the CFG.
+///
+/// From here a block argument is a VReg the terminator names, not a class every
+/// consumer resolves for itself. Before scheduling, so the schedules are built
+/// from what this wrote, and before the splitter, whose operand rewriting is
+/// what makes a pressure decision stick.
+fn commit_args(
+    func: &mut Function,
+    egraph: &EGraph,
+    lin: &linearize::Linearized,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
+) -> Result<(), CompileError> {
+    let mut rpo_pos = vec![0usize; func.blocks.len()];
+    for (pos, &idx) in lin.rpo_order.iter().enumerate() {
+        rpo_pos[idx] = pos;
+    }
+    let name = func.name.clone();
+    commit_terminator_arg_vregs(
+        func,
+        egraph,
+        &lin.class_to_vreg,
+        &lin.block_snapshots,
+        block_param_map,
+        &lin.block_param_vreg_overrides,
+        &rpo_pos,
+    )
+    .map_err(|message| CompileError {
+        phase: "terminator-args".into(),
+        message,
+        location: Some(IrLocation {
+            function: name,
+            block: None,
+            inst: None,
+        }),
+    })
 }
 
 /// What the IR-level passes hand to the machine-level half of the pipeline.
@@ -312,23 +364,6 @@ pub(super) fn run_ir_passes(
     sink: &mut Option<&mut dyn DiagnosticSink>,
 ) -> Result<IrPasses, CompileError> {
     crate::verify::verify_stage("ir-entry", func, egraph);
-
-    // Redundant block parameters, first: every later pass keyed on
-    // `(BlockId, param_index)` needs the arity final, and every later pass gets
-    // simpler input for it.
-    if opts.enable_phi_simplify {
-        let removed = phi_simplify::simplify_block_params(func, egraph);
-        if removed > 0 {
-            canonicalize_class_refs(func, egraph);
-        }
-        if crate::trace::is_enabled("egraph") && crate::trace::fn_matches(&func.name) {
-            tracing::debug!(
-                target: "blitz::egraph",
-                "[{}] phi-simplify: removed {removed} block parameter(s)", func.name,
-            );
-        }
-        crate::verify::verify_stage("phi-simplify", func, egraph);
-    }
 
     // Store-to-load / load-to-load forwarding: intra-block, pre-LICM so
     // hoisting and saturation both benefit from fewer memory ops.
@@ -434,6 +469,56 @@ pub fn compile(
     // Phase 3: linearize. One e-class can become several VRegs here, and every
     // later question about which register carries a class is a question about
     // what this returned.
+    //
+    // Runs twice when step 2 removes a block parameter: the block that loses one
+    // has to name the class directly, and whether that needs the class re-emitted
+    // there is linearization's decision and nobody else's.
+    let mut block_param_map = block_param_map;
+    let mut extraction = extraction;
+    let mut lin = linearize::linearize(&func, &egraph, &extraction, &block_param_map, &extra_roots);
+    commit_args(&mut func, &egraph, &lin, &block_param_map)?;
+
+    if opts.enable_phi_removal {
+        let removal =
+            phi_removal::find_trivial_params(&func, &egraph, &lin, &extraction, &block_param_map);
+        if !removal.is_empty() {
+            // Kept so the removal can be undone: whether it was legal is a
+            // question only the re-linearization answers.
+            let saved_func = func.clone();
+            let saved_egraph = egraph.clone();
+
+            phi_removal::apply(&mut func, &mut egraph, &removal);
+            canonicalize_class_refs(&mut func, &egraph);
+            crate::verify::verify_stage("phi-removal", &func, &egraph);
+            // The chosen node for a parameter's class carried its old position,
+            // and a removed parameter has no node at all now.
+            let (new_map, new_extraction) = extract_from_egraph(&func, &egraph, opts)?;
+            let new_lin =
+                linearize::linearize(&func, &egraph, &new_extraction, &new_map, &extra_roots);
+
+            let accepted = phi_removal::barrier_counts_agree(&func, &new_lin);
+            if accepted {
+                block_param_map = new_map;
+                extraction = new_extraction;
+                lin = new_lin;
+                commit_args(&mut func, &egraph, &lin, &block_param_map)?;
+            } else {
+                func = saved_func;
+                egraph = saved_egraph;
+            }
+            if crate::trace::is_enabled("phi") && crate::trace::fn_matches(&func.name) {
+                tracing::debug!(
+                    target: "blitz::phi",
+                    "[{}] {} trivial block parameter(s) across {} block(s): {}",
+                    func.name,
+                    removal.removed,
+                    removal.keep.len(),
+                    if accepted { "removed" } else { "put back, re-emission would have moved a barrier result" },
+                );
+            }
+        }
+    }
+
     let linearize::Linearized {
         mut class_to_vreg,
         mut next_vreg,
@@ -444,35 +529,12 @@ pub fn compile(
         block_param_vregs,
         vreg_types,
         ..
-    } = linearize::linearize(&func, &egraph, &extraction, &block_param_map, &extra_roots);
+    } = lin;
 
-    // Commit linearization's choice into the CFG: from here a block argument is
-    // a VReg the terminator names, not a class every consumer resolves for
-    // itself. Before scheduling, so the schedules are built from what this
-    // wrote, and before the splitter, whose operand rewriting is what makes a
-    // pressure decision stick.
     let mut rpo_pos = vec![0usize; func.blocks.len()];
     for (pos, &idx) in rpo_order.iter().enumerate() {
         rpo_pos[idx] = pos;
     }
-    commit_terminator_arg_vregs(
-        &mut func,
-        &egraph,
-        &class_to_vreg,
-        &block_class_to_vreg_snapshot,
-        &block_param_map,
-        &block_param_vreg_overrides,
-        &rpo_pos,
-    )
-    .map_err(|message| CompileError {
-        phase: "terminator-args".into(),
-        message,
-        location: Some(IrLocation {
-            function: func.name.clone(),
-            block: None,
-            inst: None,
-        }),
-    })?;
 
     // NOW freeze func for the rest of the pipeline.
     let func = &func;
@@ -1577,6 +1639,15 @@ pub fn compile(
             barrier_k += 1;
         }
         lower_pending(&mut pending, &mut all_insts)?;
+        if barrier_k != non_term_ops.len() && std::env::var("BLITZ_PROBE").is_ok() {
+            eprintln!(
+                "[probe] block {block_idx} schedule: {:?}",
+                rewritten
+                    .iter()
+                    .map(|i| format!("v{}={:?}", i.dst.0, i.op))
+                    .collect::<Vec<_>>()
+            );
+        }
         debug_assert_eq!(
             barrier_k,
             non_term_ops.len(),

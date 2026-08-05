@@ -46,6 +46,12 @@ pub(super) struct Linearized {
     pub block_param_vregs: BTreeMap<(BlockId, u32), VReg>,
     /// VReg -> type, from the snapshots as well as the function-wide map.
     pub vreg_types: BTreeMap<VReg, Type>,
+    /// The block index that first emitted each class. A block whose emitter does
+    /// not dominate it gets its own copy, so this is the record of which classes
+    /// a later pass may name without forcing a re-emission.
+    pub class_emitted_in: BTreeMap<ClassId, usize>,
+    /// Immediate dominator per block index, for asking that question.
+    pub idom: Vec<Option<usize>>,
 }
 
 /// Build the per-block `VRegInst` lists and everything derived from that choice.
@@ -306,5 +312,7 @@ pub(super) fn linearize(
         block_param_vreg_overrides,
         block_param_vregs,
         vreg_types,
+        class_emitted_in,
+        idom,
     }
 }

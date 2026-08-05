@@ -177,7 +177,7 @@ capacity loss with no obvious cause.
 | 0 | Slot numbering gets a real representation | small | **DONE** — was a documented landmine, and a prerequisite for step 5 |
 | 1 | Terminator args become VRegs in the CFG | medium | **DONE** — the representation defect, smallest slice with the biggest payoff |
 | — | Prereq D and four cleanups | small | **DONE** — behaviour-neutral, before step 2; see "Duplication: do it first, except where first makes it worse" |
-| 2 | Trivial-phi elimination over those VRegs | small-medium | 85-94% of every function's parameters; removes 36 of the 46 capacity failures |
+| 2 | Trivial-phi elimination over those VRegs | small-medium | **TIER 1 DONE** — measured: fewer spills and reloads everywhere, capacity unchanged. Tier 2 open |
 | 3 | The remaining `EffectfulOp` operands become VRegs | medium | finishes step 1 |
 | 3b | Block parameters get VRegs in the CFG | small | the phi seam's *destination* end; step 4 deletes its four-source resolution and needs a replacement |
 | 4 | Delete the reconstruction machinery (~312 sites) | mechanical | the payoff: the bug class goes away |
@@ -329,7 +329,43 @@ chain for its self-reference test.
   a drained memo, because the new index of a surviving parameter is usually the old
   index of a removed one and any incremental rewrite collides.
 
-### Step 2 notes — trivial-phi elimination
+### Step 2 notes — trivial-phi elimination — TIER 1 LANDED
+
+`src/compile/phi_removal.rs`, on by default. What shipped and what did not:
+
+- **Tier 1 is in**, with the dominance condition made explicit: a parameter goes
+  when every predecessor passes the same VReg *and* the source class's emitter
+  dominates the block, so nothing has to be re-emitted. Tier 2 (predecessors
+  passing different VRegs of one class, paid for by a re-emission the cost model
+  approves) is not written.
+- **The removal is not local, and the pass now proves its own result.** Removing
+  a parameter means unioning its class with the source's -- the block's own uses
+  still name the parameter, and a class whose only node was that parameter has
+  nothing left to lower. But a union changes what *every other* list naming
+  either class means, and composing several put a `CallResult` where a block
+  re-emitted it: a second barrier instruction for one effectful op, which
+  lowering asserts against. Predicting that composition was the wrong shape of
+  fix. The pass removes, re-extracts, linearizes, and then checks that no block
+  emits more barrier results than its own effectful ops produce; if it does, the
+  CFG and e-graph go back exactly as they were. `Function` derives `Clone` for
+  that reason.
+- **Measured** (`tests/run_codesize.sh`, totals against the pre-step baseline):
+  `lit` -1.6% instructions / -3.9% reloads, `fuzz` -3.1% instructions / -8.3%
+  spills / -6.3% reloads, `bench` +1.1% instructions but -13% spills / -8.5%
+  reloads. Per program on `bench` it is genuinely mixed: `hash_table` -O1 is
+  -9.2% instructions and -29% spills, `binary_search` -O1 -42% spills, while
+  `sort_insert` is +11% and `queens` +9%. Removing a parameter replaces a copy
+  per edge with a live range that spans to the use, and on a recursive function
+  that range now crosses a call.
+- **Capacity is unchanged**: 180 (seed, level) pairs on all three shapes, 0
+  regressed and 0 fixed. The 85-94% figure counts parameters this pass could
+  remove; tier 1 alone does not reach the 36 capacity failures the step claims,
+  and whether tier 2 does is now a measurable question rather than an estimate.
+- `propagate_block_params` is still in place. It was to be subsumed, and tier 1
+  does not subsume it: it merges a single-predecessor block's parameter with a
+  *constant* argument, which is a class-level merge this pass does not make.
+
+### Step 2 notes — the original design
 
 `phi(v, …, v) → v`, self-references ignored, iterated to a fixpoint.
 

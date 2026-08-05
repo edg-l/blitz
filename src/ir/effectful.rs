@@ -116,6 +116,18 @@ impl TermArgs {
             TermArgs::Committed(v) => Some(v.as_slice()),
         }
     }
+
+    /// Drop back to `Classes`, keeping the class each argument carries.
+    ///
+    /// For a pass that changes the CFG after the commit and hands it back to
+    /// linearization: the classes are still what the arguments *are*, while the
+    /// VRegs describe a linearization that is about to be replaced. Keeping them
+    /// would be keeping an answer to a question the next pass re-asks.
+    pub fn uncommit(&mut self) {
+        if let TermArgs::Committed(v) = self {
+            *self = TermArgs::Classes(v.iter().map(|a| a.class).collect());
+        }
+    }
 }
 
 /// Effectful operations that must appear in the CFG skeleton (not the e-graph).
