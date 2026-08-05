@@ -1247,12 +1247,35 @@ itself wrong: the remaining miscompile is most likely a separate latent defect
 that the changed allocation exposes, consistent with it being wrong at `-O1` and
 right at `-O0`.
 
-That makes it a value-level hunt on the emitted code, not another guard on the
-splitter: `DEBUGGING-NOTES.md` technique 1, one `printf` per term against `cc`,
-then `read_frame.py --sum-chain`. The bisection harness is worth rebuilding first
--- a `BLITZ_RULE3_LIMIT` counter around `route.insert` turns a whole-program
-miscompile into one named parameter in about eight compiles, and it is what
-found both of the defects this section did fix.
+### The wrong term is named, and it is one value reading another's storage
+
+`read_frame.py --sum-chain` run against both binaries -- the correct one and the
+one rule 3 produces -- gives chains that align term for term, and they diverge at
+exactly one row:
+
+| term | correct | rule 3 |
+| --- | --- | --- |
+| 10 | **0** | **-58** |
+| 11-23 | 14, 27, 43, 26, -47, -7, 14, -1, 2, 5, 8, -58, 819 | identical |
+
+Every later term is the same and the running totals stay 58 apart, which is
+exactly 1788 - 1730. **One term reads -58 where 0 belongs, and -58 is the value
+term 22 legitimately adds in the same sum.** So this is not arithmetic going
+wrong: a value is reading storage that belongs to another value.
+
+That is the backend's most common wrong-code shape, and with routing in the
+picture the specific thing to check first is the slot. `ParamGroup` is keyed by
+**VReg** and gives every position naming that VReg **one** slot, on the grounds
+that one VReg is one value. Rule 3 widens which parameters become candidates,
+and `find_block_param_vreg` now falls back to the CFG's `param_vregs` -- so the
+question to answer before anything else is whether two parameters of *different*
+blocks, carrying different values, can reach the same group and therefore the
+same cell. If they can, the fix is to key the group by something that is one
+value rather than by a name that two values can share.
+
+The tools for it are all present: the bisection harness (`BLITZ_RULE3_LIMIT`
+around `route.insert`) names the routing, `BLITZ_DEBUG=slots` prints every slot's
+traffic with its owner, and `read_frame.py --sum-chain` names the term.
 
 ### A store must not overwrite a slot its own block still reads
 
