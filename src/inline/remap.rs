@@ -186,7 +186,7 @@ impl RemapContext {
                 true_args,
                 false_args,
             } => EffectfulOp::Branch {
-                cond: self.remap_class_id(*cond),
+                cond: EffOperand::Class(self.remap_class_id(cond.class())),
                 cc: *cc,
                 bb_true: self.remap_block_id(*bb_true),
                 bb_false: self.remap_block_id(*bb_false),

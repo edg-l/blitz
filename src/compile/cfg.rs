@@ -441,8 +441,8 @@ pub(super) fn commit_terminator_arg_vregs(
     Ok(())
 }
 
-/// Commit linearization's choice of VReg for everything a non-terminator
-/// effectful op reads or defines.
+/// Commit linearization's choice of VReg for everything an effectful op reads or
+/// defines, except a `Ret`'s value.
 ///
 /// The sibling of [`commit_terminator_arg_vregs`], and the same move for the
 /// same reason: the address a `Load` reads is a register in a block, while the
@@ -474,8 +474,7 @@ pub(super) fn commit_effectful_vregs(
     for (block_idx, block) in func.blocks.iter_mut().enumerate() {
         let snapshot = &block_snapshots[block_idx];
         let point = ProgramPoint::block_exit(block_idx);
-        let non_term_count = block.non_term_count();
-        for (op_idx, op) in block.ops[..non_term_count].iter_mut().enumerate() {
+        for (op_idx, op) in block.ops.iter_mut().enumerate() {
             let roles: Vec<(String, &mut EffOperand)> = match op {
                 EffectfulOp::Load { addr, result, .. } => vec![
                     ("Load address".to_string(), addr),
@@ -498,6 +497,9 @@ pub(super) fn commit_effectful_vregs(
                             .map(|(i, r)| (format!("Call result {i}"), r)),
                     )
                     .collect(),
+                EffectfulOp::Branch { cond, .. } => {
+                    vec![("Branch condition".to_string(), cond)]
+                }
                 _ => continue,
             };
             for (what, operand) in roles {

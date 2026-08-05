@@ -298,7 +298,7 @@ mod tests {
             ty: Type::I64,
         });
         bb.ops.push(EffectfulOp::Branch {
-            cond: ClassId(3),
+            cond: EffOperand::Class(ClassId(3)),
             cc: CondCode::Ne,
             bb_true: 1,
             bb_false: 2,

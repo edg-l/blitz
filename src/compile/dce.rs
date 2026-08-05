@@ -93,7 +93,7 @@ pub(super) fn fold_constant_branches(
             ref false_args,
         } = *terminator
         {
-            let canon_cond = egraph.unionfind.find_immutable(cond);
+            let canon_cond = egraph.unionfind.find_immutable(cond.class());
 
             // Scan the cond e-class for an Icmp node with constant children.
             // The extraction may have picked X86Sub/Proj1 over Icmp, but the
@@ -188,7 +188,7 @@ fn collect_consumed_class_ids(
                     false_args,
                     ..
                 } => {
-                    seeds.push(*cond);
+                    seeds.push(cond.class());
                     seeds.extend(true_args.expect_classes().iter().copied());
                     seeds.extend(false_args.expect_classes().iter().copied());
                 }
@@ -473,7 +473,7 @@ mod tests {
                 make_block(
                     0,
                     vec![EffectfulOp::Branch {
-                        cond: ClassId(0),
+                        cond: EffOperand::Class(ClassId(0)),
                         cc: CondCode::Ne,
                         bb_true: 1,
                         bb_false: 2,

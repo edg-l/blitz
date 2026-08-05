@@ -232,7 +232,7 @@ pub enum EffectfulOp {
     /// Conditional branch to `bb_true` or `bb_false` depending on flags.
     /// `true_args` / `false_args` are passed as block parameters.
     Branch {
-        cond: ClassId,
+        cond: EffOperand,
         cc: CondCode,
         bb_true: BlockId,
         bb_false: BlockId,
@@ -273,7 +273,7 @@ impl EffectfulOp {
                 false_args,
                 ..
             } => {
-                f(*cond);
+                f(cond.class());
                 for args in [true_args, false_args] {
                     args.class_ids().for_each(&mut f);
                 }
@@ -313,7 +313,7 @@ impl EffectfulOp {
                 false_args,
                 ..
             } => {
-                f(cond);
+                f(cond.class_mut());
                 for args in [true_args, false_args] {
                     args.class_ids_mut().for_each(&mut f);
                 }

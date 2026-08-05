@@ -17,15 +17,10 @@ use crate::schedule::scheduler::ScheduledInst;
 pub(super) fn mark_branch_cond_barrier(
     terminator: Option<&EffectfulOp>,
     non_term_count: usize,
-    block_idx: usize,
-    egraph: &EGraph,
-    class_to_vreg: &ClassVRegMap,
     vreg_to_arg: &mut BTreeMap<VReg, usize>,
 ) {
     if let Some(EffectfulOp::Branch { cond, .. }) = terminator {
-        let canon = egraph.unionfind.find_immutable(*cond);
-        let point = ProgramPoint::block_entry(block_idx);
-        if let Some(vreg) = class_to_vreg.lookup(canon, point) {
+        if let Some(vreg) = cond.vreg() {
             // Force the cond VReg into the group after all effectful ops.
             // Use max (not min like mark_arg) because we need this to come
             // AFTER all calls, overriding any earlier constraint.
@@ -41,7 +36,6 @@ pub(super) fn mark_branch_cond_barrier(
 /// called together.
 pub(super) fn build_barrier_context(
     block: &BasicBlock,
-    block_idx: usize,
     egraph: &EGraph,
     class_to_vreg: &ClassVRegMap,
     schedule: &[ScheduledInst],
@@ -50,14 +44,7 @@ pub(super) fn build_barrier_context(
     let non_term_ops = &block.ops[..non_term_count];
     let (result_map, mut arg_map) =
         build_barrier_maps(non_term_ops, egraph, class_to_vreg, schedule);
-    mark_branch_cond_barrier(
-        block.ops.last(),
-        non_term_count,
-        block_idx,
-        egraph,
-        class_to_vreg,
-        &mut arg_map,
-    );
+    mark_branch_cond_barrier(block.ops.last(), non_term_count, &mut arg_map);
     (result_map, arg_map)
 }
 

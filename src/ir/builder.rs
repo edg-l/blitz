@@ -599,7 +599,7 @@ impl FunctionBuilder {
             block.id
         );
         block.ops.push(EffectfulOp::Branch {
-            cond: cond.0,
+            cond: EffOperand::Class(cond.0),
             cc,
             bb_true,
             bb_false,

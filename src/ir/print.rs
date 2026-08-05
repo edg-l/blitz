@@ -226,7 +226,7 @@ fn fmt_effectful(
             true_args,
             false_args,
         } => {
-            let cond_s = resolve_cid(*cond, class_to_vreg, egraph_uf);
+            let cond_s = resolve_cid(cond.class(), class_to_vreg, egraph_uf);
             let true_arg_strs: Vec<String> = true_args
                 .class_ids()
                 .map(|a| resolve_cid(a, class_to_vreg, egraph_uf))

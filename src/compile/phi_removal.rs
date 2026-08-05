@@ -322,6 +322,7 @@ pub(super) fn apply(func: &mut Function, egraph: &mut EGraph, removal: &Removal)
                     .iter_mut()
                     .chain(results.iter_mut())
                     .for_each(EffOperand::uncommit),
+                EffectfulOp::Branch { cond, .. } => cond.uncommit(),
                 _ => {}
             }
         }

@@ -449,7 +449,7 @@ pub fn run_licm(func: &mut Function, egraph: &mut EGraph) -> ExtraRoots {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::effectful::{EffectfulOp, TermArgs};
+    use crate::ir::effectful::{EffOperand, EffectfulOp, TermArgs};
     use crate::ir::function::{BasicBlock, Function};
     use crate::ir::op::ClassId;
 
@@ -468,7 +468,7 @@ mod tests {
 
     fn branch(cond: ClassId, bb_true: BlockId, bb_false: BlockId) -> EffectfulOp {
         EffectfulOp::Branch {
-            cond,
+            cond: EffOperand::Class(cond),
             cc: crate::ir::condcode::CondCode::Ne,
             bb_true,
             bb_false,

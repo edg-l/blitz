@@ -30,7 +30,7 @@ fn collect_referenced_ids(ops: &[EffectfulOp]) -> BTreeSet<ClassId> {
                 false_args,
                 ..
             } => {
-                ids.insert(*cond);
+                ids.insert(cond.class());
                 ids.extend(true_args.expect_classes());
                 ids.extend(false_args.expect_classes());
             }
@@ -268,7 +268,7 @@ fn substitute_class_ids(op: &EffectfulOp, subst: &[(ClassId, ClassId)]) -> Effec
             true_args,
             false_args,
         } => EffectfulOp::Branch {
-            cond: sub(*cond),
+            cond: EffOperand::Class(sub(cond.class())),
             cc: *cc,
             bb_true: *bb_true,
             bb_false: *bb_false,

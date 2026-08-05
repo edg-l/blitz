@@ -280,7 +280,7 @@ impl Verifier<'_> {
                 false_args,
                 ..
             } => {
-                self.check_class(*cond, &format!("{at}: Branch cond"));
+                self.check_class(cond.class(), &format!("{at}: Branch cond"));
                 self.check_edge(&at, "true", *bb_true, true_args);
                 self.check_edge(&at, "false", *bb_false, false_args);
             }

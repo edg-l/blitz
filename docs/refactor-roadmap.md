@@ -564,10 +564,7 @@ independent, and the cheap ones first buy the shape before the hard one needs it
 1. `Load.addr`, `Store.addr`, `Store.val` -- one carrier each. **DONE.**
 2. `Call.args` -- a list of the same carrier. **DONE.**
 3. `Load.result`, `Call.results` -- *defs*, not uses. **DONE.**
-4. `Branch.cond` -- one field, but it reaches every constructor of `Branch`: the
-   inliner's remapper and transform, DCE's constant fold, LICM, the verifier and
-   the builder. Cheap to describe, wide to land; do it once the carrier type has
-   settled on the four above.
+4. `Branch.cond` -- one field, wide to land. **DONE.**
 5. `Ret.val` -- last, because it needs the both-fields shape *and* a decision
    about the constant fold described above.
 
@@ -622,6 +619,16 @@ regressed: `hash_table.c` -O0 224 -> 223 insts, `mixed-seed28` -O1 6199 -> 6196,
 generated (seed, level) pairs with 0 regressed, 0 fixed, 0 changed kind.
 
 Slice 3 is byte-identical to slice 2: 768 identity comparisons, 0 differing.
+
+**Slice 4 replaced the two derivations of the branch condition with one**, and
+they turned out to agree everywhere measured. `mark_branch_cond_barrier` asked
+the block's own snapshot at the block's *entry*; Phase 4b asked the
+*function-wide* map at the block's *exit*. A flags-typed class is re-emitted in
+every block that names it -- linearization forces that, since EFLAGS cannot cross
+a block boundary -- so the function-wide map holds whichever block emitted it
+first, and the two could differ. On this corpus they do not: 768 identity
+comparisons, 0 differing. Both functions lost their `block_idx`, and
+`mark_branch_cond_barrier` lost the e-graph and the map as well.
 
 **State the prediction before each one.** These resolutions all run before the
 splitter, where they are correct today, so each slice should be byte-identical on
