@@ -552,6 +552,30 @@ obvious list:
 Step 3 is what makes `verify_cfg_schedule_agreement` vacuous so it can go, and with
 it both of the post-splitter disagreement shapes recorded under prereq A.
 
+**Do it in this order, one commit each, gates between.** The fields are
+independent, and the cheap ones first buy the shape before the hard one needs it:
+
+1. `Load.addr`, `Store.addr`, `Store.val` -- one carrier each, and the barrier
+   already holds the VReg positionally, so the commit has somewhere to read from.
+2. `Call.args` -- a list, the same shape as `TermArgs::Committed`.
+3. `Load.result`, `Call.results` -- *defs*, not uses. The barrier instruction's
+   own `dst` is the VReg, so these commit from the schedule rather than from the
+   class map, and they are what makes the agreement check vacuous.
+4. `Branch.cond` -- one field, but it reaches every constructor of `Branch`: the
+   inliner's remapper and transform, DCE's constant fold, LICM, the verifier and
+   the builder. Cheap to describe, wide to land; do it once the carrier type has
+   settled on the four above.
+5. `Ret.val` -- last, because it needs the both-fields shape *and* a decision
+   about the constant fold described above.
+
+**State the prediction before each one.** These resolutions all run before the
+splitter, where they are correct today, so each slice should be byte-identical on
+`tests/run_identity.sh` and clean on `tests/run_codesize.sh --check`. A slice that
+changes output has found a disagreement that was already there -- which is the
+point of the step, but it means stopping to explain the diff rather than
+recording a new baseline. Step 2's estimate went unchecked for a year because
+nothing could check it; every step from here says what it expects first.
+
 ### Step 3b notes — block parameters get VRegs
 
 The phi seam has two ends and step 1 fixed one. `cfg::resolve_block_param_vreg` still
