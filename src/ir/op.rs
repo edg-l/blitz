@@ -1036,6 +1036,11 @@ impl Op {
                     RegClass::GPR
                 }
             }
+            // A load's operands are its address -- the folded `Addr`, and the
+            // base and index the barrier repeats for liveness -- so they are
+            // GPR however the loaded value is classed. This is the one op whose
+            // result is FP while no operand of it is.
+            Op::LoadResult(_, _) => RegClass::GPR,
             _ if self.is_fp_op() => RegClass::XMM,
             _ => RegClass::GPR,
         }
