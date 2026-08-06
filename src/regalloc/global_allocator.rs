@@ -1755,10 +1755,19 @@ pub fn allocate_global(
             .flatten()
             .copied()
             .collect();
+        // Nor is a division's pair, for the reason `Op::result_in_fixed_regs`
+        // gives: the store would save a register that never held it.
+        let fixed_reg_results: BTreeSet<VReg> = phase4
+            .per_block_insts
+            .iter()
+            .flatten()
+            .filter(|inst| inst.op.result_in_fixed_regs())
+            .map(|inst| inst.dst)
+            .collect();
         let candidates: BTreeSet<usize> = phase4
             .over_budget
             .iter()
-            .filter(|v| !block_params.contains(v))
+            .filter(|v| !block_params.contains(v) && !fixed_reg_results.contains(v))
             .map(|v| v.0 as usize)
             .collect();
 

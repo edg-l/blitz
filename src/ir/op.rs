@@ -1070,6 +1070,20 @@ impl Op {
         }
     }
 
+    /// Whether this op leaves its result in fixed physical registers rather than
+    /// in the VReg it defines.
+    ///
+    /// A division writes its quotient to RAX and its remainder to RDX. The pair
+    /// VReg names the two together and holds neither, and only the projections
+    /// adjacent to the division read those registers -- so it needs no colour of
+    /// its own, and a slot saving it would store a register that never held it.
+    /// Spilling it is worse than wasteful: the reload renames the operand the
+    /// projections are recognised by, and a projection that is no longer read as
+    /// a division's becomes an ordinary register copy out of the pair.
+    pub fn result_in_fixed_regs(&self) -> bool {
+        matches!(self, Op::Mach(MachOp::X86Idiv(..) | MachOp::X86Div(..)))
+    }
+
     /// Returns true if this op produces a value that lives in an XMM (FP) register.
     pub fn is_fp_op(&self) -> bool {
         match self {
