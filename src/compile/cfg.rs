@@ -717,3 +717,185 @@ pub(super) fn compute_loop_depths(
 
     result
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::CondCode;
+
+    /// A function whose blocks are wired by the terminators given, block `i`
+    /// carrying `terms[i]`. Ids equal indices, so a `BlockId` and an index are
+    /// interchangeable in the assertions below.
+    fn func_with(terms: Vec<EffectfulOp>) -> Function {
+        let blocks = terms
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| BasicBlock {
+                id: i as BlockId,
+                param_types: vec![],
+                param_vregs: vec![],
+                ops: vec![t],
+            })
+            .collect::<Vec<_>>();
+        Function {
+            name: "f".to_string(),
+            param_types: vec![],
+            return_types: vec![],
+            next_block_id: blocks.len() as BlockId,
+            blocks,
+            param_class_ids: vec![],
+            egraph: None,
+            stack_slots: vec![],
+            noinline: false,
+        }
+    }
+
+    fn jump(target: BlockId) -> EffectfulOp {
+        EffectfulOp::Jump {
+            target,
+            args: TermArgs::classes([]),
+        }
+    }
+
+    fn branch(bb_true: BlockId, bb_false: BlockId) -> EffectfulOp {
+        EffectfulOp::Branch {
+            cond: EffOperand::Class(ClassId(0)),
+            cc: CondCode::Ne,
+            bb_true,
+            bb_false,
+            true_args: TermArgs::classes([]),
+            false_args: TermArgs::classes([]),
+        }
+    }
+
+    fn ret() -> EffectfulOp {
+        EffectfulOp::Ret { val: None }
+    }
+
+    /// 0 -> {1, 2} -> 3.
+    fn diamond() -> Function {
+        func_with(vec![branch(1, 2), jump(3), jump(3), ret()])
+    }
+
+    /// 0 -> 1, 1 -> {2, 3}, 2 -> 1 (back edge), 3 returns.
+    fn loop_with_exit() -> Function {
+        func_with(vec![jump(1), branch(2, 3), jump(1), ret()])
+    }
+
+    /// 0 returns; 1 and 2 form a cycle the entry cannot reach.
+    fn unreachable_cycle() -> Function {
+        func_with(vec![ret(), jump(2), jump(1)])
+    }
+
+    fn idom_of(func: &Function) -> Vec<Option<usize>> {
+        compute_idom(func, &compute_rpo(func))
+    }
+
+    /// The whole point of `DomOrder`: it is a constant-time restatement of the
+    /// chain walk, so the two must answer identically for every ordered pair of
+    /// a function whose blocks the entry all reaches -- which is what DCE leaves
+    /// and what every dominance query in the pipeline runs on.
+    #[test]
+    fn dom_order_agrees_with_the_chain_walk() {
+        for func in [diamond(), loop_with_exit()] {
+            let idom = idom_of(&func);
+            let order = DomOrder::new(&idom);
+            for a in 0..func.blocks.len() {
+                for b in 0..func.blocks.len() {
+                    assert_eq!(
+                        order.dominates(a, b),
+                        dominates(a, b, &idom),
+                        "{}: disagreement on ({a}, {b}), idom = {idom:?}",
+                        func.name,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn entry_dominates_every_reachable_block_and_neither_arm_dominates_the_join() {
+        let func = diamond();
+        let idom = idom_of(&func);
+        let order = DomOrder::new(&idom);
+        for b in 0..func.blocks.len() {
+            assert!(order.dominates(0, b), "entry must dominate block {b}");
+        }
+        assert!(!order.dominates(1, 3));
+        assert!(!order.dominates(2, 3));
+        assert!(!order.dominates(1, 2));
+        assert!(!order.dominates(3, 0));
+    }
+
+    #[test]
+    fn a_loop_header_dominates_its_body_and_its_exit() {
+        let func = loop_with_exit();
+        let order = DomOrder::new(&idom_of(&func));
+        assert!(order.dominates(1, 2), "the header must dominate the body");
+        assert!(order.dominates(1, 3), "the header must dominate the exit");
+        assert!(
+            !order.dominates(2, 1),
+            "the body must not dominate the header"
+        );
+    }
+
+    /// A block outside the dominator tree gets an empty interval, so it
+    /// dominates nothing but itself and nothing dominates it.
+    #[test]
+    fn nothing_dominates_an_unreachable_block() {
+        let func = unreachable_cycle();
+        let order = DomOrder::new(&idom_of(&func));
+        for b in [1, 2] {
+            assert!(!order.dominates(0, b));
+            assert!(!order.dominates(b, 0));
+            assert!(order.dominates(b, b));
+        }
+        assert!(!order.dominates(1, 2));
+    }
+
+    /// RPO's stated guarantee: a loop header comes before its body, and every
+    /// block appears exactly once even when the entry cannot reach it.
+    #[test]
+    fn rpo_puts_a_loop_header_before_its_body_and_lists_every_block_once() {
+        let func = loop_with_exit();
+        let rpo = compute_rpo(&func);
+        let mut seen = rpo.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..func.blocks.len()).collect::<Vec<_>>());
+        let pos = |b: usize| rpo.iter().position(|&x| x == b).unwrap();
+        assert!(pos(1) < pos(2), "header before body, got {rpo:?}");
+        assert!(pos(0) < pos(1));
+
+        let func = unreachable_cycle();
+        let mut seen = compute_rpo(&func);
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![0, 1, 2],
+            "unreachable blocks are still listed once"
+        );
+    }
+
+    #[test]
+    fn successors_and_predecessors_are_the_same_edge_set() {
+        for func in [diamond(), loop_with_exit(), unreachable_cycle()] {
+            let succs = successor_indices(&func);
+            let preds = predecessor_indices(&func);
+            let mut from_succs: Vec<(usize, usize)> = succs
+                .iter()
+                .enumerate()
+                .flat_map(|(a, ss)| ss.iter().map(move |&b| (a, b)))
+                .collect();
+            let mut from_preds: Vec<(usize, usize)> = preds
+                .iter()
+                .enumerate()
+                .flat_map(|(b, ps)| ps.iter().map(move |&a| (a, b)))
+                .collect();
+            from_succs.sort_unstable();
+            from_preds.sort_unstable();
+            assert_eq!(from_succs, from_preds, "{}", func.name);
+        }
+    }
+}
