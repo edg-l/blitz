@@ -13,9 +13,9 @@ is fair game here.
 The measure of success is code quality against `gcc -O2` / `clang -O2` on the
 same input: fewer instructions, fewer bytes, fewer spills, better loops.
 
-**Where that stands: `x1.29` against `gcc -O2` and `x1.04` against `clang -O2`**,
+**Where that stands: `x1.29` against `gcc -O2` and `x1.03` against `clang -O2`**,
 geometric mean of the per-program instruction ratio over the 15 `bench` kernels,
-from `bash tests/run_codesize.sh --gap`. Worst is `queens` at `x2.64`. Five
+from `bash tests/run_codesize.sh --gap`. Worst is `queens` at `x2.67`. Five
 kernels are already *below* 1.0, which is not a win and is the first thing to
 misread: this counts static instructions, and a compiler that inlines or unrolls
 emits more of them and runs faster. `gcc` turns `fib_memo` into 436 instructions
@@ -111,7 +111,7 @@ gated on pressure because it runs before global liveness exists, and
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
 - Code quality also has an *absolute* number now, which is the one the Goal is
-  written against: `--gap`, `x1.29` vs `gcc -O2` and `x1.04` vs `clang -O2` on
+  written against: `--gap`, `x1.29` vs `gcc -O2` and `x1.03` vs `clang -O2` on
   `bench`. **`bench` is the only corpus that can produce it.** `lit` and `fuzz`
   compute a fixed answer from no runtime input, so `gcc -O2` evaluates the whole
   program and emits the constant -- a generated program becomes
@@ -283,14 +283,23 @@ so the holes stay visible.
       -3.6%. It also removed **eight capacity failures**, 24 -> 16: the spurious
       edges were making graphs uncolourable that are not.
 - [ ] **Copies are still a third of what blitz emits.** Measured over the 15
-      `bench` kernels: blitz 820 register-to-register moves in 2628
+      `bench` kernels: blitz 805 register-to-register moves in 2613
       instructions, against `gcc -O2`'s 345 in 2226 and `clang -O2`'s 214 in
-      2572. **The whole remaining instruction gap to gcc is copies.** Of blitz's,
-      the two-address form is now handled; what is left is parallel copies at
-      block edges (168 of them sit in runs of four or more) and scattered
-      shuffles. `coalesce.rs` already runs Briggs-Cooper over the phi copies, so
-      the work starts by finding why it declines these merges -- and it lands in
-      the block-parameter machinery, so read `docs/refactor-roadmap.md` first.
+      2572. **The whole remaining instruction gap to gcc is copies.**
+      Conservative coalescing is at its limit: `BLITZ_DEBUG=coalesce` now
+      reports the declines, and with Briggs and George both in, 34 of 64
+      candidate copies on `queens` and 43 of 112 on `hash_table` are still
+      refused because the merge genuinely constrains the graph. Getting further
+      needs one of two structural changes rather than more tuning -- iterated
+      coalescing, which interleaves merging with simplification instead of
+      deciding each copy once, or **fewer block parameters to copy**, which
+      `docs/refactor-roadmap.md` argues for at length and measures 85-94% of
+      them as naming a single value. Read it before starting.
+- [x] **Coalescing takes George's rule as well as Briggs'.** Either test
+      passing admits the merge; both are conservative, so the pair is too. Over
+      the rows that changed: `fuzz` -7.1% insts and -4.5% bytes, `lit` -5.6% and
+      -3.9%, `bench` -1.0%. It helps where the interference graph is dense,
+      which is where Briggs alone refuses most merges.
 - [ ] **GVN / cross-block CSE.** The e-graph does local CSE only. Repeated
       address computations and field loads survive across blocks. Typical
       5-15% on real code.

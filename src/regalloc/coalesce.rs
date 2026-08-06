@@ -51,6 +51,8 @@ pub fn coalesce(
     xmm_colors: u32,
 ) -> Vec<(usize, usize)> {
     let mut merged: Vec<(usize, usize)> = Vec::new();
+    // Why each candidate copy was refused, for the summary trace below.
+    let mut why: std::collections::BTreeMap<&str, usize> = Default::default();
     // Union-find to track already-merged groups.
     let mut parent: Vec<usize> = (0..graph.num_vregs).collect();
 
@@ -82,18 +84,21 @@ pub fn coalesce(
 
         if src_root == dst_root {
             // Already in the same group.
+            *why.entry("already merged").or_default() += 1;
             continue;
         }
 
         // Check if the two representative groups interfere. `adj` is kept in
         // sync with merges, so this considers every member of either group.
         if adj[src_root].contains(&dst_root) || adj[dst_root].contains(&src_root) {
+            *why.entry("groups interfere").or_default() += 1;
             continue;
         }
 
         // Different register classes must never coalesce (GPR <-> XMM merge
         // is always invalid regardless of adjacency).
         if graph.reg_class[src_root] != graph.reg_class[dst_root] {
+            *why.entry("different reg class").or_default() += 1;
             continue;
         }
 
@@ -118,7 +123,35 @@ pub fn coalesce(
                 significant.insert(n_root);
             }
         }
-        if significant.len() >= k {
+        // Briggs is conservative and refuses most merges here: 39 of 64
+        // candidate copies on `queens`, 44 of 112 on `hash_table`. George's
+        // test admits a different set and is conservative in the same sense --
+        // it passes only when the merge constrains no neighbour that was not
+        // already constrained -- so taking either is still safe.
+        //
+        // For every neighbour `t` of the node being merged away: `t` is
+        // harmless if it cannot compete for the colour (different class), if it
+        // already interferes with the survivor, or if it has room to spare
+        // (degree below k). If that holds of all of them, the survivor's
+        // neighbourhood gains nothing that can stop it being coloured.
+        //
+        // Checked in both orientations: either one passing justifies the same
+        // merged node.
+        let george = |a: usize, b: usize, parent: &mut Vec<usize>| {
+            adj[a].iter().all(|&t| {
+                let t_root = find(parent, t);
+                t_root == a
+                    || t_root == b
+                    || graph.reg_class[t_root] != class
+                    || adj[b].contains(&t_root)
+                    || adj[t_root].len() < k
+            })
+        };
+        if significant.len() >= k
+            && !george(dst_root, src_root, &mut parent)
+            && !george(src_root, dst_root, &mut parent)
+        {
+            *why.entry("briggs and george both decline").or_default() += 1;
             continue;
         }
 
@@ -160,6 +193,18 @@ pub fn coalesce(
         merged.push((src_root, dst_root));
     }
 
+    // What was declined and why. The trace named only the merges it made, so a
+    // copy surviving into the emitted code had no explanation anywhere -- and
+    // copies are a third of what this backend emits.
+    if crate::trace::is_enabled("coalesce") {
+        tracing::debug!(
+            target: "blitz::coalesce",
+            "{} copy pairs, {} merged; declined: {:?}",
+            copy_pairs.len(),
+            merged.len(),
+            why,
+        );
+    }
     merged
 }
 
