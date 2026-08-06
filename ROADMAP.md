@@ -30,19 +30,58 @@ rather than overhead against it.
   atomics, sanitizers, LTO, PGO. These are what a *shipping* compiler needs, not
   what a *good* optimizer needs. Revisit only if one blocks measurement.
 
+## Start here
+
+Ordered. Each says what it is, why it is placed there, and what would tell you it
+is done.
+
+1. **Fix the five open miscompiles.** `mixed` seeds 92 and 109, `args` seeds 52,
+   108 and 175, with reproducers at `~/.cache/blitz-fuzz-fails/`. Correctness is a
+   precondition of this project's goal, not a competing priority. Take `mixed` 92
+   first: it is wrong at *both* levels, so only the `cc` oracle sees it, and it
+   widened from `-O1`-only during the refactor rather than sitting still.
+   Separately, `mixed` 57 is a **capacity regression** step 6's fold introduced;
+   it is the one open failure this tree caused rather than inherited.
+   Done when a 200-seed run of each shape is clean.
+2. **Make the gate able to see them.** `run_fuzz.sh` is pinned at 30 seeds
+   everywhere, and at 30 seeds all three shapes are green while five programs
+   miscompile. **A session can work all day, see every gate pass, and never learn
+   that.** Widening costs 67s a shape; a saved corpus of known-failing programs
+   would make the routine check seconds. Do this alongside 1, or 1 has no oracle.
+3. **Give LICM a pressure check.** The largest measured quality gap in the tree:
+   `BLITZ_PASSES=-licm bash tests/run_codesize.sh` takes `bench` reloads from 377
+   to 149 and spills 84 to 30, and *lowers* instructions 2637 to 2518. It hoists
+   every invariant it can prove, and a value hoisted out of a loop is live across
+   the whole body. Done when `-O1` beats `-O0` on all 15 `bench` kernels.
+4. **Offset-aware alias analysis.** ~50 LOC in `alias.rs`, and the cheapest
+   quality win available: today any write to a base invalidates every cached load
+   at that base, so `s->a` and `s->b` kill each other, which throttles the
+   forwarding and DSE passes already shipped.
+
+After those, the P1 list below is ordered by measured impact. **`P2` is where the
+single-target thesis is supposed to pay off and none of it is started** --
+immediate-form ALU ops are shovel-ready and mirror the shipped `X86CmpI`.
+
+**Do not start in the register allocator, the splitter, or the block-parameter
+machinery without reading `docs/refactor-roadmap.md` first.** It is finished as
+work and is now the record of what eleven steps measured -- including the
+predictions that were wrong, which is what stops the next attempt repeating them.
+Three are worth knowing before touching the splitter: the Chaitin ratio has been
+rejected by measurement three times, `insert_early_barrier_spills` cannot be
+gated on pressure because it runs before global liveness exists, and
+`Op::BlockParam` cannot leave the e-graph because expressions consume it.
+
 ## Current state (2026-08-06)
 
 - 925 Rust tests + 478 lit tests, all green. `cargo fmt` clean, zero build warnings.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
 - `bash tests/lit/run_diff.sh`: 301 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
-- Generated programs at 30 seeds per shape: `mixed` 30/30, `args` 30/30,
-  `pressure` 30/30. **That is the width the corpus is pinned at, and it is
-  measuring nothing.** At 200 seeds `mixed` is 191/200 and `args` 183/200:
-  **8 wrong-value programs and 16 capacity failures across the two shapes.** The
-  30-seed run is green because 30 seeds is too narrow, not because the compiler
-  is correct -- see Known bugs. (`mixed` is 194/200 since step 6's fold; the table
-  in Known bugs is the current one.)
+- Generated programs at 30 seeds a shape -- the width every gate runs -- are
+  `mixed` 30/30, `args` 30/30, `pressure` 30/30. **That width measures nothing.**
+  At 200 seeds `mixed` is 194/200 and `args` 183/200: **5 wrong-value programs
+  and 17 capacity failures.** The 30-seed run is green because it is too narrow,
+  not because the compiler is correct. See Known bugs, and item 2 of Start here.
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 892 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
@@ -53,32 +92,6 @@ rather than overhead against it.
   lowering -> MachInst lowering -> branch relaxation -> ELF.
 - Implemented e-graph rules: see `docs/egraph-optimization-roadmap.md`.
 - Splitter design: see `docs/split-pass-plan.md`.
-
-## The next refactors
-
-**`docs/refactor-roadmap.md` is finished.** All eleven steps -- 0, 1, 2, 3, 3b, 4,
-5, 5b, 5c, 6 and 7 -- are done. Read it before starting anything in the register
-allocator, the splitter, or the block-parameter machinery: it is now a record of
-what each step measured, including the predictions that were wrong, rather than a
-list of work.
-
-What it closed, in the order it mattered:
-
-- **The CFG held `ClassId`s where it should hold VRegs** (steps 1-4), the root
-  cause behind nine wrong-code bugs and both failed rematerialization attempts.
-- **The function-scope allocator could not spill** (step 5), which was every
-  capacity failure. With 5b and 5c it took the generated corpus from `pressure`
-  14/30 to 30/30 at the width the gate runs.
-- **Two allocators did one job** (step 6). One is left; the fold deleted 1620
-  lines and fixed two miscompiles, because the per-block path was still pinning a
-  dividend to RAX after that was removed elsewhere as a bug.
-- **`Op` was three enums wearing one hat** (step 7). `PureOp` / `MachOp` /
-  `PseudoOp`, which collapsed the 30-variant generic-op list that `lower.rs` and
-  `cost.rs` each maintained separately -- and had already drifted over `Fcmp` --
-  into one arm apiece.
-
-Two things outlived it and are **not** refactoring: the splitter's victim
-heuristic, now P3 below, and the open miscompiles under Known bugs.
 
 ## Priorities
 
@@ -269,30 +282,31 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**Eight wrong-value programs and sixteen capacity failures are open**, found by
-running the generator at 200 seeds a shape instead of the 30 the gate is pinned
+**Five wrong-value programs and seventeen capacity failures are open**, found by
+running the generator at 200 seeds a shape instead of the 30 every gate is pinned
 at. Reproducers are kept outside the repo at `~/.cache/blitz-fuzz-fails/` and are
-unreduced.
+unreduced; `gen_c.py --seed N --shape S` regenerates one until the generator
+changes, which is why the files are the durable artifact and the seed is not.
 
 | shape | passing | wrong value | capacity |
 | --- | --- | --- | --- |
-| `mixed` at 200 | 194/200 | seeds 92, 109 | seeds 57, 123, 135, 150 |
-| `args` at 200 | 183/200 | seeds 52, 108, 146, 175 | 13 seeds |
+| `mixed` at 200 | 194/200 | 92, 109 | 57, 123, 135, 150 |
+| `args` at 200 | 183/200 | 52, 108, 175 | 13 seeds |
 
-`mixed` seeds 137 and 196 stopped miscompiling when step 6's fold removed the
-single-block path's RAX dividend pin. Seed 57 is new from that same fold and seed
-92 widened from `-O1` to both levels, so the fold is one fewer failing seed on
-net; `63e2f1b` has the detail.
+**Three of these closed themselves during the refactor**, which is the argument
+for re-measuring rather than trusting the list: `mixed` 137 and 196 and `args` 146
+stopped miscompiling when step 6's fold removed the single-block path's RAX
+dividend pin. **`mixed` 57 went the other way** -- a capacity failure the same
+fold introduced -- and `mixed` 92 widened from `-O1` to both levels.
 
-Both oracles are contributing, which is the argument for keeping both: `mixed`
-seed 137 is wrong at `-O0` and right at `-O1`, seed 109 the reverse (1571 against
-675), and seed 92 is wrong at `-O1` only. Seed 196 exits 3 at `-O0` -- the
-program's own guard rejecting its own sum -- while `-O1` prints 1624.
+Both oracles are contributing, which is the argument for keeping both: `mixed` 109
+is right at `-O0` and wrong at `-O1` (1571 against 675), while 92 is now wrong at
+both and only the `cc` oracle sees it.
 
-The capacity failures are the two shapes the allocator already names: *"spilling
-did not reduce it, so the pressure point is one instruction whose own operands
-are what is live there"*, and *"every over-budget VReg is a block parameter,
-which only the splitter can route through a slot"*.
+The capacity failures are the two shapes the allocator names itself: *"spilling
+did not reduce it, so the pressure point is one instruction whose own operands are
+what is live there"*, and *"every over-budget VReg is a block parameter, which
+only the splitter can route through a slot"*.
 
 What the fixed ones are worth is the shape they kept having, which is the first
 thing to check on any of these:
