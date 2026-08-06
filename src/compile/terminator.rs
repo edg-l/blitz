@@ -132,26 +132,20 @@ pub(super) fn thread_branches(
             redirect.insert(k, dest);
         }
 
-        // Rewrite Jcc/Jmp targets in all blocks.
+        // Rewrite Jcc/Jmp targets in all blocks. A rewrite that lands on the
+        // target the jump already had is not a change: a cycle of trampolines
+        // redirects onto itself, and counting that as progress means the outer
+        // loop rebuilds the same map forever.
         let mut changed = false;
         for items in block_items.iter_mut() {
             for item in items.iter_mut() {
-                if let BlockItem::Inst(inst) = item {
-                    match inst {
-                        MachInst::Jmp { target } => {
-                            if let Some(&new_target) = redirect.get(target) {
-                                *target = new_target;
-                                changed = true;
-                            }
-                        }
-                        MachInst::Jcc { target, .. } => {
-                            if let Some(&new_target) = redirect.get(target) {
-                                *target = new_target;
-                                changed = true;
-                            }
-                        }
-                        _ => {}
-                    }
+                if let BlockItem::Inst(MachInst::Jmp { target } | MachInst::Jcc { target, .. }) =
+                    item
+                    && let Some(&new_target) = redirect.get(target)
+                    && new_target != *target
+                {
+                    *target = new_target;
+                    changed = true;
                 }
             }
         }
@@ -768,4 +762,156 @@ fn emit_phi_copies(copies: &[PhiCopy], temp: Reg, frame_layout: &FrameLayout) ->
 
     result.extend(phi_copies(&reg_copies, temp));
     result
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::function::BasicBlock;
+
+    /// Blocks 0..n with ids equal to indices, which is what lets `rpo_order` be
+    /// the identity below and a `LabelId` be a block index.
+    fn func_of(n: usize) -> Function {
+        Function {
+            name: "f".to_string(),
+            param_types: vec![],
+            return_types: vec![],
+            next_block_id: n as BlockId,
+            blocks: (0..n)
+                .map(|i| BasicBlock {
+                    id: i as BlockId,
+                    param_types: vec![],
+                    param_vregs: vec![],
+                    ops: vec![EffectfulOp::Ret { val: None }],
+                })
+                .collect(),
+            param_class_ids: vec![],
+            egraph: None,
+            stack_slots: vec![],
+            noinline: false,
+        }
+    }
+
+    fn jmp(target: LabelId) -> BlockItem {
+        BlockItem::Inst(MachInst::Jmp { target })
+    }
+
+    fn mov() -> BlockItem {
+        BlockItem::Inst(MachInst::MovRR {
+            size: OpSize::S64,
+            dst: Operand::Reg(Reg::RAX),
+            src: Operand::Reg(Reg::RCX),
+        })
+    }
+
+    /// `thread_branches` over blocks in index order, returning the target of
+    /// each block's jump.
+    fn thread(mut items: Vec<Vec<BlockItem>>) -> Vec<Option<LabelId>> {
+        let func = func_of(items.len());
+        let rpo: Vec<usize> = (0..items.len()).collect();
+        thread_branches(&mut items, &func, &rpo);
+        items
+            .iter()
+            .map(|block| {
+                block.iter().find_map(|item| match item {
+                    BlockItem::Inst(MachInst::Jmp { target }) => Some(*target),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    /// A chain of trampolines collapses in one call: every jump into it lands on
+    /// the block that does real work, not on the next hop.
+    #[test]
+    fn a_chain_of_empty_blocks_is_threaded_to_its_end() {
+        let targets = thread(vec![
+            vec![jmp(1)],
+            vec![jmp(2)],
+            vec![jmp(3)],
+            vec![BlockItem::BindLabel(3), mov()],
+        ]);
+        assert_eq!(targets[0], Some(3));
+        assert_eq!(targets[1], Some(3));
+    }
+
+    /// A `Jcc` is threaded exactly as a `Jmp` is; both name a block, and a block
+    /// that only jumps on is not a destination either way.
+    #[test]
+    fn a_conditional_target_is_threaded_too() {
+        let mut items = vec![
+            vec![BlockItem::Inst(MachInst::Jcc {
+                cc: CondCode::Ne,
+                target: 1,
+            })],
+            vec![jmp(2)],
+            vec![mov()],
+        ];
+        let func = func_of(3);
+        thread_branches(&mut items, &func, &[0, 1, 2]);
+        assert!(matches!(
+            items[0][0],
+            BlockItem::Inst(MachInst::Jcc { target: 2, .. }),
+        ));
+    }
+
+    /// Only a block whose whole body is one jump is a trampoline. A block that
+    /// carries a phi copy has work to do, so a jump to it must survive.
+    #[test]
+    fn a_block_that_does_work_is_not_threaded_through() {
+        let targets = thread(vec![vec![jmp(1)], vec![mov(), jmp(2)], vec![mov()]]);
+        assert_eq!(targets[0], Some(1));
+    }
+
+    /// A loop of empty blocks is a cycle in the redirect map, and resolving it
+    /// must terminate rather than chase the cycle forever.
+    #[test]
+    fn a_cycle_of_empty_blocks_terminates() {
+        let targets = thread(vec![vec![jmp(1)], vec![jmp(2)], vec![jmp(1)]]);
+        assert!(targets[0].is_some());
+    }
+
+    fn regalloc_of(pairs: &[(u32, Reg)]) -> RegAllocResult {
+        RegAllocResult {
+            vreg_to_reg: pairs.iter().map(|&(v, r)| (VReg(v), r)).collect(),
+            spill_slots: 0,
+            callee_saved_used: vec![],
+            insts: vec![],
+            unprecolored_params: vec![],
+        }
+    }
+
+    /// A `Ret`'s value is argument 0 of `Op::TerminatorArgs`, and the schedule's
+    /// answer is the post-split, post-coalesce one -- so it answers ahead of the
+    /// VReg the CFG committed.
+    #[test]
+    fn ret_value_prefers_the_schedules_argument() {
+        let regalloc = regalloc_of(&[(1, Reg::RAX), (2, Reg::RCX)]);
+        let term_args = BTreeMap::from([(0, VReg(2))]);
+        assert_eq!(
+            ret_value_reg(Some(VReg(1)), &term_args, &BTreeMap::new(), &regalloc),
+            Some(Reg::RCX),
+        );
+    }
+
+    /// The single-block path has no terminator arguments at all --
+    /// `append_terminator_args` never runs there -- so the CFG's committed VReg
+    /// is what names the register, chased through the coalesce aliases as the
+    /// schedule's own answer is.
+    #[test]
+    fn ret_value_falls_back_to_the_committed_vreg_through_its_alias() {
+        let regalloc = regalloc_of(&[(3, Reg::RDX)]);
+        let aliases = BTreeMap::from([(VReg(1), VReg(3))]);
+        assert_eq!(
+            ret_value_reg(Some(VReg(1)), &BTreeMap::new(), &aliases, &regalloc),
+            Some(Reg::RDX),
+        );
+        assert_eq!(
+            ret_value_reg(None, &BTreeMap::new(), &aliases, &regalloc),
+            None,
+            "no value and no argument is a void return",
+        );
+    }
 }
