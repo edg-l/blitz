@@ -48,11 +48,17 @@ is done.
    miscompile. **A session can work all day, see every gate pass, and never learn
    that.** Widening costs 67s a shape; a saved corpus of known-failing programs
    would make the routine check seconds. Do this alongside 1, or 1 has no oracle.
-3. **Give LICM a pressure check.** The largest measured quality gap in the tree:
-   `BLITZ_PASSES=-licm bash tests/run_codesize.sh` takes `bench` reloads from 377
-   to 149 and spills 84 to 30, and *lowers* instructions 2637 to 2518. It hoists
-   every invariant it can prove, and a value hoisted out of a loop is live across
-   the whole body. Done when `-O1` beats `-O0` on all 15 `bench` kernels.
+3. **Give LICM a pressure check.** The largest measured quality gap in the tree,
+   and it is not confined to `bench`. `BLITZ_PASSES=-licm bash
+   tests/run_codesize.sh`, totalled over the rows that change, *lowers* every
+   number on every corpus: `fuzz` instructions -24.4% with spills -53.1%, `lit`
+   -15.3% and -39.2%, `bench` -6.4% and -93.9%. It hoists every invariant it can
+   prove, and a value hoisted out of a loop is live across the whole body. On
+   `fuzz` it improves 86 rows and worsens **none** -- generated code has enough
+   live values that the trade never pays. `bench` is where it does pay, on 8 of
+   15 changed rows, so the answer is a hoist decision that consults the pressure
+   the splitter already measures, not deleting the pass. Done when `-O1` beats
+   `-O0` on all 15 `bench` kernels.
 4. **Offset-aware alias analysis.** ~50 LOC in `alias.rs`, and the cheapest
    quality win available: today any write to a base invalidates every cached load
    at that base, so `s->a` and `s->b` kill each other, which throttles the
@@ -181,15 +187,24 @@ so the holes stay visible.
 ### P1 -- Optimizer gaps with the largest measured impact
 
 - [ ] **LICM has no pressure check, and it is the largest measured quality gap
-      in the tree.** Measured on the `bench` corpus at `-O1` with
-      `BLITZ_PASSES=-licm bash tests/run_codesize.sh`: turning LICM off takes
-      reloads from **377 to 149** and spills from **84 to 30**, and *lowers* the
-      instruction count from 2637 to 2518. Per kernel it is a trade the pass
-      always takes and often loses -- `matmul` 172 insts / 23 reloads becomes
-      163 / 0, `binary_search` 136 / 39 becomes 113 / 0, `hash_table` 415 / 150
-      becomes 340 / 45 -- against a genuine saving of 2 to 14 instructions on
-      the six kernels where the hoisted value fits (`sieve`, `crc32`,
-      `bitcount`, `dot_product`, `nbody_step`, `struct_walk`). The pass hoists
+      in the tree.** `BLITZ_PASSES=-licm bash tests/run_codesize.sh`, totalled
+      over the rows that change, *lowers* every number on all three corpora:
+
+      | corpus | insts | spills | reloads | changed / worse |
+      | --- | --- | --- | --- | --- |
+      | `lit` | -15.3% | -39.2% | -35.6% | 69 / 25 |
+      | `bench` | -6.4% | -93.9% | -62.6% | 15 / 8 |
+      | `fuzz` | -24.4% | -53.1% | -49.7% | 86 / **0** |
+
+      **On generated code the trade never pays**: 86 rows improve and none get
+      worse, `args` seed 29 going 7703 insts / 1814 spills to 3716 / 104. Per
+      `bench` kernel it is a trade the pass always takes and often loses --
+      `matmul` 172 insts / 23 reloads becomes 163 / 0, `binary_search` 136 / 39
+      becomes 113 / 0, `hash_table` 415 / 150 becomes 340 / 45 -- against a
+      genuine saving of 2 to 14 instructions on the six kernels where the
+      hoisted value fits (`sieve`, `crc32`, `bitcount`, `dot_product`,
+      `nbody_step`, `struct_walk`). Those six are the reason the answer is a
+      pressure-aware hoist and not deleting the pass. The pass hoists
       every invariant it can prove, and a value hoisted out of a loop is live
       across the whole body: on a loop whose body already needs most of the
       register file that is a spill and one reload per use. What it needs is a
