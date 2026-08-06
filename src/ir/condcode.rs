@@ -32,3 +32,29 @@ pub enum CondCode {
     /// Lowered to: setne + setp + or (or cmovne + cmovp).
     UnordNe,
 }
+
+impl CondCode {
+    /// The condition that holds of `(b, a)` exactly when `self` holds of
+    /// `(a, b)`.
+    ///
+    /// Defined for the integer comparison codes only. The parity and composite
+    /// float codes describe a flag pattern rather than an ordering, and their
+    /// operand order is fixed by the `ucomisd`/`ucomiss` isel rule.
+    pub fn swapped(self) -> Option<CondCode> {
+        Some(match self {
+            CondCode::Eq => CondCode::Eq,
+            CondCode::Ne => CondCode::Ne,
+            CondCode::Slt => CondCode::Sgt,
+            CondCode::Sle => CondCode::Sge,
+            CondCode::Sgt => CondCode::Slt,
+            CondCode::Sge => CondCode::Sle,
+            CondCode::Ult => CondCode::Ugt,
+            CondCode::Ule => CondCode::Uge,
+            CondCode::Ugt => CondCode::Ult,
+            CondCode::Uge => CondCode::Ule,
+            CondCode::Parity | CondCode::NotParity | CondCode::OrdEq | CondCode::UnordNe => {
+                return None;
+            }
+        })
+    }
+}

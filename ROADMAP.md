@@ -374,8 +374,14 @@ isel patterns; we should beat it on the ones we implement.
 - [ ] **Carry-chain forms**: `adc`/`sbb`, and `setcc`-free branchless idioms
       (`sbb reg,reg` as a 0/-1 mask).
 - [ ] **Rotates and double shifts**: `rol`/`ror`, `shld`/`shrd`.
-- [ ] **LHS-iconst compare commutation**: `Icmp(cc, iconst, x)` currently misses
-      `X86CmpI`; needs a cc-flipping rewrite.
+- [x] **LHS-iconst compare commutation.** A constant left-hand operand moves
+      right and the condition flips, so `X86CmpI` matches it and the constant
+      is never materialized. Over the rows that changed, `lit` -0.54% insts and
+      -0.40% bytes, `fuzz` -0.79%/-0.71%; `bench` and `live` unchanged.
+      The swap is a normal form `IRBuilder::icmp` builds the node in, not an
+      e-graph equality: an `Icmp`'s condition code is read from its e-class,
+      independently of which node extraction picks, so two `Icmp` nodes with
+      different codes in one class would make that read ambiguous.
 - [ ] **Wider LEA coverage** beyond LEA2/3/4 already present; `lea` as a
       3-operand add to avoid destructive-form moves.
 - [ ] **Latency/port-aware DAG scheduling.** A uarch model (ports, latencies,

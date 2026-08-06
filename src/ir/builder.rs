@@ -454,6 +454,7 @@ impl FunctionBuilder {
     /// Compare two integers. The result is a flags value: pass it to
     /// [`Self::select`] or to [`Self::branch`], not to arithmetic.
     pub fn icmp(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
+        let (cc, a, b) = canonical_icmp_operands(&self.egraph, cc, a, b);
         let node = ENode {
             op: Op::Pure(PureOp::Icmp(cc)),
             children: smallvec![a.0, b.0],
@@ -922,6 +923,35 @@ impl FunctionBuilder {
     }
 }
 
+/// Put a constant comparison operand on the right.
+///
+/// x86's `cmp r, imm` takes its immediate as the second operand, so a compare
+/// against a constant left-hand side would have to materialize the constant
+/// into a register. Swapping the operands and the condition puts it where the
+/// `X86CmpI` isel rule can match it.
+///
+/// The swap happens here rather than as an e-graph rewrite because an `Icmp`'s
+/// condition code is read from its e-class -- by [`IRBuilder::branch`] and by
+/// the `Select` isel rule -- independently of which node extraction picks. Two
+/// `Icmp` nodes with different codes in one class would make that read
+/// ambiguous, so the operand order is a normal form the node is built in, not
+/// an equality the e-graph knows.
+fn canonical_icmp_operands(
+    egraph: &EGraph,
+    cc: CondCode,
+    a: Value,
+    b: Value,
+) -> (CondCode, Value, Value) {
+    // Both constant is left alone: constant folding owns that case.
+    let (Some((v, _)), None) = (egraph.get_constant(a.0), egraph.get_constant(b.0)) else {
+        return (cc, a, b);
+    };
+    match (i32::try_from(v), cc.swapped()) {
+        (Ok(_), Some(swapped)) => (swapped, b, a),
+        _ => (cc, a, b),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1270,5 +1300,64 @@ mod tests {
         b.ret(Some(val));
         let f = b.finalize();
         assert!(f.is_ok(), "{:?}", f.err());
+    }
+
+    /// The condition code a comparison's e-class states must describe the
+    /// operand order the node was built with.
+    #[test]
+    fn icmp_constant_lhs_moves_right_and_flips_the_condition() {
+        let mut b = FunctionBuilder::new("test", &[Type::I64], &[Type::I64]);
+        let x = b.params()[0];
+        let five = b.iconst(5, Type::I64);
+        let flags = b.icmp(CondCode::Slt, five, x);
+
+        let canon = b.egraph.unionfind.find_immutable(flags.0);
+        let node = b.egraph.class(canon).nodes[0].clone();
+        assert_eq!(node.op, Op::Pure(PureOp::Icmp(CondCode::Sgt)));
+        assert_eq!(node.children[0], x.0);
+        assert_eq!(node.children[1], five.0);
+    }
+
+    /// Two source spellings of one comparison are one e-class, so the
+    /// comparison is emitted once.
+    #[test]
+    fn icmp_both_operand_orders_share_an_e_class() {
+        let mut b = FunctionBuilder::new("test", &[Type::I64], &[Type::I64]);
+        let x = b.params()[0];
+        let five = b.iconst(5, Type::I64);
+        let lhs_const = b.icmp(CondCode::Slt, five, x);
+        let rhs_const = b.icmp(CondCode::Sgt, x, five);
+        assert_eq!(
+            b.egraph.unionfind.find_immutable(lhs_const.0),
+            b.egraph.unionfind.find_immutable(rhs_const.0)
+        );
+    }
+
+    /// A constant too wide for a `cmp r, imm32` gains nothing from the swap,
+    /// and two constants are constant folding's business.
+    #[test]
+    fn icmp_keeps_its_operand_order_when_the_swap_buys_nothing() {
+        let mut b = FunctionBuilder::new("test", &[Type::I64], &[Type::I64]);
+        let x = b.params()[0];
+        let wide = b.iconst(i64::from(i32::MAX) + 1, Type::I64);
+        let flags = b.icmp(CondCode::Slt, wide, x);
+        let canon = b.egraph.unionfind.find_immutable(flags.0);
+        let node = b.egraph.class(canon).nodes[0].clone();
+        assert_eq!(node.op, Op::Pure(PureOp::Icmp(CondCode::Slt)));
+        assert_eq!(node.children[0], wide.0);
+    }
+
+    /// Swapping the operands twice is the identity, for every code that has a
+    /// swapped form.
+    #[test]
+    fn swapping_a_condition_code_twice_is_the_identity() {
+        use CondCode::*;
+        for cc in [Eq, Ne, Slt, Sle, Sgt, Sge, Ult, Ule, Ugt, Uge] {
+            let swapped = cc.swapped().expect("integer codes swap");
+            assert_eq!(swapped.swapped(), Some(cc), "{cc:?}");
+        }
+        for cc in [Parity, NotParity, OrdEq, UnordNe] {
+            assert_eq!(cc.swapped(), None, "{cc:?}");
+        }
     }
 }
