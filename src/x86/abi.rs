@@ -256,7 +256,7 @@ pub fn compute_frame_layout(
 ///
 /// Otherwise:
 ///   push rbp; mov rbp, rsp  (only if `uses_frame_pointer`)
-///   push <callee-saved>…    (in declaration order)
+///   push `<callee-saved>`…    (in declaration order)
 ///   sub rsp, frame_size     (if non-zero and not using red zone)
 pub fn emit_prologue(encoder: &mut Encoder, layout: &FrameLayout) {
     if layout.is_leaf {
@@ -299,7 +299,7 @@ pub fn emit_prologue(encoder: &mut Encoder, layout: &FrameLayout) {
 ///
 /// Otherwise:
 ///   add rsp, frame_size   (if non-zero and not using red zone)
-///   pop <callee-saved>…   (reverse order)
+///   pop `<callee-saved>`…   (reverse order)
 ///   pop rbp               (only if `uses_frame_pointer`)
 ///   ret
 pub fn emit_epilogue(encoder: &mut Encoder, layout: &FrameLayout) {

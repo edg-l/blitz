@@ -68,7 +68,7 @@ is done.
    pressure point is one instruction whose own operands are what is live
    there"*. Spilling cannot relieve a value that is live at a point *because
    the instruction there reads it*, which is why the spill loop stops -- see
-   the four measured attempts at the end of `docs/refactor-roadmap.md` before
+   the four measured attempts at the end of `docs/internal/refactor-roadmap.md` before
    trying a fifth. `args` is where it concentrates, 12 of the 16. Done when a
    200-seed run of each shape is clean.
 2. ~~**Make the gate able to see them.**~~ Done: `tests/fuzz/corpus/` plus
@@ -98,7 +98,7 @@ single-target thesis pays off**, and its first item is now in: immediate-form AL
 took the `gcc -O2` gap x1.39 -> x1.34 on its own. The rest of P2 is untouched.
 
 **Do not start in the register allocator, the splitter, or the block-parameter
-machinery without reading `docs/refactor-roadmap.md` first.** It is finished as
+machinery without reading `docs/internal/refactor-roadmap.md` first.** It is finished as
 work and is now the record of what eleven steps measured -- including the
 predictions that were wrong, which is what stops the next attempt repeating them.
 Three are worth knowing before touching the splitter: the Chaitin ratio has been
@@ -145,8 +145,8 @@ gated on pressure because it runs before global liveness exists, and
   block-parameter removal (re-extract + linearize again) -> DAG schedule ->
   live-range splitter -> function-scope Chaitin-Briggs regalloc -> terminator
   lowering -> MachInst lowering -> branch relaxation -> ELF.
-- Implemented e-graph rules: see `docs/egraph-optimization-roadmap.md`.
-- Splitter design: see `docs/split-pass-plan.md`.
+- Implemented e-graph rules: see `docs/internal/egraph-optimization-roadmap.md`.
+- Splitter design: see `docs/internal/split-pass-plan.md`.
 
 ## Priorities
 
@@ -318,7 +318,7 @@ so the holes stay visible.
         landed, is worth -0.2% on `fuzz`. Do not write the worklist allocator
         for this.
       - *Fewer block parameters to copy* is the candidate left, and
-        `docs/refactor-roadmap.md` argues it at length. Note `phi_removal`
+        `docs/internal/refactor-roadmap.md` argues it at length. Note `phi_removal`
         already does both tiers including self-references, so the 82% of
         parameters `count_trivial_phis.py` calls redundant on `hash_table` is
         what the *rule* permits, not what is sound to remove -- one e-class is
@@ -399,7 +399,7 @@ isel patterns; we should beat it on the ones we implement.
       read twice from one read twenty times -- on
       `regalloc/array_spill_frame_corruption.c` it picks a value stored once and
       reloaded 23 times, which is most of that program's +55%. Moved here from
-      `docs/refactor-roadmap.md` step 6: the fold is done and this is allocation
+      `docs/internal/refactor-roadmap.md` step 6: the fold is done and this is allocation
       policy, not a refactor. **Two directions are closed by measurement**, and a
       replacement has to beat those numbers rather than be reasoned from first
       principles: dividing by use count (the Chaitin ratio) costs 35 regressed
@@ -461,7 +461,7 @@ What the fixed ones are worth is the shape they kept having, which is the first
 thing to check on any of these:
 
 - **A block resolved an e-class to the wrong VReg** -- nine bugs, and the reason
-  steps 1-4 of `docs/refactor-roadmap.md` exist. `BLITZ_DEBUG=regalloc` dumps the
+  steps 1-4 of `docs/internal/refactor-roadmap.md` exist. `BLITZ_DEBUG=regalloc` dumps the
   final assignment, and a value with several VRegs where only one has the right
   register is the signature.
 - **Liveness measured against one instruction order while another is emitted.**
@@ -504,7 +504,7 @@ has since removed rather than on the policy**:
 
 ## Tech debt
 
-- [ ] `docs/split-pass-plan.md` Phase 8 and Final Audit are unchecked. The audit
+- [ ] `docs/internal/split-pass-plan.md` Phase 8 and Final Audit are unchecked. The audit
       requires zero hits for `coalesce_aliases`; there are 25. Decide whether it
       is now load-bearing, then finish or amend the plan.
 - [ ] Clear the clippy backlog (47 warnings, cosmetic), including the

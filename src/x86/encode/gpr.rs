@@ -444,7 +444,7 @@ impl Encoder {
         self.encode_0f_rr(0xBF, dst, src);
     }
 
-    /// MOVZX r64, byte ptr [addr]: REX.W + 0F B6 /r with memory operand.
+    /// `MOVZX r64, byte ptr [addr]`: REX.W + 0F B6 /r with memory operand.
     pub fn encode_movzx_brm(&mut self, dst: Reg, addr: &Addr) {
         let d = dst.hw_enc();
         let idx = addr.index.map_or(0u8, |r| r.hw_enc());
@@ -455,7 +455,7 @@ impl Encoder {
         self.emit_addr(d, addr);
     }
 
-    /// MOVZX r64, word ptr [addr]: REX.W + 0F B7 /r with memory operand.
+    /// `MOVZX r64, word ptr [addr]`: REX.W + 0F B7 /r with memory operand.
     pub fn encode_movzx_wrm(&mut self, dst: Reg, addr: &Addr) {
         let d = dst.hw_enc();
         let idx = addr.index.map_or(0u8, |r| r.hw_enc());

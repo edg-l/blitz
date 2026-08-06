@@ -269,7 +269,7 @@ The evidence, all of it already in the repo before this document:
 Chasing the splitter or the colourer is treating symptoms. Three attempts were
 measured on 2026-08-03 — a Chaitin-Briggs simplify/select colourer, cross-round
 victim dedup, and a routing-target change — and all were neutral or worse. They are
-recorded under "Ruled out" in `docs/terminator-args-next-steps.md`.
+recorded under "Ruled out" in `docs/internal/terminator-args-next-steps.md`.
 
 ### The fix
 
@@ -942,7 +942,7 @@ seed 15, the overshoot *grows* with each round: 3, 9, 12, 15, 18, 21, 23, then
 flat. Spilling a value whose live range exists because it is an operand of the
 pressure instruction cannot help -- the reload lands immediately before that
 instruction and is live there too. This is shape B from
-`docs/terminator-args-next-steps.md`: a terminator passing 28 block arguments,
+`docs/internal/terminator-args-next-steps.md`: a terminator passing 28 block arguments,
 where the arguments *are* what is live at the point that overflows. No allocator
 can place 28 values in 14 registers at one instruction; the arguments have to
 leave the register file, which is `SplitPlan::operand_removals` and the splitter's
@@ -982,7 +982,7 @@ why removing 85-94% of a program's block parameters moved capacity by nothing.
 So the lever is not fewer parameters. It is fewer *values live at the edge*,
 which means taking some of them out of the register file: `SplitPlan::operand_removals`
 and `slot_spilled_params`, the splitter's slot routing. What limits that today is
-recorded in `docs/terminator-args-next-steps.md`: `detect_blockparam_slot_routing`
+recorded in `docs/internal/terminator-args-next-steps.md`: `detect_blockparam_slot_routing`
 finds a parameter through `find_block_param_vreg`, which needs an `Op::BlockParam`
 marker in the e-graph, and on `pressure` seed 22's 28-argument edge 16 of the 28
 parameters have none -- linearization skips the marker for a parameter whose class
@@ -998,7 +998,7 @@ only where a block's parameters of one class outnumber that class's budget, and
 no block on this program has that many. Reverted; nothing speculative kept.
 
 **Which corrects the recorded diagnosis for this program.** The old note in
-`docs/terminator-args-next-steps.md` describes shape B as a 28-parameter block
+`docs/internal/terminator-args-next-steps.md` describes shape B as a 28-parameter block
 clique that slot routing cannot see. On seed 15 the parameters are not the
 clique: 50 of the 92 have no VReg in the class map at block entry at all, and the
 other 42 share an ordinary value's VReg -- the pass-through case, where routing
@@ -1655,7 +1655,7 @@ an unfinished pass. Step 2 removed it with `phi_simplify.rs`.
 - **Shape A** (`gpr_overshoot=1`, mostly `-O0`, ~8 pairs): real pressure at a call
   with twelve argument operands, where the splitter's overshoot marches forward two
   instructions per round. Step 5 turns it into spill code. Diagnosis in
-  `docs/terminator-args-next-steps.md` item 10.
+  `docs/internal/terminator-args-next-steps.md` item 10.
 - File sizes. `compile/tests.rs` (3751 lines), `compile/mod.rs` (2043),
   `egraph/algebraic.rs` (2289) are untidy with no evidence of harm, and a rule set
   being long is fine.

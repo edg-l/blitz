@@ -16,6 +16,7 @@ use crate::ir::types::Type;
 pub struct Value(pub ClassId);
 
 impl Value {
+    /// The e-class this value names.
     pub fn class_id(self) -> ClassId {
         self.0
     }
@@ -92,7 +93,8 @@ pub(crate) struct BlockData {
 // ── FunctionBuilder ───────────────────────────────────────────────────────────
 
 macro_rules! binop {
-    ($name:ident, $op:expr) => {
+    ($name:ident, $op:expr, $doc:expr) => {
+        #[doc = $doc]
         pub fn $name(&mut self, a: Value, b: Value) -> Value {
             self.add_node(ENode {
                 op: $op,
@@ -309,24 +311,69 @@ impl FunctionBuilder {
 
     // ── Pure op builders ──────────────────────────────────────────────────────
 
-    binop!(add, Op::Pure(PureOp::Add));
-    binop!(sub, Op::Pure(PureOp::Sub));
-    binop!(mul, Op::Pure(PureOp::Mul));
-    binop!(udiv, Op::Pure(PureOp::UDiv));
-    binop!(sdiv, Op::Pure(PureOp::SDiv));
-    binop!(urem, Op::Pure(PureOp::URem));
-    binop!(srem, Op::Pure(PureOp::SRem));
-    binop!(and, Op::Pure(PureOp::And));
-    binop!(or, Op::Pure(PureOp::Or));
-    binop!(xor, Op::Pure(PureOp::Xor));
-    binop!(shl, Op::Pure(PureOp::Shl));
-    binop!(shr, Op::Pure(PureOp::Shr));
-    binop!(sar, Op::Pure(PureOp::Sar));
-    binop!(fadd, Op::Pure(PureOp::Fadd));
-    binop!(fsub, Op::Pure(PureOp::Fsub));
-    binop!(fmul, Op::Pure(PureOp::Fmul));
-    binop!(fdiv, Op::Pure(PureOp::Fdiv));
+    binop!(
+        add,
+        Op::Pure(PureOp::Add),
+        "Integer addition. Both operands must have the same type."
+    );
+    binop!(sub, Op::Pure(PureOp::Sub), "Integer subtraction, `a - b`.");
+    binop!(
+        mul,
+        Op::Pure(PureOp::Mul),
+        "Integer multiplication, low half of the product."
+    );
+    binop!(
+        udiv,
+        Op::Pure(PureOp::UDiv),
+        "Unsigned division. Division by zero is undefined."
+    );
+    binop!(
+        sdiv,
+        Op::Pure(PureOp::SDiv),
+        "Signed division, truncating toward zero. Division by zero, and `INT_MIN / -1`, are undefined."
+    );
+    binop!(urem, Op::Pure(PureOp::URem), "Unsigned remainder.");
+    binop!(
+        srem,
+        Op::Pure(PureOp::SRem),
+        "Signed remainder, taking the sign of `a`."
+    );
+    binop!(and, Op::Pure(PureOp::And), "Bitwise AND.");
+    binop!(or, Op::Pure(PureOp::Or), "Bitwise OR.");
+    binop!(xor, Op::Pure(PureOp::Xor), "Bitwise XOR.");
+    binop!(
+        shl,
+        Op::Pure(PureOp::Shl),
+        "Shift left. A shift amount at or above the operand width is undefined."
+    );
+    binop!(
+        shr,
+        Op::Pure(PureOp::Shr),
+        "Logical shift right, shifting in zeros."
+    );
+    binop!(
+        sar,
+        Op::Pure(PureOp::Sar),
+        "Arithmetic shift right, shifting in the sign bit."
+    );
+    binop!(fadd, Op::Pure(PureOp::Fadd), "Floating-point addition.");
+    binop!(
+        fsub,
+        Op::Pure(PureOp::Fsub),
+        "Floating-point subtraction, `a - b`."
+    );
+    binop!(
+        fmul,
+        Op::Pure(PureOp::Fmul),
+        "Floating-point multiplication."
+    );
+    binop!(
+        fdiv,
+        Op::Pure(PureOp::Fdiv),
+        "Floating-point division, `a / b`."
+    );
 
+    /// An integer constant of the given width.
     pub fn iconst(&mut self, val: i64, ty: Type) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Iconst(val, ty)),
@@ -335,6 +382,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// An `F64` constant.
     pub fn fconst(&mut self, val: f64) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Fconst(val.to_bits(), Type::F64)),
@@ -343,6 +391,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// An `F32` constant.
     pub fn fconst_f32(&mut self, val: f32) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Fconst(val.to_bits() as u64, Type::F32)),
@@ -351,6 +400,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Sign-extend an integer to a wider type.
     pub fn sext(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Sext(target)),
@@ -359,6 +409,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Zero-extend an integer to a wider type.
     pub fn zext(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Zext(target)),
@@ -367,6 +418,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Truncate an integer to a narrower type, discarding the high bits.
     pub fn trunc(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Trunc(target)),
@@ -375,6 +427,8 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Reinterpret the bits as another type of the same width, moving between
+    /// the integer and floating-point register files without converting.
     pub fn bitcast(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Bitcast(target)),
@@ -383,6 +437,8 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Compare two integers. The result is a flags value: pass it to
+    /// [`Self::select`] or to [`Self::branch`], not to arithmetic.
     pub fn icmp(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Icmp(cc)),
@@ -391,6 +447,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Compare two floats, producing a flags value as [`Self::icmp`] does.
     pub fn fcmp(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Fcmp(cc)),
@@ -414,6 +471,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Convert a signed integer to `F32` or `F64`.
     pub fn int_to_float(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::IntToFloat(target)),
@@ -422,6 +480,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Convert a float to a signed integer, truncating toward zero.
     pub fn float_to_int(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::FloatToInt(target)),
@@ -430,6 +489,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Widen `F32` to `F64`.
     pub fn float_ext(&mut self, val: Value) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::FloatExt),
@@ -438,6 +498,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Narrow `F64` to `F32`.
     pub fn float_trunc(&mut self, val: Value) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::FloatTrunc),
@@ -446,6 +507,7 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// Square root of a float.
     pub fn fsqrt(&mut self, val: Value) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Fsqrt),
@@ -454,6 +516,9 @@ impl FunctionBuilder {
         self.add_node(node)
     }
 
+    /// `if flags { t } else { f }`, where `flags` comes from [`Self::icmp`] or
+    /// [`Self::fcmp`]. Both arms are evaluated, so this is a branchless choice
+    /// rather than control flow; use [`Self::branch`] when an arm must not run.
     pub fn select(&mut self, flags: Value, t: Value, f: Value) -> Value {
         let node = ENode {
             op: Op::Pure(PureOp::Select),

@@ -241,7 +241,7 @@ pub enum MachOp {
     /// leaves undefined.
     X86Cvtsi2sd(Type),
     /// `cvtsi2ss` — signed int -> f32; 1 child (GPR), result F32.
-    /// The `Type` is the source width; see [`Op::X86Cvtsi2sd`].
+    /// The `Type` is the source width; see [`MachOp::X86Cvtsi2sd`].
     X86Cvtsi2ss(Type),
     /// `cvttsd2si` — f64 -> signed int (truncation); 1 child (XMM), result = Type param.
     X86Cvttsd2si(Type),
@@ -326,11 +326,11 @@ pub enum PseudoOp {
     CallResult(u32, Type),
 
     // ── Spill/reload pseudo-ops ──────────────────────────────────────────────
-    /// GPR spill store: operand[0] is the VReg to spill, i64 is the slot index.
+    /// GPR spill store: `operand[0]` is the VReg to spill, `i64` is the slot index.
     SpillStore(i64),
     /// GPR spill load: dst is the reload VReg, i64 is the slot index.
     SpillLoad(i64),
-    /// XMM spill store: operand[0] is the VReg to spill, i64 is the slot index.
+    /// XMM spill store: `operand[0]` is the VReg to spill, `i64` is the slot index.
     XmmSpillStore(i64),
     /// XMM spill load: dst is the reload VReg, i64 is the slot index.
     XmmSpillLoad(i64),
@@ -353,7 +353,7 @@ pub enum PseudoOp {
     /// sequence per terminator -- a Jump's args in order, a Branch's `true_args`
     /// followed by its `false_args`, a Ret's value as argument 0. The indices are
     /// explicit rather than implied by position because an argument can carry no
-    /// operand at all: see [`Op::TerminatorArgs`] users for slot-routed
+    /// operand at all: see [`PseudoOp::TerminatorArgs`] users for slot-routed
     /// parameters, which are passed in memory and hold no register here.
     ///
     /// This exists for the same reason the barrier pseudo-ops do, and closes the

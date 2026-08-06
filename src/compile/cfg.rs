@@ -330,7 +330,7 @@ pub(super) fn collect_block_roots(block: &BasicBlock, egraph: &EGraph) -> Vec<Cl
 /// Resolving before the splitter, where every segment is still full-range, is
 /// what made them inert. They stay because which answer is right where the two
 /// *would* differ is unproven, and the shape is unreached rather than
-/// unreachable; step 4 of `docs/refactor-roadmap.md` is where they go.
+/// unreachable; step 4 of `docs/internal/refactor-roadmap.md` is where they go.
 ///
 /// Must run after extraction and DCE2, and before the splitter -- the splitter's
 /// operand rewriting is what makes a pressure decision stick, and it works on

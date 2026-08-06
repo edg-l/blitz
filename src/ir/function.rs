@@ -43,7 +43,7 @@ pub struct BasicBlock {
     /// on the regalloc, bench and generated corpora, this and the schedule agree
     /// everywhere both answer. Coalescing then renames, so past that point the
     /// target block's own `Op::BlockParam` is the authority -- see
-    /// [`crate::compile::cfg::resolve_block_param_vreg`], which asks it first.
+    /// `compile::cfg::resolve_block_param_vreg`, which asks it first.
     pub param_vregs: Vec<Option<VReg>>,
     /// Effectful operations, including the terminator as the final element.
     pub ops: Vec<EffectfulOp>,

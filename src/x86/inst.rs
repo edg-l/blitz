@@ -66,13 +66,13 @@ pub enum MachInst {
         dst: Operand,
         imm: i64,
     },
-    /// Load: dst = [addr]
+    /// Load: `dst = [addr]`
     MovRM {
         size: OpSize,
         dst: Operand,
         addr: Addr,
     },
-    /// Store: [addr] = src
+    /// Store: `[addr] = src`
     MovMR {
         size: OpSize,
         addr: Addr,
@@ -303,12 +303,12 @@ pub enum MachInst {
         dst: Operand,
         src: Operand,
     },
-    /// Zero-extend byte from memory to 64-bit register: MOVZX r64, byte ptr [addr]
+    /// Zero-extend byte from memory to 64-bit register: `MOVZX r64, byte ptr [addr]`
     MovzxBRM {
         dst: Operand,
         addr: Addr,
     },
-    /// Zero-extend word from memory to 64-bit register: MOVZX r64, word ptr [addr]
+    /// Zero-extend word from memory to 64-bit register: `MOVZX r64, word ptr [addr]`
     MovzxWRM {
         dst: Operand,
         addr: Addr,

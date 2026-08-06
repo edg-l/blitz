@@ -23,7 +23,7 @@
 //! has to be re-emitted and no cost model has to agree. Predecessors that pass
 //! *different* VRegs of the same class are the case the parameter exists for;
 //! removing those trades copies for a recomputation and wants the cost model,
-//! which is step 2's tier 2 in `docs/refactor-roadmap.md`.
+//! which is step 2's tier 2 in `docs/internal/refactor-roadmap.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 

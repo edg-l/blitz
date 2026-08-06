@@ -62,6 +62,10 @@ $ cargo run --example basic
 $ cc examples/main.c output.o -o demo && ./demo
 ```
 
+[`docs/ir.md`](docs/ir.md) is the guide to the IR itself: block parameters
+instead of phi nodes, pure versus effectful ops, branches, loops, memory and
+calls, with worked examples.
+
 ## Code quality
 
 The point of the project is the output, so it is measured rather than asserted.
@@ -104,8 +108,9 @@ callee.
 ```
 
 The IR is dual: the e-graph holds pure values, the CFG holds effectful ops and
-control flow, and effectful ops reference pure values by e-class. Priorities and
-non-goals are in [`ROADMAP.md`](ROADMAP.md).
+control flow, and effectful ops reference pure values by e-class.
+[`ROADMAP.md`](ROADMAP.md) has the priorities and non-goals; `docs/internal/` has
+the implementation notes.
 
 ## Testing
 

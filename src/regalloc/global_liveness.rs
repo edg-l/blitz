@@ -24,7 +24,7 @@ pub struct GlobalLiveness {
 ///
 /// Algorithm (standard backward liveness):
 ///   def(B) = VRegs defined in B's scheduled instructions
-///   use(B) = VRegs used (as operands) in B but not defined in B, UNION phi_uses[B]
+///   `use(B)` = VRegs used (as operands) in B but not defined in B, UNION `phi_uses[B]`
 ///   live_out(B) = union over successors S of live_in(S)
 ///   live_in(B)  = use(B) | (live_out(B) - def(B))
 /// Iterate until fixed point.

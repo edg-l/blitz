@@ -149,7 +149,7 @@ Non-consumer: `src/regalloc/mod.rs:63` is a doc-comment reference, no code chang
 
 - [ ] Task 3.1: Add `extract_at` and `extract_at_with_memo` in `src/egraph/extract.rs` (Complexity: Medium)
 - [ ] Task 3.2: Add 5 unit tests listed above (Complexity: Medium)
-- [ ] Task 3.3: Document `extract_at` API reference (function signatures, parameter semantics, return invariants) in `docs/egraph-reference.md` under a new "Constrained extraction" section. Cross-linking to `docs/split-pass.md` is handled in Phase 8.3. (Complexity: Low)
+- [ ] Task 3.3: Document `extract_at` API reference (function signatures, parameter semantics, return invariants) in `docs/internal/egraph-reference.md` under a new "Constrained extraction" section. Cross-linking to `docs/split-pass.md` is handled in Phase 8.3. (Complexity: Low)
 - [ ] Task 3.4: Run `cargo fmt`, `cargo test`, lit suite — green (Complexity: Low)
 - [ ] **Checkpoint: Verify Phase 3 complete** — `extract_at` exists, 5 new tests pass (baseline 636 unit), docs updated. Agreement property holds on 5-program correctness set.
 
@@ -366,8 +366,8 @@ Instead, a dedicated `detect_blockparam_call_crossings` function handles block-p
 - Concrete changes:
   - Delete `lookup_single`/`lookup_any` deprecated paths if not needed (Phase 7 should have replaced them all).
   - Update `CLAUDE.md` pipeline diagram to include "Pressure-driven splitting" between scheduling and regalloc.
-  - Cross-link `docs/egraph-reference.md` <-> `docs/split-pass.md` and note `extract_at` in both. The `extract_at` API reference itself was written in Task 3.3; Phase 8.3 only adds cross-references between the two docs.
-  - Update `docs/egraph-optimization-roadmap.md` if it discusses regalloc-side changes.
+  - Cross-link `docs/internal/egraph-reference.md` <-> `docs/split-pass.md` and note `extract_at` in both. The `extract_at` API reference itself was written in Task 3.3; Phase 8.3 only adds cross-references between the two docs.
+  - Update `docs/internal/egraph-optimization-roadmap.md` if it discusses regalloc-side changes.
   - Add a new doc `docs/split-pass.md` (user-facing reference): program-point model, `class_to_vreg` segments, split kinds, env flags, how to interpret `BLITZ_DEBUG=split` trace output.
   - Audit `TODO.md` for any item that the refactor makes obsolete.
 - Test milestone:
@@ -381,7 +381,7 @@ Instead, a dedicated `detect_blockparam_call_crossings` function handles block-p
 
 - [ ] Task 8.1: Update `CLAUDE.md` pipeline diagram (Complexity: Low)
 - [ ] Task 8.2: Write `docs/split-pass.md` (Complexity: Medium)
-- [ ] Task 8.3: Cross-link `docs/egraph-reference.md` and `docs/split-pass.md` (adds "See also" references in both directions); update `docs/egraph-optimization-roadmap.md` if it discusses regalloc-side changes. API reference content for `extract_at` already lives in `egraph-reference.md` from Task 3.3 and is not duplicated. (Complexity: Low)
+- [ ] Task 8.3: Cross-link `docs/internal/egraph-reference.md` and `docs/split-pass.md` (adds "See also" references in both directions); update `docs/internal/egraph-optimization-roadmap.md` if it discusses regalloc-side changes. API reference content for `extract_at` already lives in `egraph-reference.md` from Task 3.3 and is not duplicated. (Complexity: Low)
 - [ ] Task 8.4: Add 3 lit tests (Complexity: Medium)
 - [ ] Task 8.5: Run full `cargo test` + lit — green baseline (653 unit + 361 lit) (Complexity: Low)
 - [ ] **Checkpoint: Verify Phase 8 complete** — Docs updated, 3 new lit tests added and passing, baseline now 653 unit + 361 lit.

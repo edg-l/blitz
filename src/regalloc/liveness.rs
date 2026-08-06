@@ -5,7 +5,7 @@ use crate::schedule::scheduler::ScheduledInst;
 
 pub struct LivenessInfo {
     /// For each program point (instruction index), the set of live VRegs.
-    /// live_at[i] is the set live *before* instruction i executes.
+    /// `live_at[i]` is the set live *before* instruction `i` executes.
     pub live_at: Vec<BTreeSet<VReg>>,
     /// Live-in set for the block (live before the first instruction).
     pub live_in: BTreeSet<VReg>,
@@ -21,7 +21,7 @@ pub struct LivenessInfo {
 /// Backward pass:
 ///   live = block_live_out
 ///   For each inst in reverse:
-///     live_at[i] = live after removing dst, then adding uses
+///     `live_at[i]` = live after removing dst, then adding uses
 ///     Remove dst from live (if this inst defines it)
 ///     Add all operands to live
 ///   live_in = live after processing all instructions

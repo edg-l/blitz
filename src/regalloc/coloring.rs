@@ -108,7 +108,7 @@ fn check_precolorings(graph: &InterferenceGraph, pre_coloring: &BTreeMap<usize, 
 /// What a VReg would like to share a colour with, and why it is worth having.
 ///
 /// x86 two-address arithmetic reads and writes one register, so `lower.rs`
-/// emits `mov dst, operand[0]` for every op in [`Op::two_address_src`] whose
+/// emits `mov dst, operand[0]` for every op in `Op::two_address_src` whose
 /// result did not get its first operand's register. That copy does not exist
 /// when the allocator runs -- lowering inserts it afterwards -- so coalescing
 /// never sees it and cannot remove it. Colouring the two alike is the only
