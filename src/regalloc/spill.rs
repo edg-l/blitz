@@ -250,10 +250,22 @@ impl SpillPlacement<'_> {
 
         for mut inst in old_insts {
             // Before this instruction, insert reloads for any spilled operands.
+            //
+            // One per (instruction, spilled VReg), not one per occurrence: every
+            // operand of an instruction is read at the same point, so a value
+            // named twice needs one register holding it, not two. A fresh VReg
+            // per occurrence puts k copies of one value live at one program
+            // point, and a terminator's argument list names the same value as
+            // several block arguments routinely.
+            let mut reloaded_here: BTreeMap<usize, VReg> = BTreeMap::new();
             let mut new_operands = Vec::with_capacity(inst.operands.len());
             for &op in &inst.operands {
                 let op_idx = op.0 as usize;
                 if spilled.contains(&op_idx) {
+                    if let Some(&already) = reloaded_here.get(&op_idx) {
+                        new_operands.push(already);
+                        continue;
+                    }
                     // Replace with a reload VReg. Call-arg VRegs must NOT use
                     // rematerialization: the original def must stay alive at the
                     // call point with proper interference against call clobbers.
@@ -294,6 +306,7 @@ impl SpillPlacement<'_> {
                         // Should not happen: spilled but no slot and not remat.
                         op
                     };
+                    reloaded_here.insert(op_idx, reload_vreg);
                     new_operands.push(reload_vreg);
                 } else {
                     new_operands.push(op);

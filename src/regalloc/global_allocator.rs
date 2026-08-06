@@ -814,6 +814,7 @@ fn run_phase3(
     block_param_vregs_per_block: &[BTreeSet<VReg>],
     uses_frame_pointer: bool,
     mut next_vreg: u32,
+    coalesce_now: bool,
 ) -> Phase3State {
     // Build function-wide precoloring (params + shifts + divs +
     // caller-supplied call-arg precolors).
@@ -824,10 +825,17 @@ fn run_phase3(
     // Collect call and div program points.
     let (call_points, div_points) = collect_call_div_points(&block_schedules);
 
-    // Coalesce on the PRE-phantom graph from Phase 2.
-    // This mirrors the per-block allocator which coalesces on the pre-phantom
-    // graph and never again.
-    let coalesced = {
+    // Coalesce on the PRE-phantom graph from Phase 2, once for the function.
+    //
+    // `coalesce_now` is what makes "once" true. The spill loop runs this phase
+    // every round, and `copy_pairs` is derived from the schedules the loop
+    // started with -- so a second round would coalesce an already-coalesced
+    // list against pairs naming VRegs the first round merged away. That is not
+    // a smaller version of the same decision, it is a different one: on `args`
+    // seed 81 a round whose spilling changed nothing still took the overshoot
+    // from 1 to 9, purely from being coalesced twice, and the loop then read its
+    // own re-coalescing as proof that spilling cannot help.
+    let coalesced = if coalesce_now {
         let pairs: Vec<(usize, usize)> = copy_pairs
             .iter()
             .map(|(src, dst)| (src.0 as usize, dst.0 as usize))
@@ -839,6 +847,8 @@ fn run_phase3(
             super::coloring::available_gpr_colors(uses_frame_pointer),
             super::coloring::AVAILABLE_XMM_COLORS,
         )
+    } else {
+        Default::default()
     };
 
     // Apply coalescing aliases to each block's schedule
@@ -1631,6 +1641,9 @@ pub fn allocate_global(
     // 12, 15, 18, 21, 23, and then flat for the remaining rounds, having
     // committed 207 slots to buy nothing.
     let mut prev_overshoot: Option<u32> = None;
+    // Every coalescing decision made for this function, which the first round
+    // makes all of.
+    let mut coalesce_aliases: BTreeMap<u32, u32> = BTreeMap::new();
 
     for round in 0..=MAX_GLOBAL_SPILL_ROUNDS {
         let block_schedules: &[Vec<ScheduledInst>] = &schedules;
@@ -1716,6 +1729,7 @@ pub fn allocate_global(
             block_param_vregs_per_block,
             uses_frame_pointer,
             next_vreg,
+            round == 0,
         );
 
         // Phase 4: global coloring and color-to-register mapping.
@@ -1725,7 +1739,13 @@ pub fn allocate_global(
         // build the transitive alias map so the caller's ClassId -> VReg resolution
         // (block_class_to_vreg in compile/mod.rs) chases stale `class_to_vreg`
         // entries that still point at pre-coalesce VRegs.
-        let alias_map = phase4.alias_map.clone();
+        //
+        // Carried across rounds rather than taken from the round that happens to
+        // converge: only the first round coalesces, so a function needing two
+        // rounds would otherwise report no aliases at all and leave every stale
+        // entry pointing at a VReg that no longer exists.
+        coalesce_aliases.extend(phase4.alias_map.iter().map(|(&k, &v)| (k, v)));
+        let alias_map = coalesce_aliases.clone();
 
         // Phase 5: global spilling.
         let ctx = Phase5Context {
@@ -1795,6 +1815,31 @@ pub fn allocate_global(
                 class,
             )
             .unwrap_or_else(|| "no instructions".to_string());
+            // Which values could not be placed, and what defines them. A count
+            // says the loop failed; this says what it failed on, which is the
+            // difference between "the program is genuinely too wide here" and
+            // "the loop kept choosing something that does not help".
+            if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+                let over: Vec<String> = phase4
+                    .over_budget
+                    .iter()
+                    .take(24)
+                    .map(|v| {
+                        let def = phase4
+                            .per_block_insts
+                            .iter()
+                            .flatten()
+                            .find(|i| i.dst == *v)
+                            .map(|i| format!("{:?}", i.op))
+                            .unwrap_or_else(|| "no def".to_string());
+                        format!("v{}={def}", v.0)
+                    })
+                    .collect();
+                tracing::debug!(
+                    target: "blitz::regalloc",
+                    "[{func_name}] over budget: [{}]", over.join(", "),
+                );
+            }
             return Err(format!(
                 "global regalloc: register pressure overshoot for function '{func_name}' \
                  after {round} spill round(s): {why} (gpr_overshoot={}, xmm_overshoot={}, \
@@ -1808,6 +1853,30 @@ pub fn allocate_global(
             ));
         }
         prev_overshoot = Some(overshoot);
+
+        // What is about to be spilled, read off the list the coloring ran on --
+        // not off the result, where a rematerialized VReg's defining
+        // instruction has already been dropped and every candidate reads as
+        // undefined.
+        let chosen: Vec<String> =
+            if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+                candidates
+                    .iter()
+                    .take(16)
+                    .map(|&v| {
+                        let def = phase4
+                            .per_block_insts
+                            .iter()
+                            .flatten()
+                            .find(|i| i.dst.0 as usize == v)
+                            .map(|i| format!("{:?}", i.op))
+                            .unwrap_or_else(|| "no def".to_string());
+                        format!("v{v}={def}")
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
         // Spill on the schedules the coloring was computed from, which are
         // Phase 3's post-coalesce lists rather than the ones this round
@@ -1834,13 +1903,17 @@ pub fn allocate_global(
         schedules = next_schedules;
 
         if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+            // What was spilled, not just how many: a round that raises the
+            // overshoot is the loop's own choice going wrong, and the choice is
+            // the VReg and the op that defines it.
             tracing::debug!(
                 target: "blitz::regalloc",
                 "[{func_name}] global spill round {round}: spilled {} VReg(s), \
-                 gpr_overshoot={}, xmm_overshoot={}",
+                 gpr_overshoot={}, xmm_overshoot={}, chose [{}]",
                 candidates.len(),
                 phase4.gpr_overshoot,
                 phase4.xmm_overshoot,
+                chosen.join(", "),
             );
         }
     }
@@ -2236,6 +2309,7 @@ mod tests {
             &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false, // uses_frame_pointer
             10,    // next_vreg start
+            true,  // coalesce_now
         );
 
         // v0 was precolored to RDI. With a call phantom for RDI interfering
@@ -2308,6 +2382,7 @@ mod tests {
             &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false,
             next_vreg,
+            true, // coalesce_now
         );
 
         // Phase 3 graph must have more VRegs than Phase 2 due to phantom
@@ -2362,6 +2437,7 @@ mod tests {
             &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false,
             next_vreg,
+            true, // coalesce_now
         );
 
         let gpr_order = allocatable_gpr_order(false);
@@ -2415,6 +2491,7 @@ mod tests {
             &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false,
             next_vreg,
+            true, // coalesce_now
         );
 
         let gpr_order = allocatable_gpr_order(false);
@@ -2452,6 +2529,7 @@ mod tests {
             &Vec::<std::collections::BTreeSet<VReg>>::new(),
             uses_frame_pointer,
             next_vreg,
+            true,
         )
     }
 
