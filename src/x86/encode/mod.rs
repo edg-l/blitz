@@ -457,6 +457,14 @@ impl Encoder {
             MachInst::RolRI { size, dst, imm } => {
                 self.encode_rol_ri(*size, Self::expect_reg(dst), *imm);
             }
+            MachInst::ShldRRI {
+                size,
+                dst,
+                src,
+                imm,
+            } => {
+                self.encode_shld_rri(*size, Self::expect_reg(dst), Self::expect_reg(src), *imm);
+            }
             MachInst::ShlRCL { size, dst } => {
                 self.encode_shl_rcl(*size, Self::expect_reg(dst));
             }

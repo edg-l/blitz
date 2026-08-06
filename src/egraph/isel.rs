@@ -12,7 +12,7 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_alu_isel(egraph, &snaps);
     changed |= apply_shift_isel(egraph, &snaps);
     changed |= apply_shift_imm_isel(egraph, &snaps);
-    changed |= apply_rotate_isel(egraph, &snaps);
+    changed |= apply_funnel_shift_isel(egraph, &snaps);
     changed |= apply_alu_imm_isel(egraph, &snaps);
     changed |= apply_select_isel(egraph, &snaps);
     changed |= apply_icmp_isel(egraph, &snaps);
@@ -347,25 +347,28 @@ fn apply_shift_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     changed
 }
 
-/// `Or(Shl(x, k), Shr(x, w - k))` on a `w`-bit `x` -> `Proj0(X86RolImm(k)(x))`.
+/// `Or(Shl(x, k), Shr(y, w - k))` on `w`-bit operands -> one funnel shift:
+/// `Proj0(X86RolImm(k)(x))` where `x` and `y` are the same value, and
+/// `Proj0(X86ShldImm(k)(x, y))` where they differ.
 ///
-/// The rotate is one instruction where the shift pair is three, and it reads `x`
-/// once rather than twice, so the value it rotates does not have to stay live
+/// Either is one instruction where the shift pair is three, and the rotate reads
+/// `x` once rather than twice, so the value it rotates does not have to stay live
 /// across a second shift. `Shr` and not `Sar`: an arithmetic shift feeds the sign
-/// bit into the high end, which is not what a rotate puts there.
+/// bit into the high end, which is what neither form puts there.
 ///
-/// The two amounts must sum to the width of the rotated value's own type, so a
-/// `w`-bit rotate expressed on a wider type is not matched -- there the high bits
-/// of the shift-left result survive and the rotate would drop them.
-fn apply_rotate_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
-    /// The rotated value and the left-rotate amount, read off one operand class
-    /// pair of an `Or`.
-    fn rotate_parts(
+/// The two amounts must sum to the width of the shifted values' own type, so a
+/// `w`-bit funnel shift expressed on a wider type is not matched -- there the high
+/// bits of the shift-left result survive and the single instruction would drop
+/// them.
+fn apply_funnel_shift_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    /// The two shifted values and the left shift amount, read off one operand
+    /// class pair of an `Or` taken in the order (shifted left, shifted right).
+    fn funnel_parts(
         egraph: &EGraph,
         shl_class: ClassId,
         shr_class: ClassId,
         width: u32,
-    ) -> Option<(ClassId, u8)> {
+    ) -> Option<(ClassId, ClassId, u8)> {
         let shift = |class: ClassId, want: PureOp| -> Option<(ClassId, i64)> {
             let canon = egraph.unionfind.find_immutable(class);
             if canon == ClassId::NONE {
@@ -385,16 +388,20 @@ fn apply_rotate_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let (x, k) = shift(shl_class, PureOp::Shl)?;
         let (y, j) = shift(shr_class, PureOp::Shr)?;
         let x_canon = egraph.unionfind.find_immutable(x);
-        if x_canon == ClassId::NONE || x_canon != egraph.unionfind.find_immutable(y) {
+        let y_canon = egraph.unionfind.find_immutable(y);
+        if x_canon == ClassId::NONE || y_canon == ClassId::NONE {
             return None;
         }
         if k <= 0 || j <= 0 || k + j != i64::from(width) {
             return None;
         }
-        // The rotate is over the whole of its own type, so the value it rotates
-        // must have that type and not a wider one truncated into it.
-        let x_ty = infer_class_type(egraph, x_canon)?;
-        (x_ty.is_integer() && x_ty.bit_width() == width).then_some((x_canon, k as u8))
+        // The funnel shift is over the whole of its own type, so both values it
+        // reads must have that type and not a wider one truncated into it.
+        let full_width = |class: ClassId| {
+            infer_class_type(egraph, class)
+                .is_some_and(|ty| ty.is_integer() && ty.bit_width() == width)
+        };
+        (full_width(x_canon) && full_width(y_canon)).then_some((x_canon, y_canon, k as u8))
     }
 
     let mut changed = false;
@@ -411,19 +418,32 @@ fn apply_rotate_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         }
         let width = ty.bit_width();
         let (a, b) = (snap.children[0], snap.children[1]);
-        let Some((x, k)) =
-            rotate_parts(egraph, a, b, width).or_else(|| rotate_parts(egraph, b, a, width))
+        let Some((x, y, k)) =
+            funnel_parts(egraph, a, b, width).or_else(|| funnel_parts(egraph, b, a, width))
         else {
             continue;
         };
 
-        let rol = egraph.add(ENode {
-            op: Op::Mach(MachOp::X86RolImm(k)),
-            children: smallvec![x],
-        });
+        // `shld` has no byte form, so an 8-bit funnel shift of two values stays
+        // as the shift pair; an 8-bit rotate is still a rotate.
+        let node = if x == y {
+            ENode {
+                op: Op::Mach(MachOp::X86RolImm(k)),
+                children: smallvec![x],
+            }
+        } else if width > 8 {
+            ENode {
+                op: Op::Mach(MachOp::X86ShldImm(k)),
+                children: smallvec![x, y],
+            }
+        } else {
+            continue;
+        };
+
+        let funnel = egraph.add(node);
         let proj0 = egraph.add(ENode {
             op: Op::Pure(PureOp::Proj0),
-            children: smallvec![rol],
+            children: smallvec![funnel],
         });
 
         let canon = egraph.unionfind.find_immutable(snap.class_id);

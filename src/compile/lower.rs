@@ -309,6 +309,17 @@ fn lower_op(
             *imm,
             |dst, imm| MachInst::RolRI { size, dst, imm },
         ),
+        Op::Mach(MachOp::X86ShldImm(imm)) => {
+            let imm = *imm;
+            lower_binary_alu("X86ShldImm", size, dst_reg, operand_regs, |dst, src| {
+                MachInst::ShldRRI {
+                    size,
+                    dst,
+                    src,
+                    imm,
+                }
+            })
+        }
 
         // X86CmpI is handled in the caller (where vreg_types is available) so
         // the OpSize is derived from the operand width, not the Flags dst.

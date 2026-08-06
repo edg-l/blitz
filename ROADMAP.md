@@ -381,7 +381,16 @@ isel patterns; we should beat it on the ones we implement.
       sign bit into the high end. On `tests/lit/asm/rotate.c` a rotate function
       is 3 insts / 6 bytes against 9 / 19 for the same shape on a signed
       operand; no corpus row changed, because none of them rotates.
-- [ ] **Double shifts**: `shld`/`shrd`.
+- [x] **Double shifts.** The rotate rule generalized: `Or(Shl(x, k), Shr(y, w - k))`
+      on `w`-bit `x` and `y` is `rol k` where the two are the same value and
+      `shld x, y, k` where they differ. There is no `shrd` form -- `shrd y, x, w - k`
+      computes the same bits, so the two differ only in which operand the
+      destructive form consumes and extraction has no basis to prefer either.
+      On `tests/lit/asm/double_shift.c` a funnel shift is 3 insts / 7 bytes
+      against 7 / 15 for the same shape on signed operands; no corpus row
+      changed, because none of them funnel-shifts. `shld` is priced at Skylake's
+      latency 3 / throughput 1, which loses under the `Latency` goal and wins
+      under `Balanced` on its size and its single read of each operand.
 - [x] **LHS-iconst compare commutation.** A constant left-hand operand moves
       right and the condition flips, so `X86CmpI` matches it and the constant
       is never materialized. Over the rows that changed, `lit` -0.54% insts and

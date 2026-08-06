@@ -76,6 +76,8 @@ asm/cmp_zero_test.c	O0	13	44	0	0
 asm/cmp_zero_test.c	O1	13	40	0	0
 asm/div_instruction.c	O0	9	32	0	0
 asm/div_instruction.c	O1	9	32	0	0
+asm/double_shift.c	O0	65	275	0	0
+asm/double_shift.c	O1	65	275	0	0
 asm/imul.c	O0	9	34	0	0
 asm/imul.c	O1	9	34	0	0
 asm/imul_general.c	O0	9	34	0	0

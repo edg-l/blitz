@@ -85,6 +85,7 @@ pub fn fmt_op(op: &Op) -> String {
         Op::Mach(MachOp::X86ShrImm(n)) => format!("x86_shr_imm({n})"),
         Op::Mach(MachOp::X86SarImm(n)) => format!("x86_sar_imm({n})"),
         Op::Mach(MachOp::X86RolImm(n)) => format!("x86_rol_imm({n})"),
+        Op::Mach(MachOp::X86ShldImm(n)) => format!("x86_shld_imm({n})"),
 
         // x86 flag-only compare with immediate
         Op::Mach(MachOp::X86CmpI { imm, ty }) => format!("x86_cmp_imm({imm}, {ty:?})"),

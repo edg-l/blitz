@@ -26,6 +26,7 @@ fn writes_flags(inst: &MachInst) -> bool {
             | MachInst::ShrRI { .. }
             | MachInst::SarRI { .. }
             | MachInst::RolRI { .. }
+            | MachInst::ShldRRI { .. }
             | MachInst::ShlRCL { .. }
             | MachInst::ShrRCL { .. }
             | MachInst::SarRCL { .. }

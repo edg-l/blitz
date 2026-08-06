@@ -167,6 +167,21 @@ impl CostModel {
                     * 0.9
             } // small discount to prefer imm form when available
 
+            // ── x86-64 double shift ──────────────────────────────────────────
+            //
+            // One instruction, but a multi-uop one: latency 3 and reciprocal
+            // throughput 1 are Skylake's numbers for `shld r,r,imm8`, which is
+            // no faster than the shift pair it replaces (those run in parallel,
+            // then the `or`). What it wins is four bytes against eight and one
+            // read of each operand instead of a destructive copy of both, so it
+            // is priced to win under `Balanced` and to lose under `Latency`.
+            Op::Mach(MachOp::X86ShldImm(_)) => CostTuple {
+                latency: 3.0,
+                throughput: 1.0,
+                size: 4.0,
+            }
+            .weighted(self.goal),
+
             // ── x86 flag-only compare with immediate: no register output; slightly
             //    cheaper than Proj1(X86Sub) since we don't pay for the sub's
             //    dst register write. imm=0 lowers to `test r, r` (2 bytes, even

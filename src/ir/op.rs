@@ -174,6 +174,18 @@ pub enum MachOp {
     /// direction was meant.
     X86RolImm(u8),
 
+    /// Double shift left by immediate count -- `shld dst, src, imm`; 2 children.
+    /// `dst` is shifted left by `imm` and the vacated low bits are filled from
+    /// the high end of `src`, which is left unchanged. Emitted by isel for
+    /// `Or(Shl(x, k), Shr(y, w - k))` on `w`-bit `x` and `y`, one instruction
+    /// where the shift pair is three.
+    ///
+    /// There is no `shrd` form: `shrd y, x, w - k` computes the same bits as
+    /// `shld x, y, k`, so the two differ only in which operand the destructive
+    /// form consumes, and extraction has no basis to prefer one -- both price
+    /// the same and neither knows which operand dies here.
+    X86ShldImm(u8),
+
     /// `lea [base + idx]`
     X86Lea2,
     /// `lea [base + idx * scale]` — scale embedded in op
@@ -705,6 +717,20 @@ impl Op {
                 );
                 Type::Pair(Box::new(child_types[0].clone()), Box::new(Type::Flags))
             }
+            Op::Mach(MachOp::X86ShldImm(_)) => {
+                assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
+                let t = &child_types[0];
+                assert!(
+                    t.is_integer(),
+                    "{self:?} requires integer operands, got {t:?}"
+                );
+                assert_eq!(
+                    &child_types[1], t,
+                    "{self:?} operand type mismatch: {:?} vs {:?}",
+                    t, child_types[1]
+                );
+                Type::Pair(Box::new(t.clone()), Box::new(Type::Flags))
+            }
 
             // ── x86 immediate-form ALU and shifts (1 child → Pair(childtype, Flags)) ──
             Op::Mach(MachOp::X86AddI(_))
@@ -1152,6 +1178,7 @@ impl Op {
                     | MachOp::X86ShrImm(_)
                     | MachOp::X86SarImm(_)
                     | MachOp::X86RolImm(_)
+                    | MachOp::X86ShldImm(_)
                     | MachOp::X86Addsd
                     | MachOp::X86Subsd
                     | MachOp::X86Mulsd

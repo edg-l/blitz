@@ -158,6 +158,14 @@ pub enum MachInst {
         dst: Operand,
         imm: u8,
     },
+    /// Double shift left by immediate count: `dst` shifts left by `imm` and the
+    /// vacated low bits come from the high end of `src`, which is not written.
+    ShldRRI {
+        size: OpSize,
+        dst: Operand,
+        src: Operand,
+        imm: u8,
+    },
     /// Shift left by CL
     ShlRCL {
         size: OpSize,
@@ -564,6 +572,7 @@ impl MachInst {
             MachInst::ShrRI { dst, .. } => collect(&[dst]),
             MachInst::SarRI { dst, .. } => collect(&[dst]),
             MachInst::RolRI { dst, .. } => collect(&[dst]),
+            MachInst::ShldRRI { dst, .. } => collect(&[dst]),
             MachInst::Neg { dst, .. } => collect(&[dst]),
             MachInst::Not { dst, .. } => collect(&[dst]),
             MachInst::Inc { dst, .. } => collect(&[dst]),
@@ -663,6 +672,7 @@ impl MachInst {
             MachInst::ShrRI { dst, .. } => collect(&[dst]),
             MachInst::SarRI { dst, .. } => collect(&[dst]),
             MachInst::RolRI { dst, .. } => collect(&[dst]),
+            MachInst::ShldRRI { dst, src, .. } => collect(&[dst, src]),
             MachInst::Neg { dst, .. } => collect(&[dst]),
             MachInst::Not { dst, .. } => collect(&[dst]),
             MachInst::Inc { dst, .. } => collect(&[dst]),

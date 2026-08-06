@@ -307,6 +307,19 @@ impl Encoder {
         self.encode_shift_ri(size, 7, dst, imm);
     }
 
+    /// `SHLD r/m, r, imm8` -- 0F A4 /r ib. The shifted-in operand is the ModRM
+    /// reg field and the destination is r/m, the opposite of the ALU forms.
+    pub fn encode_shld_rri(&mut self, size: OpSize, dst: Reg, src: Reg, imm: u8) {
+        assert!(size != OpSize::S8, "SHLD has no byte form");
+        let d = dst.hw_enc();
+        let s = src.hw_enc();
+        self.emit_prefix_and_rex(size, s, 0, d);
+        self.emit_byte(0x0F);
+        self.emit_byte(0xA4);
+        self.emit_modrm(0b11, s, d);
+        self.emit_byte(imm);
+    }
+
     pub fn encode_shl_rcl(&mut self, size: OpSize, dst: Reg) {
         self.encode_shift_cl(size, 4, dst);
     }
