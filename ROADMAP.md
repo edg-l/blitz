@@ -44,19 +44,24 @@ rather than overhead against it.
 Ordered. Each says what it is, why it is placed there, and what would tell you it
 is done.
 
-1. **Twenty-three capacity failures are what is left.** No generated program
+1. **Twenty-two capacity failures are what is left.** No generated program
    computes a wrong value any more: 600 at 200 seeds a shape are `mixed`
    198/200, `args` 186/200, `pressure` 194/200, and **every one of those
    failures is the allocator refusing to colour, not a wrong answer.**
    Reproducers in `tests/fuzz/corpus/open/`; `run_corpus.sh` checks them in
    seconds.
 
+   **A program that does not compile is a program no oracle can judge**: 28 of
+   the 1200 (program, level) pairs are unjudged for that reason, so "no wrong
+   value remains" is a statement about the 1172 that ran, not about all 1200.
+   That is the second reason to close these.
+
    The allocator names the shape itself: *"spilling did not reduce it, so the
    pressure point is one instruction whose own operands are what is live
    there"*. Spilling cannot relieve a value that is live at a point *because
    the instruction there reads it*, which is why the spill loop stops -- see
    the four measured attempts at the end of `docs/refactor-roadmap.md` before
-   trying a fifth. `args` is where it concentrates, 14 of the 23. Done when a
+   trying a fifth. `args` is where it concentrates, 14 of the 22. Done when a
    200-seed run of each shape is clean.
 2. ~~**Make the gate able to see them.**~~ Done: `tests/fuzz/corpus/` plus
    `run_corpus.sh`, and `oracles.sh` so the saved programs and the generated ones
@@ -99,7 +104,7 @@ gated on pressure because it runs before global liveness exists, and
   `mixed` 30/30, `args` 30/30, `pressure` 30/30. **That width measures nothing**,
   and it is what `run_corpus.sh` exists to compensate for. At 200 seeds it is
   `mixed` 198/200, `args` 186/200, `pressure` 194/200: **no wrong-value programs
-  and 23 capacity failures.**
+  and 22 capacity failures.**
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 894 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
@@ -353,7 +358,7 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**No wrong-value programs are open. Twenty-three capacity failures are**, found
+**No wrong-value programs are open. Twenty-two capacity failures are**, found
 by running the generator at 200 seeds a shape instead of the 30 every gate is
 pinned at. The ones worth keeping are checked in under `tests/fuzz/corpus/open/`,
 where `run_corpus.sh` re-checks them in seconds; the files are the durable
