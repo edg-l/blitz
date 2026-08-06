@@ -1208,6 +1208,9 @@ pub fn compile(
                                 crate::x86::reg::RegClass::GPR => {
                                     Op::Pseudo(PseudoOp::SpillStore(info.slot))
                                 }
+                                crate::x86::reg::RegClass::Flags => {
+                                    unreachable!("flags cannot be spilled to a slot")
+                                }
                             },
                             dst: VReg(next_vreg),
                             operands: vec![vreg],
@@ -1624,8 +1627,17 @@ pub fn compile(
         // stated where the register is actually needed, and unconditionally
         // rather than only in a debug build.
         if func.blocks.len() > 1 {
+            // A flags operand is exempt, and is the one operand that must be:
+            // it names EFLAGS, which no instruction addresses and no allocation
+            // can hand out. Its consumer reads the flags the comparison left.
+            let flags_vregs = crate::regalloc::build_vreg_classes_from_all_blocks(
+                std::slice::from_ref(&rewritten),
+            );
             for inst in rewritten.iter() {
                 for &op in &inst.operands {
+                    if flags_vregs.get(&op) == Some(&crate::x86::reg::RegClass::Flags) {
+                        continue;
+                    }
                     debug_assert!(
                         regalloc_result.vreg_to_reg.contains_key(&op),
                         "8a-effectful safety net fired after global regalloc: \

@@ -3,6 +3,15 @@
 pub enum RegClass {
     GPR,
     XMM,
+    /// EFLAGS, of which the machine has exactly one.
+    ///
+    /// A comparison's result is a value like any other -- it is defined, it is
+    /// live to its use, two of them live at once would conflict -- but it lives
+    /// in a register no instruction names and no move can copy. Left in the GPR
+    /// class it takes a general register it never occupies and an interference
+    /// edge to everything live at its definition, which is chromatic number
+    /// spent on nothing: 35 of 196 values in one measured function.
+    Flags,
 }
 
 /// Physical x86-64 registers (GPR and XMM).

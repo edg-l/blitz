@@ -1110,6 +1110,8 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
             RegClass::XMM => {
                 xmm_max_color = Some(xmm_max_color.map_or(color, |m: u32| m.max(color)));
             }
+            // Flags occupy no register file, so they widen neither.
+            RegClass::Flags => {}
         }
     }
 
@@ -1149,6 +1151,7 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
             let reg = match phase3.graph.reg_class[vreg_idx] {
                 RegClass::GPR => gpr_order.get(color as usize).copied(),
                 RegClass::XMM => xmm_order.get(color as usize).copied(),
+                RegClass::Flags => None,
             };
             reg.map(|r| (vreg_idx, r))
         })
@@ -1197,6 +1200,10 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
         let reg = match reg_class {
             RegClass::GPR => gpr_color_to_reg.get(&color).copied(),
             RegClass::XMM => xmm_color_to_reg.get(&color).copied(),
+            // A flags value gets no machine register: the comparison leaves it
+            // where its consumer reads it, and lowering emits nothing for the
+            // projection naming it.
+            RegClass::Flags => None,
         };
         if let Some(r) = reg {
             vreg_to_reg.insert(VReg(idx as u32), r);
@@ -1218,6 +1225,10 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
             let budget = match phase3.graph.reg_class[idx] {
                 RegClass::GPR => gpr_budget,
                 RegClass::XMM => xmm_budget,
+                // One EFLAGS, and the schedules never put two flags values live
+                // at once -- so a colour of 1 or more here is a real conflict
+                // and belongs over budget like any other.
+                RegClass::Flags => 1,
             };
             color >= budget
         })
@@ -1418,6 +1429,7 @@ fn exceeds_budget(
             let budget = match graph.reg_class[idx] {
                 RegClass::GPR => gpr_budget,
                 RegClass::XMM => super::coloring::AVAILABLE_XMM_COLORS,
+                RegClass::Flags => 1,
             };
             color >= budget
         })
@@ -1490,6 +1502,7 @@ fn format_overshoot(
         let budget = match class {
             RegClass::GPR => gpr_budget,
             RegClass::XMM => xmm_budget,
+            RegClass::Flags => 1,
         };
         if color < budget {
             continue;
@@ -1562,6 +1575,7 @@ fn compute_overshoot_from_coloring(
             RegClass::XMM => {
                 xmm_max = Some(xmm_max.map_or(color, |m| m.max(color)));
             }
+            RegClass::Flags => {}
         }
     }
 

@@ -183,6 +183,11 @@ pub fn map_colors_to_regs(
     let available: Vec<Reg> = match reg_class {
         RegClass::GPR => allocatable_gpr_order(uses_frame_pointer),
         RegClass::XMM => allocatable_xmm_order(),
+        // EFLAGS is not a register any instruction names, so a flags value gets
+        // a colour and no machine register: the comparison writes the flags
+        // where its consumer reads them, and lowering emits nothing for the
+        // projection that names them.
+        RegClass::Flags => Vec::new(),
     };
 
     // Track which physical registers are already claimed.

@@ -1084,6 +1084,25 @@ impl Op {
         matches!(self, Op::Mach(MachOp::X86Idiv(..) | MachOp::X86Div(..)))
     }
 
+    /// Whether this op's result *is* the flags, rather than a value in a
+    /// register.
+    ///
+    /// The ops whose `result_type` is `Type::Flags`. A pair-producing op whose
+    /// second element is flags is not one of these -- the pair is a real value
+    /// and it is the `Proj1` that names the flags.
+    pub fn produces_flags(&self) -> bool {
+        matches!(
+            self,
+            Op::Pure(PureOp::Icmp(_))
+                | Op::Pure(PureOp::Fcmp(_))
+                | Op::Mach(MachOp::X86CmpI { .. })
+                | Op::Mach(MachOp::X86Ucomisd)
+                | Op::Mach(MachOp::X86Ucomiss)
+                | Op::Mach(MachOp::X86UcomisdCc(_))
+                | Op::Mach(MachOp::X86UcomissCc(_))
+        )
+    }
+
     /// Returns true if this op produces a value that lives in an XMM (FP) register.
     pub fn is_fp_op(&self) -> bool {
         match self {

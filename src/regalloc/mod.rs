@@ -71,10 +71,12 @@ pub fn build_vreg_classes_from_all_blocks(
     let mut map: BTreeMap<VReg, RegClass> = BTreeMap::new();
     for sched in block_schedules {
         for (&vreg, &class) in &build_vreg_classes_from_insts(sched) {
-            // XMM wins over GPR if a VReg appears in multiple blocks with different classes.
+            // A block that saw the definition wins over one that saw only a use
+            // and fell back to the GPR default: XMM and Flags are both stated by
+            // a defining op, GPR is also what "no idea" looks like.
             let entry = map.entry(vreg).or_insert(class);
-            if class == RegClass::XMM {
-                *entry = RegClass::XMM;
+            if class != RegClass::GPR {
+                *entry = class;
             }
         }
     }
@@ -121,6 +123,32 @@ pub fn build_vreg_classes_from_insts(insts: &[ScheduledInst]) -> BTreeMap<VReg, 
             for &op in &inst.operands {
                 map.insert(op, class);
             }
+        }
+    }
+    // Flags last, so it wins over the GPR default an earlier pass gave a value
+    // it saw as an operand before reaching its definition.
+    //
+    // Two shapes produce one: an op whose result *is* the flags, and `Proj1` of
+    // a pair whose second element is flags -- which is every pair-producing op
+    // except a division, whose `Proj1` is the remainder and a real register
+    // value. That distinction cannot be made from the projection alone, so it
+    // is made from the op defining its operand, the same way `lower.rs` makes
+    // it.
+    let def_op: BTreeMap<VReg, &crate::ir::op::Op> = insts.iter().map(|i| (i.dst, &i.op)).collect();
+    for inst in insts {
+        if inst.op.produces_flags() {
+            map.insert(inst.dst, RegClass::Flags);
+            continue;
+        }
+        if matches!(inst.op, crate::ir::op::Op::Pure(crate::ir::op::PureOp::Proj1))
+            && let Some(&src) = inst.operands.first()
+            // A projection whose pair is defined in another block is not a
+            // flags projection: flags cannot cross a block boundary, and
+            // linearization re-emits them per block for that reason.
+            && let Some(src_op) = def_op.get(&src)
+            && !src_op.result_in_fixed_regs()
+        {
+            map.insert(inst.dst, RegClass::Flags);
         }
     }
     map

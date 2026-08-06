@@ -1635,6 +1635,11 @@ fn detect_blockparam_slot_routing(
                     op: match group.reg_class {
                         RegClass::XMM => Op::Pseudo(PseudoOp::XmmSpillLoad(slot)),
                         RegClass::GPR => Op::Pseudo(PseudoOp::SpillLoad(slot)),
+                        // Routing moves a value out of the register file into a
+                        // frame slot. There is no instruction that puts EFLAGS
+                        // in one, and nothing needs it: a flags value is
+                        // consumed in the block that computes it.
+                        RegClass::Flags => unreachable!("flags cannot be slot-routed"),
                     },
                     dst: reload_vreg,
                     operands: vec![],

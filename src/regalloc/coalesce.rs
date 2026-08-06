@@ -103,6 +103,9 @@ pub fn coalesce(
         let k = match graph.reg_class[src_root] {
             RegClass::GPR => gpr_colors,
             RegClass::XMM => xmm_colors,
+            // One EFLAGS. Two flags values never live at once, so nothing is
+            // ever a candidate here, and if one were, k = 1 refuses it.
+            RegClass::Flags => 1,
         } as usize;
         let class = graph.reg_class[src_root];
         let mut significant: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
