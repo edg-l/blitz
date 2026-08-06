@@ -13,6 +13,15 @@ is fair game here.
 The measure of success is code quality against `gcc -O2` / `clang -O2` on the
 same input: fewer instructions, fewer bytes, fewer spills, better loops.
 
+**Where that stands: `x1.43` against `gcc -O2` and `x1.15` against `clang -O2`**,
+geometric mean of the per-program instruction ratio over the 15 `bench` kernels,
+from `bash tests/run_codesize.sh --gap`. Worst is `hash_table` at `x3.45`. Five
+kernels are already *below* 1.0, which is not a win and is the first thing to
+misread: this counts static instructions, and a compiler that inlines or unrolls
+emits more of them and runs faster. `gcc` turns `fib_memo` into 436 instructions
+against blitz's 228 by inlining, and it is the faster program. A ratio under 1.0
+is a program to go and read.
+
 Correctness is a precondition, not a tradeoff against that. An aggressive
 single-target optimizer has more room to be subtly wrong than a conservative
 portable one, so the correctness infrastructure in P0 is part of the goal
@@ -92,6 +101,16 @@ gated on pressure because it runs before global liveness exists, and
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 894 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
+- Code quality also has an *absolute* number now, which is the one the Goal is
+  written against: `--gap`, `x1.43` vs `gcc -O2` and `x1.15` vs `clang -O2` on
+  `bench`. **`bench` is the only corpus that can produce it.** `lit` and `fuzz`
+  compute a fixed answer from no runtime input, so `gcc -O2` evaluates the whole
+  program and emits the constant -- a generated program becomes
+  `mov $0x562,%esi; call printf`. `--gap` detects and excludes that where it is
+  total, but not where it is partial, and partial is the common case: `main`
+  folds to a constant while the helpers survive, because a non-static function
+  is emitted whether or not a call to it is left. **15 kernels is a thin basis
+  for the project's headline metric** -- see P1.
 - **Compile time is quadratic in blocks x classes.** `secs ~ (B*C)^0.86`,
   R2=0.92 over 44 (program, level) points, and both levels sit on one line, so
   `-O1` is not intrinsically cheaper -- it just hands the same pipeline a smaller
@@ -186,6 +205,17 @@ so the holes stay visible.
 
 ### P1 -- Optimizer gaps with the largest measured impact
 
+- [ ] **A benchmark corpus whose inputs are not known at compile time.** The
+      project's headline metric rests on 15 kernels, because they are the only
+      programs here a reference compiler cannot evaluate outright: everything in
+      `lit` and `fuzz` computes a fixed answer from nothing, and `gcc -O2` prints
+      it. So `--gap` can say `x1.43` and cannot say much about *which* code is
+      1.43x, and no amount of generator work fixes that -- `gen_c.py`'s whole
+      design is that it knows the answer while generating. What is needed is
+      kernels that take their data from `argv`, a file or a clock, in enough
+      variety to cover the shapes the optimizer claims: loops over arrays,
+      pointer chasing, struct field access, float reductions, calls that cannot
+      be inlined away. Until then every quality claim is a claim about `bench`.
 - [ ] **LICM has no pressure check, and it is the largest measured quality gap
       in the tree.** `BLITZ_PASSES=-licm bash tests/run_codesize.sh`, totalled
       over the rows that change, *lowers* every number on all three corpora:
