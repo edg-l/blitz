@@ -19,7 +19,8 @@
 #   bash tests/run_codesize.sh --update        # rewrite the baselines
 #   bash tests/run_codesize.sh --gap           # how far the output is from gcc/clang -O2
 #
-#   CORPUS=lit|bench|fuzz|all   which programs (default all; --gap defaults to bench)
+#   CORPUS=lit|bench|live|fuzz|all  which programs (default all; --gap defaults to
+#                               `bench live`, the two a reference compiler cannot fold)
 #   SEEDS=30                    generated programs per shape, for the fuzz corpus
 #   JOBS=N                      parallel compiles (default: every core)
 #   GAP_LEVEL=-O1               the blitz level `--gap` compares (default -O1)
@@ -65,6 +66,12 @@
 #   bench  the kernels in tests/lit/bench: sieve, matmul, sorts, CRC, string
 #          ops, a struct-field walk, FP loops. This is where loop-invariant
 #          motion, strength reduction and alias analysis have room to show.
+#   live   the kernels in tests/lit/live. Same shapes as `bench`, except that
+#          every one seeds its data from `argc`, so no reference compiler can
+#          evaluate the program and print the answer. `bench` is foldable in
+#          part -- `main` collapses to a constant while the helpers survive --
+#          and that is exactly what makes a ratio against it hard to read.
+#          This corpus is the one to trust when comparing against gcc or clang.
 #   fuzz   generated programs at real register pressure, the same ones
 #          `compare_ref.sh` judges for correctness. Partial by construction:
 #          a program that does not compile is recorded as a hole, not skipped,
@@ -231,7 +238,8 @@ mkdir -p "$BASELINE_DIR"
 collect() {
     case "$1" in
         lit)
-            find "$ROOT/tests/lit" -name '*.c' -not -path '*/bench/*' | sort |
+            find "$ROOT/tests/lit" -name '*.c' -not -path '*/bench/*' \
+                -not -path '*/live/*' | sort |
                 while IFS= read -r f; do
                     printf '%s|%s\n' "${f#"$ROOT"/tests/lit/}" "$f"
                 done
@@ -240,6 +248,12 @@ collect() {
             find "$ROOT/tests/lit/bench" -name '*.c' | sort |
                 while IFS= read -r f; do
                     printf '%s|%s\n' "${f#"$ROOT"/tests/lit/bench/}" "$f"
+                done
+            ;;
+        live)
+            find "$ROOT/tests/lit/live" -name '*.c' | sort |
+                while IFS= read -r f; do
+                    printf '%s|%s\n' "${f#"$ROOT"/tests/lit/live/}" "$f"
                 done
             ;;
         fuzz)
@@ -424,23 +438,29 @@ compare() {
     ' "$baseline" "$WORK/$corpus.tsv" || regressed=1
 }
 
-# `--gap` defaults to `bench` alone, and this is a limit of the corpora rather
-# than of the harness. `lit` and `fuzz` are closed-form: nothing they compute
-# depends on anything read at runtime, so a reference compiler evaluates the
-# program and prints the answer. The loop test below catches that when it is
-# total, but not when it is partial -- a generated program's `main` folds to one
-# constant while its helpers survive, because a non-static function has to be
-# emitted whether or not any call to it is left. There is no detector for that;
-# there is only a corpus whose inputs are not known until it runs. `bench` is
-# that corpus, which is why it exists, and every one of its kernels compares.
+# `--gap` defaults to the two corpora a reference compiler cannot evaluate.
+#
+# `lit` and `fuzz` are closed-form: nothing they compute depends on anything
+# read at runtime, so a reference compiler runs the program and prints the
+# answer. The loop test below catches that when it is total, but not when it is
+# partial -- a generated program's `main` folds to one constant while its
+# helpers survive, because a non-static function has to be emitted whether or
+# not any call to it is left. There is no detector for that; there is only a
+# corpus whose inputs are not known until it runs.
+#
+# `bench` was that corpus and is only half of one: its kernels are large enough
+# that gcc gives up rather than forbidden from folding, so a ratio against them
+# is a ratio against whatever gcc happened to leave. `live` is the honest
+# version -- every kernel seeds its data from `argc` -- and it is the one to
+# read when the two disagree.
 if [ -z "$CORPUS" ]; then
     case "$mode" in
-        gap) CORPUS=bench ;;
+        gap) CORPUS="bench live" ;;
         *) CORPUS=all ;;
     esac
 fi
 case "$CORPUS" in
-    all) corpora="lit bench fuzz" ;;
+    all) corpora="lit bench live fuzz" ;;
     *) corpora="$CORPUS" ;;
 esac
 

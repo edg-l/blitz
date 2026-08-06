@@ -13,14 +13,20 @@ is fair game here.
 The measure of success is code quality against `gcc -O2` / `clang -O2` on the
 same input: fewer instructions, fewer bytes, fewer spills, better loops.
 
-**Where that stands: `x1.29` against `gcc -O2` and `x1.03` against `clang -O2`**,
-geometric mean of the per-program instruction ratio over the 15 `bench` kernels,
-from `bash tests/run_codesize.sh --gap`. Worst is `queens` at `x2.67`. Five
-kernels are already *below* 1.0, which is not a win and is the first thing to
-misread: this counts static instructions, and a compiler that inlines or unrolls
-emits more of them and runs faster. `gcc` turns `fib_memo` into 436 instructions
-against blitz's 228 by inlining, and it is the faster program. A ratio under 1.0
-is a program to go and read.
+**Where that stands: `x1.36` against `gcc -O2`**, geometric mean of the
+per-program instruction ratio over the 8 `live` kernels, from
+`bash tests/run_codesize.sh --gap`. Worst is `call_hot` at `x2.44`.
+
+Read `live`, not `bench`. Both are reported, and `bench` says `x1.29` -- but its
+kernels resist folding only by being large enough that `gcc` gives up, so that
+ratio is against whatever `gcc` happened to leave behind. Every `live` kernel
+seeds its data from `argc`, which no reference compiler can evaluate.
+
+**The `clang` column is not a ranking.** It reads `x0.74` on `live`, meaning
+blitz emits fewer instructions than `clang -O2` -- because `clang` vectorizes
+and unrolls these loops into 1315 instructions against blitz's 831, and its code
+is much faster. This counts static instructions, so a ratio under 1.0 is a
+program to go and read, not a win.
 
 Correctness is a precondition, not a tradeoff against that. An aggressive
 single-target optimizer has more room to be subtly wrong than a conservative
@@ -116,16 +122,16 @@ gated on pressure because it runs before global liveness exists, and
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 894 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
-- Code quality also has an *absolute* number now, which is the one the Goal is
-  written against: `--gap`, `x1.29` vs `gcc -O2` and `x1.03` vs `clang -O2` on
-  `bench`. **`bench` is the only corpus that can produce it.** `lit` and `fuzz`
-  compute a fixed answer from no runtime input, so `gcc -O2` evaluates the whole
-  program and emits the constant -- a generated program becomes
-  `mov $0x562,%esi; call printf`. `--gap` detects and excludes that where it is
-  total, but not where it is partial, and partial is the common case: `main`
-  folds to a constant while the helpers survive, because a non-static function
-  is emitted whether or not a call to it is left. **15 kernels is a thin basis
-  for the project's headline metric** -- see P1.
+- Code quality also has an *absolute* number, which is the one the Goal is
+  written against: `--gap`, `x1.36` vs `gcc -O2` over the 8 `live` kernels.
+  `lit` and `fuzz` compute a fixed answer from no runtime input, so `gcc -O2`
+  evaluates the whole program and emits the constant -- a generated program
+  becomes `mov $0x562,%esi; call printf`. `--gap` detects that where it is
+  total but not where it is partial, and partial is the common case. `bench`
+  resists only by being big and reports a flattering `x1.29`; `live` seeds every
+  kernel from `argc` and cannot be folded at all. **8 kernels is still a thin
+  basis** -- widening `live` is the cheapest way to make every later quality
+  claim mean more.
 - **Compile time is quadratic in blocks x classes.** `secs ~ (B*C)^0.86`,
   R2=0.92 over 44 (program, level) points, and both levels sit on one line, so
   `-O1` is not intrinsically cheaper -- it just hands the same pipeline a smaller
@@ -260,17 +266,19 @@ so the holes stay visible.
 
 ### P1 -- Optimizer gaps with the largest measured impact
 
-- [ ] **A benchmark corpus whose inputs are not known at compile time.** The
-      project's headline metric rests on 15 kernels, because they are the only
-      programs here a reference compiler cannot evaluate outright: everything in
-      `lit` and `fuzz` computes a fixed answer from nothing, and `gcc -O2` prints
-      it. So `--gap` can say `x1.43` and cannot say much about *which* code is
-      1.43x, and no amount of generator work fixes that -- `gen_c.py`'s whole
-      design is that it knows the answer while generating. What is needed is
-      kernels that take their data from `argv`, a file or a clock, in enough
-      variety to cover the shapes the optimizer claims: loops over arrays,
-      pointer chasing, struct field access, float reductions, calls that cannot
-      be inlined away. Until then every quality claim is a claim about `bench`.
+- [x] **A benchmark corpus whose inputs are not known at compile time.**
+      `tests/lit/live`, 8 kernels seeding their data from `argc`: a strided array
+      walk, a struct-field walk, a dependent pointer chase, two float
+      reductions, a hot loop over a `noinline` callee, a dense matmul, a
+      data-dependent branch filter, and a bit-manipulation loop. `--gap` now
+      defaults to `bench live`, and `live` is the one to read.
+      **It disagreed with `bench` immediately: `x1.36` against `gcc -O2` where
+      `bench` says `x1.29`.** `bench` resists folding only by being large enough
+      that `gcc` gives up, so its ratio is against whatever `gcc` left behind;
+      `live` cannot be folded at all. They are lit tests too, so `run_tests.sh`
+      and `run_diff.sh` check each still computes the right answer at both
+      levels and against `cc`. Widening this from 8 is the cheapest way to make
+      every later quality claim mean more.
 - [x] **LICM has a pressure check.** Hoisting is budgeted by the register file
       less what the loop already needs (`licm::within_budget`). instructions
       -12.3% on `bench` and -21.3% on `fuzz`, spills -91.1% and -47.3%, no row
