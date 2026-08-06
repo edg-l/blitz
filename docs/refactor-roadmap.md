@@ -1363,20 +1363,34 @@ with `regalloc/param_shadow_seed13.c` at `-O0` losing 4.4% of its instructions a
 
 ---
 
-## Step 6: two allocators
+## Step 6: two allocators -- FOLD DONE (`63e2f1b`)
 
 `allocator.rs` (per-block, spill rounds, interval colouring) and
-`global_allocator.rs` (function-scope, primary) do the same job twice, with the
+`global_allocator.rs` (function-scope, primary) did the same job twice, with the
 capabilities split the wrong way. A single-block function is a special case of the
-general one, not a separate algorithm. Fold after step 5, or the spill loop gets
-written twice.
+general one, not a separate algorithm.
 
-Beyond merging the two files, the single-block path is the last consumer of two
-helpers that duplicate the multi-block path's answers: `cfg::compute_copy_pairs`,
-which resolves parameter VRegs through the class map where the multi-block path uses
-`compute_copy_pairs_from_schedules`, and `cfg::collect_phi_source_vregs`. One
-algorithm means one derivation of the copy set, which is the same "two passes deriving
-it separately" hazard as everywhere else in this document.
+**`func.blocks.len() == 1` is gone and the per-block allocator with it** -- 1620
+lines deleted against 20 added, `allocator.rs` down to `RegAllocResult`. The
+helpers the fast path was the last consumer of went too: `cfg::compute_copy_pairs`
+and `cfg::collect_phi_source_vregs`, which derived the copy set a second way, and
+`precolor::add_div_precolors` / `add_shift_precolors`. Behind them a dead-code
+cascade: `coloring::interval_color` and `spill.rs`'s entire second victim selector
+(`select_spill`, `select_spill_for_class`, `spill_score`, `spill_fallback_score`,
+`find_pressure_point`, `compute_next_use`). The live scorer is
+`split::score_victim`.
+
+**The div precoloring was a live behaviour difference, not just duplication.**
+`add_div_precolors` pinned a dividend to RAX, which the function-scope path
+deliberately stopped doing in `1851865` after two live quotients both took RAX and
+the second destroyed the first. Single-block functions were still getting the old
+behaviour, and removing it **fixes two miscompiles**: `mixed` seeds 137 and 196.
+
+**What the fold cost, and what is still open under this heading**: 12 regressed
+`run_codesize.sh` rows, and one new capacity failure (`mixed` seed 57, with seed 92
+widening from `-O1` to both levels). `mixed` at 200 seeds goes 191/200 -> 194/200,
+so it is one fewer failing seed overall, but seed 57 is new. The 12 rows are the
+subject of the two sections below; neither is fixed.
 
 ### Measured: the general path handles them, and emits worse code
 
@@ -1424,6 +1438,35 @@ count -- the standard Chaitin ratio -- is a **large** loss: `pressure` 28/30 ->
 Reverted. Preferring long ranges outright beats preferring cheap ones here, and
 whatever replaces it has to be measured against those numbers rather than
 reasoned from first principles.
+
+**Re-measured after the fold, on this tree: the Chaitin ratio is still a loss**,
+so that verdict is not an artifact of the pre-step-5 allocator. 478 lit pass, and
+`--check` goes from 12 regressed rows to **35**, with **88** regressed fuzz rows
+against 0 on `bench`. Three attempts now, so treat "prefer cheap ones" as closed
+and look for something that is neither length nor length-over-uses.
+
+**Two more probes on the pass in front of it, both measured after the fold and
+both rejected:**
+
+- **Gate `insert_early_barrier_spills` on pressure it measures itself.** It has no
+  pressure input at all today: it spills any GPR barrier result whose consumer is
+  two or more barrier groups away, and on
+  `regalloc/array_spill_frame_corruption.c` it owns 6 of the 9 slots, each stored
+  once and reloaded once. Gating it is **structurally blocked, not a tuning
+  problem**: the pass runs before `populate_effectful_operands` and before global
+  liveness exists, so it cannot see a block's live-out, which is most of its
+  pressure. Counting the barrier operands `vreg_to_arg_of_barrier` already names,
+  and correcting `<= budget` to `< budget` for the def-counting the allocator
+  does, both failed to close the gap, and the gate cost `args` seed 3 its compile.
+  Moving the pass after global liveness means renaming barrier results *after*
+  populate has attached them -- the second rename layer the pass exists to avoid.
+- **Delete the pass outright.** All 478 lit pass and the generated corpus gets
+  **better** in aggregate -- spills 53503 -> 52426 and instructions 316613 ->
+  314452 over 179 changed rows -- but `args` seed 3 stops compiling, and
+  `array_spill_frame_corruption.c` only improves from +60% to +55%, because the
+  splitter's 3 slots are what dominate it and one is reloaded 23 times. So
+  early-barrier is the smaller half of that program's cost and the victim choice
+  is the larger one, which is the same conclusion from the other side.
 
 This is also the natural place for soundness gap 2 above: the merge-versus-liveness
 check needs to sit inside whichever allocator survives.
