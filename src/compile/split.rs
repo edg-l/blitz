@@ -1118,27 +1118,34 @@ fn format_plan(plan: &SplitPlan, slots: &SlotAllocator) -> String {
 
 // ── Block-param slot routing ────────────────────────────────────────────────
 
-/// The VReg and canonical e-class naming block `bid`'s parameter `pidx` at
-/// `entry_point`.
+/// The VReg and canonical e-class naming block `block`'s parameter `pidx`.
 ///
-/// The class map answers first, and the block's own record second: a parameter
-/// passing a dominating definition straight through has no `BlockParam` node and
-/// no segment covering the entry point, and `param_vregs` is where linearization
-/// states which VReg it shares -- see `cfg::commit_block_param_vregs`. Without
-/// that fallback such a parameter cannot be named here at all, which is most of
-/// the arguments on the wide edges the generated loops produce.
+/// Routing moves a parameter out of the register file, so the VReg it names has
+/// to be the one the block itself reads -- `cfg::resolve_block_param_vreg` is
+/// that answer, and asking the class map first instead gets it wrong exactly
+/// where one class names several VRegs. Then the reloads go in front of uses of
+/// a VReg this block never mentions, the block keeps reading a register no
+/// predecessor writes, and the store into the slot is the only traffic it ever
+/// sees.
 fn find_block_param_vreg(
     block: &BasicBlock,
+    block_idx: usize,
+    block_schedule: &[ScheduledInst],
     egraph: &EGraph,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     class_to_vreg: &ClassVRegMap,
     pidx: u32,
-    entry_point: ProgramPoint,
 ) -> Option<(VReg, ClassId)> {
     let canon = egraph.find_immutable(*block_param_map.get(&(block.id, pidx))?);
-    let vreg = class_to_vreg
-        .lookup(canon, entry_point)
-        .or_else(|| block.param_vreg(pidx))?;
+    let vreg = super::cfg::resolve_block_param_vreg(
+        block,
+        pidx,
+        block_idx,
+        block_schedule,
+        egraph,
+        class_to_vreg,
+        block_param_map,
+    )?;
     Some((vreg, canon))
 }
 
@@ -1262,7 +1269,6 @@ fn detect_blockparam_slot_routing(
 
     for block_idx in 0..n_blocks.min(func.blocks.len()) {
         let block = &func.blocks[block_idx];
-        let entry_point = ProgramPoint::block_entry(block_idx);
         for pidx in 0..block.param_types.len() as u32 {
             // Already routed through a slot by an earlier round. Routing it again
             // would allocate a second slot, and only the newer entry survives in
@@ -1278,11 +1284,12 @@ fn detect_blockparam_slot_routing(
             }
             let Some((vreg, class_id)) = find_block_param_vreg(
                 block,
+                block_idx,
+                block_schedules.get(block_idx).map_or(&[], |s| s.as_slice()),
                 egraph,
                 block_param_map,
                 class_to_vreg,
                 pidx,
-                entry_point,
             ) else {
                 continue;
             };

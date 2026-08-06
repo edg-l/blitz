@@ -591,9 +591,9 @@ regalloc/loop_latch_param_passthrough.c	O1	637	3572	130	173
 regalloc/many_cross_block_values.c	O0	54	155	0	0
 regalloc/many_cross_block_values.c	O1	54	150	0	0
 regalloc/mixed_pressure_seed12.c	O0	1476	8383	279	416
-regalloc/mixed_pressure_seed12.c	O1	1314	6954	243	358
+regalloc/mixed_pressure_seed12.c	O1	1315	6962	243	359
 regalloc/multi_block_param_group.c	O0	1344	7329	160	343
-regalloc/multi_block_param_group.c	O1	996	5654	152	258
+regalloc/multi_block_param_group.c	O1	997	5662	152	259
 regalloc/nested_loops_deep_pressure.c	O0	42	150	0	0
 regalloc/nested_loops_deep_pressure.c	O1	40	138	0	0
 regalloc/param_shadow_const_v7.c	O0	874	5336	248	318
