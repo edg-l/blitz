@@ -672,7 +672,6 @@ pub fn compile(
         }
     }
 
-
     // Phase 4b: Reorder each block's schedule to respect effectful op barriers.
     //
     // Effectful ops (loads, stores, calls) impose ordering constraints on pure ops:

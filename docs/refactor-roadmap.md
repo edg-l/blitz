@@ -8,7 +8,7 @@ Judge every step on the full battery (`cargo test --all-targets --workspace`,
 `bash tests/lit/run_diff.sh`) and per **(seed, level) pair** with
 `tests/fuzz/compare_ref.sh <ref> 60 <shape>`, never on a bare pass count.
 
-## Cheap things that make the rest easier
+## Cheap things that make the rest easier — all DONE
 
 None of these changes behaviour. Each one shrinks the surface or the risk of the
 steps below, and they are worth doing first rather than carrying through a rewrite.
@@ -111,7 +111,7 @@ Not worth doing first: splitting the large files (no evidence of harm), and the 
 split -- that is step 7, and doing it early fights steps 1-4, which change what the
 CFG holds.
 
-## Duplication: do it first, except where first makes it worse
+## Duplication: do it first, except where first makes it worse — all DONE
 
 Found by a 10-line-window scan over `src/` and `crates/`, filtered to production code
 and then read. **Cleanups go before new work** — that is why A, B and C preceded step 1
@@ -354,7 +354,7 @@ chain for its self-reference test.
   a drained memo, because the new index of a surviving parameter is usually the old
   index of a removed one and any incremental rewrite collides.
 
-### Step 2 notes — trivial-phi elimination — TIER 1 LANDED
+### Step 2 notes — trivial-phi elimination — DONE, both tiers
 
 `src/compile/phi_removal.rs`, on by default. What shipped and what did not:
 
@@ -719,7 +719,7 @@ them.
 Byte-identical: 768 identity comparisons against step 3, 0 differing; 888 codesize
 rows unchanged.
 
-### Step 4 notes — what to delete
+### Step 4 notes — what to delete — DONE
 
 Per-block snapshots, the three-times-patched map, `Linearized::block_param_vregs`
 (now a copy into `BasicBlock::param_vregs` and read nowhere else),
