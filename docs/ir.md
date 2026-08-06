@@ -150,8 +150,9 @@ bump:
 ```
 
 For locals, `create_stack_slot(size, align)` reserves frame space and
-`stack_addr(slot)` gives you its address as an `I64` value. `global_addr(name)`
-does the same for a named global.
+`stack_addr(slot)` gives you its address as an `I64` value; `alloc_layout` below
+does both from a struct layout. `global_addr(name)` does the same for a named
+global.
 
 ## Structs
 
@@ -259,18 +260,19 @@ store to `p->x` does not stop a load of `p->tag` being forwarded, because their
 ## Tagged enums
 
 A tagged enum is a struct whose first field is the tag and whose second is a
-payload big enough for the widest variant. Reading one is a load of the tag, a
-comparison, and a branch per variant; the arms rejoin at a block that takes the
-result as a parameter.
-
-`enum Value { Int(i64), Float(f64) }` as `{ i64 tag; union { i64; f64 } payload; }`:
+payload sized for the widest variant. Declare the payload at that width and read
+it with the variant's own type:
 
 ```rust
 # use blitz::ir::builder::FunctionBuilder;
 # use blitz::ir::condcode::CondCode;
+# use blitz::ir::layout::Layout;
 # use blitz::ir::types::Type;
-const TAG: i64 = 0;
-const PAYLOAD: i64 = 8;
+// enum Value { Int(i64), Float(f64) }
+// as { i64 tag; union { i64; f64 } payload; }
+let value = Layout::c(&[Type::I64, Type::I64]);
+const TAG: usize = 0;
+const PAYLOAD: usize = 1;
 const TAG_INT: i64 = 0;
 
 // fn as_i64(v: *const Value) -> i64 {
@@ -283,40 +285,36 @@ let int_arm = b.create_block();
 let float_arm = b.create_block();
 let (done, done_p) = b.create_block_with_params(&[Type::I64]);
 
-let o = b.iconst(TAG, Type::I64);
-let tag_addr = b.add(v, o);
-let tag = b.load(tag_addr, Type::I64);
+let tag = b.load_field(v, &value, TAG);
 let want = b.iconst(TAG_INT, Type::I64);
 let is_int = b.icmp(CondCode::Eq, tag, want);
 b.branch(is_int, int_arm, float_arm, &[], &[]);
 
 b.set_block(int_arm);
-let o = b.iconst(PAYLOAD, Type::I64);
-let a = b.add(v, o);
-let i = b.load(a, Type::I64);            // read the payload as i64
+let i = b.load_field(v, &value, PAYLOAD);     // the declared type, I64
 b.jump(done, &[i]);
 
 b.set_block(float_arm);
-let o = b.iconst(PAYLOAD, Type::I64);
-let a = b.add(v, o);
-let f = b.load(a, Type::F64);            // same address, read as f64
+let addr = b.field_addr(v, &value, PAYLOAD);  // same address...
+let f = b.load(addr, Type::F64);              // ...read as F64
 let as_int = b.float_to_int(f, Type::I64);
 b.jump(done, &[as_int]);
 
 b.set_block(done);
-b.ret(Some(done_p[0]));                  // whichever arm ran passed its value
+b.ret(Some(done_p[0]));                       // whichever arm ran passed its value
 # let _ = b.finalize()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The union is just the two `load`s: one address, two types. Because the payload is
-read with the variant's own type, the `F64` arm lands in an XMM register and the
-`I64` arm in a general-purpose one, without you saying so.
+The union is the two reads: one address, two types. `load_field` uses the type
+the layout declares, so the variant that disagrees takes `field_addr` and names
+its own — which is the reason the two are separate calls. Because the payload is
+read with the variant's type, the `F64` arm lands in an XMM register and the
+`I64` arm in a general-purpose one without you saying so.
 
-The merge block's parameter is the `match` expression's value. This is the
+The merge block's parameter is the `match` expression's value. That is the
 pattern for any expression whose value depends on which branch ran; with more
-than two variants, chain the comparisons and have every arm jump to the same
-`done`.
+variants, chain the comparisons and have every arm jump to the same `done`.
 
 ## Calls
 

@@ -59,8 +59,14 @@
 //! * **`finalize` validates.** It returns an error rather than a half-built
 //!   function, so a malformed body is caught before any pass runs.
 //!
-//! `docs/ir.md` covers this properly, with worked examples of branches, loops
-//! and memory.
+//! There is no aggregate type either: a struct is memory plus a constant offset
+//! per field, which keeps layout policy where it belongs, in the frontend.
+//! [`ir::layout::Layout`] computes the offsets from the rules you pick, and
+//! [`FunctionBuilder::load_field`](ir::builder::FunctionBuilder::load_field) and
+//! friends address them.
+//!
+//! `docs/ir.md` covers all of this properly, with worked examples of branches,
+//! loops, memory, structs and tagged enums.
 //!
 //! # Module map
 //!

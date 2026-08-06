@@ -63,8 +63,8 @@ $ cc examples/main.c output.o -o demo && ./demo
 ```
 
 [`docs/ir.md`](docs/ir.md) is the guide to the IR itself: block parameters
-instead of phi nodes, pure versus effectful ops, branches, loops, memory and
-calls, with worked examples.
+instead of phi nodes, pure versus effectful ops, branches, loops, memory, structs
+and tagged enums, with worked examples.
 
 ## Code quality
 
