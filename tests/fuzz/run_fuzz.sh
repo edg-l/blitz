@@ -1,11 +1,8 @@
 #!/bin/sh
 # Generate UB-free C programs and check blitz against three oracles.
 #
-#   predicted   the generator interprets the program as it builds it, so it
-#               knows the answer before any compiler runs
-#   -O0 vs -O1  self-consistency: optimization must not change behavior
-#   vs cc       ground truth, catching bugs that are equally wrong at both
-#               optimization levels
+# The oracles themselves live in oracles.sh, shared with run_corpus.sh. This
+# script is the generator driver: it decides which programs get checked.
 #
 # Every generated program is free of undefined behavior by construction (see
 # gen_c.py), so any disagreement is a compiler bug rather than a program that
@@ -17,7 +14,10 @@
 #   count   number of programs (default 20)
 #   shape   mixed | args | pressure  (default mixed)
 #
-# Failing programs are left in the work directory and the path is printed.
+# Failing programs are left in the work directory and the path is printed. Save
+# one into tests/fuzz/corpus/ to make it part of the seconds-long regression
+# check; a 200-seed sweep is minutes and is not run between every change.
+#
 # Honors BLITZ_VERIFY, CC, and COMPILE_TIMEOUT (seconds per compile before it is
 # reported as a hang; default 60).
 #
@@ -52,15 +52,10 @@ if [ ! -x "$TINYC" ]; then
     exit 1
 fi
 
+. "$SCRIPT_DIR/oracles.sh"
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/blitz_fuzz_XXXXXX")"
 
-# One line per seed and level when RESULTS is set, so a run can be compared with
-# another instead of read.
-record() {
-    if [ -n "$RESULTS" ]; then
-        printf "%s %s %s\n" "$1" "$2" "$3" >> "$RESULTS"
-    fi
-}
 if [ -n "$RESULTS" ]; then
     : > "$RESULTS"
 fi
@@ -78,110 +73,13 @@ while [ "$seed" -le "$COUNT" ]; do
         continue
     fi
 
-    want="$(sed -n 's|^// OUTPUT: ||p' "$src")"
-
-    # A reference answer, when the reference compiler will take the program.
-    #
-    # If the reference build runs but does not finish, the program itself does
-    # not terminate and no oracle can say anything about it: blitz will time out
-    # too, and blaming blitz for that is a false positive. Skip the seed and say
-    # which one, because it means the generator emitted something it should not
-    # have -- that is how two nonterminating programs were chased as miscompiles.
-    wantc=""
-    if command -v "$CC" > /dev/null 2>&1 \
-        && "$CC" -w -O0 -ffp-contract=off -x c "$src" -o "$WORK/ref" 2>/dev/null; then
-        # `|| refst=$?` rather than a bare assignment: `set -e` is on and the
-        # program under test may legitimately exit nonzero.
-        refst=0
-        refout="$(timeout 20 "$WORK/ref" 2>/dev/null)" || refst=$?
-        if [ "$refst" -eq 124 ]; then
-            skip=$((skip + 1))
-            printf "\nSKIP seed %s: does not terminate under %s either -- generator bug\n  %s\n" \
-                "$seed" "$CC" "$src"
-            seed=$((seed + 1))
-            continue
-        fi
-        if [ "$refst" -eq 0 ]; then
-            wantc="$refout"
-        fi
-    fi
-
-    # Check each level on its own, and keep going after a failure.
-    #
-    # These used to short-circuit: -O1 was compiled first and a failure there
-    # skipped the seed entirely. A level that cannot allocate registers then hid
-    # whatever the other level did, and three -O0 miscompiles sat behind -O1
-    # compile errors for a whole session. A compile error at one level says
-    # nothing about the other.
-    seed_failed=0
-    o0_out=""; o0_ok=0
-    o1_out=""; o1_ok=0
-    for level in -O0 -O1; do
-        # Compilation is under a timeout of its own. A compiler that loops
-        # forever otherwise absorbs the entire run: one hang in the parallel-copy
-        # sequentializer ate a 40-program sweep before anyone noticed the harness
-        # was not merely slow. A hang is a finding, and reported as one.
-        if ! timeout "$COMPILE_TIMEOUT" "$TINYC" "$src" "$level" -o "$WORK/o" \
-            > "$WORK/log" 2>&1; then
-            st=$?
-            seed_failed=1
-            if [ "$st" -eq 124 ]; then
-                printf "\nFAIL seed %s: blitz %s HUNG (over %ss)\n  %s\n" \
-                    "$seed" "$level" "$COMPILE_TIMEOUT" "$src"
-                record "$seed" "$level" "fail hang"
-            else
-                printf "\nFAIL seed %s: blitz %s did not compile\n  %s\n" "$seed" "$level" "$src"
-                head -2 "$WORK/log" | sed 's/^/  /'
-                record "$seed" "$level" "fail no-compile"
-            fi
-            continue
-        fi
-        # `set -e` is on, and a program under test may legitimately exit
-        # nonzero -- that is a finding, not a reason to abandon the run. The
-        # original code had the same shape and aborted the whole harness the
-        # first time a compiled program returned nonzero.
-        if out="$(timeout 20 "$WORK/o" 2>/dev/null)"; then st=0; else st=$?; fi
-        if [ "$level" = "-O0" ]; then o0_out="$out"; o0_ok=1; else o1_out="$out"; o1_ok=1; fi
-        if [ "$st" -ne 0 ]; then
-            seed_failed=1
-            printf "\nFAIL seed %s: blitz %s exited %s\n  %s\n" "$seed" "$level" "$st" "$src"
-            record "$seed" "$level" "fail exit-nonzero"
-            continue
-        fi
-        if [ -n "$want" ] && [ "$out" != "$want" ]; then
-            seed_failed=1
-            printf "\nFAIL seed %s: blitz %s printed %s, generator predicted %s\n  %s\n" \
-                "$seed" "$level" "$out" "$want" "$src"
-            record "$seed" "$level" "fail wrong-predicted"
-            continue
-        fi
-        if [ -n "$wantc" ] && [ "$out" != "$wantc" ]; then
-            seed_failed=1
-            printf "\nFAIL seed %s: blitz %s printed %s, %s printed %s\n  %s\n" \
-                "$seed" "$level" "$out" "$CC" "$wantc" "$src"
-            record "$seed" "$level" "fail wrong-cc"
-            continue
-        fi
-        record "$seed" "$level" "pass"
-    done
-
-    # -O0-vs-O1 self-consistency, when both levels produced a program. This
-    # catches a pass that changes behaviour even where no oracle disagrees.
-    if [ "$o0_ok" = 1 ] && [ "$o1_ok" = 1 ] && [ "$o0_out" != "$o1_out" ]; then
-        seed_failed=1
-        printf "\nFAIL seed %s: -O0 printed %s, -O1 printed %s\n  %s\n" \
-            "$seed" "$o0_out" "$o1_out" "$src"
-        record "$seed" both "fail levels-disagree"
-    fi
-
-    if [ "$seed_failed" = 1 ]; then
-        fail=$((fail + 1))
-        seed=$((seed + 1))
-        continue
-    fi
-
-    pass=$((pass + 1))
-    printf "."
+    st=0
+    check_program "$seed" "seed $seed" "$src" || st=$?
+    case "$st" in
+        0) pass=$((pass + 1)); printf "." ;;
+        2) skip=$((skip + 1)) ;;
+        *) fail=$((fail + 1)) ;;
+    esac
     seed=$((seed + 1))
 done
 
