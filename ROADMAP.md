@@ -36,13 +36,12 @@ rather than overhead against it.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
 - `bash tests/lit/run_diff.sh`: 301 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
-- Generated programs, per (seed, level) pair at 30 seeds per shape: **`mixed`
-  30/30, `args` 30/30, `pressure` 30/30 -- every generated program compiles and
-  prints what the generator predicted.** No failure of any kind is open on this
-  corpus, no wrong-value program is open, and `tests/fuzz/findings/` is empty --
-  its last file stopped reproducing and is now
-  `tests/lit/arrays/extra_array_store_seed58.c`. (The 60-seed figures this
-  section used to quote were `mixed` 58/60, `args` 53/60, `pressure` 24/60.)
+- Generated programs at 30 seeds per shape: `mixed` 30/30, `args` 30/30,
+  `pressure` 30/30. **That is the width the corpus is pinned at, and it is
+  measuring nothing.** At 200 seeds `mixed` is 191/200 and `args` 183/200:
+  **8 wrong-value programs and 16 capacity failures across the two shapes.** The
+  30-seed run is green because 30 seeds is too narrow, not because the compiler
+  is correct -- see Known bugs.
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 892 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
@@ -255,9 +254,28 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**None open.** Every wrong-value bug this corpus has produced is fixed and lives
-as a lit test; `tests/fuzz/findings/` is empty. What the fixed ones are worth is
-the shape they kept having, which is the first thing to check on any new one:
+**Eight wrong-value programs and sixteen capacity failures are open**, found by
+running the generator at 200 seeds a shape instead of the 30 the gate is pinned
+at. Reproducers are kept outside the repo at `~/.cache/blitz-fuzz-fails/` and are
+unreduced.
+
+| shape | passing | wrong value | capacity |
+| --- | --- | --- | --- |
+| `mixed` at 200 | 191/200 | seeds 92, 109, 137, 196 | seeds 123, 135, 150 |
+| `args` at 200 | 183/200 | seeds 52, 108, 146, 175 | 13 seeds |
+
+Both oracles are contributing, which is the argument for keeping both: `mixed`
+seed 137 is wrong at `-O0` and right at `-O1`, seed 109 the reverse (1571 against
+675), and seed 92 is wrong at `-O1` only. Seed 196 exits 3 at `-O0` -- the
+program's own guard rejecting its own sum -- while `-O1` prints 1624.
+
+The capacity failures are the two shapes the allocator already names: *"spilling
+did not reduce it, so the pressure point is one instruction whose own operands
+are what is live there"*, and *"every over-budget VReg is a block parameter,
+which only the splitter can route through a slot"*.
+
+What the fixed ones are worth is the shape they kept having, which is the first
+thing to check on any of these:
 
 - **A block resolved an e-class to the wrong VReg** -- nine bugs, and the reason
   steps 1-4 of `docs/refactor-roadmap.md` exist. `BLITZ_DEBUG=regalloc` dumps the
@@ -271,13 +289,16 @@ the shape they kept having, which is the first thing to check on any new one:
 `CLAUDE.md` and `DEBUGGING-NOTES.md` carry these with the techniques that found
 them.
 
-**The capacity failures are closed as far as this corpus can see.** They were the
-whole of `run_fuzz.sh`'s failures for months -- an overshoot reaching phase 5,
-which aborted compilation rather than spilling -- and step 5's spill loop plus
-5c's slot routing took all three shapes to 30/30. Read that as "no longer
-observable at 30 seeds a shape", not as proof: widening the generator is what
-would turn it into evidence, and the corpus no longer distinguishes anything at
-its current width.
+**The capacity failures are not closed, and 30/30 was never evidence that they
+were.** Step 5's spill loop and 5c's slot routing took all three shapes to 30/30
+and that reads as a fix; at 200 seeds sixteen remain. What the two steps did buy
+is real -- the same corpus was 14/30 on `pressure` before them -- but the gate's
+width, not the compiler, is what made the number green.
+
+**The lesson is about the gate, not about the bugs.** A corpus pinned at the
+width where it stops failing reports its own width back as a pass. `run_fuzz.sh`
+takes a seed count as its first argument and 200 seeds is 67 seconds, so nothing
+but habit was keeping it at 30.
 
 **The constant-remat lever is still open and still worth taking.** The offenders
 were long-lived hash-consed constants: one `Iconst(3)` serving `arr[3]`'s index

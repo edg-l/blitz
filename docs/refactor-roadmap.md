@@ -1509,12 +1509,14 @@ The 60-seed figures this section quoted before steps 1 and 2, for comparison:
 | `args` | 53/60 | 8, mostly `-O0` |
 | `pressure` | 24/60 | 36, **all** `-O1` |
 
-**Nothing on this corpus fails any more**, of either kind: no
-`register pressure overshoot` and no wrong value. `tests/fuzz/findings/` is
-empty as well: its last file stopped reproducing and was promoted to
-`tests/lit/arrays/extra_array_store_seed58.c`, where the gate runs it. Widening
-the generator past 30 seeds per shape is what the corpus needs next: at this
-width it no longer distinguishes anything.
+**Nothing at 30 seeds a shape fails any more**, of either kind. That is a
+statement about the corpus, and it does not survive widening it: at 200 seeds
+`mixed` is 191/200 and `args` 183/200, with **8 wrong-value programs and 16
+capacity failures** between them. Steps 5 and 5c moved the number they were
+judged against -- `pressure` was 14/30 before them -- but neither closed the
+shape, and the 30-seed run reports its own width back as a pass. Reproducers are
+in `~/.cache/blitz-fuzz-fails/`, unreduced. `ROADMAP.md`'s Known bugs has the
+seed lists.
 
 Redundant block parameters, `tests/fuzz/count_trivial_phis.py`:
 
