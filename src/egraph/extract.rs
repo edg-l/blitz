@@ -437,6 +437,7 @@ pub fn extract(
                     continue;
                 }
 
+                let needs_reg = CostModel::operand_needs_register(&node.op);
                 let mut child_cost_sum = 0.0;
                 let mut children_canonical: Vec<ClassId> = Vec::with_capacity(node.children.len());
                 let mut ok = true;
@@ -449,7 +450,12 @@ pub fn extract(
                     let canon = egraph.unionfind.find_immutable(child);
                     children_canonical.push(canon);
                     match memo.get(&canon) {
-                        Some(ext) => child_cost_sum += ext.cost,
+                        Some(ext) => {
+                            child_cost_sum += ext.cost;
+                            if needs_reg && is_constant(&ext.op) {
+                                child_cost_sum += cost_model.const_materialization();
+                            }
+                        }
                         None => {
                             ok = false;
                             break;
@@ -526,6 +532,15 @@ pub fn extract(
 }
 
 // ── Constrained extraction ────────────────────────────────────────────────────
+
+/// Returns `true` for the constant leaves, which the cost model prices at 0.0
+/// on the assumption that they are an immediate field of whatever reads them.
+fn is_constant(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Pure(PureOp::Iconst(..)) | Op::Pure(PureOp::Fconst(..))
+    )
+}
 
 /// Returns `true` for ops that are always safe to rematerialize at any point:
 /// they have zero cost and no children, so they impose no liveness requirements.
@@ -625,6 +640,7 @@ pub fn extract_at_with_memo(
         }
 
         // For non-leaf nodes, sum child costs: 0 if live, memo cost otherwise.
+        let needs_reg = CostModel::operand_needs_register(&node.op);
         let mut total = own_cost;
         let mut children_canonical: Vec<ClassId> = Vec::with_capacity(node.children.len());
         let mut feasible = true;
@@ -648,6 +664,9 @@ pub fn extract_at_with_memo(
                             break;
                         }
                         total += ext.cost;
+                        if needs_reg && is_constant(&ext.op) {
+                            total += cost_model.const_materialization();
+                        }
                     }
                     None => {
                         // Child not in memo: unreachable, skip this candidate.
@@ -966,6 +985,16 @@ mod tests {
         })
     }
 
+    /// An opaque I64 value. A constant is not a stand-in for one: the cost model
+    /// charges a constant read by an address computation for the `mov` that puts
+    /// it in a register.
+    fn param(g: &mut EGraph, idx: u32) -> ClassId {
+        g.add(ENode {
+            op: Op::Pure(PureOp::Param(idx, Type::I64)),
+            children: smallvec![],
+        })
+    }
+
     fn x86add(g: &mut EGraph, a: ClassId, b: ClassId) -> ClassId {
         g.add(ENode {
             op: Op::Mach(MachOp::X86Add),
@@ -1086,8 +1115,8 @@ mod tests {
         use crate::egraph::isel::apply_isel_rules;
 
         let mut g = EGraph::new();
-        let base = iconst(&mut g, 0x1000);
-        let idx = iconst(&mut g, 3);
+        let base = param(&mut g, 0);
+        let idx = param(&mut g, 1);
         let two = iconst(&mut g, 2);
 
         // idx << 2  (= idx * 4)

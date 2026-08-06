@@ -14,5 +14,5 @@ matmul_rt.c	O0	114	402	0	0
 matmul_rt.c	O1	113	380	0	0
 pointer_chase.c	O0	66	243	0	0
 pointer_chase.c	O1	64	235	0	0
-struct_fields.c	O0	111	409	0	0
-struct_fields.c	O1	114	418	2	2
+struct_fields.c	O0	105	350	0	0
+struct_fields.c	O1	107	357	2	2

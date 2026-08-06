@@ -40,6 +40,37 @@ impl CostModel {
         Self { goal }
     }
 
+    /// Cost of getting a constant into a register with `mov r, imm32`.
+    ///
+    /// `Iconst` is priced at 0.0 because a constant is normally an immediate
+    /// field of the instruction that reads it, and so costs nothing of its own.
+    /// An operand position with no immediate encoding is the exception: there
+    /// the constant needs a register and a `mov` to fill it, and only the
+    /// consumer knows that. See [`Self::operand_needs_register`].
+    pub fn const_materialization(&self) -> f64 {
+        CostTuple {
+            latency: 1.0,
+            throughput: 0.25,
+            size: 7.0,
+        }
+        .weighted(self.goal)
+    }
+
+    /// Whether an operand of `op` has to be a register, so a constant there is
+    /// paid for at [`Self::const_materialization`] rather than being free.
+    ///
+    /// x86-64 addressing modes encode a displacement, never an immediate base
+    /// or index, so every operand of an address computation is a register.
+    pub fn operand_needs_register(op: &Op) -> bool {
+        matches!(
+            op,
+            Op::Pure(PureOp::Addr { .. })
+                | Op::Mach(MachOp::X86Lea2)
+                | Op::Mach(MachOp::X86Lea3 { .. })
+                | Op::Mach(MachOp::X86Lea4 { .. })
+        )
+    }
+
     /// Cost of a single node (not including children).
     ///
     /// Returns `f64::INFINITY` for generic IR ops that have no x86-64 encoding.

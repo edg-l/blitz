@@ -136,15 +136,14 @@ fn ir_diamond_cfg() {
         // CHECK-NEXT: v3 = proj1(v2)
         // CHECK: branch Sgt v3 block1() block2()
         // CHECK-LABEL: block1:
-        // CHECK: v6 = addr(scale=1, disp=0)(v0, v4)
+        // CHECK: v5 = addr(scale=1, disp=1)(v0)
         // CHECK: jump block3
         // CHECK-LABEL: block2:
-        // CHECK: v4 = iconst(1, I64)
-        // CHECK-NEXT: v5 = addr(scale=1, disp=0)(v1, v4)
+        // CHECK: v4 = addr(scale=1, disp=1)(v1)
         // CHECK: jump block3
         // CHECK-LABEL: block3(p0: I64):
-        // CHECK: v7 = block_param(b3, 0, I64)
-        // CHECK: ret v7
+        // CHECK: v6 = block_param(b3, 0, I64)
+        // CHECK: ret v6
         ",
     );
 }
@@ -174,7 +173,7 @@ fn ir_counted_loop() {
         // CHECK: v0 = iconst(0, I64)
         // CHECK: jump block3(v0, v0)
         // CHECK-LABEL: block1(p0: I64, p1: I64):
-        // CHECK: addr(scale=1, disp=0)
+        // CHECK: addr(scale=1, disp=1)
         // CHECK: x86_sub
         // CHECK: proj1
         // CHECK: addr(scale=1, disp=0)
@@ -183,7 +182,6 @@ fn ir_counted_loop() {
         // CHECK: ret
         // CHECK-LABEL: block3(p0: I64, p1: I64):
         // CHECK: param(0, I64)
-        // CHECK: iconst(1, I64)
         // CHECK: jump block1
         ",
     );
@@ -411,8 +409,7 @@ fn asm_addr_mode_full() {
         b.finalize().unwrap(),
         "
         // CHECK: lea    {{[a-z0-9]+}},[rdi+rsi*8]
-        // CHECK: mov    {{[a-z0-9]+}},0x10
-        // CHECK-NEXT: lea    rax,[{{[a-z0-9]+}}+{{[a-z0-9]+}}*1]
+        // CHECK-NEXT: lea    rax,[{{[a-z0-9]+}}+0x10]
         // CHECK-NOT: shl
         // CHECK-NEXT: ret
         ",
@@ -535,12 +532,9 @@ fn asm_diamond_branch() {
         "
         // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
         // CHECK: jg
-        // CHECK: mov    {{[a-z0-9]+}},0x1
-        // CHECK: lea    {{[a-z0-9]+}},
+        // CHECK: lea    rax,[{{[a-z0-9]+}}+0x1]
         // CHECK: jmp
-        // CHECK: mov    {{[a-z0-9]+}},0x1
-        // CHECK: lea    {{[a-z0-9]+}},
-        // CHECK: mov    rax,
+        // CHECK: lea    rax,[{{[a-z0-9]+}}+0x1]
         // CHECK-NEXT: ret
         ",
     );
@@ -1137,7 +1131,7 @@ fn ir_chain_strength_reassoc_addr() {
         // CHECK-LABEL: function sr_reassoc
         // CHECK: param(0, I64)
         // CHECK-NOT: x86_imul
-        // CHECK: addr(scale=4
+        // CHECK: x86_shl_imm(2)
         ",
     );
 }
@@ -1336,7 +1330,7 @@ fn ir_four_rule_chain() {
         // CHECK-NOT: x86_imul
         // CHECK-NOT: x86_and
         // CHECK-NOT: x86_xor
-        // CHECK: addr(scale=8
+        // CHECK: x86_shl_imm(3)
         ",
     );
 }
