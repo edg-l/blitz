@@ -443,3 +443,180 @@ impl Removal {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::egraph::extract::{ClassVRegMap, VRegInst};
+    use crate::ir::Type;
+    use crate::ir::effectful::Symbol;
+    use crate::ir::function::BasicBlock;
+
+    /// Blocks 0..n, block `i` carrying `params[i]` parameters and the ops given.
+    /// Ids equal indices, as everywhere else in this module's callers.
+    fn func_with(blocks: Vec<(usize, Vec<EffectfulOp>)>) -> Function {
+        let blocks = blocks
+            .into_iter()
+            .enumerate()
+            .map(|(i, (nparams, ops))| BasicBlock {
+                id: i as BlockId,
+                param_types: vec![Type::I64; nparams],
+                param_vregs: vec![],
+                ops,
+            })
+            .collect::<Vec<_>>();
+        Function {
+            name: "f".to_string(),
+            param_types: vec![],
+            return_types: vec![],
+            next_block_id: blocks.len() as BlockId,
+            blocks,
+            param_class_ids: vec![],
+            egraph: None,
+            stack_slots: vec![],
+            noinline: false,
+        }
+    }
+
+    fn ret() -> EffectfulOp {
+        EffectfulOp::Ret { val: None }
+    }
+
+    fn load() -> EffectfulOp {
+        EffectfulOp::Load {
+            addr: EffOperand::Class(ClassId(0)),
+            ty: Type::I64,
+            result: EffOperand::Class(ClassId(1)),
+        }
+    }
+
+    fn store() -> EffectfulOp {
+        EffectfulOp::Store {
+            addr: EffOperand::Class(ClassId(0)),
+            ty: Type::I64,
+            val: EffOperand::Class(ClassId(1)),
+        }
+    }
+
+    fn call(results: usize) -> EffectfulOp {
+        EffectfulOp::Call {
+            func: Symbol::from("g"),
+            args: vec![],
+            arg_tys: vec![],
+            ret_tys: vec![Type::I64; results],
+            results: vec![EffOperand::Class(ClassId(2)); results],
+        }
+    }
+
+    /// A `Linearized` carrying nothing but the per-block instruction lists, which
+    /// is all [`barrier_offenders`] reads.
+    fn lin_with(block_vreg_insts: Vec<Vec<VRegInst>>) -> Linearized {
+        Linearized {
+            class_to_vreg: ClassVRegMap::new(),
+            next_vreg: 0,
+            rpo_order: (0..block_vreg_insts.len()).collect(),
+            block_snapshots: vec![],
+            block_param_vregs: BTreeMap::new(),
+            vreg_types: BTreeMap::new(),
+            class_emitted_in: BTreeMap::new(),
+            idom: vec![],
+            block_vreg_insts,
+        }
+    }
+
+    fn result_inst(op: PseudoOp) -> VRegInst {
+        VRegInst {
+            dst: VReg(0),
+            op: Op::Pseudo(op),
+            operands: vec![],
+        }
+    }
+
+    /// One result instruction per Load and per Call with results is what a block
+    /// owns; anything at that count or under is not an offender.
+    #[test]
+    fn barrier_offenders_accepts_a_block_emitting_what_it_owns() {
+        let func = func_with(vec![(0, vec![load(), store(), call(1), ret()])]);
+        let lin = lin_with(vec![vec![
+            result_inst(PseudoOp::LoadResult(0, Type::I64)),
+            result_inst(PseudoOp::CallResult(0, Type::I64)),
+        ]]);
+        assert!(barrier_offenders(&func, &lin).is_empty());
+    }
+
+    /// A void call produces no result instruction, so a block emitting one for it
+    /// is over its own count.
+    #[test]
+    fn barrier_offenders_does_not_credit_a_void_call() {
+        let func = func_with(vec![(0, vec![call(0), ret()])]);
+        let lin = lin_with(vec![vec![result_inst(PseudoOp::CallResult(0, Type::I64))]]);
+        assert_eq!(barrier_offenders(&func, &lin), BTreeSet::from([0]));
+    }
+
+    /// The shape the acceptance test exists for: a block re-emitting a barrier
+    /// result its own effectful ops did not produce.
+    #[test]
+    fn barrier_offenders_names_the_block_that_re_emits() {
+        let func = func_with(vec![
+            (0, vec![load(), ret()]),
+            (0, vec![load(), ret()]),
+            (0, vec![ret()]),
+        ]);
+        let lin = lin_with(vec![
+            vec![result_inst(PseudoOp::LoadResult(0, Type::I64))],
+            vec![
+                result_inst(PseudoOp::LoadResult(1, Type::I64)),
+                result_inst(PseudoOp::LoadResult(0, Type::I64)),
+            ],
+            vec![result_inst(PseudoOp::LoadResult(0, Type::I64))],
+        ]);
+        assert_eq!(barrier_offenders(&func, &lin), BTreeSet::from([1, 2]));
+    }
+
+    /// Block 1 loses one of its two parameters, block 2 loses its only one.
+    fn two_block_removal() -> (Function, Removal) {
+        let func = func_with(vec![(0, vec![ret()]), (2, vec![ret()]), (1, vec![ret()])]);
+        let removal = Removal {
+            keep: BTreeMap::from([(1, vec![1]), (2, vec![])]),
+            removed: 2,
+            merges: vec![(ClassId(10), ClassId(20)), (ClassId(11), ClassId(21))],
+            merge_owner: BTreeMap::from([(1, vec![ClassId(10)]), (2, vec![ClassId(11)])]),
+        };
+        (func, removal)
+    }
+
+    /// Excluding nothing restores the same removal, including its count.
+    #[test]
+    fn without_nothing_is_identity() {
+        let (func, removal) = two_block_removal();
+        let same = removal.without(&func, &BTreeSet::new());
+        assert_eq!(same.keep, removal.keep);
+        assert_eq!(same.removed, 2);
+        assert_eq!(same.merges, removal.merges);
+    }
+
+    /// An excluded block keeps every parameter it had -- it leaves `keep`
+    /// entirely, rather than having its survivor list widened -- and the merge it
+    /// owned goes with it. The other block keeps what it earned.
+    #[test]
+    fn without_one_block_keeps_the_rest() {
+        let (func, removal) = two_block_removal();
+        let retry = removal.without(&func, &BTreeSet::from([2]));
+        assert_eq!(retry.keep, BTreeMap::from([(1, vec![1])]));
+        assert_eq!(retry.removed, 1);
+        assert_eq!(retry.merges, vec![(ClassId(10), ClassId(20))]);
+        // The ownership record survives so a further retry can still consult it.
+        assert_eq!(retry.merge_owner, removal.merge_owner);
+    }
+
+    /// Excluding every block is the all-or-nothing back-off, and leaves nothing
+    /// for `apply` to do.
+    #[test]
+    fn without_every_block_is_empty() {
+        let (func, removal) = two_block_removal();
+        let retry = removal.without(&func, &BTreeSet::from([1, 2]));
+        assert!(retry.keep.is_empty());
+        assert!(retry.merges.is_empty());
+        assert!(retry.is_empty());
+    }
+}
