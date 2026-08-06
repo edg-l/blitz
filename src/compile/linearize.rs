@@ -109,6 +109,23 @@ pub(super) fn linearize(
     let mut emitted_by: Vec<Vec<ClassId>> = vec![Vec::new(); func.blocks.len()];
     let mut reemit_per_block: Vec<Vec<ClassId>> = vec![Vec::new(); func.blocks.len()];
     let mut emitter_blocks: Vec<usize> = Vec::new();
+    // Emitter blocks whose classes are out of the map right now, and the VReg
+    // each of those classes had when it was taken out.
+    //
+    // A block re-emits a class whose emitter does not dominate it, and the map
+    // is what tells the emission walk that. Taking every such class out and
+    // putting it back around each block is the same answer recomputed from
+    // nothing 3763 times: 29.7 million removals on one function, against 2419
+    // changes in *which emitters* are out of scope. So the map is carried from
+    // block to block and only the difference is paid -- a bucket leaves when
+    // its emitter stops dominating and comes back, with the VRegs it had, when
+    // it starts again.
+    let mut removed_emitters: BTreeSet<usize> = BTreeSet::new();
+    let mut removed_vregs: BTreeMap<ClassId, VReg> = BTreeMap::new();
+    // Emitter blocks with at least one class that must be re-emitted even under
+    // a dominating emitter. Those depend on which block is being processed, so
+    // they are taken out and put back per block -- there are very few.
+    let mut reemit_emitters: Vec<usize> = Vec::new();
 
     // A division leaves its quotient in RAX and its remainder in RDX; the pair
     // VReg holds neither. Only the projections adjacent to the division read
@@ -132,26 +149,45 @@ pub(super) fn linearize(
     let mut block_class_to_vreg_snapshot: Vec<ClassVRegMap> =
         vec![ClassVRegMap::new(); func.blocks.len()];
     for &block_idx in &rpo_order {
-        // Remove classes emitted in non-dominating blocks so they get fresh VRegs.
-        // Also remove from ALL prior blocks every class whose value lives in a
-        // fixed physical register rather than in the VReg it is assigned, since
-        // no such register survives a block boundary.
-        let mut removed: Vec<(ClassId, VReg)> = Vec::new();
-        for &emitter in &emitter_blocks {
-            let group = if !dom.dominates(emitter, block_idx) {
-                &emitted_by[emitter]
-            } else if emitter != block_idx {
-                &reemit_per_block[emitter]
-            } else {
-                continue;
-            };
-            for &cid in group {
+        // Bring the scope to this block: classes emitted in non-dominating
+        // blocks are out of the map, so they get fresh VRegs here, and classes
+        // whose value lives in a fixed physical register are out of it too,
+        // since no such register survives a block boundary.
+        let want: BTreeSet<usize> = emitter_blocks
+            .iter()
+            .copied()
+            .filter(|&e| !dom.dominates(e, block_idx))
+            .collect();
+        for &emitter in want.difference(&removed_emitters) {
+            for &cid in &emitted_by[emitter] {
                 if let Some(vreg) = class_to_vreg.remove(cid) {
-                    removed.push((cid, vreg));
+                    removed_vregs.insert(cid, vreg);
                 }
             }
         }
-        let removed_classes: BTreeSet<ClassId> = removed.iter().map(|(cid, _)| *cid).collect();
+        for &emitter in removed_emitters.difference(&want) {
+            for &cid in &emitted_by[emitter] {
+                if let Some(vreg) = removed_vregs.remove(&cid) {
+                    class_to_vreg.insert_single(cid, vreg);
+                }
+            }
+        }
+        removed_emitters = want;
+
+        // Flags are clobbered by any arithmetic instruction and a division's
+        // pair lives in RAX and RDX, so those are re-emitted in every block that
+        // names them, dominating emitter or not.
+        let mut reemit_removed: Vec<(ClassId, VReg)> = Vec::new();
+        for &emitter in &reemit_emitters {
+            if emitter == block_idx || removed_emitters.contains(&emitter) {
+                continue;
+            }
+            for &cid in &reemit_per_block[emitter] {
+                if let Some(vreg) = class_to_vreg.remove(cid) {
+                    reemit_removed.push((cid, vreg));
+                }
+            }
+        }
 
         let block = &func.blocks[block_idx];
         let roots = collect_block_roots(block, egraph);
@@ -189,12 +225,17 @@ pub(super) fn linearize(
         all_roots.sort_by_key(|c| c.0);
         all_roots.dedup();
         // Whether a class was already in the map when this block started. Every
-        // class the map holds is one some block emitted, and this block removed
-        // exactly `removed_classes` of them, so the two records answer it
-        // between them -- `class_emitted_in` does not learn about this block
-        // until the end of the iteration.
-        let was_pre_emitted =
-            |cid: ClassId| class_emitted_in.contains_key(&cid) && !removed_classes.contains(&cid);
+        // class the map holds is one some block emitted, and what is out of
+        // scope right now is exactly what the two removal records name, so
+        // between them they answer it -- `class_emitted_in` does not learn about
+        // this block until the end of the iteration.
+        let reemit_removed_set: BTreeSet<ClassId> =
+            reemit_removed.iter().map(|(cid, _)| *cid).collect();
+        let was_pre_emitted = |cid: ClassId| {
+            class_emitted_in.contains_key(&cid)
+                && !removed_vregs.contains_key(&cid)
+                && !reemit_removed_set.contains(&cid)
+        };
 
         let (mut insts, newly_emitted) =
             vreg_insts_for_block(extraction, &all_roots, &mut class_to_vreg, &mut next_vreg);
@@ -297,6 +338,9 @@ pub(super) fn linearize(
                     || matches!(ty, Type::Pair(_, b) if **b == Type::Flags)
                     || div_classes.contains(&cid)
                 {
+                    if reemit_per_block[block_idx].is_empty() {
+                        reemit_emitters.push(block_idx);
+                    }
                     reemit_per_block[block_idx].push(cid);
                 }
             }
@@ -307,10 +351,25 @@ pub(super) fn linearize(
         // resolve to that block's VReg, not a stale cross-block one.
         block_class_to_vreg_snapshot[block_idx] = class_to_vreg.clone();
 
-        // Restore removed classes so subsequent blocks can see them.
-        for (cid, vreg) in removed {
+        // Put back the per-block re-emitted classes, and take the block's own
+        // copy of an out-of-scope class back out. The scope carries over to the
+        // next block, so a class whose emitter still does not dominate must not
+        // be left in the map holding the VReg this block minted for it -- the
+        // one it had when it went out of scope is the one waiting to come back.
+        for (cid, vreg) in reemit_removed {
             class_to_vreg.insert_single(cid, vreg);
         }
+        for &cid in &newly_emitted {
+            if removed_vregs.contains_key(&cid) {
+                class_to_vreg.remove(cid);
+            }
+        }
+    }
+
+    // Every class the scope still holds out belongs in the function-wide map the
+    // later passes read, which is the whole of it rather than any block's view.
+    for (cid, vreg) in std::mem::take(&mut removed_vregs) {
+        class_to_vreg.insert_single(cid, vreg);
     }
 
     // Build VReg -> Type map from the egraph's per-class type info.
