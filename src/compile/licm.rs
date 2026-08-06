@@ -237,10 +237,15 @@ pub(super) fn insert_preheader(
 /// loop-body block (Load result, Call results) or a BlockParam of a loop-body
 /// block. Operands that are merely *used* by the loop (addr, val, cond, args)
 /// are NOT included; those may be loop-invariant.
+///
+/// `block_params` is [`EGraph::block_param_classes`], passed in rather than
+/// recomputed: that scan walks the whole arena, and one per loop makes a
+/// function with many loops quadratic in its value count.
 pub(super) fn collect_loop_defined_classes(
     func: &Function,
     egraph: &EGraph,
     loop_body: &BTreeSet<usize>,
+    block_params: &BTreeMap<(BlockId, u32), ClassId>,
 ) -> BTreeSet<ClassId> {
     let mut defined: BTreeSet<ClassId> = BTreeSet::new();
 
@@ -267,9 +272,9 @@ pub(super) fn collect_loop_defined_classes(
     let loop_block_ids: BTreeSet<BlockId> =
         loop_body.iter().map(|&idx| func.blocks[idx].id).collect();
 
-    for (&(bid, _), &cid) in &egraph.block_param_classes() {
+    for (&(bid, _), &cid) in block_params {
         if loop_block_ids.contains(&bid) {
-            defined.insert(cid);
+            defined.insert(egraph.unionfind.find_immutable(cid));
         }
     }
 
@@ -404,8 +409,9 @@ pub(super) fn find_invariant_classes(
     func: &Function,
     egraph: &EGraph,
     loop_info: &LoopInfo,
+    block_params: &BTreeMap<(BlockId, u32), ClassId>,
 ) -> Vec<ClassId> {
-    let loop_defined = collect_loop_defined_classes(func, egraph, &loop_info.body);
+    let loop_defined = collect_loop_defined_classes(func, egraph, &loop_info.body, block_params);
     let mut cache: HashMap<ClassId, bool> = HashMap::new();
 
     // Seed: all ClassIds directly referenced by effectful ops in loop body.
@@ -529,6 +535,12 @@ pub fn run_licm(func: &mut Function, egraph: &mut EGraph) -> ExtraRoots {
     let mut extra_roots: ExtraRoots = BTreeMap::new();
     let mut total_hoisted = 0usize;
 
+    // Scanned once for all loops. `insert_preheader` adds `BlockParam` nodes as
+    // it goes, but only for the preheaders it appends past the end of `blocks`,
+    // and no loop body detected above can name one; the classes this map already
+    // holds are re-canonicalized on use.
+    let block_params = egraph.block_param_classes();
+
     for loop_info in &loops {
         // The entry block has no predecessors outside the loop, so there is
         // nowhere to put a preheader.
@@ -542,7 +554,7 @@ pub fn run_licm(func: &mut Function, egraph: &mut EGraph) -> ExtraRoots {
             continue;
         }
 
-        let invariant_classes = find_invariant_classes(func, egraph, loop_info);
+        let invariant_classes = find_invariant_classes(func, egraph, loop_info, &block_params);
         let found = invariant_classes.len();
         let invariant_classes = within_budget(func, egraph, loop_info, invariant_classes, trace);
 
@@ -1109,7 +1121,12 @@ mod tests {
             op: Op::Pure(PureOp::Iconst(42, Type::I64)),
             children: smallvec![],
         });
-        let loop_defined = collect_loop_defined_classes(&f, &egraph, &loop_info.body);
+        let loop_defined = collect_loop_defined_classes(
+            &f,
+            &egraph,
+            &loop_info.body,
+            &egraph.block_param_classes(),
+        );
         let mut cache = HashMap::new();
         assert!(is_class_loop_invariant(
             iconst,
@@ -1140,7 +1157,12 @@ mod tests {
             op: Op::Pure(PureOp::Add),
             children: smallvec![param, iconst],
         });
-        let loop_defined = collect_loop_defined_classes(&f, &egraph, &loop_info.body);
+        let loop_defined = collect_loop_defined_classes(
+            &f,
+            &egraph,
+            &loop_info.body,
+            &egraph.block_param_classes(),
+        );
         let mut cache = HashMap::new();
         assert!(is_class_loop_invariant(
             add_node,
@@ -1165,7 +1187,12 @@ mod tests {
             op: Op::Pure(PureOp::BlockParam(header_id, 1, Type::I64)),
             children: smallvec![],
         });
-        let loop_defined = collect_loop_defined_classes(&f, &egraph, &loop_info.body);
+        let loop_defined = collect_loop_defined_classes(
+            &f,
+            &egraph,
+            &loop_info.body,
+            &egraph.block_param_classes(),
+        );
         let mut cache = HashMap::new();
         assert!(!is_class_loop_invariant(
             bp,
@@ -1190,7 +1217,12 @@ mod tests {
             op: Op::Pseudo(PseudoOp::LoadResult(99, Type::I64)),
             children: smallvec![],
         });
-        let loop_defined = collect_loop_defined_classes(&f, &egraph, &loop_info.body);
+        let loop_defined = collect_loop_defined_classes(
+            &f,
+            &egraph,
+            &loop_info.body,
+            &egraph.block_param_classes(),
+        );
         let mut cache = HashMap::new();
         assert!(!is_class_loop_invariant(
             lr,
@@ -1223,7 +1255,12 @@ mod tests {
             op: Op::Pure(PureOp::Add),
             children: smallvec![body_bp, iconst],
         });
-        let loop_defined = collect_loop_defined_classes(&f, &egraph, &loop_info.body);
+        let loop_defined = collect_loop_defined_classes(
+            &f,
+            &egraph,
+            &loop_info.body,
+            &egraph.block_param_classes(),
+        );
         let mut cache = HashMap::new();
         assert!(!is_class_loop_invariant(
             add_node,
