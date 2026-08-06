@@ -290,11 +290,24 @@ so the holes stay visible.
       reports the declines, and with Briggs and George both in, 34 of 64
       candidate copies on `queens` and 43 of 112 on `hash_table` are still
       refused because the merge genuinely constrains the graph. Getting further
-      needs one of two structural changes rather than more tuning -- iterated
-      coalescing, which interleaves merging with simplification instead of
-      deciding each copy once, or **fewer block parameters to copy**, which
-      `docs/refactor-roadmap.md` argues for at length and measures 85-94% of
-      them as naming a single value. Read it before starting.
+      needs a structural change rather than more tuning, and **one of the two
+      candidates is now measured out**:
+
+      - *Iterated coalescing is worthless here.* George & Appel's leverage is
+        `simplify`, which removes every node of degree < k so the rest fall
+        below the threshold the two tests are stated against. Simulated on the
+        `bench` kernels it removes 62 of 165 nodes on `queens` and 80 of 297 on
+        `hash_table`, and **zero** refused copies would pass afterwards: the
+        survivors have their endpoints in the dense core, which is what
+        simplification does not touch. Re-testing to a fixpoint, which is what
+        landed, is worth -0.2% on `fuzz`. Do not write the worklist allocator
+        for this.
+      - *Fewer block parameters to copy* is the candidate left, and
+        `docs/refactor-roadmap.md` argues it at length. Note `phi_removal`
+        already does both tiers including self-references, so the 82% of
+        parameters `count_trivial_phis.py` calls redundant on `hash_table` is
+        what the *rule* permits, not what is sound to remove -- one e-class is
+        one expression, not one value. Read that file before starting.
 - [x] **Coalescing takes George's rule as well as Briggs'.** Either test
       passing admits the merge; both are conservative, so the pair is too. Over
       the rows that changed: `fuzz` -7.1% insts and -4.5% bytes, `lit` -5.6% and

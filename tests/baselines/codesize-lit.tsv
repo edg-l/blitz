@@ -585,14 +585,14 @@ regalloc/high_pressure_with_calls.c	O1	17	55	0	0
 regalloc/loop_carried_terms_collapse.c	O0	254	1112	24	30
 regalloc/loop_carried_terms_collapse.c	O1	250	1078	24	29
 regalloc/loop_counter_blockparam_remat.c	O0	579	3048	61	140
-regalloc/loop_counter_blockparam_remat.c	O1	360	1667	35	55
+regalloc/loop_counter_blockparam_remat.c	O1	360	1670	35	55
 regalloc/loop_latch_param_passthrough.c	O0	483	2479	55	111
 regalloc/loop_latch_param_passthrough.c	O1	602	3440	129	168
 regalloc/many_cross_block_values.c	O0	45	128	0	0
 regalloc/many_cross_block_values.c	O1	45	124	0	0
 regalloc/mixed_pressure_seed12.c	O0	1406	8100	276	399
 regalloc/mixed_pressure_seed12.c	O1	1234	6639	241	347
-regalloc/multi_block_param_group.c	O0	1257	7014	158	334
+regalloc/multi_block_param_group.c	O0	1245	6961	158	334
 regalloc/multi_block_param_group.c	O1	866	5137	150	252
 regalloc/nested_loops_deep_pressure.c	O0	37	138	0	0
 regalloc/nested_loops_deep_pressure.c	O1	37	126	0	0
@@ -604,8 +604,8 @@ regalloc/param_shadow_seed16.c	O0	1135	5983	163	272
 regalloc/param_shadow_seed16.c	O1	1288	8278	355	457
 regalloc/param_shadow_seed3.c	O0	1919	8670	120	296
 regalloc/param_shadow_seed3.c	O1	1985	10228	315	445
-regalloc/phi_dest_from_target_schedule.c	O0	302	888	0	0
-regalloc/phi_dest_from_target_schedule.c	O1	284	813	0	0
+regalloc/phi_dest_from_target_schedule.c	O0	292	861	0	0
+regalloc/phi_dest_from_target_schedule.c	O1	274	792	0	0
 regalloc/seed6_truncated_guard_values.c	O0	185	735	2	6
 regalloc/seed6_truncated_guard_values.c	O1	138	560	0	0
 regalloc/shared_vreg_two_arg_positions.c	O0	936	5742	302	344

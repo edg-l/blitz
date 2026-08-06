@@ -74,123 +74,156 @@ pub fn coalesce(
         x
     };
 
-    for &(src, dst) in copy_pairs {
-        if src >= graph.num_vregs || dst >= graph.num_vregs {
-            continue;
-        }
+    // Iterate to a fixpoint rather than deciding each copy once.
+    //
+    // This is *not* George & Appel's iterated coalescing, and measurement says
+    // it should not become it: their algorithm's leverage is `simplify`, which
+    // removes every node of degree < k from the graph so the remaining degrees
+    // fall. Simulated over the `bench` kernels, simplify removes 62 of 165
+    // nodes on `queens` and 80 of 297 on `hash_table` and **zero** of the
+    // refused copies would pass afterwards -- the copies that survive both
+    // tests have their endpoints in the dense core, which is exactly what
+    // simplification does not touch. The worklist rewrite would buy nothing.
+    //
+    // Merging two nodes leaves every neighbour they had in common seeing one
+    // node where it saw two, so that neighbour's degree drops and it can stop
+    // being "significant". Both conservative tests are stated in terms of
+    // significant degree, so a copy they refuse against the graph as it stands
+    // can be safe against the graph one merge later. Deciding once loses those.
+    //
+    // Each round re-tests only what the previous round refused, and the loop
+    // stops as soon as a round merges nothing, so it does at most one round per
+    // merge.
+    let mut pending: Vec<(usize, usize)> = copy_pairs
+        .iter()
+        .copied()
+        .filter(|&(src, dst)| src < graph.num_vregs && dst < graph.num_vregs)
+        .collect();
+    let mut rounds = 0usize;
+    loop {
+        rounds += 1;
+        let before = merged.len();
+        let mut declined: Vec<(usize, usize)> = Vec::new();
+        why.clear();
+        for (src, dst) in std::mem::take(&mut pending) {
+            let src_root = find(&mut parent, src);
+            let dst_root = find(&mut parent, dst);
 
-        let src_root = find(&mut parent, src);
-        let dst_root = find(&mut parent, dst);
-
-        if src_root == dst_root {
-            // Already in the same group.
-            *why.entry("already merged").or_default() += 1;
-            continue;
-        }
-
-        // Check if the two representative groups interfere. `adj` is kept in
-        // sync with merges, so this considers every member of either group.
-        if adj[src_root].contains(&dst_root) || adj[dst_root].contains(&src_root) {
-            *why.entry("groups interfere").or_default() += 1;
-            continue;
-        }
-
-        // Different register classes must never coalesce (GPR <-> XMM merge
-        // is always invalid regardless of adjacency).
-        if graph.reg_class[src_root] != graph.reg_class[dst_root] {
-            *why.entry("different reg class").or_default() += 1;
-            continue;
-        }
-
-        // Briggs: the merged node must have fewer than k neighbours of
-        // significant degree. Degrees are read from `adj`, which merges keep
-        // current, so this measures the graph as it stands.
-        let k = match graph.reg_class[src_root] {
-            RegClass::GPR => gpr_colors,
-            RegClass::XMM => xmm_colors,
-            // One EFLAGS. Two flags values never live at once, so nothing is
-            // ever a candidate here, and if one were, k = 1 refuses it.
-            RegClass::Flags => 1,
-        } as usize;
-        let class = graph.reg_class[src_root];
-        let mut significant: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-        for &n in adj[src_root].iter().chain(adj[dst_root].iter()) {
-            let n_root = find(&mut parent, n);
-            if n_root == src_root || n_root == dst_root {
+            if src_root == dst_root {
+                // Already in the same group; nothing will ever change that.
+                *why.entry("already merged").or_default() += 1;
                 continue;
             }
-            if graph.reg_class[n_root] == class && adj[n_root].len() >= k {
-                significant.insert(n_root);
-            }
-        }
-        // Briggs is conservative and refuses most merges here: 39 of 64
-        // candidate copies on `queens`, 44 of 112 on `hash_table`. George's
-        // test admits a different set and is conservative in the same sense --
-        // it passes only when the merge constrains no neighbour that was not
-        // already constrained -- so taking either is still safe.
-        //
-        // For every neighbour `t` of the node being merged away: `t` is
-        // harmless if it cannot compete for the colour (different class), if it
-        // already interferes with the survivor, or if it has room to spare
-        // (degree below k). If that holds of all of them, the survivor's
-        // neighbourhood gains nothing that can stop it being coloured.
-        //
-        // Checked in both orientations: either one passing justifies the same
-        // merged node.
-        let george = |a: usize, b: usize, parent: &mut Vec<usize>| {
-            adj[a].iter().all(|&t| {
-                let t_root = find(parent, t);
-                t_root == a
-                    || t_root == b
-                    || graph.reg_class[t_root] != class
-                    || adj[b].contains(&t_root)
-                    || adj[t_root].len() < k
-            })
-        };
-        if significant.len() >= k
-            && !george(dst_root, src_root, &mut parent)
-            && !george(src_root, dst_root, &mut parent)
-        {
-            *why.entry("briggs and george both decline").or_default() += 1;
-            continue;
-        }
 
-        if crate::trace::is_enabled("coalesce") {
-            // The merge is between the two groups' representatives, not between
-            // the copy's own endpoints: `src`/`dst` name the copy, `src_root`/
-            // `dst_root` name everything that goes with them. A merge whose
-            // endpoints carry no edge in the pre-merge graph while its groups
-            // hold values that do overlap is how an illegal merge gets in, and
-            // the degrees say whether the Briggs test was what admitted it.
-            tracing::debug!(
-                target: "blitz::coalesce",
-                "merge v{src_root} <- v{dst_root} for copy (v{src}, v{dst}); \
-                 pre_merge_edge={} degrees {}/{} against k={k}",
-                graph.adj[src_root].contains(&dst_root),
-                adj[src_root].len(),
-                adj[dst_root].len(),
-            );
-        }
-
-        // Coalesce: merge dst_root into src_root. Transfer adjacency so
-        // subsequent checks against src_root see dst_root's neighbors too.
-        // For every neighbor n of dst_root, update adj[n] to reference
-        // src_root (via their current roots) and add to adj[src_root].
-        let dst_neighbors: Vec<usize> = adj[dst_root].iter().copied().collect();
-        for n in dst_neighbors {
-            let n_root = find(&mut parent, n);
-            if n_root == src_root {
-                // The merged pair was both neighbors of src_root already —
-                // cannot happen here since we checked non-interference above,
-                // but skip defensively.
+            // Whether the two representative groups interfere. `adj` is kept in
+            // sync with merges, so this considers every member of either group,
+            // and interference only ever grows as groups merge.
+            if adj[src_root].contains(&dst_root) || adj[dst_root].contains(&src_root) {
+                *why.entry("groups interfere").or_default() += 1;
                 continue;
             }
-            adj[src_root].insert(n_root);
-            adj[n_root].insert(src_root);
+
+            // Different register classes must never coalesce (GPR <-> XMM merge
+            // is always invalid regardless of adjacency).
+            if graph.reg_class[src_root] != graph.reg_class[dst_root] {
+                *why.entry("different reg class").or_default() += 1;
+                continue;
+            }
+
+            let k = match graph.reg_class[src_root] {
+                RegClass::GPR => gpr_colors,
+                RegClass::XMM => xmm_colors,
+                // One EFLAGS. Two flags values never live at once, so nothing
+                // is ever a candidate here, and if one were, k = 1 refuses it.
+                RegClass::Flags => 1,
+            } as usize;
+            let class = graph.reg_class[src_root];
+
+            // Briggs: the merged node must have fewer than k neighbours of
+            // significant degree. Degrees are read from `adj`, which merges
+            // keep current, so this measures the graph as it stands.
+            let mut significant: std::collections::BTreeSet<usize> =
+                std::collections::BTreeSet::new();
+            for &n in adj[src_root].iter().chain(adj[dst_root].iter()) {
+                let n_root = find(&mut parent, n);
+                if n_root == src_root || n_root == dst_root {
+                    continue;
+                }
+                if graph.reg_class[n_root] == class && adj[n_root].len() >= k {
+                    significant.insert(n_root);
+                }
+            }
+
+            // George admits a different set and is conservative in the same
+            // sense, so taking either is still safe. For every neighbour `t` of
+            // the node being merged away, `t` is harmless if it cannot compete
+            // for the colour (different class), if it already interferes with
+            // the survivor, or if it has room to spare (degree below k). If
+            // that holds of all of them, the survivor's neighbourhood gains
+            // nothing that can stop it being coloured.
+            //
+            // Checked in both orientations: either one passing justifies the
+            // same merged node.
+            let george = |a: usize, b: usize, parent: &mut Vec<usize>| {
+                adj[a].iter().all(|&t| {
+                    let t_root = find(parent, t);
+                    t_root == a
+                        || t_root == b
+                        || graph.reg_class[t_root] != class
+                        || adj[b].contains(&t_root)
+                        || adj[t_root].len() < k
+                })
+            };
+            if significant.len() >= k
+                && !george(dst_root, src_root, &mut parent)
+                && !george(src_root, dst_root, &mut parent)
+            {
+                // The only refusal a later round can overturn.
+                *why.entry("briggs and george both decline").or_default() += 1;
+                declined.push((src, dst));
+                continue;
+            }
+
+            if crate::trace::is_enabled("coalesce") {
+                // The merge is between the two groups' representatives, not
+                // between the copy's own endpoints: `src`/`dst` name the copy,
+                // `src_root`/`dst_root` name everything that goes with them. A
+                // merge whose endpoints carry no edge in the pre-merge graph
+                // while its groups hold values that do overlap is how an
+                // illegal merge gets in, and the degrees say whether the Briggs
+                // test was what admitted it.
+                tracing::debug!(
+                    target: "blitz::coalesce",
+                    "merge v{src_root} <- v{dst_root} for copy (v{src}, v{dst}); \
+                     pre_merge_edge={} degrees {}/{} against k={k}",
+                    graph.adj[src_root].contains(&dst_root),
+                    adj[src_root].len(),
+                    adj[dst_root].len(),
+                );
+            }
+
+            // Merge dst_root into src_root. Transfer adjacency so subsequent
+            // checks against src_root see dst_root's neighbours too.
+            let dst_neighbors: Vec<usize> = adj[dst_root].iter().copied().collect();
+            for n in dst_neighbors {
+                let n_root = find(&mut parent, n);
+                if n_root == src_root {
+                    // Cannot happen -- non-interference was checked above --
+                    // but skip defensively.
+                    continue;
+                }
+                adj[src_root].insert(n_root);
+                adj[n_root].insert(src_root);
+            }
+            adj[dst_root].clear();
+            parent[dst_root] = src_root;
+            merged.push((src_root, dst_root));
         }
-        adj[dst_root].clear();
-        parent[dst_root] = src_root;
-        merged.push((src_root, dst_root));
+
+        pending = declined;
+        if merged.len() == before || pending.is_empty() {
+            break;
+        }
     }
 
     // What was declined and why. The trace named only the merges it made, so a
@@ -199,7 +232,7 @@ pub fn coalesce(
     if crate::trace::is_enabled("coalesce") {
         tracing::debug!(
             target: "blitz::coalesce",
-            "{} copy pairs, {} merged; declined: {:?}",
+            "{} copy pairs, {} merged over {rounds} round(s); declined: {:?}",
             copy_pairs.len(),
             merged.len(),
             why,
