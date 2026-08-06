@@ -1198,9 +1198,9 @@ fn detect_blockparam_slot_routing(
     // every block, so a block with 28 parameters re-read the function a hundred
     // times over.
     //
-    // The blocks each VReg is read in come out of the same pass, for
-    // `stores_reach_every_use` below: asking it per candidate is otherwise a
-    // scan of every instruction of every block, once per over-budget point.
+    // The blocks each VReg is read in come out of the same pass, for `routable`
+    // below: asking it per candidate is otherwise a scan of every instruction of
+    // every block, once per over-budget point.
     let mut use_counts: BTreeMap<VReg, usize> = BTreeMap::new();
     let mut use_blocks: BTreeMap<VReg, BTreeSet<usize>> = BTreeMap::new();
     for (block_idx, sched) in block_schedules.iter().enumerate() {
@@ -1304,6 +1304,13 @@ fn detect_blockparam_slot_routing(
         }
     }
 
+    // Whether a group may be given a slot at all. Every rule below decides only
+    // *whether* the pressure at some point calls for routing; whether the group
+    // can be routed without changing what the program computes is decided here,
+    // once, so no rule can admit a shape another refuses.
+    //
+    // Two conditions, for two different reasons.
+    //
     // Every use of a routed VReg becomes a reload, and what fills the slot is a
     // store on the edges into the parameter's own block. So a use has to sit
     // where those stores have run: in a block one of the parameter's blocks
@@ -1311,9 +1318,19 @@ fn detect_blockparam_slot_routing(
     // that defining block, which keeps the value in a register and is where the
     // store is placed. A use anywhere else reloads a slot nothing wrote, which
     // the machine verifier reports as a read of an unwritten frame cell.
+    //
+    // And one slot per group is right when the group is one value. The group is
+    // keyed by VReg, with the positions' shared e-class as the argument that
+    // they are one -- but an e-class is one *expression*, not one value: two
+    // blocks' parameters can share a class and hold different values at their
+    // respective entries, and one cell cannot carry both. So every position a
+    // group names has to belong to one block.
     let rpo = super::cfg::compute_rpo(func);
     let idom = super::cfg::compute_idom(func, &rpo);
-    let stores_reach_every_use = |vreg: VReg, group: &ParamGroup| {
+    let routable = |vreg: VReg, group: &ParamGroup| {
+        if !group.positions.iter().all(|p| p.0 == group.positions[0].0) {
+            return false;
+        }
         let def_block = value_defs.get(&vreg).copied();
         use_blocks.get(&vreg).into_iter().flatten().all(|&use_bi| {
             def_block == Some(use_bi)
@@ -1336,7 +1353,7 @@ fn detect_blockparam_slot_routing(
                 call_bi < global_liveness.live_in.len()
                     && global_liveness.live_in[call_bi].contains(&vreg)
             })
-            && stores_reach_every_use(vreg, group)
+            && routable(vreg, group)
         {
             route.insert(vreg);
         }
@@ -1385,7 +1402,7 @@ fn detect_blockparam_slot_routing(
             let of_class = |v: &VReg| {
                 groups
                     .get(v)
-                    .is_some_and(|g| g.reg_class == class && stores_reach_every_use(*v, g))
+                    .is_some_and(|g| g.reg_class == class && routable(*v, g))
             };
             let others = shadow_others
                 .iter()
@@ -1469,7 +1486,7 @@ fn detect_blockparam_slot_routing(
                     })?;
                     (group.reg_class == class
                         && defined_here(&arg_vreg)
-                        && stores_reach_every_use(*param_vreg, group))
+                        && routable(*param_vreg, group))
                     .then_some(*param_vreg)
                 });
                 let slot = by_arg
@@ -1526,14 +1543,6 @@ fn detect_blockparam_slot_routing(
     // it" with most of its over-budget VRegs unspillable -- a clique of values
     // that are parameters of several different blocks, each within budget on its
     // own.
-    //
-    // A group spanning more than one block is refused here, and the reason is
-    // this document's root cause rather than a heuristic. One slot per group is
-    // right when the group is one value, and the group is keyed by VReg with the
-    // positions' shared e-class as the argument that they are one. But an e-class
-    // is one *expression*, not one value: two blocks' parameters can share a class
-    // and hold different values at their respective entries, and one cell cannot
-    // carry both. The rules above never reach that shape; this one does.
     let vreg_count = *next_vreg as usize;
     // One mask per class for the whole function: `vreg_classes` is function-wide
     // and does not change here, so rebuilding it per block walked the entire map
@@ -1586,8 +1595,7 @@ fn detect_blockparam_slot_routing(
                         group.reg_class == class
                             && !route.contains(*vreg)
                             && live_sets[point].contains(**vreg)
-                            && stores_reach_every_use(**vreg, group)
-                            && group.positions.iter().all(|p| p.0 == group.positions[0].0)
+                            && routable(**vreg, group)
                     })
                     .map(|(vreg, _)| *vreg)
                     .collect();
