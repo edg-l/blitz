@@ -2,122 +2,138 @@
   <img src="logo.svg" width="160" alt="Blitz logo">
 </p>
 
-# Blitz
+<h1 align="center">Blitz</h1>
 
-A pure-Rust compiler backend targeting x86-64, optimizing for generated code quality.
+<p align="center">
+  <em>A compiler backend that targets x86-64, and nothing else, on purpose.</em>
+</p>
 
-Blitz uses a custom e-graph for unified optimization and instruction selection, a function-scope graph-coloring register allocator, and emits ELF64 relocatable object files. It targets only x86-64, which lets the optimizer natively understand addressing modes, flags, LEA tricks, and multi-output instructions without the abstraction penalty of multi-target backends.
+---
 
-## Features
+Blitz turns SSA-style IR into linkable ELF object files. It targets a single ISA
+so the optimizer can reason about addressing modes, flags, `lea`, and
+multi-output instructions directly, instead of laundering them through a
+target-neutral IR and hoping the peephole pass finds them again.
 
-- **Custom e-graph engine** with union-find, hashcons, typed e-classes, and phased rewrite rules (algebraic simplification, strength reduction, constant folding, x86-64 instruction selection, addressing mode formation, LEA/flag fusion)
-- **Cost-based extraction** with DAG sharing awareness and configurable optimization goals (latency, throughput, code size, balanced)
-- **Function-scope graph-coloring register allocation** with MCS ordering, a degree-order retry when that overshoots the register budget, conservative (Briggs) coalescing, loop-aware spill selection, rematerialization, and pressure-driven live range splitting across blocks
-- **Hand-written x86-64 encoder** covering 70+ instruction forms (integer ALU, shifts, multiply/divide, MOV, LEA, branches, CALL/RET, CMOV, SETCC, SSE2 scalar FP, MOVQ, PUSH/POP, NOP) with correct REX, ModRM, SIB, and displacement encoding
-- **SystemV AMD64 ABI** with register/stack argument passing, callee-saved preservation, 16-byte aligned frames, parallel copy sequentialization for phi elimination, and caller-saved clobber tracking across calls
-- **ELF64 object emission** with .text, .symtab, .strtab, .shstrtab, .rela.text, and .note.GNU-stack sections
-- **Post-RA passes**: peephole optimization (redundant MOV elimination, XOR-zero idiom, TEST-for-CMP, INC/DEC substitution, branch threading), NOP alignment for loop headers, branch relaxation (short/near form selection)
-- **Multi-block support** with RPO ordering, fallthrough optimization, block parameter passing (SSA phi equivalent), and global liveness dataflow across the whole function
+Optimization and instruction selection happen in **one e-graph**: algebraic
+rewrites, strength reduction, constant folding, and x86 instruction selection all
+compete in the same equality-saturation pass, and a cost model picks the winner.
+There is no separate "isel" phase to undo the optimizer's work.
 
-## Quick Start
+## Quick start
 
 ```rust
 use blitz::compile::{CompileOptions, compile};
 use blitz::ir::builder::FunctionBuilder;
 use blitz::ir::types::Type;
 
-// Build: fn add(a: i64, b: i64) -> i64 { a + b }
+// fn add(a: i64, b: i64) -> i64 { a + b }
 let mut b = FunctionBuilder::new("add", &[Type::I64, Type::I64], &[Type::I64]);
 let p = b.params().to_vec();
 let sum = b.add(p[0], p[1]);
 b.ret(Some(sum));
-let func = b.finalize().expect("finalize");
 
-// Compile to object file
-let obj = compile(func, &CompileOptions::default(), None).expect("compile");
-obj.write_to(std::path::Path::new("add.o")).expect("write");
-
-// Link with C: cc main.c add.o -o test
+let obj = compile(b.finalize()?, &CompileOptions::default(), None)?;
+obj.write_to(std::path::Path::new("add.o"))?;
 ```
 
-Use `compile_module` to put several functions in one object file; inlining works across the functions it is given.
+Link it against C like any other object file:
 
-See [`examples/basic.rs`](examples/basic.rs) for a complete example building add, max, sum-to-N, a constant-folded function, and an array index, and [`examples/main.c`](examples/main.c) for the C driver.
-
-```sh
-cargo run --example basic
-cc examples/main.c output.o -o test && ./test
+```console
+$ cc main.c add.o -o demo && ./demo
+42
 ```
 
-## Architecture
+The emitted `add` is what you would hope for: the addition folded into the
+address unit, no frame, no moves.
+
+```asm
+add:
+    lea    (%rdi,%rsi,1),%rax
+    ret
+```
+
+Use `compile_module` to put several functions in one object; inlining works
+across whatever you hand it. [`examples/basic.rs`](examples/basic.rs) builds a
+handful of functions and [`examples/main.c`](examples/main.c) drives them:
+
+```console
+$ cargo run --example basic
+$ cc examples/main.c output.o -o demo && ./demo
+```
+
+## Code quality
+
+The point of the project is the output, so it is measured rather than asserted.
+`bash tests/run_codesize.sh --gap` compares instruction counts against system
+compilers on eight loop kernels that seed their data from `argc`, so no
+reference compiler can fold the program away and print the answer:
+
+| | instructions, geomean |
+|---|---|
+| vs `gcc -O2` | **x1.36** |
+| vs `clang -O2` | **x0.74** |
+
+The `clang` figure is not a victory lap; clang unrolls where blitz does not,
+which inflates its count on these kernels. `gcc -O2` is the number to watch. The
+worst kernel is `call_hot` at `x2.44`, the ABI cost of a loop around a `noinline`
+callee.
+
+## What's in it
+
+- **E-graph optimizer**: union-find, hashcons, typed e-classes, phased rewrites,
+  and cost-based extraction with DAG-sharing awareness. Optimization goals:
+  latency, throughput, size, balanced.
+- **Function-scope register allocator**: Chaitin-Briggs coloring with MCS
+  ordering, conservative coalescing, rematerialization, loop-aware spill choice,
+  and pressure-driven live-range splitting across blocks.
+- **Hand-written encoder**: 70+ x86-64 instruction forms with correct REX,
+  ModRM, SIB and displacement encoding, plus branch relaxation.
+- **SysV AMD64 ABI**: register and stack arguments, callee-saved preservation,
+  16-byte frames, parallel-copy sequentialization for phi elimination.
+- **Optimization passes**: inlining, LICM, store-to-load and load-to-load
+  forwarding, dead store elimination with offset-aware alias analysis, DCE,
+  peephole, loop-header alignment.
+
+## Pipeline
 
 ```
-Source IR (FunctionBuilder API, or C via the tinyc test frontend)
-       |
-       v
-  [ Inlining ]  -- cost-based, bottom-up
-       |
-       v
-  [ DCE 1 ]  -- unreachable block elimination
-       |
-       v
-  [ Memory ]  -- store-to-load / load-to-load forwarding, dead store
-       |          elimination (intra-block, alias-analysis driven)
-       v
-  [ LICM ]  -- loop detection, preheader insertion, invariant hoisting
-       |
-       v
-  [ E-graph ]  -- unified saturation: algebraic simplification, strength
-       |           reduction, constant folding, known-bits, distributivity,
-       |           x86-64 instruction selection, addressing modes, LEA
-       v
-  [ Extraction ]  -- cost-based bottom-up DAG extraction
-       |
-       v
-  [ DCE 2 ]  -- constant branch folding, unreachable blocks, dead loads
-       |
-       v
-  [ Scheduling ]  -- list scheduler with register pressure heuristic
-       |
-       v
-  [ Splitter ]  -- pressure-driven live-range splitting (remat / slot plan)
-       |
-       v
-  [ Register Allocation ]  -- function-scope Chaitin-Briggs coloring
-       |
-       v
-  [ Post-RA ]  -- phi elimination, peephole, NOP alignment,
-       |           branch relaxation
-       v
-  [ Encoding ]  -- x86-64 binary encoder with label fixups
-       |
-       v
-  [ ELF Emission ]  -- relocatable .o file
+  IR  →  inline  →  DCE  →  memory  →  LICM  →  e-graph  →  extract
+                                                               ↓
+  ELF  ←  encode  ←  post-RA  ←  regalloc  ←  split  ←  schedule
 ```
+
+The IR is dual: the e-graph holds pure values, the CFG holds effectful ops and
+control flow, and effectful ops reference pure values by e-class. Priorities and
+non-goals are in [`ROADMAP.md`](ROADMAP.md).
 
 ## Testing
 
-```sh
-cargo test --all-targets --workspace   # 917 tests
-bash tests/lit/run_tests.sh            # 406 tests
-bash tests/lit/run_diff.sh             # 268 programs, each at -O0 and -O1 and against cc
-bash tests/fuzz/run_fuzz.sh 40 mixed   # random UB-free programs
+```console
+$ cargo test --all-targets --workspace   # 925 unit and codegen tests
+$ bash tests/lit/run_tests.sh            # 498 FileCheck-style tests
+$ bash tests/lit/run_diff.sh             # 311 comparisons: -O0 vs -O1 vs cc
+$ bash tests/fuzz/run_fuzz.sh 40 mixed   # random UB-free programs
 ```
 
-Coverage includes instruction encoding tests (byte-level verification), end-to-end tests (compile -> link with C -> run -> verify results), miscompile regression tests (signed overflow, spill correctness, phi permutations, nested control flow), unit tests for every pipeline phase, and FileCheck-style codegen tests over C sources in `tests/lit/`.
+Two harnesses check *values* rather than patterns, and they fail differently.
+`run_diff.sh` compiles every runnable test at both optimization levels and
+against a reference compiler, so it catches a pass that changes behavior *and* a
+bug that is equally wrong at both levels. `run_fuzz.sh` generates programs that
+are free of undefined behavior by construction and interprets them as it
+generates, so it knows the expected output before any compiler runs.
 
-Two harnesses check values rather than patterns, and they fail differently: `run_diff.sh` compiles every runnable lit test at both optimization levels and against a reference compiler, so it catches a pass that changes behavior and a bug that is equally wrong at both levels. `run_fuzz.sh` generates programs that are free of undefined behavior by construction and interprets them while generating, so it knows the expected output before any compiler runs.
+`BLITZ_VERIFY=1` checks the IR at every pass boundary and the machine code after
+branch relaxation; `BLITZ_VERIFY=strict` also requires every e-class reference in
+the CFG to be canonical.
 
-`BLITZ_VERIFY=1` checks the IR at every pass boundary and the machine code after branch relaxation; `BLITZ_VERIFY=strict` additionally requires every e-class reference in the CFG to be canonical.
-
-End-to-end tests require `cc` (gcc/clang) on PATH. They skip gracefully if unavailable.
+End-to-end tests need `cc` on `PATH` and skip gracefully without it.
 
 ## Status
 
-The compiler produces correct code for integer arithmetic, floating-point (F32/F64 via SSE2), conditional branches, loops with block parameters, function calls with up to 6+ register args and stack args, memory loads/stores with addressing mode fusion, and programs requiring register spilling.
+Correct code for integer and floating-point arithmetic (F32/F64 via SSE2),
+branches, loops with block parameters, calls with register and stack arguments,
+memory access with addressing-mode fusion, and programs that need spilling.
 
-`crates/tinyc` is a small C frontend used to feed the backend realistic input in tests. It is not a product; see [`ROADMAP.md`](ROADMAP.md) for the project's goal, priorities, and non-goals.
-
-## License
-
-MIT
+`crates/tinyc` is a small C frontend that exists to feed the backend realistic
+input in tests. It is not a product.
