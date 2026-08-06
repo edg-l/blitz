@@ -238,7 +238,20 @@ impl FunctionBuilder {
     /// Set the current insertion block.
     pub fn set_block(&mut self, block: BlockId) {
         self.current_block = Some(block);
-        self.current_block_idx = self.blocks.iter().position(|b| b.id == block);
+        self.current_block_idx = self.block_idx(block);
+    }
+
+    /// The index of `block` in `blocks`, which is the block's own id.
+    ///
+    /// Ids are handed out by `next_block_id` in step with the pushes that create
+    /// them and nothing removes a block, so `blocks[i].id == i`. Searching for
+    /// the id instead makes every block lookup linear, and the SSA construction
+    /// does one per parameter and one per terminator argument.
+    pub(crate) fn block_idx(&self, block: BlockId) -> Option<usize> {
+        let idx = block as usize;
+        let data = self.blocks.get(idx)?;
+        debug_assert_eq!(data.id, block, "block ids must index `blocks`");
+        Some(idx)
     }
 
     /// Get function parameters as Values.

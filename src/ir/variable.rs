@@ -133,12 +133,8 @@ impl FunctionBuilder {
 
     /// Incrementally add a block parameter, creating an Op::BlockParam e-node.
     fn add_block_param(&mut self, block: BlockId, ty: Type) -> Value {
-        let block_data = self
-            .blocks
-            .iter()
-            .find(|b| b.id == block)
-            .expect("block not found");
-        let param_idx = block_data.param_types.len() as u32;
+        let idx = self.block_idx(block).expect("block not found");
+        let param_idx = self.blocks[idx].param_types.len() as u32;
 
         let node = ENode {
             op: Op::Pure(PureOp::BlockParam(block, param_idx, ty.clone())),
@@ -148,11 +144,7 @@ impl FunctionBuilder {
         let val = Value(cid);
 
         // Re-borrow block_data mutably after egraph mutation.
-        let block_data = self
-            .blocks
-            .iter_mut()
-            .find(|b| b.id == block)
-            .expect("block not found");
+        let block_data = &mut self.blocks[idx];
         block_data.param_types.push(ty);
         block_data.param_values.push(val);
         val
@@ -160,11 +152,8 @@ impl FunctionBuilder {
 
     /// Append a value to a predecessor's terminator args targeting a specific block.
     fn append_jump_arg_for_edge(&mut self, from_block: BlockId, edge: PredEdge, arg: Value) {
-        let block = self
-            .blocks
-            .iter_mut()
-            .find(|b| b.id == from_block)
-            .expect("from_block not found");
+        let idx = self.block_idx(from_block).expect("from_block not found");
+        let block = &mut self.blocks[idx];
         let term = block
             .ops
             .last_mut()
