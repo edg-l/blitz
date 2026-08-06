@@ -568,6 +568,8 @@ regalloc/div_and_mod_same_operands.c	O0	82	287	3	3
 regalloc/div_and_mod_same_operands.c	O1	43	165	0	0
 regalloc/div_both_projections.c	O0	92	299	0	0
 regalloc/div_both_projections.c	O1	27	128	0	0
+regalloc/div_proj_crosses_block.c	O0	34	103	0	0
+regalloc/div_proj_crosses_block.c	O1	34	94	0	0
 regalloc/div_width_from_op.c	O0	110	349	0	0
 regalloc/div_width_from_op.c	O1	112	350	0	0
 regalloc/double_array_base_shares_counter.c	O0	40	161	2	2

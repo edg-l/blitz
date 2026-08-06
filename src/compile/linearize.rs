@@ -20,7 +20,7 @@ use crate::egraph::extract::{
 };
 use crate::ir::effectful::BlockId;
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op, PureOp};
+use crate::ir::op::{ClassId, MachOp, Op, PureOp};
 use crate::ir::types::Type;
 
 use super::cfg::{self, collect_block_roots, compute_idom, compute_rpo, dominates};
@@ -95,6 +95,20 @@ pub(super) fn linearize(
     let idom = compute_idom(func, &rpo_order);
     let mut class_emitted_in: BTreeMap<ClassId, usize> = BTreeMap::new();
 
+    // A division leaves its quotient in RAX and its remainder in RDX; the pair
+    // VReg holds neither. Only the projections adjacent to the division read
+    // those registers, so a projection in another block would take whatever that
+    // block last put there -- these classes are re-emitted per block, as flags
+    // are and for the same reason. Collected once: the test below runs for every
+    // (block, emitted class) pair, where a lookup in the whole extraction costs
+    // more than the whole set of divisions.
+    let div_classes: BTreeSet<ClassId> = extraction
+        .choices
+        .iter()
+        .filter(|(_, node)| matches!(node.op, Op::Mach(MachOp::X86Idiv(..) | MachOp::X86Div(..))))
+        .map(|(cid, _)| *cid)
+        .collect();
+
     // Build per-block VRegInst lists in RPO order, stored by block index.
     let mut block_vreg_insts: Vec<Vec<VRegInst>> = vec![Vec::new(); func.blocks.len()];
     // Snapshot of class_to_vreg AT THE END of each block's processing (before
@@ -104,21 +118,24 @@ pub(super) fn linearize(
         vec![ClassVRegMap::new(); func.blocks.len()];
     for &block_idx in &rpo_order {
         // Remove classes emitted in non-dominating blocks so they get fresh VRegs.
-        // Also remove flags-typed classes from ALL prior blocks: EFLAGS cannot
-        // survive cross-block boundaries because any arithmetic instruction
-        // clobbers them.
+        // Also remove from ALL prior blocks every class whose value lives in a
+        // fixed physical register rather than in the VReg it is assigned, since
+        // no such register survives a block boundary.
         let removable_classes: Vec<ClassId> = class_emitted_in
             .iter()
             .filter(|(cid, emitter)| {
                 if !dominates(**emitter, block_idx, &idom) {
                     return true;
                 }
-                // Flags-typed classes must be re-emitted per-block.
                 if **emitter != block_idx {
+                    // EFLAGS: any arithmetic instruction clobbers them.
                     let ty = &egraph.classes[cid.0 as usize].ty;
                     if matches!(ty, Type::Flags)
                         || matches!(ty, Type::Pair(_, b) if **b == Type::Flags)
                     {
+                        return true;
+                    }
+                    if div_classes.contains(cid) {
                         return true;
                     }
                 }
