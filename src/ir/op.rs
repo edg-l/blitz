@@ -357,6 +357,28 @@ pub enum Op {
     Pseudo(PseudoOp),
 }
 
+impl PseudoOp {
+    /// Whether this pseudo takes no register, because it names no value.
+    ///
+    /// Only a pseudo can answer anything but `false`, which is why the predicate
+    /// lives here rather than on `Op`: a pure or machine op is an expression and
+    /// always defines something. Every bug in this area has been a structure that
+    /// assumed otherwise -- a phantom `dst` taking a colour, a marker's position
+    /// read as a def point.
+    pub fn defines_no_value(&self) -> bool {
+        matches!(
+            self,
+            PseudoOp::StoreBarrier
+                | PseudoOp::VoidCallBarrier
+                | PseudoOp::TerminatorArgs(_)
+                // A spill store writes memory. Its consumers read the slot back
+                // through a `SpillLoad`, never its `dst`.
+                | PseudoOp::SpillStore(_)
+                | PseudoOp::XmmSpillStore(_)
+        )
+    }
+}
+
 impl Op {
     /// Derive the result type of this node given the types of its children.
     ///
@@ -999,16 +1021,11 @@ impl Op {
     /// parallel copy, so the phantom is the difference between fitting the
     /// budget and overshooting it by one.
     pub fn has_no_result(&self) -> bool {
-        matches!(
-            self,
-            Op::Pseudo(PseudoOp::StoreBarrier)
-                | Op::Pseudo(PseudoOp::VoidCallBarrier)
-                | Op::Pseudo(PseudoOp::TerminatorArgs(_))
-                // A spill store writes memory. Its consumers read the slot back
-                // through a `SpillLoad`, never its `dst`.
-                | Op::Pseudo(PseudoOp::SpillStore(_))
-                | Op::Pseudo(PseudoOp::XmmSpillStore(_))
-        )
+        match self {
+            Op::Pseudo(p) => p.defines_no_value(),
+            // A pure or machine op is an expression: it always names a value.
+            Op::Pure(_) | Op::Mach(_) => false,
+        }
     }
 
     /// Returns true if this op produces a value that lives in an XMM (FP) register.
