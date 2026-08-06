@@ -23,7 +23,7 @@ use crate::ir::function::Function;
 use crate::ir::op::{ClassId, MachOp, Op, PureOp};
 use crate::ir::types::Type;
 
-use super::cfg::{self, collect_block_roots, compute_idom, compute_rpo, dominates};
+use super::cfg::{self, DomOrder, collect_block_roots, compute_idom, compute_rpo};
 use super::licm::ExtraRoots;
 use super::program_point::ProgramPoint;
 
@@ -93,7 +93,22 @@ pub(super) fn linearize(
     let mut block_param_vregs: BTreeMap<(BlockId, u32), VReg> = BTreeMap::new();
 
     let idom = compute_idom(func, &rpo_order);
+    let dom = DomOrder::new(&idom);
     let mut class_emitted_in: BTreeMap<ClassId, usize> = BTreeMap::new();
+
+    // The same record as `class_emitted_in`, indexed by the emitting block.
+    //
+    // Which classes a block must re-emit is a question about their *emitters*:
+    // one that does not dominate this block, or a value that lives in a fixed
+    // physical register no block boundary preserves. Asked of every class in
+    // turn it costs the whole function at every block; asked of every emitter it
+    // costs one dominance test per block that has emitted anything, and the
+    // classes come along in a list. `reemit_per_block` is the sublist that has
+    // to be re-emitted even under a dominating emitter, so the common case
+    // touches no class at all.
+    let mut emitted_by: Vec<Vec<ClassId>> = vec![Vec::new(); func.blocks.len()];
+    let mut reemit_per_block: Vec<Vec<ClassId>> = vec![Vec::new(); func.blocks.len()];
+    let mut emitter_blocks: Vec<usize> = Vec::new();
 
     // A division leaves its quotient in RAX and its remainder in RDX; the pair
     // VReg holds neither. Only the projections adjacent to the division read
@@ -121,34 +136,22 @@ pub(super) fn linearize(
         // Also remove from ALL prior blocks every class whose value lives in a
         // fixed physical register rather than in the VReg it is assigned, since
         // no such register survives a block boundary.
-        let removable_classes: Vec<ClassId> = class_emitted_in
-            .iter()
-            .filter(|(cid, emitter)| {
-                if !dominates(**emitter, block_idx, &idom) {
-                    return true;
-                }
-                if **emitter != block_idx {
-                    // EFLAGS: any arithmetic instruction clobbers them.
-                    let ty = &egraph.classes[cid.0 as usize].ty;
-                    if matches!(ty, Type::Flags)
-                        || matches!(ty, Type::Pair(_, b) if **b == Type::Flags)
-                    {
-                        return true;
-                    }
-                    if div_classes.contains(cid) {
-                        return true;
-                    }
-                }
-                false
-            })
-            .map(|(cid, _)| *cid)
-            .collect();
         let mut removed: Vec<(ClassId, VReg)> = Vec::new();
-        for cid in removable_classes {
-            if let Some(vreg) = class_to_vreg.remove(cid) {
-                removed.push((cid, vreg));
+        for &emitter in &emitter_blocks {
+            let group = if !dom.dominates(emitter, block_idx) {
+                &emitted_by[emitter]
+            } else if emitter != block_idx {
+                &reemit_per_block[emitter]
+            } else {
+                continue;
+            };
+            for &cid in group {
+                if let Some(vreg) = class_to_vreg.remove(cid) {
+                    removed.push((cid, vreg));
+                }
             }
         }
+        let removed_classes: BTreeSet<ClassId> = removed.iter().map(|(cid, _)| *cid).collect();
 
         let block = &func.blocks[block_idx];
         let roots = collect_block_roots(block, egraph);
@@ -185,8 +188,15 @@ pub(super) fn linearize(
         }
         all_roots.sort_by_key(|c| c.0);
         all_roots.dedup();
-        let pre_emission: BTreeSet<ClassId> = class_to_vreg.keys().collect();
-        let mut insts =
+        // Whether a class was already in the map when this block started. Every
+        // class the map holds is one some block emitted, and this block removed
+        // exactly `removed_classes` of them, so the two records answer it
+        // between them -- `class_emitted_in` does not learn about this block
+        // until the end of the iteration.
+        let was_pre_emitted =
+            |cid: ClassId| class_emitted_in.contains_key(&cid) && !removed_classes.contains(&cid);
+
+        let (mut insts, newly_emitted) =
             vreg_insts_for_block(extraction, &all_roots, &mut class_to_vreg, &mut next_vreg);
 
         // Per-block fixup: ensure block params of this block use Op::BlockParam,
@@ -208,7 +218,7 @@ pub(super) fn linearize(
                         ));
                         inst.operands.clear();
                         block_param_vregs.insert((block_id, pidx), vreg);
-                    } else if pre_emission.contains(&canon) && block_preds[block_idx].len() <= 1 {
+                    } else if was_pre_emitted(canon) && block_preds[block_idx].len() <= 1 {
                         // Pass-through: the canonical class was already emitted
                         // in a dominating block (survived this block's filter)
                         // AND this block has at most one predecessor, so
@@ -266,10 +276,29 @@ pub(super) fn linearize(
 
         block_vreg_insts[block_idx] = insts;
 
-        // Track newly emitted classes for dominator filtering.
-        for cid in class_to_vreg.keys().collect::<Vec<_>>() {
-            if !pre_emission.contains(&cid) && !class_emitted_in.contains_key(&cid) {
-                class_emitted_in.insert(cid, block_idx);
+        // Track newly emitted classes for dominator filtering. `vreg_insts_for_block`
+        // returns exactly the classes it added, so this costs what the block
+        // emitted rather than what the function has emitted so far.
+        for &cid in &newly_emitted {
+            // The *first* block to emit a class owns it. A later block that
+            // re-emits it gets a VReg of its own, but the record of where the
+            // class came from must not move, or every dominance question asked
+            // about it afterwards is asked about the wrong block.
+            if let std::collections::btree_map::Entry::Vacant(slot) = class_emitted_in.entry(cid) {
+                slot.insert(block_idx);
+                if emitted_by[block_idx].is_empty() && reemit_per_block[block_idx].is_empty() {
+                    emitter_blocks.push(block_idx);
+                }
+                emitted_by[block_idx].push(cid);
+                // EFLAGS: any arithmetic instruction clobbers them. A division's
+                // pair lives in RAX and RDX, which no block boundary preserves.
+                let ty = &egraph.classes[cid.0 as usize].ty;
+                if matches!(ty, Type::Flags)
+                    || matches!(ty, Type::Pair(_, b) if **b == Type::Flags)
+                    || div_classes.contains(&cid)
+                {
+                    reemit_per_block[block_idx].push(cid);
+                }
             }
         }
 

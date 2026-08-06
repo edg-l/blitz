@@ -752,7 +752,13 @@ pub fn extraction_to_vreg_insts_with_map(
     let mut emit_order: Vec<ClassId> = Vec::new();
 
     for &root in roots {
-        vreg_dfs(root, extraction, &mut visited, &mut emit_order);
+        vreg_dfs(
+            root,
+            extraction,
+            &class_to_vreg,
+            &mut visited,
+            &mut emit_order,
+        );
     }
 
     for &class_id in &emit_order {
@@ -796,7 +802,13 @@ pub fn extraction_to_vreg_insts(extraction: &ExtractionResult, roots: &[ClassId]
     let mut emit_order: Vec<ClassId> = Vec::new();
 
     for &root in roots {
-        vreg_dfs(root, extraction, &mut visited, &mut emit_order);
+        vreg_dfs(
+            root,
+            extraction,
+            &class_to_vreg,
+            &mut visited,
+            &mut emit_order,
+        );
     }
 
     // Allocate VRegs in emission order.
@@ -844,16 +856,28 @@ pub fn vreg_insts_for_block(
     roots: &[ClassId],
     class_to_vreg: &mut ClassVRegMap,
     next_vreg: &mut u32,
-) -> Vec<VRegInst> {
+) -> (Vec<VRegInst>, Vec<ClassId>) {
     // DFS to find emission order for classes not yet visited.
-    let mut visited: std::collections::BTreeSet<ClassId> = class_to_vreg.keys().collect();
+    //
+    // A class the map already holds is a stopping point, asked of the map one
+    // node at a time rather than copied out of it first: seeding `visited` with
+    // every key means a cost proportional to the whole function at every block,
+    // where the walk itself only ever touches this block's own cone.
+    let mut visited: std::collections::BTreeSet<ClassId> = std::collections::BTreeSet::new();
     let mut emit_order: Vec<ClassId> = Vec::new();
 
     for &root in roots {
-        vreg_dfs(root, extraction, &mut visited, &mut emit_order);
+        vreg_dfs(
+            root,
+            extraction,
+            class_to_vreg,
+            &mut visited,
+            &mut emit_order,
+        );
     }
 
-    // Assign new VRegs.
+    // Assign new VRegs. `emit_order` holds only classes the map did not have,
+    // so this is also the record of what this block emitted.
     for &class_id in &emit_order {
         if !class_to_vreg.contains(class_id) {
             let vreg = VReg(*next_vreg);
@@ -884,7 +908,7 @@ pub fn vreg_insts_for_block(
             operands,
         });
     }
-    insts
+    (insts, emit_order)
 }
 
 /// Build a map from VReg to its IR Type by looking up each VReg's e-class type
@@ -903,10 +927,14 @@ pub fn build_vreg_types(class_to_vreg: &ClassVRegMap, egraph: &EGraph) -> BTreeM
 fn vreg_dfs(
     id: ClassId,
     extraction: &ExtractionResult,
+    have: &ClassVRegMap,
     visited: &mut std::collections::BTreeSet<ClassId>,
     order: &mut Vec<ClassId>,
 ) {
     if id == ClassId::NONE || !extraction.choices.contains_key(&id) {
+        return;
+    }
+    if have.contains(id) {
         return;
     }
     if !visited.insert(id) {
@@ -915,7 +943,7 @@ fn vreg_dfs(
     let ext = &extraction.choices[&id];
     for &child in &ext.children {
         if child != ClassId::NONE {
-            vreg_dfs(child, extraction, visited, order);
+            vreg_dfs(child, extraction, have, visited, order);
         }
     }
     order.push(id);

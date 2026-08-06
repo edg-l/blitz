@@ -50,7 +50,7 @@ pub fn compile_to_ir_string(
         }
         all_roots.sort_by_key(|c| c.0);
         all_roots.dedup();
-        let mut insts =
+        let (mut insts, _newly_emitted) =
             vreg_insts_for_block(&extraction, &all_roots, &mut class_to_vreg, &mut next_vreg);
 
         for pidx in 0..block.param_types.len() as u32 {

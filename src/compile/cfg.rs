@@ -170,6 +170,72 @@ pub(super) fn compute_idom(func: &Function, rpo: &[usize]) -> Vec<Option<usize>>
 }
 
 /// Check if block `a` dominates block `b` using the idom tree.
+/// Dominance as two integer comparisons, for the callers that ask it a great
+/// many times.
+///
+/// [`dominates`] walks `b`'s immediate-dominator chain, which is fine once and
+/// quadratic when a pass asks it for every (block, value) pair -- linearization
+/// does, and on a 3763-block function that walk was most of the compile. A
+/// depth-first numbering of the dominator tree answers the same question in
+/// constant time: `a` dominates `b` exactly when `b`'s entry number lies inside
+/// `a`'s entry/exit interval.
+///
+/// Blocks the entry cannot reach are in no dominator tree and get an empty
+/// interval, so nothing dominates them and they dominate nothing but themselves
+/// -- which is what the chain walk answers for them too.
+pub(super) struct DomOrder {
+    tin: Vec<u32>,
+    tout: Vec<u32>,
+}
+
+impl DomOrder {
+    pub(super) fn new(idom: &[Option<usize>]) -> Self {
+        let n = idom.len();
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (b, &parent) in idom.iter().enumerate() {
+            if let Some(p) = parent
+                && p != b
+            {
+                children[p].push(b);
+            }
+        }
+        let mut tin = vec![0u32; n];
+        let mut tout = vec![0u32; n];
+        let mut clock = 1u32;
+        // Explicit stack: a dominator tree can be as deep as the function has
+        // blocks, and recursion would overflow on the shapes this exists for.
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        if n > 0 {
+            tin[0] = clock;
+            clock += 1;
+            stack.push((0, 0));
+        }
+        while let Some((node, next)) = stack.pop() {
+            if next < children[node].len() {
+                stack.push((node, next + 1));
+                let child = children[node][next];
+                tin[child] = clock;
+                clock += 1;
+                stack.push((child, 0));
+            } else {
+                tout[node] = clock;
+                clock += 1;
+            }
+        }
+        DomOrder { tin, tout }
+    }
+
+    pub(super) fn dominates(&self, a: usize, b: usize) -> bool {
+        if a == b {
+            return true;
+        }
+        if self.tin[a] == 0 || self.tin[b] == 0 {
+            return false;
+        }
+        self.tin[a] < self.tin[b] && self.tout[b] < self.tout[a]
+    }
+}
+
 pub(super) fn dominates(a: usize, b: usize, idom: &[Option<usize>]) -> bool {
     if a == b {
         return true;
