@@ -54,6 +54,8 @@ arrays/array_in_struct.c	O0	38	147	0	0
 arrays/array_in_struct.c	O1	39	155	0	0
 arrays/basic.c	O0	32	97	0	0
 arrays/basic.c	O1	29	84	0	0
+arrays/extra_array_store_seed58.c	O0	1018	4314	130	181
+arrays/extra_array_store_seed58.c	O1	529	3222	153	196
 arrays/large_array.c	O0	35	118	0	0
 arrays/large_array.c	O1	32	106	0	0
 arrays/multidim.c	O0	37	122	0	0

@@ -32,19 +32,18 @@ rather than overhead against it.
 
 ## Current state (2026-08-06)
 
-- 934 Rust tests + 476 lit tests, all green. `cargo fmt` clean.
+- 934 Rust tests + 478 lit tests, all green. `cargo fmt` clean.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 300 tests compared O0-vs-O1 and against a
+- `bash tests/lit/run_diff.sh`: 301 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
 - Generated programs, per (seed, level) pair at 30 seeds per shape: **`mixed`
   30/30, `args` 30/30, `pressure` 30/30 -- every generated program compiles and
   prints what the generator predicted.** No failure of any kind is open on this
-  corpus, and no wrong-value program is open. `tests/fuzz/findings/` holds one
-  file, `mixed58_extra_array_store.c`, which no longer reproduces: it prints 666
-  at both levels, agreeing with `cc`. It belongs in `tests/lit/` as a regression
-  test now rather than in `findings/`. (The 60-seed figures this section used to
-  quote were `mixed` 58/60, `args` 53/60, `pressure` 24/60.)
-- Code quality has a baseline: `bash tests/run_codesize.sh --check`, 890 rows
+  corpus, no wrong-value program is open, and `tests/fuzz/findings/` is empty --
+  its last file stopped reproducing and is now
+  `tests/lit/arrays/extra_array_store_seed58.c`. (The 60-seed figures this
+  section used to quote were `mixed` 58/60, `args` 53/60, `pressure` 24/60.)
+- Code quality has a baseline: `bash tests/run_codesize.sh --check`, 892 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->

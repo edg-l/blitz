@@ -1,29 +1,26 @@
-// NO LONGER REPRODUCES. Kept for the shape it exercises; it belongs in
-// `tests/lit/` as a regression test rather than here. Do not "fix" it by
-// weakening it.
+// Regression test: an array element received a store the program never writes.
+// Prints 666 at both levels, agreeing with cc. Do not "fix" it by weakening it.
 //
-//   cc -O0 and cc -O2   666
-//   blitz -O0           666
-//   blitz -O1           666
+// Was KNOWN FAILING -- blitz printed 742 at BOTH levels against 666 from cc at
+// -O0 and -O2. Wrong at both levels was a new signature: every bug of the three
+// sessions before it was wrong at one level and right or uncompilable at the
+// other, so the -O0-vs-O1 oracle carried them. This one only the reference
+// compiler saw, which is why that second oracle is load-bearing.
 //
-// What it looked like when it was found, and why that mattered:
-//
-//   blitz -O0            742
-//   blitz -O1            742
-//
-// Wrong at both levels is a new signature here: every bug of the last three
-// sessions was wrong at one level and right or uncompilable at the other, so the
-// -O0-vs-O1 oracle carried them. This one only the reference compiler sees.
-//
-// ONE WRONG TERM, and it is a store that should not have happened. `arr[4]` reads
-// 81 where its initialiser 5 belongs, which is the whole +76; the reference never
-// writes that element. Every other term of the sum agrees, including arr[6] at 608
-// and arr[7] at 38, so some store's index came out 4.
+// ONE WRONG TERM, and it was a store that should not have happened. `arr[4]`
+// read 81 where its initialiser 5 belongs, the whole +76; the reference never
+// writes that element. Every other term of the sum agreed, including arr[6] at
+// 608 and arr[7] at 38, so some store's index came out 4.
 //
 // Read off the unmodified binary with `read_frame.py --sum-chain` against a `cc`
-// build whose printf is split into one call per term. Perturbation was not needed
-// and would have been the wrong tool: this program allocates comfortably, so start
-// from the store, not from the register file.
+// build whose printf is split into one call per term. Perturbation was not the
+// tool: this program allocates comfortably, so the hunt started from the store
+// rather than from the register file. It lives under `arrays/` for that reason
+// and not under `regalloc/`, where the other promoted findings sit.
+//
+// It is not attributed to a commit. It stopped reproducing somewhere in the
+// block-parameter slot-routing work and was not bisected; the value of the file
+// is the shape, which nothing else in the corpus covers.
 //
 // 247 lines, reduced from gen_c.py seed 58 shape mixed (666 lines) with all eight
 // `arr[k] =` initialisers restored afterwards -- reduce.py deleted three and its
