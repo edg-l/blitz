@@ -164,6 +164,16 @@ pub enum MachOp {
     /// Arithmetic shift right by immediate count — `sar dst, imm`; 1 child.
     X86SarImm(u8),
 
+    /// Rotate left by immediate count — `rol dst, imm`; 1 child. Emitted by isel
+    /// for `Or(Shl(x, k), Shr(x, w - k))` on a `w`-bit `x`, which is one
+    /// instruction instead of three and leaves `x` with a single use.
+    ///
+    /// There is no right-rotate form: `ror k` is `rol (w - k)` in the same
+    /// encoding size, and a right rotate written in the source reaches isel as
+    /// the same `Or` of two shifts, whose operand order says nothing about which
+    /// direction was meant.
+    X86RolImm(u8),
+
     /// `lea [base + idx]`
     X86Lea2,
     /// `lea [base + idx * scale]` — scale embedded in op
@@ -704,7 +714,8 @@ impl Op {
             | Op::Mach(MachOp::X86XorI(_))
             | Op::Mach(MachOp::X86ShlImm(_))
             | Op::Mach(MachOp::X86ShrImm(_))
-            | Op::Mach(MachOp::X86SarImm(_)) => {
+            | Op::Mach(MachOp::X86SarImm(_))
+            | Op::Mach(MachOp::X86RolImm(_)) => {
                 assert_eq!(child_types.len(), 1, "{self:?} requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
@@ -1140,6 +1151,7 @@ impl Op {
                     | MachOp::X86ShlImm(_)
                     | MachOp::X86ShrImm(_)
                     | MachOp::X86SarImm(_)
+                    | MachOp::X86RolImm(_)
                     | MachOp::X86Addsd
                     | MachOp::X86Subsd
                     | MachOp::X86Mulsd

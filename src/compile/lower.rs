@@ -301,6 +301,14 @@ fn lower_op(
             *imm,
             |dst, imm| MachInst::SarRI { size, dst, imm },
         ),
+        Op::Mach(MachOp::X86RolImm(imm)) => lower_dst_imm(
+            "X86RolImm",
+            size,
+            dst_reg,
+            operand_regs,
+            *imm,
+            |dst, imm| MachInst::RolRI { size, dst, imm },
+        ),
 
         // X86CmpI is handled in the caller (where vreg_types is available) so
         // the OpSize is derived from the operand width, not the Flags dst.

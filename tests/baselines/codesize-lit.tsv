@@ -92,6 +92,8 @@ asm/lea_strength.c	O0	7	30	0	0
 asm/lea_strength.c	O1	7	30	0	0
 asm/ret_instruction.c	O0	2	6	0	0
 asm/ret_instruction.c	O1	2	6	0	0
+asm/rotate.c	O0	40	130	0	0
+asm/rotate.c	O1	40	130	0	0
 asm/shl_strength.c	O0	7	27	0	0
 asm/shl_strength.c	O1	7	27	0	0
 asm/xor_zero.c	O0	2	6	0	0

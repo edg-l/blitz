@@ -299,6 +299,10 @@ impl Encoder {
         self.encode_shift_ri(size, 5, dst, imm);
     }
 
+    pub fn encode_rol_ri(&mut self, size: OpSize, dst: Reg, imm: u8) {
+        self.encode_shift_ri(size, 0, dst, imm);
+    }
+
     pub fn encode_sar_ri(&mut self, size: OpSize, dst: Reg, imm: u8) {
         self.encode_shift_ri(size, 7, dst, imm);
     }

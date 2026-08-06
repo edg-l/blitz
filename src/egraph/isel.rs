@@ -12,6 +12,7 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_alu_isel(egraph, &snaps);
     changed |= apply_shift_isel(egraph, &snaps);
     changed |= apply_shift_imm_isel(egraph, &snaps);
+    changed |= apply_rotate_isel(egraph, &snaps);
     changed |= apply_alu_imm_isel(egraph, &snaps);
     changed |= apply_select_isel(egraph, &snaps);
     changed |= apply_icmp_isel(egraph, &snaps);
@@ -340,6 +341,95 @@ fn apply_shift_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let proj0_imm_canon = egraph.unionfind.find_immutable(proj0_imm);
         if canon != proj0_imm_canon {
             egraph.merge(class_id, proj0_imm);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// `Or(Shl(x, k), Shr(x, w - k))` on a `w`-bit `x` -> `Proj0(X86RolImm(k)(x))`.
+///
+/// The rotate is one instruction where the shift pair is three, and it reads `x`
+/// once rather than twice, so the value it rotates does not have to stay live
+/// across a second shift. `Shr` and not `Sar`: an arithmetic shift feeds the sign
+/// bit into the high end, which is not what a rotate puts there.
+///
+/// The two amounts must sum to the width of the rotated value's own type, so a
+/// `w`-bit rotate expressed on a wider type is not matched -- there the high bits
+/// of the shift-left result survive and the rotate would drop them.
+fn apply_rotate_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    /// The rotated value and the left-rotate amount, read off one operand class
+    /// pair of an `Or`.
+    fn rotate_parts(
+        egraph: &EGraph,
+        shl_class: ClassId,
+        shr_class: ClassId,
+        width: u32,
+    ) -> Option<(ClassId, u8)> {
+        let shift = |class: ClassId, want: PureOp| -> Option<(ClassId, i64)> {
+            let canon = egraph.unionfind.find_immutable(class);
+            if canon == ClassId::NONE {
+                return None;
+            }
+            egraph.class(canon).nodes.iter().find_map(|n| {
+                (n.op == Op::Pure(want.clone()) && n.children.len() == 2)
+                    .then(|| {
+                        egraph
+                            .get_constant(n.children[1])
+                            .map(|(v, _)| (n.children[0], v))
+                    })
+                    .flatten()
+            })
+        };
+
+        let (x, k) = shift(shl_class, PureOp::Shl)?;
+        let (y, j) = shift(shr_class, PureOp::Shr)?;
+        let x_canon = egraph.unionfind.find_immutable(x);
+        if x_canon == ClassId::NONE || x_canon != egraph.unionfind.find_immutable(y) {
+            return None;
+        }
+        if k <= 0 || j <= 0 || k + j != i64::from(width) {
+            return None;
+        }
+        // The rotate is over the whole of its own type, so the value it rotates
+        // must have that type and not a wider one truncated into it.
+        let x_ty = infer_class_type(egraph, x_canon)?;
+        (x_ty.is_integer() && x_ty.bit_width() == width).then_some((x_canon, k as u8))
+    }
+
+    let mut changed = false;
+
+    for snap in snaps {
+        if snap.op != Op::Pure(PureOp::Or) || snap.children.len() != 2 {
+            continue;
+        }
+        let Some(ty) = infer_class_type(egraph, snap.class_id) else {
+            continue;
+        };
+        if !ty.is_integer() {
+            continue;
+        }
+        let width = ty.bit_width();
+        let (a, b) = (snap.children[0], snap.children[1]);
+        let Some((x, k)) =
+            rotate_parts(egraph, a, b, width).or_else(|| rotate_parts(egraph, b, a, width))
+        else {
+            continue;
+        };
+
+        let rol = egraph.add(ENode {
+            op: Op::Mach(MachOp::X86RolImm(k)),
+            children: smallvec![x],
+        });
+        let proj0 = egraph.add(ENode {
+            op: Op::Pure(PureOp::Proj0),
+            children: smallvec![rol],
+        });
+
+        let canon = egraph.unionfind.find_immutable(snap.class_id);
+        let proj0_canon = egraph.unionfind.find_immutable(proj0);
+        if canon != proj0_canon {
+            egraph.merge(snap.class_id, proj0);
             changed = true;
         }
     }

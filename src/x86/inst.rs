@@ -152,6 +152,12 @@ pub enum MachInst {
         dst: Operand,
         imm: u8,
     },
+    /// Rotate left by immediate count
+    RolRI {
+        size: OpSize,
+        dst: Operand,
+        imm: u8,
+    },
     /// Shift left by CL
     ShlRCL {
         size: OpSize,
@@ -557,6 +563,7 @@ impl MachInst {
             MachInst::ShlRI { dst, .. } => collect(&[dst]),
             MachInst::ShrRI { dst, .. } => collect(&[dst]),
             MachInst::SarRI { dst, .. } => collect(&[dst]),
+            MachInst::RolRI { dst, .. } => collect(&[dst]),
             MachInst::Neg { dst, .. } => collect(&[dst]),
             MachInst::Not { dst, .. } => collect(&[dst]),
             MachInst::Inc { dst, .. } => collect(&[dst]),
@@ -655,6 +662,7 @@ impl MachInst {
             MachInst::ShlRI { dst, .. } => collect(&[dst]),
             MachInst::ShrRI { dst, .. } => collect(&[dst]),
             MachInst::SarRI { dst, .. } => collect(&[dst]),
+            MachInst::RolRI { dst, .. } => collect(&[dst]),
             MachInst::Neg { dst, .. } => collect(&[dst]),
             MachInst::Not { dst, .. } => collect(&[dst]),
             MachInst::Inc { dst, .. } => collect(&[dst]),

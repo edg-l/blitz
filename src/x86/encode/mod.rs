@@ -454,6 +454,9 @@ impl Encoder {
             MachInst::SarRI { size, dst, imm } => {
                 self.encode_sar_ri(*size, Self::expect_reg(dst), *imm);
             }
+            MachInst::RolRI { size, dst, imm } => {
+                self.encode_rol_ri(*size, Self::expect_reg(dst), *imm);
+            }
             MachInst::ShlRCL { size, dst } => {
                 self.encode_shl_rcl(*size, Self::expect_reg(dst));
             }

@@ -373,7 +373,15 @@ isel patterns; we should beat it on the ones we implement.
       Needs a CPU feature level knob.
 - [ ] **Carry-chain forms**: `adc`/`sbb`, and `setcc`-free branchless idioms
       (`sbb reg,reg` as a 0/-1 mask).
-- [ ] **Rotates and double shifts**: `rol`/`ror`, `shld`/`shrd`.
+- [x] **Rotates.** `Or(Shl(x, k), Shr(x, w - k))` on a `w`-bit `x` becomes
+      `rol k`: three instructions and two reads of `x` collapse to one of each.
+      There is no `ror` form -- `ror k` is `rol (w - k)` in the same encoding
+      size, and the operand order of the `Or` says nothing about which direction
+      the source meant. `Shr` and not `Sar`, since an arithmetic shift feeds the
+      sign bit into the high end. On `tests/lit/asm/rotate.c` a rotate function
+      is 3 insts / 6 bytes against 9 / 19 for the same shape on a signed
+      operand; no corpus row changed, because none of them rotates.
+- [ ] **Double shifts**: `shld`/`shrd`.
 - [x] **LHS-iconst compare commutation.** A constant left-hand operand moves
       right and the condition flips, so `X86CmpI` matches it and the constant
       is never materialized. Over the rows that changed, `lit` -0.54% insts and

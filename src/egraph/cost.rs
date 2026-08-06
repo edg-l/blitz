@@ -156,7 +156,8 @@ impl CostModel {
             // ── x86-64 immediate-form shifts: slightly cheaper (no CL constraint) ─
             Op::Mach(MachOp::X86ShlImm(_))
             | Op::Mach(MachOp::X86ShrImm(_))
-            | Op::Mach(MachOp::X86SarImm(_)) => {
+            | Op::Mach(MachOp::X86SarImm(_))
+            | Op::Mach(MachOp::X86RolImm(_)) => {
                 CostTuple {
                     latency: 1.0,
                     throughput: 0.5,
