@@ -148,6 +148,8 @@ pub(super) fn linearize(
     // in a block point to that block's VReg, not the globally-restored one.
     let mut block_class_to_vreg_snapshot: Vec<ClassVRegMap> =
         vec![ClassVRegMap::new(); func.blocks.len()];
+    // VReg -> type, accumulated as each VReg is minted.
+    let mut vreg_types: BTreeMap<VReg, Type> = BTreeMap::new();
     for &block_idx in &rpo_order {
         // Bring the scope to this block: classes emitted in non-dominating
         // blocks are out of the map, so they get fresh VRegs here, and classes
@@ -239,6 +241,19 @@ pub(super) fn linearize(
 
         let (mut insts, newly_emitted) =
             vreg_insts_for_block(extraction, &all_roots, &mut class_to_vreg, &mut next_vreg);
+
+        // Every VReg this block minted, recorded with its class's type here and
+        // not later: a re-emission's VReg is about to be replaced in the map by
+        // the one its class had before -- the restore below, and for a flags
+        // class every block does it -- after which only this block's snapshot
+        // still names it. Reading the types back out of the snapshots afterwards
+        // means reading the whole function once per block.
+        for &cid in &newly_emitted {
+            if let Some(vreg) = class_to_vreg.lookup_any(cid) {
+                let canon = egraph.unionfind.find_immutable(cid);
+                vreg_types.insert(vreg, egraph.class(canon).ty.clone());
+            }
+        }
 
         // Per-block fixup: ensure block params of this block use Op::BlockParam,
         // not whatever the global extraction chose. The global extraction picks
@@ -372,20 +387,17 @@ pub(super) fn linearize(
         class_to_vreg.insert_single(cid, vreg);
     }
 
-    // Build VReg -> Type map from the egraph's per-class type info.
+    // The function-wide map on top of what the blocks recorded as they emitted.
     //
-    // From the per-block snapshots as well as the function-wide map, because a
-    // class re-emitted in a later block gets a VReg of its own and the restore
-    // above is an `insert_single` -- it replaces the class's segments, so the
-    // function-wide map keeps one re-emission and every other one is left with no
-    // type at all. Lowering derives an operand width from this map and a missing
-    // entry falls back to 64 bits, which is a miscompile rather than a pessimism:
-    // a flags-only `cmp` on two I32 values came out `cmp r8,rdi`, and `mov edi,-2`
-    // had zero-extended, so `14 < -2` compared 14 against 4294967294 and was true.
-    let mut vreg_types = build_vreg_types(&class_to_vreg, egraph);
-    for snapshot in &block_class_to_vreg_snapshot {
-        vreg_types.extend(build_vreg_types(snapshot, egraph));
-    }
+    // Both are needed: a class re-emitted in a later block gets a VReg of its
+    // own and the restore above is an `insert_single`, so the function-wide map
+    // keeps one re-emission and every other one would be left with no type at
+    // all. Lowering derives an operand width from this map and a missing entry
+    // falls back to 64 bits, which is a miscompile rather than a pessimism: a
+    // flags-only `cmp` on two I32 values came out `cmp r8,rdi`, and `mov edi,-2`
+    // had zero-extended, so `14 < -2` compared 14 against 4294967294 and was
+    // true.
+    vreg_types.extend(build_vreg_types(&class_to_vreg, egraph));
 
     // Every block parameter's VReg needs a type, including one linearization
     // minted fresh above: it has no e-class entry of its own, and a VReg absent
