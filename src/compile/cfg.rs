@@ -103,15 +103,20 @@ pub(super) fn compute_rpo(func: &Function) -> Vec<usize> {
         }
     }
 
-    // Any blocks not reachable from block 0 are appended at the end in index order.
+    post_order.reverse();
+    let mut rpo = post_order;
+
+    // Any blocks not reachable from block 0 go at the end, in index order, after
+    // the reverse so that the entry stays first: `compute_idom` roots the
+    // dominator tree at `rpo[0]` while `DomOrder` roots its numbering at block 0,
+    // and the two must be the same block.
     for (i, &was_visited) in visited.iter().enumerate() {
         if !was_visited {
-            post_order.push(i);
+            rpo.push(i);
         }
     }
 
-    post_order.reverse();
-    post_order
+    rpo
 }
 
 /// Compute the immediate dominator for each block using the Cooper-Harvey-Kennedy
@@ -795,11 +800,12 @@ mod tests {
 
     /// The whole point of `DomOrder`: it is a constant-time restatement of the
     /// chain walk, so the two must answer identically for every ordered pair of
-    /// a function whose blocks the entry all reaches -- which is what DCE leaves
-    /// and what every dominance query in the pipeline runs on.
+    /// blocks. `DomOrder` numbers from block 0 and the chain walk roots at
+    /// `rpo[0]`, so a function with unreachable blocks is the shape that pulls
+    /// them apart and belongs in the loop.
     #[test]
     fn dom_order_agrees_with_the_chain_walk() {
-        for func in [diamond(), loop_with_exit()] {
+        for func in [diamond(), loop_with_exit(), unreachable_cycle()] {
             let idom = idom_of(&func);
             let order = DomOrder::new(&idom);
             for a in 0..func.blocks.len() {
@@ -869,7 +875,9 @@ mod tests {
         assert!(pos(0) < pos(1));
 
         let func = unreachable_cycle();
-        let mut seen = compute_rpo(&func);
+        let rpo = compute_rpo(&func);
+        assert_eq!(rpo[0], 0, "the entry comes first, got {rpo:?}");
+        let mut seen = rpo;
         seen.sort_unstable();
         assert_eq!(
             seen,
