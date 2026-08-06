@@ -85,14 +85,30 @@ fn check_precolorings(graph: &InterferenceGraph, pre_coloring: &BTreeMap<usize, 
     }
 }
 
+/// What a VReg would like to share a colour with, and why it is worth having.
+///
+/// x86 two-address arithmetic reads and writes one register, so `lower.rs`
+/// emits `mov dst, operand[0]` for every op in [`Op::two_address_src`] whose
+/// result did not get its first operand's register. That copy does not exist
+/// when the allocator runs -- lowering inserts it afterwards -- so coalescing
+/// never sees it and cannot remove it. Colouring the two alike is the only
+/// point at which it can be avoided, and on the `bench` kernels 246 of 875
+/// emitted register-to-register moves are exactly this pattern.
+///
+/// A hint is only ever a preference: the forbidden set still decides what is
+/// legal, so an unsatisfiable hint costs nothing but the copy it wanted to save.
+pub type ColorHints = BTreeMap<usize, Vec<usize>>;
+
 /// Greedy graph coloring in reverse MCS order.
 ///
 /// Colors VRegs with the smallest available color not used by any
-/// already-colored neighbor. Respects `pre_coloring` constraints.
+/// already-colored neighbor, except where a [`ColorHints`] entry names a VReg
+/// whose colour is still legal here. Respects `pre_coloring` constraints.
 pub fn greedy_color(
     graph: &InterferenceGraph,
     ordering: &[usize],
     pre_coloring: &BTreeMap<usize, u32>,
+    hints: &ColorHints,
 ) -> ColoringResult {
     let n = graph.num_vregs;
     let mut colors: Vec<Option<u32>> = vec![None; n];
@@ -120,12 +136,24 @@ pub fn greedy_color(
             }
         }
 
-        // Assign smallest non-forbidden color.
-        let mut color = 0u32;
-        while forbidden.contains(&color) {
-            color += 1;
-        }
-        colors[v] = Some(color);
+        // A hint first, where one is legal here: taking it removes a copy, and
+        // it can never need a colour beyond those already handed out, since the
+        // hinted VReg is holding one.
+        let hinted = hints.get(&v).and_then(|prefs| {
+            prefs
+                .iter()
+                .filter_map(|&u| colors.get(u).copied().flatten())
+                .find(|c| !forbidden.contains(c))
+        });
+
+        // Otherwise the smallest non-forbidden color.
+        colors[v] = Some(hinted.unwrap_or_else(|| {
+            let mut color = 0u32;
+            while forbidden.contains(&color) {
+                color += 1;
+            }
+            color
+        }));
     }
 
     // Handle any VRegs not in the ordering (isolated nodes with no edges).
@@ -310,7 +338,7 @@ mod tests {
     fn no_interference_all_color_zero() {
         let graph = make_graph(4, &[]);
         let ordering = mcs_ordering(&graph);
-        let result = greedy_color(&graph, &ordering, &BTreeMap::new());
+        let result = greedy_color(&graph, &ordering, &BTreeMap::new(), &BTreeMap::new());
 
         for c in &result.colors {
             assert_eq!(*c, Some(0), "all isolated nodes should get color 0");
@@ -324,7 +352,7 @@ mod tests {
     fn chain_two_colors() {
         let graph = make_graph(3, &[(0, 1), (1, 2)]);
         let ordering = mcs_ordering(&graph);
-        let result = greedy_color(&graph, &ordering, &BTreeMap::new());
+        let result = greedy_color(&graph, &ordering, &BTreeMap::new(), &BTreeMap::new());
 
         // Adjacent nodes must have different colors.
         assert_ne!(result.colors[0], result.colors[1]);
@@ -339,7 +367,7 @@ mod tests {
         let edges = &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
         let graph = make_graph(4, edges);
         let ordering = mcs_ordering(&graph);
-        let result = greedy_color(&graph, &ordering, &BTreeMap::new());
+        let result = greedy_color(&graph, &ordering, &BTreeMap::new(), &BTreeMap::new());
 
         // All nodes in a clique must have distinct colors.
         let c: Vec<u32> = result.colors.iter().map(|c| c.unwrap()).collect();
@@ -358,7 +386,7 @@ mod tests {
         let ordering = mcs_ordering(&graph);
         let mut pre = BTreeMap::new();
         pre.insert(0usize, 5u32); // v0 -> color 5
-        let result = greedy_color(&graph, &ordering, &pre);
+        let result = greedy_color(&graph, &ordering, &pre, &BTreeMap::new());
 
         assert_eq!(result.colors[0], Some(5), "pre-coloring must be respected");
     }
@@ -371,7 +399,7 @@ mod tests {
         let ordering = mcs_ordering(&graph);
         let mut pre = BTreeMap::new();
         pre.insert(0usize, 0u32);
-        let result = greedy_color(&graph, &ordering, &pre);
+        let result = greedy_color(&graph, &ordering, &pre, &BTreeMap::new());
 
         assert_eq!(result.colors[0], Some(0));
         assert_ne!(
@@ -386,7 +414,7 @@ mod tests {
     fn color_to_reg_basic() {
         let graph = make_graph(2, &[(0, 1)]);
         let ordering = mcs_ordering(&graph);
-        let result = greedy_color(&graph, &ordering, &BTreeMap::new());
+        let result = greedy_color(&graph, &ordering, &BTreeMap::new(), &BTreeMap::new());
         let color_to_reg = map_colors_to_regs(&result, RegClass::GPR, &BTreeMap::new(), true);
 
         // Two colors, two distinct registers.
@@ -403,7 +431,7 @@ mod tests {
     fn color_to_reg_no_rbp_with_frame_pointer() {
         let graph = make_graph(2, &[(0, 1)]);
         let ordering = mcs_ordering(&graph);
-        let result = greedy_color(&graph, &ordering, &BTreeMap::new());
+        let result = greedy_color(&graph, &ordering, &BTreeMap::new(), &BTreeMap::new());
         let color_to_reg = map_colors_to_regs(&result, RegClass::GPR, &BTreeMap::new(), true);
         for &reg in color_to_reg.values() {
             assert_ne!(

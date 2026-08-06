@@ -1053,8 +1053,15 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
     // MCS ordering on the Phase 3 graph.
     let ordering = mcs_ordering(&phase3.graph);
 
-    // Greedy coloring with merged precoloring from Phase 3.
-    let mut coloring = greedy_color(&phase3.graph, &ordering, &phase3.pre_coloring_colors);
+    // Greedy coloring with merged precoloring from Phase 3, biased toward the
+    // register each two-address result wants so lowering emits no copy for it.
+    let hints = two_address_hints(&phase3.per_block_insts);
+    let mut coloring = greedy_color(
+        &phase3.graph,
+        &ordering,
+        &phase3.pre_coloring_colors,
+        &hints,
+    );
 
     // Reverse MCS order is optimal on chordal graphs, and a single block's
     // interference graph is one. A function-scope graph is not: a value live
@@ -1074,7 +1081,12 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
         // `greedy_color` walks its ordering in reverse, so hand it the ascending
         // list to have it colour the highest-degree nodes first.
         by_degree.reverse();
-        let retry = greedy_color(&phase3.graph, &by_degree, &phase3.pre_coloring_colors);
+        let retry = greedy_color(
+            &phase3.graph,
+            &by_degree,
+            &phase3.pre_coloring_colors,
+            &hints,
+        );
         if retry.chromatic_number < coloring.chromatic_number {
             coloring = retry;
         }
@@ -1540,6 +1552,31 @@ fn format_overshoot(
     out
 }
 
+/// Which VRegs want the colour of an operand, from the two-address ops.
+///
+/// See [`super::coloring::ColorHints`]: `lower.rs` emits `mov dst, operand[0]`
+/// for every op in [`Op::two_address_src`] whose result did not get its first
+/// operand's register, and that copy is created after allocation, so nothing
+/// downstream can remove it. Built from the post-coalesce lists, so the VRegs
+/// named here are the ones the graph is coloured over.
+fn two_address_hints(per_block_insts: &[Vec<ScheduledInst>]) -> super::coloring::ColorHints {
+    let mut hints: super::coloring::ColorHints = BTreeMap::new();
+    for block in per_block_insts {
+        for inst in block {
+            if let Some(idx) = inst.op.two_address_src()
+                && let Some(&src) = inst.operands.get(idx)
+                && src != inst.dst
+            {
+                hints
+                    .entry(inst.dst.0 as usize)
+                    .or_default()
+                    .push(src.0 as usize);
+            }
+        }
+    }
+    hints
+}
+
 /// Compute (gpr_overshoot, xmm_overshoot) from graph and precoloring.
 fn compute_overshoot(
     graph: &InterferenceGraph,
@@ -1549,7 +1586,9 @@ fn compute_overshoot(
 ) -> (u32, u32) {
     use super::coloring::{greedy_color, mcs_ordering};
     let ordering = mcs_ordering(graph);
-    let coloring = greedy_color(graph, &ordering, pre_coloring_colors);
+    // No hints: this asks how many colours the graph needs, and a hint changes
+    // which colouring is chosen rather than how many colours exist.
+    let coloring = greedy_color(graph, &ordering, pre_coloring_colors, &BTreeMap::new());
     compute_overshoot_from_coloring(graph, &coloring, gpr_budget, xmm_budget)
 }
 

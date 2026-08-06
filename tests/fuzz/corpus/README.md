@@ -33,4 +33,5 @@ something different after it does.
 | `fixed/pressure-seed128.c` | pressure 128 | `-O1` printed 1878 for 1911, same cause. |
 | `fixed/mixed-seed128.c` | mixed 128 | `-O1` printed 1221 for 1178, same cause. |
 | `open/mixed-seed57.c` | mixed 57 | `-O0` does not compile: register pressure overshoot where every over-budget value is one instruction's own operand. |
-| `open/pressure-seed39.c` | pressure 39 | `-O1` does not compile, same shape. |
+| `fixed/pressure-seed39.c` | pressure 39 | `-O1` did not compile until the def stopped interfering with the operand it overwrites. |
+| `open/pressure-seed98.c` | pressure 98 | `-O1` does not compile: the same capacity wall, reached by a different schedule. |

@@ -344,9 +344,8 @@ fn asm_mul_pow2_to_shl() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: mov    rcx,rdi
-        // CHECK-NEXT: shl    rcx,0x3
-        // CHECK-NEXT: mov    rax,rcx
+        // CHECK: shl    {{[a-z0-9]+}},0x3
+        // CHECK-NEXT: mov    rax,{{[a-z0-9]+}}
         // CHECK-NEXT: ret
         ",
     );
@@ -367,11 +366,11 @@ fn asm_chained_sr() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: shl    rax,0x2
+        // CHECK: shl    {{[a-z0-9]+}},0x2
         // CHECK-NOT: imul
-        // CHECK: shr    rax,0x4
+        // CHECK: shr    {{[a-z0-9]+}},0x4
         // CHECK-NOT: div
-        // CHECK: lea    rax,[rdx+rcx*1]
+        // CHECK: lea    rax,[{{[a-z0-9]+}}+{{[a-z0-9]+}}*1]
         // CHECK-NEXT: ret
         ",
     );
@@ -434,11 +433,13 @@ fn asm_flag_fusion_sub_cmov() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: mov    rax,rdi
-        // CHECK-NEXT: sub    rax,rsi
+        // The subtraction is two-address, so it runs in its own operand's
+        // register and no copy sets it up.
+        // CHECK-NOT: mov    {{[a-z0-9]+}},rdi
+        // CHECK: sub    {{[a-z0-9]+}},rsi
         // The flags-only compare against 0 is `test r, r` (X86CmpI(0)).
         // CHECK: test   {{[a-z0-9]+}},{{[a-z0-9]+}}
-        // CHECK: cmovg  rax,{{[a-z0-9]+}}
+        // CHECK: cmovg  {{[a-z0-9]+}},{{[a-z0-9]+}}
         // CHECK-NEXT: ret
         ",
     );
@@ -588,9 +589,10 @@ fn asm_i32_uses_32bit_regs() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: mov    ecx,edi
-        // CHECK-NEXT: add    ecx,esi
-        // CHECK-NEXT: mov    eax,ecx
+        // 32-bit operands mean 32-bit registers throughout. The add is
+        // two-address and needs no copy to set its destination up.
+        // CHECK: add    e{{[a-z0-9]+}},e{{[a-z0-9]+}}
+        // CHECK-NEXT: mov    eax,e{{[a-z0-9]+}}
         // CHECK-NEXT: ret
         ",
     );
@@ -694,9 +696,8 @@ fn asm_urem_pow2_to_and() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: mov    rcx,rdi
-        // CHECK-NEXT: and    rcx,0x7
-        // CHECK-NEXT: mov    rax,rcx
+        // CHECK: and    {{[a-z0-9]+}},0x7
+        // CHECK-NEXT: mov    rax,{{[a-z0-9]+}}
         // CHECK-NOT: div
         // CHECK: ret
         ",

@@ -1107,6 +1107,52 @@ impl Op {
         matches!(self, Op::Mach(MachOp::X86Idiv(..) | MachOp::X86Div(..)))
     }
 
+    /// The operand index this op's result must share a register with, if any.
+    ///
+    /// x86 ALU and SSE arithmetic is two-address: `add dst, src` reads and
+    /// writes `dst`. `lower.rs` honours that by emitting `mov dst, operand[0]`
+    /// whenever the allocator did not give the result its first operand's
+    /// register, so every op named here costs a copy unless the two are
+    /// coloured alike.
+    ///
+    /// The allocator reads this to bias its colouring toward the register the
+    /// result wants. That is why the answer lives on the op rather than in
+    /// either pass: lowering and the allocator disagreeing about which operand
+    /// is destructive means a copy nobody planned, or a copy planned and never
+    /// emitted.
+    pub fn two_address_src(&self) -> Option<usize> {
+        matches!(
+            self,
+            Op::Mach(
+                MachOp::X86Add
+                    | MachOp::X86Sub
+                    | MachOp::X86And
+                    | MachOp::X86Or
+                    | MachOp::X86Xor
+                    | MachOp::X86AddI(_)
+                    | MachOp::X86SubI(_)
+                    | MachOp::X86AndI(_)
+                    | MachOp::X86OrI(_)
+                    | MachOp::X86XorI(_)
+                    | MachOp::X86Shl
+                    | MachOp::X86Shr
+                    | MachOp::X86Sar
+                    | MachOp::X86ShlImm(_)
+                    | MachOp::X86ShrImm(_)
+                    | MachOp::X86SarImm(_)
+                    | MachOp::X86Addsd
+                    | MachOp::X86Subsd
+                    | MachOp::X86Mulsd
+                    | MachOp::X86Divsd
+                    | MachOp::X86Addss
+                    | MachOp::X86Subss
+                    | MachOp::X86Mulss
+                    | MachOp::X86Divss
+            )
+        )
+        .then_some(0)
+    }
+
     /// Whether this op's result *is* the flags, rather than a value in a
     /// register.
     ///

@@ -13,9 +13,9 @@ is fair game here.
 The measure of success is code quality against `gcc -O2` / `clang -O2` on the
 same input: fewer instructions, fewer bytes, fewer spills, better loops.
 
-**Where that stands: `x1.34` against `gcc -O2` and `x1.07` against `clang -O2`**,
+**Where that stands: `x1.29` against `gcc -O2` and `x1.04` against `clang -O2`**,
 geometric mean of the per-program instruction ratio over the 15 `bench` kernels,
-from `bash tests/run_codesize.sh --gap`. Worst is `queens` at `x2.70`. Five
+from `bash tests/run_codesize.sh --gap`. Worst is `queens` at `x2.64`. Five
 kernels are already *below* 1.0, which is not a win and is the first thing to
 misread: this counts static instructions, and a compiler that inlines or unrolls
 emits more of them and runs faster. `gcc` turns `fib_memo` into 436 instructions
@@ -44,25 +44,26 @@ rather than overhead against it.
 Ordered. Each says what it is, why it is placed there, and what would tell you it
 is done.
 
-1. **Twenty-four capacity failures are what is left.** No generated program
+1. **Sixteen capacity failures are what is left.** No generated program
    computes a wrong value any more: 600 at 200 seeds a shape are `mixed`
-   198/200, `args` 184/200, `pressure` 194/200, and **every one of those
+   198/200, `args` 188/200, `pressure` 198/200, and **every one of those
    failures is the allocator refusing to colour, not a wrong answer.**
    Reproducers in `tests/fuzz/corpus/open/`; `run_corpus.sh` checks them in
    seconds.
 
-   **A program that does not compile is a program no oracle can judge**: 30 of
+   **A program that does not compile is a program no oracle can judge**: 21 of
    the 1200 (program, level) pairs are unjudged for that reason, so "no wrong
-   value remains" is a statement about the 1170 that ran, not about all 1200.
-   That is the second reason to close these, and the count grows whenever a
-   pass shifts the schedule: immediate-form ALU alone moved `args` 186 -> 184.
+   value remains" is a statement about the 1179 that ran, not about all 1200.
+   That is the second reason to close these. The count moves with the schedule
+   in both directions: immediate-form ALU cost `args` two programs, and dropping
+   the def's interference with the operand it overwrites returned eight.
 
    The allocator names the shape itself: *"spilling did not reduce it, so the
    pressure point is one instruction whose own operands are what is live
    there"*. Spilling cannot relieve a value that is live at a point *because
    the instruction there reads it*, which is why the spill loop stops -- see
    the four measured attempts at the end of `docs/refactor-roadmap.md` before
-   trying a fifth. `args` is where it concentrates, 16 of the 24. Done when a
+   trying a fifth. `args` is where it concentrates, 12 of the 16. Done when a
    200-seed run of each shape is clean.
 2. ~~**Make the gate able to see them.**~~ Done: `tests/fuzz/corpus/` plus
    `run_corpus.sh`, and `oracles.sh` so the saved programs and the generated ones
@@ -104,13 +105,13 @@ gated on pressure because it runs before global liveness exists, and
 - Generated programs at 30 seeds a shape -- the width every gate runs -- are
   `mixed` 30/30, `args` 30/30, `pressure` 30/30. **That width measures nothing**,
   and it is what `run_corpus.sh` exists to compensate for. At 200 seeds it is
-  `mixed` 198/200, `args` 184/200, `pressure` 194/200: **no wrong-value programs
-  and 24 capacity failures.**
+  `mixed` 198/200, `args` 188/200, `pressure` 198/200: **no wrong-value programs
+  and 16 capacity failures.**
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 894 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
 - Code quality also has an *absolute* number now, which is the one the Goal is
-  written against: `--gap`, `x1.34` vs `gcc -O2` and `x1.07` vs `clang -O2` on
+  written against: `--gap`, `x1.29` vs `gcc -O2` and `x1.04` vs `clang -O2` on
   `bench`. **`bench` is the only corpus that can produce it.** `lit` and `fuzz`
   compute a fixed answer from no runtime input, so `gcc -O2` evaluates the whole
   program and emits the constant -- a generated program becomes
@@ -273,6 +274,23 @@ so the holes stay visible.
       every cached load at that base, so `s->a` and `s->b` kill each other.
       Byte-offset + width disjointness in `src/compile/alias.rs` is ~50 LOC and
       directly unlocks the forwarding and DSE passes already shipped.
+- [x] **The def no longer interferes with the operand it overwrites.** x86
+      arithmetic is two-address, and `build_interference_into` gave every result
+      an edge to `live_at[i]` -- the set live *before* the instruction, which
+      contains that operand. The form was unsatisfiable by construction and
+      every such op cost a `mov`. `gcc -O2` gap x1.34 -> x1.29, `clang -O2`
+      x1.07 -> x1.04; over changed rows `lit` -5.5% insts, `fuzz` -3.7%, `bench`
+      -3.6%. It also removed **eight capacity failures**, 24 -> 16: the spurious
+      edges were making graphs uncolourable that are not.
+- [ ] **Copies are still a third of what blitz emits.** Measured over the 15
+      `bench` kernels: blitz 820 register-to-register moves in 2628
+      instructions, against `gcc -O2`'s 345 in 2226 and `clang -O2`'s 214 in
+      2572. **The whole remaining instruction gap to gcc is copies.** Of blitz's,
+      the two-address form is now handled; what is left is parallel copies at
+      block edges (168 of them sit in runs of four or more) and scattered
+      shuffles. `coalesce.rs` already runs Briggs-Cooper over the phi copies, so
+      the work starts by finding why it declines these merges -- and it lands in
+      the block-parameter machinery, so read `docs/refactor-roadmap.md` first.
 - [ ] **GVN / cross-block CSE.** The e-graph does local CSE only. Repeated
       address computations and field loads survive across blocks. Typical
       5-15% on real code.
@@ -370,7 +388,7 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**No wrong-value programs are open. Twenty-four capacity failures are**, found
+**No wrong-value programs are open. Sixteen capacity failures are**, found
 by running the generator at 200 seeds a shape instead of the 30 every gate is
 pinned at. The ones worth keeping are checked in under `tests/fuzz/corpus/open/`,
 where `run_corpus.sh` re-checks them in seconds; the files are the durable
@@ -380,8 +398,8 @@ regenerates a program until the generator changes.
 | shape | passing | wrong value | capacity |
 | --- | --- | --- | --- |
 | `mixed` at 200 | 198/200 | -- | 57, 123 |
-| `args` at 200 | 184/200 | -- | 16 seeds |
-| `pressure` at 200 | 194/200 | -- | 6 seeds |
+| `args` at 200 | 188/200 | -- | 12 seeds |
+| `pressure` at 200 | 198/200 | -- | 98, 148 |
 
 **Re-measure rather than trust the list.** Entries have left it without anyone
 fixing them before, and one went the other way: `mixed` 57 is a capacity failure
