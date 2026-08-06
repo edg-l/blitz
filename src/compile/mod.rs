@@ -636,6 +636,42 @@ pub fn compile(
     if let Some(s) = sink.as_mut() {
         s.phase_stats("schedule", &format!("insts={total_insts}"));
     }
+    // Every VReg a schedule names must have a type.
+    //
+    // A missing entry is not a pessimism: `lower.rs`'s `result_size` falls back
+    // to `OpSize::S64`, which turned a flags-only 32-bit compare into
+    // `cmp r8, rdi` against a zero-extended `mov edi, -2`, so `14 < -2` was true
+    // (`9207141`). The cause was a class re-emitted in a later block, whose VReg
+    // the function-wide map does not keep. A `debug_assert` rather than a gate:
+    // the `checked` profile carries it through every harness already, and the
+    // rule is that the gate set stays fixed and invariants go inside it.
+    #[cfg(debug_assertions)]
+    for (block_idx, sched) in block_schedules.iter().enumerate() {
+        for inst in sched {
+            if !inst.op.has_no_result() {
+                debug_assert!(
+                    vreg_types.contains_key(&inst.dst),
+                    "{}: block {} defines {:?} with op {:?} and no type; \
+                     lowering would size it S64 by default",
+                    func.name,
+                    block_idx,
+                    inst.dst,
+                    inst.op,
+                );
+            }
+            for operand in &inst.operands {
+                debug_assert!(
+                    vreg_types.contains_key(operand),
+                    "{}: block {} reads {:?} with no type (op {:?})",
+                    func.name,
+                    block_idx,
+                    operand,
+                    inst.op,
+                );
+            }
+        }
+    }
+
 
     // Phase 4b: Reorder each block's schedule to respect effectful op barriers.
     //

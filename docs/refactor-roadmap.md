@@ -219,7 +219,7 @@ during them, which is annoying and not a regression.
 
 ---
 
-## Steps 1-4: the CFG should state which register holds each value
+## Steps 1-4: the CFG should state which register holds each value -- DONE
 
 **Not "the CFG should hold VRegs, not ClassIds", which is what this heading said
 and which the design settled against in step 1.** A committed operand carries
@@ -812,7 +812,7 @@ writes it.
 
 ---
 
-## Soundness: three checks that do not exist yet
+## Soundness: three checks, one landed and two placed
 
 The goal is the best x86-64 code, and every quality lever here moves a value between
 registers, slots and recomputations — so each step should leave behind the invariant
@@ -827,8 +827,10 @@ to is that the gate *set* is fixed and checks are added within it. A battery tha
 grows every time something is learned stops being run between every change, and
 one-change-at-a-time is what makes attribution possible here.
 
-**1. `vreg_types` completeness — cheap, and step 2 makes it urgent.** There is no
-assertion anywhere that every VReg a schedule names has a type. A missing entry is
+**1. `vreg_types` completeness — DONE.** A `debug_assert` after scheduling, over
+every VReg every block's schedule defines or reads. It holds across the whole lit
+corpus and the generated one, and the `checked` profile carries it through every
+harness, so it costs no new gate. What it guards: A missing entry is
 not a pessimism: `lower.rs`'s `result_size` falls back to `OpSize::S64`, which turned
 a flags-only 32-bit compare into `cmp r8,rdi` against a zero-extended `mov edi,-2`,
 so `14 < -2` was true (`9207141`). The cause was a class **re-emitted in a later
@@ -845,7 +847,10 @@ and there is nothing to compare. Coalescing is where three wrong-code bugs lande
 (`021d4ed`, `29e796d`, and the `briggs_admits_illegal_merge.c` investigation), and it
 is the pass with the least verification. Closing it means comparing each merge against
 liveness measured **on the schedules as emitted**, not on the post-coalesce naming.
-Best done with step 6, which is already touching both allocators.
+Step 6 folded the allocators without closing this: the fold deleted a duplicate
+rather than changing what coalescing is checked against, so the gap is untouched
+and now lives in `ROADMAP.md` P0 as "the allocator's liveness disagrees with the
+emitted code's", which is the same disagreement seen from the reporting end.
 
 **3. Nothing checks that a value is *right*, only that it is written.** Stated in
 `CLAUDE.md` and worth keeping stated: the machine verifier is satisfied by a register
@@ -889,7 +894,7 @@ assertions). The overshoot message gained the count of slots already committed.
 
 ---
 
-## Step 5: the function-scope allocator cannot spill
+## Step 5: the function-scope allocator cannot spill -- DONE, it can now
 
 `run_phase5` in `src/regalloc/global_allocator.rs` is `if converged { Ok } else
 { Err }`. There is no spill loop. Meanwhile `src/regalloc/allocator.rs` — the
