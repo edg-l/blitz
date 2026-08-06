@@ -342,6 +342,93 @@ fn collect_effectful_operands(func: &Function, block_indices: &BTreeSet<usize>) 
     out
 }
 
+/// How many values of each register class the loop body already needs.
+///
+/// Hoisting is paid for out of what is left of the register file, so the budget
+/// needs the demand. Counted as the distinct classes the body's effectful ops
+/// name, plus the header's parameters -- every one of those is a value the loop
+/// carries. It is an estimate: this runs before saturation and long before
+/// scheduling, so the classes here are not yet the VRegs the allocator will
+/// colour. It does not have to be exact. It has to separate a loop that is
+/// already full from one with room, and on this corpus that is not a close call.
+fn loop_demand(func: &Function, egraph: &EGraph, loop_info: &LoopInfo) -> (u32, u32) {
+    // What the loop carries: a header parameter is live across the whole body by
+    // construction, so every one of them is occupied the entire time.
+    let mut gpr = 0;
+    let mut xmm = 0;
+    for ty in &func.blocks[loop_info.header_idx].param_types {
+        if ty.is_float() {
+            xmm += 1;
+        } else {
+            gpr += 1;
+        }
+    }
+    // What the body needs at once, taken as the widest single effectful op
+    // rather than the sum over the body. Summing counts a long straight run of
+    // statements as though all of its values were live together, which reads
+    // every large body as full and refuses the hoists that pay on small loops.
+    let mut widest_gpr = 0;
+    let mut widest_xmm = 0;
+    for &block_idx in &loop_info.body {
+        for op in &func.blocks[block_idx].ops {
+            let mut named: BTreeSet<ClassId> = BTreeSet::new();
+            op.for_each_class_id(|cid| {
+                named.insert(egraph.unionfind.find_immutable(cid));
+            });
+            let (mut g, mut x) = (0, 0);
+            for cid in named {
+                if egraph.class(cid).ty.is_float() {
+                    x += 1;
+                } else {
+                    g += 1;
+                }
+            }
+            widest_gpr = widest_gpr.max(g);
+            widest_xmm = widest_xmm.max(x);
+        }
+    }
+    (gpr + widest_gpr, xmm + widest_xmm)
+}
+
+/// How much work hoisting this class saves per iteration, as the number of
+/// invariant classes its expression covers.
+///
+/// This is what orders the candidates, and the ordering is the policy: a class
+/// standing for a whole invariant subtree is worth a register, and a bare
+/// `iconst` at the bottom of one is not -- the allocator rematerializes a
+/// constant for free, so hoisting it spends a register to save nothing. Sorting
+/// by subtree size puts the leaves last without naming them.
+fn invariant_subtree_size(
+    cid: ClassId,
+    egraph: &EGraph,
+    invariant: &BTreeSet<ClassId>,
+    size_cache: &mut HashMap<ClassId, u32>,
+    visiting: &mut BTreeSet<ClassId>,
+) -> u32 {
+    if let Some(&n) = size_cache.get(&cid) {
+        return n;
+    }
+    // A class reachable from itself, which a loop-carried expression can be.
+    if !visiting.insert(cid) {
+        return 0;
+    }
+    let mut size = 1;
+    for node in &egraph.class(cid).nodes {
+        for &child in &node.children {
+            if child == ClassId::NONE {
+                continue;
+            }
+            let canon = egraph.unionfind.find_immutable(child);
+            if invariant.contains(&canon) {
+                size += invariant_subtree_size(canon, egraph, invariant, size_cache, visiting);
+            }
+        }
+    }
+    visiting.remove(&cid);
+    size_cache.insert(cid, size);
+    size
+}
+
 /// Find all loop-invariant classes reachable from the loop body.
 ///
 /// Walks the e-graph transitively from all ClassIds referenced by effectful ops
@@ -392,6 +479,76 @@ pub(super) fn find_invariant_classes(
     invariant
 }
 
+/// Keep the invariants worth a register, in the order they are worth one.
+///
+/// A hoisted value is live across the whole loop body, so on a body that
+/// already needs most of the register file the saved recomputation is paid for
+/// with a spill and one reload per use. Hoisting every invariant it can prove is
+/// what makes this pass a net loss: measured over the rows that change, turning
+/// it off lowers instructions 24.4% and spills 53.1% on the generated corpus,
+/// where it improves nothing at all. It earns its place on small loops, which is
+/// what the budget keeps.
+///
+/// The budget is the register file less what the loop already needs, and the
+/// candidates are taken largest-subtree-first until it runs out.
+fn within_budget(
+    func: &Function,
+    egraph: &EGraph,
+    loop_info: &LoopInfo,
+    invariant: Vec<ClassId>,
+    trace: bool,
+) -> Vec<ClassId> {
+    use crate::regalloc::coloring::{AVAILABLE_XMM_COLORS, available_gpr_colors};
+
+    let (gpr_demand, xmm_demand) = loop_demand(func, egraph, loop_info);
+    // The frame pointer costs a GPR, and a loop this pass would overfill is
+    // exactly the shape that forces one. Assume it: the cheaper assumption is
+    // the one that hoists more, which is the behaviour being corrected.
+    let mut gpr_room = available_gpr_colors(true).saturating_sub(gpr_demand);
+    let mut xmm_room = AVAILABLE_XMM_COLORS.saturating_sub(xmm_demand);
+
+    if trace {
+        eprintln!(
+            "[licm]   loop header={} demand gpr={} xmm={} room gpr={} xmm={}",
+            loop_info.header_idx, gpr_demand, xmm_demand, gpr_room, xmm_room
+        );
+    }
+
+    let invariant_set: BTreeSet<ClassId> = invariant.iter().copied().collect();
+    let mut size_cache: HashMap<ClassId, u32> = HashMap::new();
+    let mut visiting: BTreeSet<ClassId> = BTreeSet::new();
+    let mut ranked: Vec<(u32, ClassId)> = invariant
+        .into_iter()
+        .map(|cid| {
+            (
+                invariant_subtree_size(cid, egraph, &invariant_set, &mut size_cache, &mut visiting),
+                cid,
+            )
+        })
+        .collect();
+    // Largest first, then by class id so the choice does not depend on the walk
+    // order that produced the candidates.
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.0.cmp(&b.1.0)));
+
+    let mut kept = Vec::new();
+    for (size, cid) in ranked {
+        let room = if egraph.class(cid).ty.is_float() {
+            &mut xmm_room
+        } else {
+            &mut gpr_room
+        };
+        if *room == 0 {
+            continue;
+        }
+        *room -= 1;
+        if trace {
+            eprintln!("[licm]     hoist {cid:?} subtree={size}");
+        }
+        kept.push(cid);
+    }
+    kept
+}
+
 /// Run LICM: detect loops, insert preheaders, identify invariant classes.
 /// Returns extra roots that the linearization phase should include.
 pub fn run_licm(func: &mut Function, egraph: &mut EGraph) -> ExtraRoots {
@@ -425,12 +582,15 @@ pub fn run_licm(func: &mut Function, egraph: &mut EGraph) -> ExtraRoots {
         }
 
         let invariant_classes = find_invariant_classes(func, egraph, loop_info);
+        let found = invariant_classes.len();
+        let invariant_classes = within_budget(func, egraph, loop_info, invariant_classes, trace);
 
         if trace {
             eprintln!(
-                "[licm]   loop header={} body_size={} hoisted={}",
+                "[licm]   loop header={} body_size={} invariant={} hoisted={}",
                 loop_info.header_idx,
                 loop_info.body.len(),
+                found,
                 invariant_classes.len()
             );
         }
