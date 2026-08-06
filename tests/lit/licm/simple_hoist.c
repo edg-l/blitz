@@ -1,4 +1,4 @@
-// RUN: %tinyc %s --enable-licm --emit-ir 2>&1
+// RUN: %tinyc %s --emit-ir 2>&1
 // CHECK-LABEL: function main
 // Preheader block should exist (block with params that jumps to the loop header).
 // The iconst(10) and iconst(1) used in the loop should appear in the preheader,
@@ -9,7 +9,7 @@
 // CHECK: ret
 
 // Verify correctness: (3+4) * 10 = 70
-// RUN: %tinyc %s --enable-licm -o %t && %t
+// RUN: %tinyc %s -o %t && %t
 // EXIT: 70
 
 int main() {

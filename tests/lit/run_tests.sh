@@ -55,9 +55,10 @@ run_check_test() {
     file="$1"
     mode="$2"
     extra_flags="$3"
+    passes="$4"
     name="$(echo "$file" | sed "s|^$SCRIPT_DIR/||")"
 
-    if "$TINYC" "$file" $extra_flags "$mode" 2>&1 | "$BLITZTEST" "$file" 2>/dev/null; then
+    if BLITZ_PASSES="$passes" "$TINYC" "$file" $extra_flags "$mode" 2>&1 | "$BLITZTEST" "$file" 2>/dev/null; then
         emit_pass
     else
         emit_fail "$name"
@@ -67,13 +68,14 @@ run_check_test() {
 run_exit_test() {
     file="$1"
     expected="$2"
-    shift 2
+    passes="$3"
+    shift 3
     extras="$*"
     name="$(echo "$file" | sed "s|^$SCRIPT_DIR/||")"
 
     tmpfile="$(mktemp /tmp/blitztest_XXXXXX)"
 
-    if "$TINYC" "$file" $extras -o "$tmpfile" 2>/dev/null; then
+    if BLITZ_PASSES="$passes" "$TINYC" "$file" $extras -o "$tmpfile" 2>/dev/null; then
         actual=0
         timeout 10 "$tmpfile" 2>/dev/null && actual=0 || actual=$?
         rm -f "$tmpfile"
@@ -94,7 +96,8 @@ run_exit_test() {
 
 run_output_test() {
     file="$1"
-    shift
+    passes="$2"
+    shift 2
     extras="$*"
     name="$(echo "$file" | sed "s|^$SCRIPT_DIR/||")"
 
@@ -105,7 +108,7 @@ run_output_test() {
     # Extract expected output lines from // OUTPUT: directives
     sed -n 's|.*// OUTPUT: \(.*\)|\1|p' "$file" > "$expectfile"
 
-    if "$TINYC" "$file" $extras -o "$tmpfile" 2>/dev/null; then
+    if BLITZ_PASSES="$passes" "$TINYC" "$file" $extras -o "$tmpfile" 2>/dev/null; then
         timeout 10 "$tmpfile" > "$outfile" 2>/dev/null
         actual=$?
         if [ "$actual" -eq 124 ]; then
@@ -138,6 +141,11 @@ run_one_file() {
 
     extra_files=""
     check_flags=""
+    # Deviating from an opt level is an environment setting, not a compiler flag:
+    # `-O0`/`-O1` are the configurations this compiler claims to compile
+    # correctly, and BLITZ_PASSES is a debugging facility beside BLITZ_DEBUG.
+    # A test that needs one writes `// PASSES: -inlining`.
+    test_passes=""
     run_flags=""
     file_dir="$(dirname "$file")"
 
@@ -155,12 +163,16 @@ run_one_file() {
                 ;;
             *"// RUN:"*"--emit-ir"*)
                 mode="--emit-ir"
-                # Extract compiler flags (--enable-X, --disable-X, -O0, -O1) from the RUN line.
-                check_flags="$(echo "$line" | sed 's|.*// RUN:||' | grep -oE '\-\-(enable|disable)-[a-z][a-z-]*|-O[0-9]' | tr '\n' ' ')"
+                # Extract the opt level from the RUN line. Deviating from a
+                # level is `BLITZ_PASSES=` in the environment, picked up below.
+                check_flags="$(echo "$line" | sed 's|.*// RUN:||' | grep -oE '\-O[0-9]' | tr '\n' ' ')"
                 ;;
             *"// RUN:"*"--emit-asm"*)
                 mode="--emit-asm"
-                check_flags="$(echo "$line" | sed 's|.*// RUN:||' | grep -oE '\-\-(enable|disable)-[a-z][a-z-]*|-O[0-9]' | tr '\n' ' ')"
+                check_flags="$(echo "$line" | sed 's|.*// RUN:||' | grep -oE '\-O[0-9]' | tr '\n' ' ')"
+                ;;
+            *"// PASSES:"*)
+                test_passes="$(echo "$line" | sed 's/.*\/\/ PASSES: *//')"
                 ;;
             *"// EXTRA_FILE:"*)
                 ef="$(echo "$line" | sed 's/.*\/\/ EXTRA_FILE: *//')"
@@ -177,13 +189,13 @@ run_one_file() {
     done < "$file"
 
     if [ "$has_check" = true ] && [ -n "$mode" ]; then
-        run_check_test "$file" "$mode" "$check_flags"
+        run_check_test "$file" "$mode" "$check_flags" "$test_passes"
     fi
     if [ "$has_exit" = true ]; then
-        run_exit_test "$file" "$exit_code" $run_flags $extra_files
+        run_exit_test "$file" "$exit_code" "$test_passes" $run_flags $extra_files
     fi
     if [ "$has_output" = true ]; then
-        run_output_test "$file" $run_flags $extra_files
+        run_output_test "$file" "$test_passes" $run_flags $extra_files
     fi
 }
 

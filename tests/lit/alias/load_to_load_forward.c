@@ -1,5 +1,6 @@
-// RUN: %tinyc %s --disable-inlining --emit-ir 2>&1 | %blitztest %s
+// RUN: %tinyc %s --emit-ir 2>&1 | %blitztest %s
 // RUN: %tinyc %s -o %t && %t
+// PASSES: -inlining
 // EXIT: 12
 
 // Load-to-load forwarding: two consecutive loads from the same address with

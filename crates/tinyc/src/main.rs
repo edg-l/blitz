@@ -1,11 +1,10 @@
 // Usage: tinyc <input.c> [input2.c ...] [-o <output>] [-c] [--emit-ir] [--emit-asm]
-//        [-O0] [-O1] [--enable-licm] [--disable-licm]
-//        [--enable-inlining] [--disable-inlining]
-//        [--enable-peephole] [--disable-peephole]
-//        [--enable-dce] [--disable-dce]
-//        [--enable-store-forwarding] [--disable-store-forwarding]
-//        [--enable-dse] [--disable-dse]
+//        [-O0] [-O1]
 // Compiles one or more .c files to a native executable via Blitz backend + ld/cc linker.
+//
+// The optimization level is the whole pipeline configuration. To deviate from one
+// while debugging, set BLITZ_PASSES to signed deltas -- `BLITZ_PASSES=-licm`,
+// `BLITZ_PASSES=+inlining` -- beside BLITZ_DEBUG and BLITZ_VERIFY.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,12 +21,11 @@ enum Mode {
 
 fn usage() -> ! {
     eprintln!("Usage: tinyc <input.c> [input2.c ...] [-o <output>] [-c] [--emit-ir] [--emit-asm]");
-    eprintln!("       [-O0] [-O1] [--enable-licm] [--disable-licm]");
-    eprintln!("       [--enable-inlining] [--disable-inlining]");
-    eprintln!("       [--enable-peephole] [--disable-peephole]");
-    eprintln!("       [--enable-dce] [--disable-dce]");
-    eprintln!("       [--enable-store-forwarding] [--disable-store-forwarding]");
-    eprintln!("       [--enable-dse] [--disable-dse]");
+    eprintln!("       [-O0] [-O1]");
+    eprintln!();
+    eprintln!("Pass set: -O0 and -O1 configure it. To deviate while debugging, set");
+    eprintln!("  BLITZ_PASSES=-licm  |  BLITZ_PASSES=+inlining,-dse   (signed deltas)");
+    eprintln!("  known: licm, dce, store-forwarding, dse, phi-removal, inlining, peephole");
     exit(1);
 }
 
@@ -44,13 +42,6 @@ fn main() {
     let mut mode = Mode::Compile;
     let mut compile_only = false;
     let mut opt_level: Option<OptLevel> = None;
-    let mut override_licm: Option<bool> = None;
-    let mut override_inlining: Option<bool> = None;
-    let mut override_peephole: Option<bool> = None;
-    let mut override_dce: Option<bool> = None;
-    let mut override_store_forwarding: Option<bool> = None;
-    let mut override_dse: Option<bool> = None;
-    let mut override_phi_removal: Option<bool> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -69,62 +60,6 @@ fn main() {
             }
             "-O1" => {
                 opt_level = Some(OptLevel::O1);
-                i += 1;
-            }
-            "--enable-licm" => {
-                override_licm = Some(true);
-                i += 1;
-            }
-            "--disable-licm" => {
-                override_licm = Some(false);
-                i += 1;
-            }
-            "--enable-inlining" => {
-                override_inlining = Some(true);
-                i += 1;
-            }
-            "--disable-inlining" => {
-                override_inlining = Some(false);
-                i += 1;
-            }
-            "--enable-peephole" => {
-                override_peephole = Some(true);
-                i += 1;
-            }
-            "--disable-peephole" => {
-                override_peephole = Some(false);
-                i += 1;
-            }
-            "--enable-dce" => {
-                override_dce = Some(true);
-                i += 1;
-            }
-            "--disable-dce" => {
-                override_dce = Some(false);
-                i += 1;
-            }
-            "--enable-store-forwarding" => {
-                override_store_forwarding = Some(true);
-                i += 1;
-            }
-            "--disable-store-forwarding" => {
-                override_store_forwarding = Some(false);
-                i += 1;
-            }
-            "--enable-dse" => {
-                override_dse = Some(true);
-                i += 1;
-            }
-            "--disable-dse" => {
-                override_dse = Some(false);
-                i += 1;
-            }
-            "--enable-phi-removal" => {
-                override_phi_removal = Some(true);
-                i += 1;
-            }
-            "--disable-phi-removal" => {
-                override_phi_removal = Some(false);
                 i += 1;
             }
             "-c" => {
@@ -151,26 +86,9 @@ fn main() {
         Some(OptLevel::O0) => blitz::compile::CompileOptions::o0(),
         Some(OptLevel::O1) | None => blitz::compile::CompileOptions::o1(),
     };
-    if let Some(v) = override_licm {
-        opts.enable_licm = v;
-    }
-    if let Some(v) = override_inlining {
-        opts.enable_inlining = v;
-    }
-    if let Some(v) = override_peephole {
-        opts.enable_peephole = v;
-    }
-    if let Some(v) = override_dce {
-        opts.enable_dce = v;
-    }
-    if let Some(v) = override_store_forwarding {
-        opts.enable_store_forwarding = v;
-    }
-    if let Some(v) = override_dse {
-        opts.enable_dse = v;
-    }
-    if let Some(v) = override_phi_removal {
-        opts.enable_phi_removal = v;
+    if let Err(e) = opts.apply_pass_overrides() {
+        eprintln!("tinyc: {e}");
+        exit(1);
     }
 
     if input_paths.is_empty() {

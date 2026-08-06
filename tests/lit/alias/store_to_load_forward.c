@@ -1,5 +1,6 @@
-// RUN: %tinyc %s --disable-inlining --emit-ir 2>&1 | %blitztest %s
+// RUN: %tinyc %s --emit-ir 2>&1 | %blitztest %s
 // RUN: %tinyc %s -o %t && %t
+// PASSES: -inlining
 // EXIT: 6
 
 // Store-to-load forwarding: store a value to a slot, immediately load it back.

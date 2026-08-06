@@ -32,7 +32,7 @@ rather than overhead against it.
 
 ## Current state (2026-08-06)
 
-- 934 Rust tests + 478 lit tests, all green. `cargo fmt` clean.
+- 925 Rust tests + 478 lit tests, all green. `cargo fmt` clean, zero build warnings.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
 - `bash tests/lit/run_diff.sh`: 301 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
@@ -41,7 +41,8 @@ rather than overhead against it.
   measuring nothing.** At 200 seeds `mixed` is 191/200 and `args` 183/200:
   **8 wrong-value programs and 16 capacity failures across the two shapes.** The
   30-seed run is green because 30 seeds is too narrow, not because the compiler
-  is correct -- see Known bugs.
+  is correct -- see Known bugs. (`mixed` is 194/200 since step 6's fold; the table
+  in Known bugs is the current one.)
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 892 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
@@ -159,7 +160,7 @@ so the holes stay visible.
 
 - [ ] **LICM has no pressure check, and it is the largest measured quality gap
       in the tree.** Measured on the `bench` corpus at `-O1` with
-      `FLAGS=--disable-licm bash tests/run_codesize.sh`: turning LICM off takes
+      `BLITZ_PASSES=-licm bash tests/run_codesize.sh`: turning LICM off takes
       reloads from **377 to 149** and spills from **84 to 30**, and *lowers* the
       instruction count from 2637 to 2518. Per kernel it is a trade the pass
       always takes and often loses -- `matmul` 172 insts / 23 reloads becomes
@@ -175,7 +176,7 @@ so the holes stay visible.
       `docs/refactor-roadmap.md` step 5 gives the allocator a spill loop and
       step 2 changes how many values are in flight, and both move the number
       this policy would be tuned against.
-      Second contributor, same corpus: `--disable-inlining` takes reloads to 247
+      Second contributor, same corpus: `BLITZ_PASSES=-inlining` takes reloads to 247
       and insts to 2422, so inlining is paying for itself in call overhead and
       losing in pressure. Same fix shape, same reason to wait.
 - [ ] **Offset-aware alias analysis.** Today any write to a base invalidates

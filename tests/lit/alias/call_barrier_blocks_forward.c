@@ -1,5 +1,6 @@
-// RUN: %tinyc %s --disable-inlining --emit-ir 2>&1 | %blitztest %s
+// RUN: %tinyc %s --emit-ir 2>&1 | %blitztest %s
 // RUN: %tinyc %s -o %t && %t
+// PASSES: -inlining
 // EXIT: 7
 
 // A call between a store and a load acts as a barrier: forwarding must not

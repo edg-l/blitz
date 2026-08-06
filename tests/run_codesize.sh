@@ -53,7 +53,7 @@ LEVELS="${LEVELS:--O0 -O1}"
 CORPUS="${CORPUS:-all}"
 SEEDS="${SEEDS:-30}"
 # Extra tinyc flags, for attributing a number to a pass: run the table again
-# with `FLAGS=--disable-licm` and the difference is what that pass cost or
+# with `BLITZ_PASSES=-licm` and the difference is what that pass cost or
 # bought. Not part of a baseline -- `--update` with FLAGS set would record a
 # pipeline nobody compiles with.
 FLAGS="${FLAGS:-}"

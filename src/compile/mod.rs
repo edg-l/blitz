@@ -130,6 +130,62 @@ pub enum Verbosity {
 }
 
 impl CompileOptions {
+    /// Apply `BLITZ_PASSES` to the pipeline this level configured.
+    ///
+    /// The optimization level is the only pipeline *configuration* this compiler
+    /// offers: `-O0` and `-O1` are what it claims to compile correctly, and every
+    /// gate runs those two. Deviating from a level is a debugging facility --
+    /// `CLAUDE.md`'s fifth technique, bisecting the pass set to attribute a
+    /// miscompile -- so it lives in the environment beside `BLITZ_DEBUG` and
+    /// `BLITZ_VERIFY` rather than in the argument list beside `-O1`.
+    ///
+    /// The syntax is signed deltas against the level, comma separated:
+    ///
+    /// ```text
+    /// BLITZ_PASSES=-licm            # -O1 without LICM
+    /// BLITZ_PASSES=+inlining        # -O0 with inlining
+    /// BLITZ_PASSES=-dse,-dce
+    /// ```
+    ///
+    /// Both directions are needed: `-O0 +inlining` is as much a bisection step as
+    /// `-O1 -licm`, so a disable-only list could not express half of them.
+    ///
+    /// An unknown pass name is a hard error rather than a silent no-op. A typo in
+    /// a bisection step that quietly changes nothing would attribute a bug to the
+    /// wrong pass, which is worse than not bisecting.
+    pub fn apply_pass_overrides(&mut self) -> Result<(), String> {
+        let Ok(spec) = std::env::var("BLITZ_PASSES") else {
+            return Ok(());
+        };
+        for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let (on, name) = match item.split_at(1) {
+                ("+", rest) => (true, rest),
+                ("-", rest) => (false, rest),
+                _ => {
+                    return Err(format!(
+                        "BLITZ_PASSES: `{item}` must start with `+` or `-` (e.g. `-licm`)"
+                    ));
+                }
+            };
+            match name {
+                "licm" => self.enable_licm = on,
+                "dce" => self.enable_dce = on,
+                "store-forwarding" => self.enable_store_forwarding = on,
+                "dse" => self.enable_dse = on,
+                "phi-removal" => self.enable_phi_removal = on,
+                "inlining" => self.enable_inlining = on,
+                "peephole" => self.enable_peephole = on,
+                other => {
+                    return Err(format!(
+                        "BLITZ_PASSES: unknown pass `{other}`; known: licm, dce, \
+                         store-forwarding, dse, phi-removal, inlining, peephole"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn o0() -> Self {
         CompileOptions {
             opt_level: OptLevel::O0,

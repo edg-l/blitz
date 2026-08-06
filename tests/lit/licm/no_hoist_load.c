@@ -1,4 +1,4 @@
-// RUN: %tinyc %s --enable-licm -o %t && %t
+// RUN: %tinyc %s -o %t && %t
 // EXIT: 55
 
 // Effectful ops (loads) should NOT be hoisted out of the loop.

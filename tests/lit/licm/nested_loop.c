@@ -1,4 +1,4 @@
-// RUN: %tinyc %s --enable-licm -o %t && %t
+// RUN: %tinyc %s -o %t && %t
 // EXIT: 30
 
 // Nested loop: the inner loop runs 3 times per outer iteration.

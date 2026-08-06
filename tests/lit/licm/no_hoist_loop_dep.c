@@ -1,4 +1,4 @@
-// RUN: %tinyc %s --enable-licm -o %t && %t
+// RUN: %tinyc %s -o %t && %t
 // EXIT: 55
 
 // Loop-carried dependency: sum depends on previous iteration's sum.

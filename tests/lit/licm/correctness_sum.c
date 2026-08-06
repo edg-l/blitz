@@ -1,4 +1,4 @@
-// RUN: %tinyc %s --enable-licm -o %t && %t
+// RUN: %tinyc %s -o %t && %t
 // OUTPUT: pass
 // EXIT: 0
 

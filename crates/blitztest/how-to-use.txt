@@ -252,3 +252,20 @@ Common mistakes:
 - Pattern too specific: "mov eax,0x1" might break if the register
   allocator picks a different register. Prefer patterns that test
   the property you care about, not the exact encoding.
+
+PASSES: <deltas>
+    Deviate from the optimization level's pass set, for a test that needs a
+    pipeline neither -O0 nor -O1 gives. Signed, comma separated, and passed to
+    the compiler as BLITZ_PASSES:
+
+        // PASSES: -inlining
+        // PASSES: +licm,-dse
+
+    Known names: licm, dce, store-forwarding, dse, phi-removal, inlining,
+    peephole. An unknown one fails the compile rather than being ignored.
+
+    Prefer no directive at all. The opt levels are the configurations this
+    compiler claims to compile correctly and are what every gate runs; a test
+    pinning a pass set is testing a pipeline nothing ships. Use it only when the
+    property under test genuinely needs a pass off -- an IR-shape test that a
+    later pass would rewrite, for instance.

@@ -1594,51 +1594,46 @@ On `pressure` seed 22 the loop header carries 28 parameters of which **4** are r
 and block 20 carries 28 of which **none** — a single-predecessor pass-through block
 whose incoming edge is the 28-argument terminator that stalls the splitter.
 
-## Cleanup: the per-pass flags are a debug facility wearing product clothes
+## Cleanup: the per-pass flags were a debug facility wearing product clothes -- DONE
 
-Seven `--enable-X` / `--disable-X` pairs mirror the seven `enable_*` fields on
-`CompileOptions` one-for-one, and the `-O` levels are what actually configure the
-pipeline: `o0()` sets every pass off, `o1()` sets every pass on except
-`phi_simplify`. So the flags add no configuration the levels do not already express;
-what they add is the ability to deviate from a level.
+Seven `--enable-X` / `--disable-X` pairs mirrored the seven `enable_*` fields on
+`CompileOptions` one-for-one, while the `-O` levels are what actually configure the
+pipeline. So the flags added no configuration the levels did not already express;
+what they added was the ability to deviate from a level, and **that ability earned
+its keep** -- bisecting the pass set is `CLAUDE.md`'s fifth debugging technique and
+the cheapest attribution tool in a backend whose main hazard is wrong code.
 
-**That ability has earned its keep, for one reason.** Bisecting the pass set is
-`CLAUDE.md`'s fifth debugging technique and the cheapest attribution tool in a backend
-whose main hazard is wrong code — `-O0 --enable-inlining`,
-`--disable-store-forwarding`. Keep it.
+Two things about the shape were wrong, and both are fixed:
 
-**Two things about the current shape are wrong, though.**
+- **The reachable configuration space was 2^7 and the tested one was 2.** The
+  answer was never to test more of it: `-O0` and `-O1` are the supported
+  configurations, and a pipeline reached only by a hand-picked combination of
+  toggles is not one this compiler claims to compile correctly. Gating 128
+  pipelines would multiply a battery that is run between every single change,
+  which is what makes one-change-at-a-time affordable.
+- **It was seven independent dials with no derived default**, the inverse of this
+  project's own rule.
 
-- **The reachable configuration space is 2^7; the tested one is 2.** Every gate — 440
-  lit, 281 differential, the fuzz corpus at 60 seeds a shape — runs `-O0` and `-O1`
-  and nothing else. 15 of the 440 lit tests pin a pass flag, and those are the only
-  mixed configurations under test at all.
+**`BLITZ_PASSES` replaces all fourteen flags.** Signed deltas against whatever the
+level configured -- `BLITZ_PASSES=-licm`, `BLITZ_PASSES=+inlining,-dse` -- so the
+default is derived and there is one dial. Both directions are needed and a
+disable-only list could not express half of them: `-O0 +inlining` is as much a
+bisection step as `-O1 -licm`. It lives in the environment beside `BLITZ_DEBUG`
+and `BLITZ_VERIFY`, which is what makes deviating from a level look like reaching
+for a debugger rather than choosing a build configuration. An unknown pass name is
+a hard error, because a typo that quietly changed nothing would attribute a bug to
+the wrong pass.
 
-  **The answer is not to test more of it.** `-O0` and `-O1` are the supported
-  configurations; the toggles are a debugging facility, and a pipeline reached only by
-  a hand-picked combination of them is not a configuration this compiler claims to
-  compile correctly. Gating 128 pipelines would multiply the battery to buy confidence
-  in configurations nobody ships, and the battery's length is a real constraint — it is
-  run between every single change, which is what makes one-change-at-a-time affordable.
+The shipped CLI surface is now exactly `{-O0, -O1}`.
 
-  What follows from that is the opposite of more testing: stop presenting the toggles
-  as options. Deviating from a level should look like reaching for a debugger, not like
-  choosing a build configuration.
-- **It is seven independent dials with no derived default**, which is the inverse of
-  this project's own rule (*prefer one dial with a derived default*). The other
-  development switches already live in the environment — `BLITZ_DEBUG`,
-  `BLITZ_VERIFY`, `BLITZ_DEBUG_FN` — and a single `BLITZ_DISABLE=licm,dse,inlining`
-  derived off the `-O` level would keep the *shipped* surface at exactly
-  `{O0, O1}` while leaving bisection as easy as it is now, and would name the
-  mechanism as what it is.
+Lit tests that need a deviation say `// PASSES: -inlining`; the runner exports it
+for that test alone. Nine did. The other six passed `--enable-licm` for a pass
+already on at `-O1`, which is the level `run_tests.sh` compiles at -- they asked
+for something already true and simply lost the flag.
 
-**`--enable-phi-simplify` is a different animal in the same cage:** a feature gate on
-an unfinished pass, off at every level, and the reason `phi_simplify.rs` has sat in
-the tree since `02be4ae` being neither used nor deleted. Step 2 removes both.
+`--enable-phi-simplify` was a different animal in the same cage, a feature gate on
+an unfinished pass. Step 2 removed it with `phi_simplify.rs`.
 
-Also: the six `licm/*.c` tests pass `--enable-licm` although LICM is already on at
-`-O1`, which is the level `run_tests.sh` compiles at. Harmless, and a small sign that
-the flags read as "how you turn a pass on" rather than "how you deviate from a level".
 
 ## Not part of this roadmap
 

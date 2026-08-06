@@ -1,4 +1,5 @@
-// RUN: %tinyc %s --disable-store-forwarding --emit-ir 2>&1
+// RUN: %tinyc %s --emit-ir 2>&1
+// PASSES: -store-forwarding
 // Verifies the raw shape of stack_addr / store / load IR construction.
 // Store-to-load forwarding is disabled so the load is not eliminated.
 // CHECK: stack_addr
