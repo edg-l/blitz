@@ -1360,6 +1360,10 @@ fn detect_blockparam_slot_routing(
     // group names has to belong to one block.
     let rpo = super::cfg::compute_rpo(func);
     let idom = super::cfg::compute_idom(func, &rpo);
+    // `routable` asks about dominance once per candidate per over-budget point,
+    // and walking the immediate-dominator chain for each is thousands of steps
+    // on a function whose blocks form a long chain.
+    let dom = super::cfg::DomOrder::new(&idom);
     let routable = |vreg: VReg, group: &ParamGroup| {
         if !group.positions.iter().all(|p| p.0 == group.positions[0].0) {
             return false;
@@ -1374,7 +1378,7 @@ fn detect_blockparam_slot_routing(
                     || group
                         .positions
                         .iter()
-                        .any(|&(_, _, param_bi)| super::cfg::dominates(param_bi, use_bi, &idom))
+                        .any(|&(_, _, param_bi)| dom.dominates(param_bi, use_bi))
             })
     };
 
@@ -1678,7 +1682,12 @@ fn detect_blockparam_slot_routing(
         // its uses there are uses of the value before the edge, and rewriting
         // them points the predecessor's own store at the slot it is about to
         // fill.
-        for other_block_idx in 0..n_blocks {
+        //
+        // Only the blocks that read it: the rest have no use to rewrite, and
+        // walking every instruction of every block once per routed parameter is
+        // the function scanned over and over. `use_blocks` already records
+        // exactly this, in the same ascending order.
+        for &other_block_idx in use_blocks.get(vreg.0 as usize).into_iter().flatten() {
             if value_def_block == Some(other_block_idx) {
                 continue;
             }
