@@ -44,30 +44,25 @@ rather than overhead against it.
 Ordered. Each says what it is, why it is placed there, and what would tell you it
 is done.
 
-1. **Fix the four open miscompiles.** `mixed` seed 109, `args` seeds 52 and 175,
-   `pressure` seed 128, 131, 158 or 165, with reproducers at
+1. **Fix the seven open miscompiles.** `mixed` 109, `args` 52 and 175, and
+   `pressure` 128, 131, 158 and 165, with reproducers at
    `~/.cache/blitz-fuzz-fails/`. Correctness is a precondition of this project's
-   goal, not a competing priority. All four are right at `-O0` and wrong at
+   goal, not a competing priority. All seven are right at `-O0` and wrong at
    `-O1`, which narrows where to look: the passes `-O0` does not run, or the ones
    whose input `-O0` leaves small. Separately, `mixed` 57 is a **capacity
    regression** step 6's fold introduced; it is the one open failure this tree
    caused rather than inherited. Done when a 200-seed run of each shape is clean.
 2. **Make the gate able to see them.** `run_fuzz.sh` is pinned at 30 seeds
-   everywhere, and at 30 seeds all three shapes are green while four programs
+   everywhere, and at 30 seeds all three shapes are green while seven programs
    miscompile. **A session can work all day, see every gate pass, and never learn
    that.** Widening costs 67s a shape; a saved corpus of known-failing programs
    would make the routine check seconds. Do this alongside 1, or 1 has no oracle.
-3. **Give LICM a pressure check.** The largest measured quality gap in the tree,
-   and it is not confined to `bench`. `BLITZ_PASSES=-licm bash
-   tests/run_codesize.sh`, totalled over the rows that change, *lowers* every
-   number on every corpus: `fuzz` instructions -24.4% with spills -53.1%, `lit`
-   -15.3% and -39.2%, `bench` -6.4% and -93.9%. It hoists every invariant it can
-   prove, and a value hoisted out of a loop is live across the whole body. On
-   `fuzz` it improves 86 rows and worsens **none** -- generated code has enough
-   live values that the trade never pays. `bench` is where it does pay, on 8 of
-   15 changed rows, so the answer is a hoist decision that consults the pressure
-   the splitter already measures, not deleting the pass. Done when `-O1` beats
-   `-O0` on all 15 `bench` kernels.
+3. **Give the inliner a pressure check, as LICM now has.** `-O1` still emits
+   worse code than `-O0` on 7 of the 15 `bench` kernels. LICM was 60% of that and
+   is now budgeted; the rest is inlining, which decides without looking at
+   pressure in exactly the same way -- `BLITZ_PASSES=-inlining` takes `bench`
+   instructions 2637 to 2422 and reloads 377 to 247. The fix has the same shape
+   as `licm::within_budget`. Done when `-O1` beats `-O0` on all 15 kernels.
 4. **Offset-aware alias analysis.** ~50 LOC in `alias.rs`, and the cheapest
    quality win available: today any write to a base invalidates every cached load
    at that base, so `s->a` and `s->b` kill each other, which throttles the
@@ -94,8 +89,8 @@ gated on pressure because it runs before global liveness exists, and
   reference compiler; no skips, no differences under gcc or clang.
 - Generated programs at 30 seeds a shape -- the width every gate runs -- are
   `mixed` 30/30, `args` 30/30, `pressure` 30/30. **That width measures nothing.**
-  At 200 seeds it is `mixed` 195/200, `args` 184/200, `pressure` 189/200: **4
-  wrong-value programs and 28 capacity failures.** The 30-seed run is green
+  At 200 seeds it is `mixed` 195/200, `args` 183/200, `pressure` 189/200: **7
+  wrong-value programs and 26 capacity failures.** The 30-seed run is green
   because it is too narrow, not because the compiler is correct. See Known bugs,
   and item 2 of Start here.
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 894 rows
@@ -256,36 +251,11 @@ so the holes stay visible.
       variety to cover the shapes the optimizer claims: loops over arrays,
       pointer chasing, struct field access, float reductions, calls that cannot
       be inlined away. Until then every quality claim is a claim about `bench`.
-- [ ] **LICM has no pressure check, and it is the largest measured quality gap
-      in the tree.** `BLITZ_PASSES=-licm bash tests/run_codesize.sh`, totalled
-      over the rows that change, *lowers* every number on all three corpora:
-
-      | corpus | insts | spills | reloads | changed / worse |
-      | --- | --- | --- | --- | --- |
-      | `lit` | -15.3% | -39.2% | -35.6% | 69 / 25 |
-      | `bench` | -6.4% | -93.9% | -62.6% | 15 / 8 |
-      | `fuzz` | -24.4% | -53.1% | -49.7% | 86 / **0** |
-
-      **On generated code the trade never pays**: 86 rows improve and none get
-      worse, `args` seed 29 going 7703 insts / 1814 spills to 3716 / 104. Per
-      `bench` kernel it is a trade the pass always takes and often loses --
-      `matmul` 172 insts / 23 reloads becomes 163 / 0, `binary_search` 136 / 39
-      becomes 113 / 0, `hash_table` 415 / 150 becomes 340 / 45 -- against a
-      genuine saving of 2 to 14 instructions on the six kernels where the
-      hoisted value fits (`sieve`, `crc32`, `bitcount`, `dot_product`,
-      `nbody_step`, `struct_walk`). Those six are the reason the answer is a
-      pressure-aware hoist and not deleting the pass. The pass hoists
-      every invariant it can prove, and a value hoisted out of a loop is live
-      across the whole body: on a loop whose body already needs most of the
-      register file that is a spill and one reload per use. What it needs is a
-      hoist decision that consults the same pressure the splitter measures,
-      which is why this sits behind the refactor rather than in front of it --
-      `docs/refactor-roadmap.md` step 5 gives the allocator a spill loop and
-      step 2 changes how many values are in flight, and both move the number
-      this policy would be tuned against.
-      Second contributor, same corpus: `BLITZ_PASSES=-inlining` takes reloads to 247
-      and insts to 2422, so inlining is paying for itself in call overhead and
-      losing in pressure. Same fix shape, same reason to wait.
+- [x] **LICM has a pressure check.** Hoisting is budgeted by the register file
+      less what the loop already needs (`licm::within_budget`). instructions
+      -12.3% on `bench` and -21.3% on `fuzz`, spills -91.1% and -47.3%, no row
+      worse on any corpus, `gcc -O2` gap x1.42 -> x1.39. **The same defect is
+      still open in the inliner** -- see item 3 of Start here.
 - [ ] **Offset-aware alias analysis.** Today any write to a base invalidates
       every cached load at that base, so `s->a` and `s->b` kill each other.
       Byte-offset + width disjointness in `src/compile/alias.rs` is ~50 LOC and
@@ -376,7 +346,7 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**Four wrong-value programs and twenty-eight capacity failures are open**, found
+**Seven wrong-value programs and twenty-six capacity failures are open**, found
 by running the generator at 200 seeds a shape instead of the 30 every gate is
 pinned at. Reproducers are kept outside the repo at `~/.cache/blitz-fuzz-fails/`
 and are unreduced; `gen_c.py --seed N --shape S` regenerates one until the
@@ -386,7 +356,7 @@ is not.
 | shape | passing | wrong value | capacity |
 | --- | --- | --- | --- |
 | `mixed` at 200 | 195/200 | 109 | 57, 123, 135, 150 |
-| `args` at 200 | 184/200 | 52, 175 | 14 seeds |
+| `args` at 200 | 183/200 | 52, 175 | 15 seeds |
 | `pressure` at 200 | 189/200 | 128, 131, 158, 165 | 7 seeds |
 
 **Re-measure rather than trust the list.** Four entries left it without anyone
@@ -400,7 +370,7 @@ never been run at this width, and every one of its wrong-value programs predates
 the runs that found them.
 
 Every remaining wrong-value program is right at `-O0` and wrong at `-O1`, so the
-self-consistency oracle carries all four. The one that needed the `cc` oracle was
+self-consistency oracle carries all seven. The one that needed the `cc` oracle was
 `mixed` 92, wrong at both levels: a block took `Proj0` of a division emitted in
 another block, where RAX no longer held the quotient.
 
