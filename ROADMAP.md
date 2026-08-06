@@ -150,6 +150,46 @@ inside the runs that already happen. A battery that grows every time something i
 learned stops being run between every change, and one-change-at-a-time is what
 makes attribution possible here.
 
+**Diagnostics worth building, each earned by a session it would have shortened.**
+None of these is a gate; they are what turns a wall of numbers into a name. The
+ordering is by hours lost, not by effort to build.
+
+- [ ] **Put the over-budget histogram in the error, not just the trace.** The
+      allocator's failure names a count -- "over-budget VRegs=48, of which
+      spillable=21" -- and a peak. It does not say *what* those values are, and
+      the answer settles the whole question: 21 of 24 on `args` seed 61 are
+      `Pure(BlockParam)`, which says "this is the block-parameter wall" rather
+      than "spilling failed". `BLITZ_DEBUG=regalloc` prints it now; the error
+      itself should carry the top three defining ops with counts. Cost of not
+      having it: most of a session spent on the spill loop, which was not the
+      cause.
+- [ ] **Say which register class each VReg is in, in the liveness dump.** There
+      was no way to see that a value lived in EFLAGS rather than a GPR short of
+      joining the `sched` and `liveness` dumps and re-deriving it from the op
+      defining each operand. One column would have shown 35 of 196 values in the
+      wrong class immediately.
+- [ ] **Make the per-function VReg numbering impossible to miss.** Numbering
+      restarts at v0 in every function and the dumps repeat bare `v14` on every
+      line, so any analysis over a whole `--emit` run silently pools `v5` in
+      `main` with `v5` in `f0`. That manufactured a measured "5 flags values live
+      at once" that did not exist and nearly sent a refactor the wrong way. Print
+      `f0:v14`, or state the scoping in the header of every block.
+- [ ] **A `BLITZ_DEBUG=spill` category.** Spilling is the only major pass with no
+      trace of its own: what it chose, whether the choice was slot or remat, and
+      what the slot was. Today the choice is inferred from `slots committed=0`
+      meaning "it must have rematerialized". Note the trap it has to avoid: read
+      the choice off the list the *colouring* ran on, never off the result -- a
+      rematerialized VReg's defining instruction is already dropped there, so
+      every candidate reads as "no def" and points at a bug that is not there.
+- [ ] **Name the pass that produced each number in a `--check` regression.** A
+      row moving is currently attributed by re-running with `BLITZ_PASSES=-x`
+      one flag at a time. The stats already exist per function; recording which
+      passes ran beside them would make the bisection a lookup.
+- [ ] **A decision diff, not an output diff.** `run_identity.sh` says the
+      emitted code changed; nothing says *which decision* changed. Two runs'
+      allocation, coalescing and hoisting choices, diffed by VReg, would
+      attribute a regression in one step instead of by bisection.
+
 - [ ] **The allocator's liveness disagrees with the emitted code's.** What
       `verify::verify_register_sharing` points at now that it is in.
       `build_interference_into` adds an edge for every simultaneously-live pair,
@@ -336,7 +376,7 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**Four wrong-value programs and twenty-seven capacity failures are open**, found
+**Four wrong-value programs and twenty-eight capacity failures are open**, found
 by running the generator at 200 seeds a shape instead of the 30 every gate is
 pinned at. Reproducers are kept outside the repo at `~/.cache/blitz-fuzz-fails/`
 and are unreduced; `gen_c.py --seed N --shape S` regenerates one until the
@@ -346,7 +386,7 @@ is not.
 | shape | passing | wrong value | capacity |
 | --- | --- | --- | --- |
 | `mixed` at 200 | 195/200 | 109 | 57, 123, 135, 150 |
-| `args` at 200 | 185/200 | 52, 175 | 13 seeds |
+| `args` at 200 | 184/200 | 52, 175 | 14 seeds |
 | `pressure` at 200 | 189/200 | 128, 131, 158, 165 | 7 seeds |
 
 **Re-measure rather than trust the list.** Four entries left it without anyone
