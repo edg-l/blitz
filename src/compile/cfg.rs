@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
@@ -233,76 +233,6 @@ pub(super) fn collect_block_roots(block: &BasicBlock, egraph: &EGraph) -> Vec<Cl
     roots.sort_by_key(|c| c.0);
     roots.dedup();
     roots
-}
-
-/// Collect VRegs for all phi-copy source arguments across all blocks.
-///
-/// These are the values passed as args to Jump/Branch. They need to be in
-/// `live_out` so the regalloc doesn't allocate two simultaneously-needed
-/// phi source values to the same register (especially on loop back-edges).
-///
-/// Read straight off the CFG, which names them by VReg once
-/// [`commit_terminator_arg_vregs`] has run.
-pub(super) fn collect_phi_source_vregs(func: &Function, result: &mut BTreeSet<VReg>) {
-    for block in &func.blocks {
-        let Some(term) = block.ops.last() else {
-            continue;
-        };
-        for (_, args) in super::barrier::terminator_edges(term) {
-            result.extend(
-                args.as_committed()
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|a| a.vreg),
-            );
-        }
-    }
-}
-
-/// Build phi copy pairs from block parameter passing for coalescing.
-///
-/// One pair per argument the CFG names and destination parameter that resolves,
-/// as `(arg_vreg, param_vreg)`. Used on the single-block path only; the
-/// multi-block path takes its pairs from the schedules, after the splitter, via
-/// [`compute_copy_pairs_from_schedules`].
-pub(super) fn compute_copy_pairs(
-    func: &Function,
-    class_to_vreg: &ClassVRegMap,
-    egraph: &EGraph,
-    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
-) -> Vec<(VReg, VReg)> {
-    let mut pairs: Vec<(VReg, VReg)> = Vec::new();
-
-    let id_to_idx = block_id_to_idx(func);
-
-    for block in &func.blocks {
-        let Some(term) = block.ops.last() else {
-            continue;
-        };
-        for (target, args) in super::barrier::terminator_edges(term) {
-            let Some(&target_idx) = id_to_idx.get(&target) else {
-                continue;
-            };
-            let entry_point = ProgramPoint::block_entry(target_idx);
-            for (idx, arg) in args.as_committed().unwrap_or_default().iter().enumerate() {
-                // The destination VReg for a block param: the one the target
-                // block states, and the global class map where it states none.
-                let param_v = func
-                    .blocks
-                    .get(target_idx)
-                    .and_then(|b| b.param_vreg(idx as u32))
-                    .or_else(|| {
-                        let param_cid = *block_param_map.get(&(target, idx as u32))?;
-                        let canon = egraph.unionfind.find_immutable(param_cid);
-                        class_to_vreg.lookup(canon, entry_point)
-                    });
-                if let Some(param_v) = param_v {
-                    pairs.push((arg.vreg, param_v));
-                }
-            }
-        }
-    }
-    pairs
 }
 
 /// Commit linearization's choice of VReg for every block argument into the CFG.

@@ -412,9 +412,9 @@ fn asm_addr_mode_full() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: lea    rcx,[rdi+rsi*8]
-        // CHECK: mov    rdx,0x10
-        // CHECK-NEXT: lea    rax,[rdx+rcx*1]
+        // CHECK: lea    {{[a-z0-9]+}},[rdi+rsi*8]
+        // CHECK: mov    {{[a-z0-9]+}},0x10
+        // CHECK-NEXT: lea    rax,[{{[a-z0-9]+}}+{{[a-z0-9]+}}*1]
         // CHECK-NOT: shl
         // CHECK-NEXT: ret
         ",

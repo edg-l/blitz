@@ -25,7 +25,7 @@ use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op};
 use crate::regalloc::allocate_global;
-use crate::regalloc::allocator::{RegAllocResult, allocate};
+use crate::regalloc::allocator::RegAllocResult;
 use crate::regalloc::slots::SlotAllocator;
 use crate::schedule::scheduler::{ScheduleDag, ScheduledInst, schedule};
 use crate::x86::abi::{compute_frame_layout, emit_epilogue, emit_prologue};
@@ -45,9 +45,8 @@ pub(crate) mod cfg;
 mod linearize;
 mod phi_removal;
 use cfg::{
-    collect_externals, collect_phi_source_vregs, collect_roots, commit_block_param_vregs,
-    commit_effectful_vregs, commit_terminator_arg_vregs, compute_copy_pairs,
-    compute_copy_pairs_from_schedules, compute_loop_depths,
+    collect_externals, collect_roots, commit_block_param_vregs, commit_effectful_vregs,
+    commit_terminator_arg_vregs, compute_copy_pairs_from_schedules, compute_loop_depths,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -56,10 +55,7 @@ mod licm;
 mod lower;
 use lower::lower_block_pure_ops;
 mod precolor;
-use precolor::{
-    add_call_precolors_for_block, add_div_precolors, add_shift_precolors,
-    assign_param_vregs_from_map,
-};
+use precolor::{add_call_precolors_for_block, assign_param_vregs_from_map};
 mod terminator;
 use terminator::{lower_terminator, thread_branches};
 pub mod alias;
@@ -747,112 +743,22 @@ pub fn compile(
     // The final `phi_uses`, kept for `verify::verify_register_sharing` after
     // allocation: it is the terminator half of liveness, and the check needs the
     // same one the allocator was given.
-    let mut verify_phi_uses: Vec<BTreeSet<VReg>> = Vec::new();
+    let verify_phi_uses: Vec<BTreeSet<VReg>>;
     // The block parameters, for the same reason: a parameter is written by the
     // phi copy at the edge, so it is not live at a predecessor's exit unless the
     // predecessor's terminator passes it, which `verify_phi_uses` records.
-    let mut verify_block_params: Vec<BTreeSet<VReg>> = Vec::new();
+    let verify_block_params: Vec<BTreeSet<VReg>>;
     // And the copy pairs, so the check exempts the same phi-related VRegs
     // coalescing was allowed to merge.
-    let mut verify_copy_pairs: Vec<(VReg, VReg)> = Vec::new();
+    let verify_copy_pairs: Vec<(VReg, VReg)>;
 
     // Every pass that spills draws its slot numbers from here, so no two name the
     // same 8-byte cell of the frame and each slot can say which pass owns it.
     let mut slots = SlotAllocator::new();
 
-    // Single-block fast path skips global liveness.
-    let (regalloc_result, block_rewritten, coalesce_aliases) = if func.blocks.len() == 1 {
-        // --- Single-block fast path ---
-        let mut all_scheduled: Vec<ScheduledInst> =
-            block_schedules.iter().flatten().cloned().collect();
-
-        // Populate effectful-op operands right before regalloc so it sees
-        // effectful op operand liveness at the correct barrier positions.
-        {
-            let block = &func.blocks[0];
-            let non_term_count = block.non_term_count();
-            if non_term_count > 0 {
-                let non_term_ops = &block.ops[..non_term_count];
-                let (result_map, arg_map) = build_barrier_context(
-                    block,
-                    &egraph,
-                    &block_class_to_vreg_snapshot[0],
-                    &all_scheduled,
-                );
-                let mut vreg_group = assign_barrier_groups(&all_scheduled, &result_map, &arg_map);
-                populate_effectful_operands(
-                    &mut all_scheduled,
-                    non_term_ops,
-                    &mut vreg_group,
-                    &mut next_vreg,
-                );
-
-                if crate::trace::is_enabled("sched") && crate::trace::fn_matches(&func.name) {
-                    tracing::debug!(
-                        target: "blitz::sched",
-                        "[{}] single-block after markers:\n{}",
-                        func.name,
-                        crate::trace::format_schedule(&all_scheduled, Some(&vreg_group)),
-                    );
-                }
-            }
-        }
-
-        let mut live_out: BTreeSet<VReg> = BTreeSet::new();
-        collect_phi_source_vregs(func, &mut live_out);
-        // Add Ret operands to live_out. Ret is the terminator (no barrier
-        // instruction) so its operands must survive until end of block.
-        if let Some(EffectfulOp::Ret { val: Some(val) }) = func.blocks[0].ops.last()
-            && let Some(vreg) = val.vreg()
-        {
-            live_out.insert(vreg);
-        }
-        for &(vreg, _reg) in &param_vregs {
-            live_out.insert(vreg);
-        }
-
-        let mut all_param_vregs = param_vregs.clone();
-        add_shift_precolors(&all_scheduled, &mut all_param_vregs);
-        add_div_precolors(&all_scheduled, &mut all_param_vregs);
-        add_call_precolors_for_block(&func.blocks[0], &mut all_param_vregs, &mut live_out);
-        // Coalescing's copy pairs. One block reaches no other, so the only edge
-        // this can find is a self-loop.
-        let copy_pairs = compute_copy_pairs(func, &class_to_vreg, &egraph, &block_param_map);
-        let result = allocate(
-            &all_scheduled,
-            &all_param_vregs,
-            &live_out,
-            &copy_pairs,
-            &loop_depths,
-            &mut slots,
-            opts.force_frame_pointer,
-            &func.name,
-        )
-        .map_err(|e| CompileError {
-            phase: "regalloc".into(),
-            message: e,
-            location: Some(IrLocation {
-                function: func.name.clone(),
-                block: None,
-                inst: None,
-            }),
-        })?;
-
-        for inst in &result.insts {
-            for &op in &inst.operands {
-                debug_assert!(
-                    result.vreg_to_reg.contains_key(&op),
-                    "operand VReg {:?} has no register assignment",
-                    op
-                );
-            }
-        }
-        let rewritten = vec![result.insts.clone()];
-        let aliases: BTreeMap<VReg, VReg> = BTreeMap::new();
-        (result, rewritten, aliases)
-    } else {
-        // --- Multi-block path: the function-scope register allocator ---
-
+    // One allocator for every function: a single-block function is a special
+    // case of the general one, not a separate algorithm.
+    let (regalloc_result, block_rewritten, coalesce_aliases) = {
         // Step 1: Compute CFG successors. Terminator uses come from the
         // `Op::TerminatorArgs` operands once those exist, below.
         let cfg_succs = cfg::successor_indices(func);

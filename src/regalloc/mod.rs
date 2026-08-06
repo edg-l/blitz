@@ -10,7 +10,7 @@ pub mod slots;
 pub mod spill;
 pub mod vregset;
 
-pub use allocator::{RegAllocResult, allocate};
+pub use allocator::RegAllocResult;
 pub use global_allocator::allocate_global;
 pub use slots::{SlotAllocator, SlotOwner};
 pub use vregset::VRegSet;

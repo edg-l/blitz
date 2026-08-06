@@ -5,8 +5,6 @@ use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::ir::effectful::{EffOperand, EffectfulOp};
 use crate::ir::function::Function;
-use crate::ir::op::Op;
-use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::{ArgLoc, FP_RETURN_REG, GPR_RETURN_REG, assign_args};
 use crate::x86::reg::Reg;
 
@@ -52,52 +50,6 @@ pub(super) fn assign_param_vregs_from_map(
     }
 
     pairs
-}
-
-/// Pre-color shift count operands to RCX for variable-shift instructions.
-pub(super) fn add_shift_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(VReg, Reg)>) {
-    for inst in insts {
-        if matches!(inst.op, Op::X86Shl | Op::X86Shr | Op::X86Sar) && inst.operands.len() >= 2 {
-            let count_vreg = inst.operands[1];
-            if !param_vregs.iter().any(|&(v, _)| v == count_vreg) {
-                param_vregs.push((count_vreg, Reg::RCX));
-            }
-        }
-    }
-}
-
-/// Pre-color division operands to RAX.
-///
-/// - For each X86Idiv/X86Div in the schedule: operand 0 (dividend) → RAX,
-///   which the instruction requires.
-/// - NEITHER projection is pre-colored. The lowering emits `mov dst, rax` for
-///   the quotient and `mov dst, rdx` for the remainder, so both can live
-///   anywhere.
-/// - The X86Idiv/X86Div Pair node itself is NOT pre-colored.
-///
-/// The quotient used to be pinned to RAX, unconditionally and for its whole
-/// live range. Two quotients live at once therefore both got RAX, and the
-/// second division destroyed the first -- `verify_register_sharing` reports it
-/// as two VRegs live in one register, and it was reachable on generated
-/// programs. Pinning it bought nothing: the copy out of RAX is emitted whenever
-/// the quotient lands elsewhere, and coalescing removes it when RAX is free.
-/// Proj1 was already left free for the same reason, so this makes the two
-/// projections consistent.
-pub(super) fn add_div_precolors(insts: &[ScheduledInst], param_vregs: &mut Vec<(VReg, Reg)>) {
-    // Collect VRegs defined by X86Idiv/X86Div instructions.
-    let mut div_dst_vregs: BTreeSet<VReg> = BTreeSet::new();
-    for inst in insts {
-        if !matches!(inst.op, Op::X86Idiv(..) | Op::X86Div(..)) {
-            continue;
-        }
-        div_dst_vregs.insert(inst.dst);
-        // Pre-color dividend (operand 0) to RAX.
-        if let Some(&dividend) = inst.operands.first()
-            && !param_vregs.iter().any(|&(v, _)| v == dividend)
-        {
-            param_vregs.push((dividend, Reg::RAX));
-        }
-    }
 }
 
 /// Collect the schedule indices of X86Idiv/X86Div instructions.
