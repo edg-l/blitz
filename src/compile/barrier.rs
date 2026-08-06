@@ -824,3 +824,24 @@ pub(crate) fn terminator_arg_operands(schedule: &[ScheduledInst]) -> Vec<(u32, V
         .map(|pairs| pairs.collect())
         .unwrap_or_default()
 }
+
+/// What each block's terminator consumes, per block index.
+///
+/// `Op::TerminatorArgs` is the record of that: a Jump's and a Branch's
+/// arguments and a `Ret`'s value alike, since [`terminator_arg_classes`]
+/// numbers all three the same way. Every pass that rewrites an operand rewrites
+/// it there -- the splitter routes an argument through a slot and drops it, the
+/// allocator's spill loop rematerializes one and renames it -- so the set is a
+/// function of the schedules at the moment it is asked, and asking it of a
+/// stale copy names a VReg those schedules no longer define.
+pub(crate) fn terminator_uses(schedules: &[Vec<ScheduledInst>]) -> Vec<BTreeSet<VReg>> {
+    schedules
+        .iter()
+        .map(|s| {
+            terminator_arg_operands(s)
+                .into_iter()
+                .map(|(_, v)| v)
+                .collect()
+        })
+        .collect()
+}

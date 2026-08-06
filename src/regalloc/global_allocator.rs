@@ -810,7 +810,6 @@ fn run_phase3(
     call_arg_precolors: Vec<(VReg, Reg)>,
     copy_pairs: &[(VReg, VReg)],
     cfg_succs: &[Vec<usize>],
-    phi_uses: &[BTreeSet<VReg>],
     block_param_vregs_per_block: &[BTreeSet<VReg>],
     uses_frame_pointer: bool,
     mut next_vreg: u32,
@@ -872,14 +871,13 @@ fn run_phase3(
     // per block, and re-add the cross-block boundary interferences.
     //
     // The CFG topology (cfg_succs) is unchanged by coalescing — only VReg
-    // names change. Apply the alias map to phi_uses and block_param_vregs
-    // before rebuilding liveness: the schedule operands have been renamed by
-    // apply_coalescing, but phi_uses/block_param_vregs still carry pre-coalesce
-    // VReg names. Without renaming, liveness seeds live_out[b] with a VReg
-    // that never appears in the schedule, so interferences between phi-source
-    // values and defs in the block are missed — the canonical post-coalesce
-    // VReg (e.g. v1 for n) is not recognized as live, and a new def in the
-    // block can land on the same register as n.
+    // names change, so liveness has to be rebuilt in the new names. A
+    // terminator's uses are read back off the coalesced schedules, which
+    // `apply_coalescing` has already renamed; block params are not written down
+    // in any instruction, so those go through the alias map. Seeding live_out
+    // with a pre-coalesce name instead would name a VReg the schedule never
+    // mentions, and the canonical one (e.g. v1 for n) would not read as live —
+    // a new def in the block could then land on the same register as n.
     let resolve_vreg_early = |v: VReg| -> VReg {
         let mut idx = v.0;
         while let Some(&target) = alias_map_early.get(&idx) {
@@ -887,10 +885,7 @@ fn run_phase3(
         }
         VReg(idx)
     };
-    let renamed_phi_uses: Vec<BTreeSet<VReg>> = phi_uses
-        .iter()
-        .map(|set| set.iter().map(|&v| resolve_vreg_early(v)).collect())
-        .collect();
+    let post_coalesce_phi_uses = crate::compile::barrier::terminator_uses(&post_coalesce_schedules);
     let renamed_block_param_vregs: Vec<BTreeSet<VReg>> = block_param_vregs_per_block
         .iter()
         .map(|set| set.iter().map(|&v| resolve_vreg_early(v)).collect())
@@ -899,7 +894,7 @@ fn run_phase3(
         crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
             &post_coalesce_schedules,
             cfg_succs,
-            &renamed_phi_uses,
+            &post_coalesce_phi_uses,
             &renamed_block_param_vregs,
         );
 
@@ -1648,8 +1643,6 @@ fn compute_overshoot_from_coloring(
 /// * `loop_depths` - Loop depth per VReg, used by the spill scorer to prefer
 ///   spilling values defined/used outside loops.
 /// * `cfg_succs` - CFG successors per block (block index -> list of successor block indices).
-/// * `phi_uses` - Per-block sets of VRegs referenced by block terminators (Jump/Branch
-///   args) that must be kept live at block boundaries.
 /// * `block_param_vregs_per_block` - Per-block sets of VRegs that are block parameters
 ///   (phi destinations); these are excluded from cross-block reload insertion.
 /// * `func_name` - Function name used for debug tracing.
@@ -1661,7 +1654,6 @@ pub fn allocate_global(
     copy_pairs: &[(VReg, VReg)],
     loop_depths: &BTreeMap<VReg, u32>,
     cfg_succs: &[Vec<usize>],
-    phi_uses: &[BTreeSet<VReg>],
     block_param_vregs_per_block: &[BTreeSet<VReg>],
     func_name: &str,
     uses_frame_pointer: bool,
@@ -1700,6 +1692,20 @@ pub fn allocate_global(
 
     for round in 0..=MAX_GLOBAL_SPILL_ROUNDS {
         let block_schedules: &[Vec<ScheduledInst>] = &schedules;
+
+        // What each terminator consumes, off the schedules this round colors.
+        //
+        // A round rewrites them: `insert_spills_global` rematerializes a value
+        // and renames every use, `Op::TerminatorArgs` among them. Carried in
+        // from before the loop instead, the set names the pre-spill VReg -- and
+        // since it feeds `live_out`, a value whose only remaining mention was
+        // that stale entry stays live from the entry block to the last return
+        // with no definition anywhere. It then interferes with everything and
+        // takes a colour no register exists for, so the round after a
+        // successful spill reports a *higher* overshoot than the one before it
+        // and the loop stops, blaming a program that in fact fits.
+        let phi_uses = crate::compile::barrier::terminator_uses(block_schedules);
+        let phi_uses: &[BTreeSet<VReg>] = &phi_uses;
 
         // Compute function-wide global liveness. Block params are added
         // to their block's live_in so pairs of params on the same block interfere
@@ -1778,7 +1784,6 @@ pub fn allocate_global(
             call_arg_precolors.clone(),
             copy_pairs,
             cfg_succs,
-            phi_uses,
             block_param_vregs_per_block,
             uses_frame_pointer,
             next_vreg,
@@ -2358,7 +2363,6 @@ mod tests {
             call_arg_precolors,
             &copy_pairs,
             &successors,
-            &phi_uses,
             &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false, // uses_frame_pointer
             10,    // next_vreg start
@@ -2431,7 +2435,6 @@ mod tests {
             call_arg_precolors,
             &copy_pairs,
             &successors,
-            &phi_uses,
             &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false,
             next_vreg,
@@ -2486,7 +2489,6 @@ mod tests {
             call_arg_precolors,
             &copy_pairs,
             &successors,
-            &phi_uses,
             &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false,
             next_vreg,
@@ -2540,7 +2542,6 @@ mod tests {
             call_arg_precolors,
             &copy_pairs,
             &successors,
-            &phi_uses,
             &Vec::<std::collections::BTreeSet<VReg>>::new(),
             false,
             next_vreg,
@@ -2578,7 +2579,6 @@ mod tests {
             call_arg_precolors,
             copy_pairs,
             successors,
-            &phi_uses,
             &Vec::<std::collections::BTreeSet<VReg>>::new(),
             uses_frame_pointer,
             next_vreg,
@@ -2759,7 +2759,6 @@ mod tests {
         slots: &mut SlotAllocator,
     ) -> GlobalRegAllocResult {
         let n = block_schedules.len();
-        let phi_uses = empty_phi_uses(n);
         let block_param_vregs: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
         allocate_global(
             block_schedules,
@@ -2768,7 +2767,6 @@ mod tests {
             copy_pairs,
             loop_depths,
             cfg_succs,
-            &phi_uses,
             &block_param_vregs,
             "test_fn",
             uses_frame_pointer,
@@ -2949,7 +2947,6 @@ mod tests {
             .collect();
 
         let n = block_schedules.len();
-        let phi_uses = empty_phi_uses(n);
         let block_param_vregs: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
 
         let result = allocate_global(
@@ -2959,7 +2956,6 @@ mod tests {
             &[],
             &BTreeMap::new(),
             &successors,
-            &phi_uses,
             &block_param_vregs,
             "test_many_args",
             false,
@@ -3046,9 +3042,25 @@ mod tests {
             }
         }
 
+        // A terminator's arguments are the operands of its `TerminatorArgs`,
+        // which is where the allocator reads them from: `phi_uses` is derived,
+        // not supplied, so a schedule without one passes no arguments at all.
+        fn terminator_args(dst: u32, args: &[u32]) -> ScheduledInst {
+            ScheduledInst {
+                op: Op::Pseudo(PseudoOp::TerminatorArgs((0..args.len() as u32).collect())),
+                dst: VReg(dst),
+                operands: args.iter().map(|&v| VReg(v)).collect(),
+            }
+        }
+
         let block_schedules = vec![
             // block 0: three iconsts fed as phi sources to block 1.
-            vec![iconst(0, 1), iconst(1, 5), iconst(2, 0)],
+            vec![
+                iconst(0, 1),
+                iconst(1, 5),
+                iconst(2, 0),
+                terminator_args(9, &[0, 1, 2]),
+            ],
             // block 1: three block params; sub to exercise them; feed block 2.
             vec![
                 block_param(3, 1, 0),
@@ -3059,6 +3071,7 @@ mod tests {
                     dst: VReg(6),
                     operands: vec![VReg(3), VReg(4)],
                 },
+                terminator_args(10, &[6]),
             ],
             // block 2: single block param, use it.
             vec![
@@ -3071,13 +3084,6 @@ mod tests {
             ],
         ];
         let cfg_succs = vec![vec![1usize], vec![2usize], vec![]];
-        // phi_uses[0] = {v0, v1, v2} (terminator args of block 0 to block 1).
-        // phi_uses[1] = {v6} (terminator arg of block 1 to block 2 — v6 is the sub result).
-        let mut phi_uses: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); 3];
-        phi_uses[0].insert(VReg(0));
-        phi_uses[0].insert(VReg(1));
-        phi_uses[0].insert(VReg(2));
-        phi_uses[1].insert(VReg(6));
         let mut block_param_vregs: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); 3];
         block_param_vregs[1].extend([VReg(3), VReg(4), VReg(5)]);
         block_param_vregs[2].insert(VReg(7));
@@ -3098,7 +3104,6 @@ mod tests {
             &copy_pairs,
             &BTreeMap::new(),
             &cfg_succs,
-            &phi_uses,
             &block_param_vregs,
             "three_phi_params",
             false,

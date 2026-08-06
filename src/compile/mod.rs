@@ -958,18 +958,7 @@ pub fn compile(
         // its operands and coalescing renames them, so recomputing this after
         // either pass gives that pass's answer rather than a second, independent
         // derivation that can disagree with it.
-        let terminator_uses = |schedules: &[Vec<ScheduledInst>]| -> Vec<BTreeSet<VReg>> {
-            schedules
-                .iter()
-                .map(|s| {
-                    barrier::terminator_arg_operands(s)
-                        .into_iter()
-                        .map(|(_, v)| v)
-                        .collect()
-                })
-                .collect()
-        };
-        let mut phi_uses = terminator_uses(&block_schedules);
+        let mut phi_uses = barrier::terminator_uses(&block_schedules);
 
         // Pressure-driven splitter.
         // CRITICAL ORDER: apply_plan_to must run BEFORE collect_block_param_vregs_per_block.
@@ -1230,7 +1219,7 @@ pub fn compile(
             // The plan rewrote terminator operands to its reload VRegs, and the
             // slot-routed ones are gone, so re-reading the schedules is what
             // makes a spilled value stop being live out.
-            phi_uses = terminator_uses(&block_schedules);
+            phi_uses = barrier::terminator_uses(&block_schedules);
 
             if converged {
                 break;
@@ -1300,10 +1289,6 @@ pub fn compile(
             &block_param_map,
         );
 
-        // `phi_uses` covers every VReg a terminator consumes -- a Jump's and a
-        // Branch's arguments and a `Ret`'s value alike, since
-        // `barrier::terminator_arg_classes` numbers all three the same way -- so
-        // the allocator has the whole terminator half of liveness.
         verify_phi_uses = phi_uses.clone();
         verify_block_params = block_param_vregs_per_block.clone();
         verify_copy_pairs = copy_pairs.clone();
@@ -1314,7 +1299,6 @@ pub fn compile(
             &copy_pairs,
             &loop_depths,
             &cfg_succs,
-            &phi_uses,
             &block_param_vregs_per_block,
             &func.name,
             opts.force_frame_pointer,
