@@ -55,29 +55,29 @@ rather than overhead against it.
 
 ## The next refactors
 
-**`docs/refactor-roadmap.md`** -- eight ordered steps with the reason for the order.
-Read it before starting anything in the register allocator, the splitter, or the
-block-parameter machinery. **Steps 0 through 5c are done**, which closed both the
-CFG-holds-ClassIds seam (steps 1-4, the root cause behind nine wrong-code bugs and
-both failed rematerialization attempts) and the capacity failures (step 5, which
-gave the function-scope allocator a spill loop). Two steps remain, and each is
-blocked by something the document already measured:
+**`docs/refactor-roadmap.md` is finished.** All eleven steps -- 0, 1, 2, 3, 3b, 4,
+5, 5b, 5c, 6 and 7 -- are done. Read it before starting anything in the register
+allocator, the splitter, or the block-parameter machinery: it is now a record of
+what each step measured, including the predictions that were wrong, rather than a
+list of work.
 
-- **Step 6, fold the two allocators.** The merge is not the blocker. Sending
-  single-block functions down the multi-block path is correct but costs 12 lit
-  rows, because the splitter and the early-barrier pass spill before knowing
-  whether the allocator needs them to. Skipping the splitter fails 159 lit tests.
-  So the target is `score_victim`, and the obvious replacement is wrong: dividing
-  by use count -- the standard Chaitin ratio -- costs `pressure` 28/30 -> 24/30
-  and 157 regressed fuzz rows. Whatever replaces it has to beat those numbers
-  rather than be reasoned from first principles.
-- **Step 7, split `Op` into `PureOp` / `MachOp` / `Pseudo`.** 89 variants wearing
-  one hat, and every 2026-08-03 bug in that area was a pseudo-op sitting in a
-  structure that assumes an op defines a value. It also carries a latent live
-  defect: `lower.rs` rejects every `Op::Fcmp(_)` while `cost.rs` prices
-  `Fcmp(OrdEq)` and `Fcmp(UnordNe)` finitely, so extraction may pick a node the
-  lowering match refuses. Unreachable today only because the branch path consumes
-  those nodes first.
+What it closed, in the order it mattered:
+
+- **The CFG held `ClassId`s where it should hold VRegs** (steps 1-4), the root
+  cause behind nine wrong-code bugs and both failed rematerialization attempts.
+- **The function-scope allocator could not spill** (step 5), which was every
+  capacity failure. With 5b and 5c it took the generated corpus from `pressure`
+  14/30 to 30/30 at the width the gate runs.
+- **Two allocators did one job** (step 6). One is left; the fold deleted 1620
+  lines and fixed two miscompiles, because the per-block path was still pinning a
+  dividend to RAX after that was removed elsewhere as a bug.
+- **`Op` was three enums wearing one hat** (step 7). `PureOp` / `MachOp` /
+  `PseudoOp`, which collapsed the 30-variant generic-op list that `lower.rs` and
+  `cost.rs` each maintained separately -- and had already drifted over `Fcmp` --
+  into one arm apiece.
+
+Two things outlived it and are **not** refactoring: the splitter's victim
+heuristic, now P3 below, and the open miscompiles under Known bugs.
 
 ## Priorities
 

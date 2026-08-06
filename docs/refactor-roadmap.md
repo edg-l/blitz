@@ -133,8 +133,8 @@ paid a rewrite for the privilege.
 | `verify.rs`'s private `chase_alias` | **DONE** | one line, and a verifier's own copy of what it verifies is the worst place for a drift |
 | `block_id_to_idx` rebuilt in six files | **DONE** | trivial, and steps 3b/4 churn that area |
 | Two pairs of near-identical rule bodies | **DONE** | `egraph/` only, no interaction with any step |
-| The generic-IR-op set in `lower.rs` and `cost.rs` | **wait for step 7** | the list *is* `PureOp`; a shared constant now is a third copy the split deletes |
-| `allocator.rs:319` / `global_allocator.rs:531` | **wait for step 6** | a shared helper now is deleted by the fold |
+| The generic-IR-op set in `lower.rs` and `cost.rs` | **DONE** (step 7) | the list *was* `PureOp`; both sites are now one `Op::Pure(_)` arm |
+| `allocator.rs:319` / `global_allocator.rs:531` | **DONE** (step 6) | the fold deleted the per-block side outright |
 
 Five of the seven landed before step 2, in five commits, each byte-identical over the
 lit corpus at both levels. The two that wait are written up under the steps that own
@@ -1478,69 +1478,72 @@ check needs to sit inside whichever allocator survives.
 
 ---
 
-## Step 7: `Op` is three enums wearing one hat
+## Step 7: `Op` is three enums wearing one hat -- DONE (`386d27b`, `7bceb93`)
 
-89 variants: 36 pure IR, 42 x86 machine, and **11 pseudo/markers that define no
-value** — `has_no_result()` exists to say so, consulted in 6 places.
+89 variants in one enum became three: **`PureOp`** (36 generic IR ops),
+**`MachOp`** (42 x86 instruction forms), **`PseudoOp`** (11 schedule-level
+carriers for spill traffic, barrier liveness and terminator arguments). `Op` is a
+three-way wrapper over them, and the partition was exact -- every variant fell in
+one bucket with none left over.
 
-Every 2026-08-03 bug in that area was "a pseudo-op sits in a structure that assumes
-an op defines a value": `TerminatorArgs`'s phantom `dst` taking a colour,
-`BlockParam`'s marker *position* read as a def point, spill-store dsts taking
-registers. Splitting into `PureOp` / `MachOp` / a schedule-level `Pseudo` makes those
-unrepresentable instead of guarded — the same kind of defect as the CFG one, where
-the type system has stopped helping.
+**What it bought, which is the reason the step existed.** The set of generic IR
+ops that must be lowered before extraction was enumerated **twice, 30 variants
+each**, in `lower.rs` (which rejects them) and `egraph/cost.rs` (which prices them
+at infinity). Both are now a single `Op::Pure(_)` arm. A new pure op cannot be
+added to one list and forgotten in the other, because there are no lists.
 
-It also ends a duplication the type system is currently unable to prevent: the set of
-generic IR ops that must have been lowered before extraction is enumerated twice, 24
-variants each, in `lower.rs` (which rejects them) and `egraph/cost.rs` (which prices
-them as unlowerable).
+**The two had already drifted, which was the argument for the step rather than a
+prediction of it.** `cost.rs` gave `Fcmp(OrdEq)` and `Fcmp(UnordNe)` a finite cost
+while `lower.rs` rejected every `Fcmp`. The divergence was never live --
+`lower_block_pure_ops` lowers those two directly to `ucomisd`/`ucomiss` before the
+rejecting match runs -- and it is now stated once, as the single exception arm in
+`cost.rs`, next to the reason it exists.
 
-**The two lists have already drifted, which is the argument for this step rather
-than a prediction of it.** `lower.rs` rejects every `Op::Fcmp(_)`; `cost.rs` gives
-`Fcmp(OrdEq)` and `Fcmp(UnordNe)` a *finite* cost, on the grounds that they are
-lowered directly and skip isel. Extraction may therefore pick a node the lowering
-match refuses. It does not today -- a double `==` and `!=` compile and run
-correctly at both levels, because the branch path consumes those nodes before
-`lower_op` sees them -- so the divergence is latent, not live. It is exactly the
-shape this step exists to make unrepresentable.
+`has_no_result` moved to `PseudoOp::defines_no_value`, with `Op` delegating. Only
+a pseudo can answer anything but `false`: a pure or machine op is an expression
+and always names a value. The bugs this step was aimed at -- `TerminatorArgs`'s
+phantom `dst` taking a colour, `BlockParam`'s marker position read as a def point
+-- are all that predicate being consulted about something that was never a pseudo.
 
-**Sharing the list without the enum split is not an improvement.** Replacing the
-two explicit variant lists with a predicate on `Op` moves the enumeration to one
-place but costs both sites their exhaustiveness check, since a guard arm tells the
-compiler nothing about which variants it covers. The value here is in the types,
-not in the deduplication, so the step is worth doing whole or not at all.
+**Behaviour-neutral, and measured to be.** 925 unit, 478 lit at `BLITZ_VERIFY`
+off/1/strict, 301 differential + `cc`, fuzz 30/30 on all three shapes, and **892
+codesize rows with zero changed** -- every byte of emitted code identical.
 
-That list *is* `PureOp`. After the split both sites match on the
-type, and a new pure op cannot be added to one list and forgotten in the other — which
-is the same failure mode as `has_no_result()` being consulted in six places instead of
-being a property of the type.
+The ~1630 call sites were rewritten with `perl` recursive balanced-delimiter
+matching rather than by hand. That is safe here in a way it would not be for
+deleting code: a misplaced paren is a compile error, not a silent truncation.
 
-Lowest priority, and a natural follow-on to steps 1-4 since those already change
-what the CFG holds.
+### The `BlockParam` question, answered: it cannot leave the e-graph
 
-**One open question underneath it: can `Op::BlockParam` leave the e-graph
-altogether?** It is the root-cause statement of
-this whole document — a position-dependent value stored as a position-free e-node — and
-after steps 1-4 the CFG names both ends of every phi by VReg, so the node looks
-vestigial. It is not yet: `EGraph::block_param_classes` answers step 2's
-self-reference test, `extract.rs` has a tie-break preferring a `BlockParam` node over
-a non-`BlockParam` candidate, and `cost.rs` weights it 0.0. Deleting it needs each of
-those re-expressed without it. Worth checking before step 7 rather than assuming
-either way; if it can go, `block_param_map`, `block_param_classes` and
-`rewrite_block_params` go with it and "one e-class is one expression, not one value"
-stops being a hazard the pipeline has to remember.
+This document asked whether `Op::BlockParam` could be deleted once the CFG named
+both ends of every phi by VReg, which would take `block_param_map`,
+`block_param_classes` and `rewrite_block_params` with it.
 
----
+**It cannot, and the reason is not the three consumers this document listed.** A
+`BlockParam` class is *consumed as a child by ordinary expressions*. On a loop as
+small as `for (i = 0; i < 10; i++) s = s + i * 2`, the parameter class `v4` is an
+operand of `x86_cmp_imm`, `x86_add` and `x86_lea3`. The node is the e-graph's
+representation of an opaque value produced at block entry, and every expression
+over a loop-carried variable depends on it.
 
-## State after steps 0 through 5c
+So deleting it would mean introducing some other opaque leaf for expressions to
+point at -- a rename, not a removal. "One e-class is one expression, not one
+value" stays a hazard the pipeline has to remember, and the guards that exist for
+it (`split`'s refusal to route a parameter group spanning two blocks, step 5c)
+are the mitigation rather than a workaround for something removable.
+
+
+## State after the roadmap: every step is done
 
 Gates: 934 unit, 478 lit at `BLITZ_VERIFY` off/1/strict, 301 differential + `cc`,
 and 0 machine-verifier violations over 180 generated program-levels. Code quality
 has a baseline too: `bash tests/run_codesize.sh --check`, 892 rows.
 
-Steps 0, 1, 2, 3, 3b, 4, 5, 5b and 5c are done. What each measured is in its own
-notes above, including the predictions that were stated first and the ones that
-were wrong.
+**Every step is done: 0, 1, 2, 3, 3b, 4, 5, 5b, 5c, 6 and 7.** What each measured
+is in its own notes above, including the predictions that were stated first and
+the ones that were wrong. What outlived the roadmap is not refactoring: the
+splitter's victim heuristic moved to `ROADMAP.md` P3, and the open miscompiles
+are in its Known bugs.
 
 Generated corpus at 30 seeds a shape: **`mixed` 30/30, `args` 30/30,
 `pressure` 30/30** -- every generated program compiles and prints what the
