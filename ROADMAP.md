@@ -237,6 +237,20 @@ isel patterns; we should beat it on the ones we implement.
       call operands.
 - [ ] Cross-block coalescing beyond copies; same value through a block param
       should prefer one register.
+- [ ] **The splitter's victim heuristic.** `split::score_victim` is
+      `live_range_length / loop_penalty`, which cannot tell a long-lived value
+      read twice from one read twenty times -- on
+      `regalloc/array_spill_frame_corruption.c` it picks a value stored once and
+      reloaded 23 times, which is most of that program's +55%. Moved here from
+      `docs/refactor-roadmap.md` step 6: the fold is done and this is allocation
+      policy, not a refactor. **Two directions are closed by measurement**, and a
+      replacement has to beat those numbers rather than be reasoned from first
+      principles: dividing by use count (the Chaitin ratio) costs 35 regressed
+      codesize rows against 12 and 88 on fuzz, tried three times now; and the
+      pass in front of it, `insert_early_barrier_spills`, cannot be gated on
+      pressure because it runs before global liveness exists, while deleting it
+      outright improves the corpus in aggregate but costs `args` seed 3 its
+      compile.
 - [ ] Better spill placement: split at loop boundaries, more remat shapes
       (currently leaf/free ops only).
 - [ ] Per-param precoloring: today all params are skipped when the block
@@ -261,8 +275,13 @@ unreduced.
 
 | shape | passing | wrong value | capacity |
 | --- | --- | --- | --- |
-| `mixed` at 200 | 191/200 | seeds 92, 109, 137, 196 | seeds 123, 135, 150 |
+| `mixed` at 200 | 194/200 | seeds 92, 109 | seeds 57, 123, 135, 150 |
 | `args` at 200 | 183/200 | seeds 52, 108, 146, 175 | 13 seeds |
+
+`mixed` seeds 137 and 196 stopped miscompiling when step 6's fold removed the
+single-block path's RAX dividend pin. Seed 57 is new from that same fold and seed
+92 widened from `-O1` to both levels, so the fold is one fewer failing seed on
+net; `63e2f1b` has the detail.
 
 Both oracles are contributing, which is the argument for keeping both: `mixed`
 seed 137 is wrong at `-O0` and right at `-O1`, seed 109 the reverse (1571 against

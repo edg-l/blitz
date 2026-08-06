@@ -10,7 +10,7 @@ alias/dse_overwritten_store.c	O0	12	47	0	0
 alias/dse_overwritten_store.c	O1	6	17	0	0
 alias/forward_across_disjoint_slots.c	O0	18	59	0	0
 alias/forward_across_disjoint_slots.c	O1	8	27	0	0
-alias/forward_three_loads.c	O0	16	46	0	0
+alias/forward_three_loads.c	O0	18	56	1	1
 alias/forward_three_loads.c	O1	11	27	0	0
 alias/load_to_load_forward.c	O0	12	38	0	0
 alias/load_to_load_forward.c	O1	8	21	0	0
@@ -248,7 +248,7 @@ edge/large_constant.c	O0	2	6	0	0
 edge/large_constant.c	O1	2	6	0	0
 edge/large_shift.c	O0	22	63	0	0
 edge/large_shift.c	O1	2	3	0	0
-edge/many_args.c	O0	39	138	0	0
+edge/many_args.c	O0	39	125	0	0
 edge/many_args.c	O1	3	8	0	0
 edge/many_locals.c	O0	2	6	0	0
 edge/many_locals.c	O1	2	6	0	0
@@ -258,8 +258,8 @@ edge/overflow_wrap.c	O0	2	6	0	0
 edge/overflow_wrap.c	O1	2	3	0	0
 edge/zero_operations.c	O0	2	6	0	0
 edge/zero_operations.c	O1	2	6	0	0
-float/basic_arithmetic.c	O0	44	240	0	0
-float/basic_arithmetic.c	O1	44	237	0	0
+float/basic_arithmetic.c	O0	42	205	2	8
+float/basic_arithmetic.c	O1	42	202	2	8
 float/comparisons.c	O0	128	521	3	12
 float/comparisons.c	O1	128	500	3	12
 float/conversions.c	O0	34	162	0	0
@@ -318,7 +318,7 @@ functions/forward_decl.c	O0	42	151	0	0
 functions/forward_decl.c	O1	42	142	0	0
 functions/linked_list.c	O0	112	417	0	0
 functions/linked_list.c	O1	115	435	0	0
-functions/many_args.c	O0	40	141	0	0
+functions/many_args.c	O0	40	131	0	0
 functions/many_args.c	O1	7	29	0	0
 functions/multi_call.c	O0	17	48	0	0
 functions/multi_call.c	O1	4	16	0	0
@@ -358,7 +358,7 @@ globals/inline_global.c	O0	20	73	0	0
 globals/inline_global.c	O1	16	45	0	0
 globals/multi_fn.c	O0	12	48	0	0
 globals/multi_fn.c	O1	12	48	0	0
-globals/multiple_globals.c	O0	18	61	0	0
+globals/multiple_globals.c	O0	20	71	1	1
 globals/multiple_globals.c	O1	16	58	0	0
 inline/chain_three_deep.c	O0	45	159	0	0
 inline/chain_three_deep.c	O1	25	76	0	0
@@ -390,13 +390,13 @@ inline/inline_in_loop_body.c	O0	29	113	0	0
 inline/inline_in_loop_body.c	O1	25	57	0	0
 inline/inline_into_loop.c	O0	24	76	0	0
 inline/inline_into_loop.c	O1	20	46	0	0
-inline/inline_large_body.c	O0	59	207	0	0
+inline/inline_large_body.c	O0	59	203	0	0
 inline/inline_large_body.c	O1	5	15	0	0
-inline/inline_many_args.c	O0	65	260	0	0
+inline/inline_many_args.c	O0	65	252	0	0
 inline/inline_many_args.c	O1	5	18	0	0
 inline/inline_mixed_noinline.c	O0	18	55	0	0
 inline/inline_mixed_noinline.c	O1	8	28	0	0
-inline/inline_multi_call.c	O0	34	109	0	0
+inline/inline_multi_call.c	O0	36	119	2	2
 inline/inline_multi_call.c	O1	6	26	0	0
 inline/inline_multi_return.c	O0	63	237	1	1
 inline/inline_multi_return.c	O1	65	259	0	0
@@ -430,7 +430,7 @@ inline/noinline_respected.c	O0	9	33	0	0
 inline/noinline_respected.c	O1	9	33	0	0
 inline/single_caller_eliminated.c	O0	9	33	0	0
 inline/single_caller_eliminated.c	O1	2	6	0	0
-inline/single_caller_inlined.c	O0	25	71	0	0
+inline/single_caller_inlined.c	O0	26	73	0	0
 inline/single_caller_inlined.c	O1	2	6	0	0
 inline/strength_through_inline.c	O0	8	29	0	0
 inline/strength_through_inline.c	O1	2	6	0	0
@@ -548,8 +548,8 @@ pointers/ptr_subtract.c	O0	12	38	0	0
 pointers/ptr_subtract.c	O1	12	35	0	0
 pointers/swap.c	O0	25	86	0	0
 pointers/swap.c	O1	20	55	0	0
-regalloc/array_spill_frame_corruption.c	O0	72	319	1	2
-regalloc/array_spill_frame_corruption.c	O1	71	316	1	2
+regalloc/array_spill_frame_corruption.c	O0	115	514	9	33
+regalloc/array_spill_frame_corruption.c	O1	108	475	7	29
 regalloc/blockparam_live_from_block_entry.c	O0	40	200	0	0
 regalloc/blockparam_live_from_block_entry.c	O1	27	140	0	0
 regalloc/call_arg_reemitted_in_block.c	O0	170	623	2	15
@@ -562,9 +562,9 @@ regalloc/coalesce_pair_from_schedule.c	O0	1878	11135	384	615
 regalloc/coalesce_pair_from_schedule.c	O1	1713	10023	359	477
 regalloc/coalesce_widens_param_clique.c	O0	963	3159	6	12
 regalloc/coalesce_widens_param_clique.c	O1	1630	11498	669	714
-regalloc/cross_block_spill_addr_reload.c	O0	165	740	13	20
+regalloc/cross_block_spill_addr_reload.c	O0	164	736	13	20
 regalloc/cross_block_spill_addr_reload.c	O1	130	570	6	6
-regalloc/div_and_mod_same_operands.c	O0	78	274	1	3
+regalloc/div_and_mod_same_operands.c	O0	82	287	3	3
 regalloc/div_and_mod_same_operands.c	O1	43	165	0	0
 regalloc/div_both_projections.c	O0	92	299	0	0
 regalloc/div_both_projections.c	O1	27	128	0	0
@@ -602,8 +602,8 @@ regalloc/param_shadow_seed16.c	O0	1232	6348	167	282
 regalloc/param_shadow_seed16.c	O1	1530	9601	397	513
 regalloc/param_shadow_seed3.c	O0	2168	9579	121	306
 regalloc/param_shadow_seed3.c	O1	3138	18745	788	984
-regalloc/phi_dest_from_target_schedule.c	O0	371	1131	0	0
-regalloc/phi_dest_from_target_schedule.c	O1	428	1316	0	0
+regalloc/phi_dest_from_target_schedule.c	O0	375	1120	0	0
+regalloc/phi_dest_from_target_schedule.c	O1	432	1305	0	0
 regalloc/seed6_truncated_guard_values.c	O0	197	787	2	6
 regalloc/seed6_truncated_guard_values.c	O1	148	608	0	0
 regalloc/shared_vreg_two_arg_positions.c	O0	985	5918	304	355
@@ -626,7 +626,7 @@ regalloc/xmm_pressure_mixed_calls.c	O0	36	159	0	0
 regalloc/xmm_pressure_mixed_calls.c	O1	28	133	1	2
 stack/addr_taken_param.c	O0	8	31	0	0
 stack/addr_taken_param.c	O1	5	15	0	0
-stack/multi_stack_slot.c	O0	19	55	0	0
+stack/multi_stack_slot.c	O0	21	65	1	1
 stack/multi_stack_slot.c	O1	12	44	0	0
 strings/hello.c	O0	6	27	0	0
 strings/hello.c	O1	6	24	0	0

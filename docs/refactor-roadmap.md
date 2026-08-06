@@ -1363,7 +1363,12 @@ with `regalloc/param_shadow_seed13.c` at `-O0` losing 4.4% of its instructions a
 
 ---
 
-## Step 6: two allocators -- FOLD DONE (`63e2f1b`)
+## Step 6: two allocators -- DONE (`63e2f1b`)
+
+**Closed.** The step was "one allocator, not two", and there is one. The code-size
+cost it exposed is a victim heuristic rather than a structural seam, so it moved to
+`ROADMAP.md` P3 with the measurements that close two of its directions; baselines
+record the 12 rows. What follows is the record.
 
 `allocator.rs` (per-block, spill rounds, interval colouring) and
 `global_allocator.rs` (function-scope, primary) did the same job twice, with the
