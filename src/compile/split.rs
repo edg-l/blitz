@@ -13,7 +13,7 @@ use crate::egraph::cost::CostModel;
 use crate::egraph::extract::{ClassVRegMap, ExtractionResult, extract_at_with_memo};
 use crate::ir::effectful::BlockId;
 use crate::ir::function::{BasicBlock, Function};
-use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
+use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 use crate::regalloc::global_liveness::GlobalLiveness;
 use crate::regalloc::spill::LOOP_DEPTH_PENALTY_BASE;
@@ -2089,6 +2089,7 @@ mod tests {
     use crate::egraph::cost::{CostModel, OptGoal};
     use crate::egraph::extract::ExtractionResult;
     use crate::ir::effectful::TermArgs;
+    use crate::ir::op::MachOp;
     use crate::ir::op::Op;
     use crate::ir::types::Type;
     use crate::regalloc::global_liveness::GlobalLiveness;

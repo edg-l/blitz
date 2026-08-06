@@ -8,7 +8,7 @@ use crate::compile::alias::AliasInfo;
 use crate::egraph::egraph::EGraph;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
+use crate::ir::op::{ClassId, Op, PseudoOp};
 use crate::ir::types::Type;
 
 // ── PendingMem ────────────────────────────────────────────────────────────────
@@ -183,6 +183,7 @@ mod tests {
     use crate::ir::effectful::{EffOperand, EffectfulOp};
     use crate::ir::function::{BasicBlock, Function};
     use crate::ir::op::Op;
+    use crate::ir::op::PureOp;
     use crate::ir::types::Type;
 
     fn add_node(eg: &mut EGraph, op: Op, children: &[ClassId]) -> ClassId {

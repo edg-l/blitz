@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
-use crate::ir::op::{MachOp, Op, PseudoOp, PureOp};
+use crate::ir::op::{MachOp, Op, PseudoOp};
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::reg::RegClass;
 
@@ -255,7 +255,7 @@ fn add_interferences_in_set(graph: &mut InterferenceGraph, live_set: &BTreeSet<V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::op::Op;
+    use crate::ir::op::{Op, PureOp};
     use crate::ir::types::Type;
     use crate::regalloc::liveness::compute_liveness;
     use crate::schedule::scheduler::ScheduledInst;

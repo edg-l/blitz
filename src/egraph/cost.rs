@@ -1,4 +1,3 @@
-use crate::ir::condcode::CondCode;
 use crate::ir::op::{MachOp, Op, PseudoOp, PureOp};
 
 /// Optimization objective for the cost model.
@@ -242,7 +241,10 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── x86 FP comparison ops ─────────────────────────────────────────────
-            Op::Mach(MachOp::X86Ucomisd) | Op::Mach(MachOp::X86Ucomiss) => CostTuple {
+            Op::Mach(MachOp::X86Ucomisd)
+            | Op::Mach(MachOp::X86Ucomiss)
+            | Op::Mach(MachOp::X86UcomisdCc(_))
+            | Op::Mach(MachOp::X86UcomissCc(_)) => CostTuple {
                 latency: 3.0,
                 throughput: 1.0,
                 size: 4.0,
@@ -278,19 +280,13 @@ impl CostModel {
 
             // ── Generic IR ops: must be lowered before extraction ─────────────────
             //
-            // One arm for the whole type. This and `lower.rs`'s rejection used to
-            // be two hand-written lists of the same 30 variants, and they had
-            // already drifted over `Fcmp`.
-            //
-            // The exception below is the only real one, and it is stated once:
-            // `Fcmp(OrdEq)` and `Fcmp(UnordNe)` skip isel and are lowered directly
-            // by `lower_block_pure_ops`, so extraction must be able to afford them.
-            Op::Pure(PureOp::Fcmp(CondCode::OrdEq | CondCode::UnordNe)) => CostTuple {
-                latency: 3.0,
-                throughput: 1.0,
-                size: 5.0,
-            }
-            .weighted(self.goal),
+            // One arm for the whole type, with no exceptions. This and `lower.rs`'s
+            // rejection used to be two hand-written lists of the same 30 variants,
+            // and they had drifted: this one priced `Fcmp(OrdEq)` and
+            // `Fcmp(UnordNe)` finitely because those two skipped isel and were
+            // lowered by a path of their own. They no longer skip it -- isel gives
+            // them `MachOp::X86UcomisdCc`/`X86UcomissCc` -- so every pure op is
+            // unlowered here and the two sites cannot disagree again.
             Op::Pure(_) => f64::INFINITY,
             // Spill pseudo-ops are never costed by the e-graph.
             Op::Pseudo(PseudoOp::SpillStore(_))

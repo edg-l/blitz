@@ -1493,11 +1493,22 @@ at infinity). Both are now a single `Op::Pure(_)` arm. A new pure op cannot be
 added to one list and forgotten in the other, because there are no lists.
 
 **The two had already drifted, which was the argument for the step rather than a
-prediction of it.** `cost.rs` gave `Fcmp(OrdEq)` and `Fcmp(UnordNe)` a finite cost
-while `lower.rs` rejected every `Fcmp`. The divergence was never live --
-`lower_block_pure_ops` lowers those two directly to `ucomisd`/`ucomiss` before the
-rejecting match runs -- and it is now stated once, as the single exception arm in
-`cost.rs`, next to the reason it exists.
+prediction of it**, and the drift is now gone rather than documented. `cost.rs`
+gave `Fcmp(OrdEq)` and `Fcmp(UnordNe)` a finite cost while `lower.rs` rejected
+every `Fcmp`; what made that safe was a third site, `lower_block_pure_ops`,
+lowering those two directly and bypassing isel entirely.
+
+**The cause was that a pure op was being lowered directly**, so the fix is to stop
+doing that rather than to describe it. `OrdEq` is ordered *and* equal
+(`ZF=1 ∧ PF=0`) and `UnordNe` is unordered *or* not-equal (`ZF=0 ∨ PF=1`): two flag
+tests each, so no single `setcc`/`jcc` encodes them and they cannot share the
+`X86Ucomisd` node with the one-test codes -- hashconsing would give every
+comparison of one operand pair a single class and lose the code. Carrying the code
+on the node, `MachOp::X86UcomisdCc` / `X86UcomissCc`, keeps them distinct. Isel
+now selects for them like any other op, `lower_op` lowers them like any other
+machine op, the bypass in `lower_block_pure_ops` is deleted, and `cost.rs`'s arm
+is an unconditional `Op::Pure(_) => INFINITY` **with no exception left**. The two
+sites cannot disagree again because neither has anything to enumerate.
 
 `has_no_result` moved to `PseudoOp::defines_no_value`, with `Op` delegating. Only
 a pseudo can answer anything but `false`: a pure or machine op is an expression

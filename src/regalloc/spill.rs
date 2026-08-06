@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
-use crate::ir::op::{Op, PseudoOp, PureOp};
+use crate::ir::op::{Op, PseudoOp};
 use crate::schedule::scheduler::ScheduledInst;
 
 use super::slots::{SlotAllocator, SlotOwner};
@@ -343,7 +343,7 @@ impl SpillPlacement<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::op::Op;
+    use crate::ir::op::{Op, PureOp};
     use crate::ir::types::Type;
 
     fn iconst_inst(dst: u32, val: i64) -> ScheduledInst {

@@ -239,6 +239,16 @@ pub enum MachOp {
     X86Ucomisd,
     /// `ucomiss` — compare two f32 values, sets flags; 2 children, result Flags.
     X86Ucomiss,
+    /// `ucomisd` for a **composite** condition code; 2 children, result Flags.
+    ///
+    /// `OrdEq` is ordered *and* equal (`ZF=1 ∧ PF=0`) and `UnordNe` is unordered
+    /// *or* not-equal (`ZF=0 ∨ PF=1`): no single `setcc`/`jcc` encodes either, so
+    /// they cannot ride the shared `X86Ucomisd` node the way one-test codes do.
+    /// The code rides on the node so hashconsing keeps `(OrdEq, a, b)` distinct
+    /// from any other comparison of the same pair.
+    X86UcomisdCc(CondCode),
+    /// `ucomiss` for a composite condition code. See [`MachOp::X86UcomisdCc`].
+    X86UcomissCc(CondCode),
 
     // ── x86-64 conversion ops ─────────────────────────────────────────────────
     /// `movsx` — sign-extend from `from` type to `to` type; 1 child.
@@ -929,6 +939,38 @@ impl Op {
                 );
                 Type::Flags
             }
+            Op::Mach(MachOp::X86UcomisdCc(_)) => {
+                assert_eq!(child_types.len(), 2, "X86UcomisdCc requires 2 children");
+                assert_eq!(
+                    child_types[0],
+                    Type::F64,
+                    "X86UcomisdCc requires F64 operands, got {:?}",
+                    child_types[0]
+                );
+                assert_eq!(
+                    child_types[1],
+                    Type::F64,
+                    "X86UcomisdCc requires F64 operands, got {:?}",
+                    child_types[1]
+                );
+                Type::Flags
+            }
+            Op::Mach(MachOp::X86UcomissCc(_)) => {
+                assert_eq!(child_types.len(), 2, "X86UcomissCc requires 2 children");
+                assert_eq!(
+                    child_types[0],
+                    Type::F32,
+                    "X86UcomissCc requires F32 operands, got {:?}",
+                    child_types[0]
+                );
+                assert_eq!(
+                    child_types[1],
+                    Type::F32,
+                    "X86UcomissCc requires F32 operands, got {:?}",
+                    child_types[1]
+                );
+                Type::Flags
+            }
             Op::Mach(MachOp::X86Ucomiss) => {
                 assert_eq!(child_types.len(), 2, "X86Ucomiss requires 2 children");
                 assert_eq!(
@@ -1087,6 +1129,8 @@ impl Op {
                 | Op::Mach(MachOp::X86Cvttss2si(_))
                 | Op::Mach(MachOp::X86Ucomisd)
                 | Op::Mach(MachOp::X86Ucomiss)
+                | Op::Mach(MachOp::X86UcomisdCc(_))
+                | Op::Mach(MachOp::X86UcomissCc(_))
                 | Op::Mach(MachOp::X86Bitcast { .. })
         )
     }
@@ -1103,7 +1147,9 @@ impl Op {
             Op::Mach(MachOp::X86Cvttsd2si(_))
             | Op::Mach(MachOp::X86Cvttss2si(_))
             | Op::Mach(MachOp::X86Ucomisd)
-            | Op::Mach(MachOp::X86Ucomiss) => RegClass::XMM,
+            | Op::Mach(MachOp::X86Ucomiss)
+            | Op::Mach(MachOp::X86UcomisdCc(_))
+            | Op::Mach(MachOp::X86UcomissCc(_)) => RegClass::XMM,
             // movq between the classes: the source is whichever side `from` is.
             Op::Mach(MachOp::X86Bitcast { from, .. }) => {
                 if from.is_float() {

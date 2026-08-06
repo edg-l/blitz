@@ -1005,7 +1005,26 @@ fn lower_op(
             }])
         }
 
-        // x86 FP comparison ops
+        // x86 FP comparison ops. The composite-code forms emit the same
+        // instruction: the code they carry is read by whatever consumes the flags
+        // (`X86Setcc`, or the branch), and rides on the node only so hashconsing
+        // keeps two comparisons of one pair in separate classes.
+        Op::Mach(MachOp::X86UcomisdCc(_)) => {
+            let src1 = get_op("X86UcomisdCc", operand_regs, 0)?;
+            let src2 = get_op("X86UcomisdCc", operand_regs, 1)?;
+            Ok(vec![MachInst::UcomisdRR {
+                src1: Operand::Reg(src1),
+                src2: Operand::Reg(src2),
+            }])
+        }
+        Op::Mach(MachOp::X86UcomissCc(_)) => {
+            let src1 = get_op("X86UcomissCc", operand_regs, 0)?;
+            let src2 = get_op("X86UcomissCc", operand_regs, 1)?;
+            Ok(vec![MachInst::UcomissRR {
+                src1: Operand::Reg(src1),
+                src2: Operand::Reg(src2),
+            }])
+        }
         Op::Mach(MachOp::X86Ucomisd) => {
             let src1 = get_op("X86Ucomisd", operand_regs, 0)?;
             let src2 = get_op("X86Ucomisd", operand_regs, 1)?;
@@ -1345,32 +1364,6 @@ pub(super) fn lower_block_pure_ops(
                 });
                 continue;
             }
-        }
-
-        // Fcmp(OrdEq/UnordNe) skipped isel -- lower directly to ucomisd/ucomiss.
-        if let Op::Pure(PureOp::Fcmp(cc @ (CondCode::OrdEq | CondCode::UnordNe))) = &inst.op {
-            let src1 = op_regs.first().copied().flatten();
-            let src2 = op_regs.get(1).copied().flatten();
-            if let (Some(s1), Some(s2)) = (src1, src2) {
-                let is_f32 = inst
-                    .operands
-                    .first()
-                    .and_then(|v| vreg_types.get(v))
-                    .is_some_and(|t| matches!(t, Type::F32));
-                result.push(if is_f32 {
-                    MachInst::UcomissRR {
-                        src1: Operand::Reg(s1),
-                        src2: Operand::Reg(s2),
-                    }
-                } else {
-                    MachInst::UcomisdRR {
-                        src1: Operand::Reg(s1),
-                        src2: Operand::Reg(s2),
-                    }
-                });
-                let _ = cc;
-            }
-            continue;
         }
 
         let machinsts = lower_op(

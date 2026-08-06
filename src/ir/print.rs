@@ -130,6 +130,8 @@ pub fn fmt_op(op: &Op) -> String {
 
         // x86 FP comparison
         Op::Mach(MachOp::X86Ucomisd) => "x86_ucomisd".into(),
+        Op::Mach(MachOp::X86UcomisdCc(cc)) => format!("x86_ucomisd_cc({cc:?})"),
+        Op::Mach(MachOp::X86UcomissCc(cc)) => format!("x86_ucomiss_cc({cc:?})"),
         Op::Mach(MachOp::X86Ucomiss) => "x86_ucomiss".into(),
 
         // Stack address

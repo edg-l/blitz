@@ -262,7 +262,10 @@ impl AliasInfo {
             | Op::Mach(MachOp::X86Cvtss2sd) => AddrBase::Unknown,
 
             // x86 FP comparison
-            Op::Mach(MachOp::X86Ucomisd) | Op::Mach(MachOp::X86Ucomiss) => AddrBase::Unknown,
+            Op::Mach(MachOp::X86Ucomisd)
+            | Op::Mach(MachOp::X86Ucomiss)
+            | Op::Mach(MachOp::X86UcomisdCc(_))
+            | Op::Mach(MachOp::X86UcomissCc(_)) => AddrBase::Unknown,
 
             // x86 integer conversion
             Op::Mach(MachOp::X86Movsx { .. })

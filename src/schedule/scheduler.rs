@@ -262,11 +262,11 @@ pub fn schedule(dag: &ScheduleDag) -> Vec<ScheduledInst> {
     // Emitting a division and its projections as one unit closes the window
     // instead of narrowing it. A projection's only predecessor is its division, so
     // it is always ready the moment the division is emitted.
-    let mut emit = |node_idx: usize,
-                    result: &mut Vec<ScheduledInst>,
-                    emitted: &mut Vec<bool>,
-                    remaining_preds: &mut Vec<usize>,
-                    ready: &mut BinaryHeap<(ReadyKey, usize)>| {
+    let emit = |node_idx: usize,
+                result: &mut Vec<ScheduledInst>,
+                emitted: &mut Vec<bool>,
+                remaining_preds: &mut Vec<usize>,
+                ready: &mut BinaryHeap<(ReadyKey, usize)>| {
         let node = &dag.nodes[node_idx];
         result.push(ScheduledInst {
             op: node.op.clone(),

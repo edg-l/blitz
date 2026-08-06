@@ -5,7 +5,7 @@ use smallvec::SmallVec;
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::cost::CostModel;
 use crate::egraph::egraph::EGraph;
-use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
+use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 
 // ── ClassVRegMap ──────────────────────────────────────────────────────────────
@@ -928,6 +928,7 @@ mod tests {
     use super::*;
     use crate::egraph::cost::OptGoal;
     use crate::egraph::enode::ENode;
+    use crate::ir::op::MachOp;
     use crate::ir::types::Type;
 
     fn iconst(g: &mut EGraph, v: i64) -> ClassId {

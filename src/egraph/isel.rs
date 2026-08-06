@@ -310,8 +310,11 @@ fn apply_icmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     changed
 }
 
-/// Fcmp(cc, a, b) -> X86Ucomisd(a, b) for F64, X86Ucomiss(a, b) for F32
-/// The condition code is preserved in the Fcmp node for later extraction.
+/// `Fcmp(cc, a, b)` -> `X86Ucomisd(a, b)` for F64, `X86Ucomiss(a, b)` for F32.
+///
+/// The condition code stays on the `Fcmp` node for later extraction, except for
+/// the composite codes, which carry it on the machine node instead -- see
+/// [`MachOp::X86UcomisdCc`].
 fn apply_fcmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
@@ -320,14 +323,10 @@ fn apply_fcmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         if snap.children.len() != 2 {
             continue;
         }
-        let Op::Pure(PureOp::Fcmp(_cc)) = &snap.op else {
+        let Op::Pure(PureOp::Fcmp(cc)) = &snap.op else {
             continue;
         };
-        // OrdEq/UnordNe are composite CCs lowered directly (not via shared Ucomisd).
-        // Skip isel to prevent merging with other Fcmp classes via Ucomisd hashcons.
-        if matches!(_cc, CondCode::OrdEq | CondCode::UnordNe) {
-            continue;
-        }
+        let cc = *cc;
 
         let a = snap.children[0];
         let b = snap.children[1];
@@ -336,10 +335,18 @@ fn apply_fcmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let child_ty = infer_class_type(egraph, a);
         let is_f32 = matches!(child_ty, Some(Type::F32));
 
-        let x86_op = if is_f32 {
-            Op::Mach(MachOp::X86Ucomiss)
-        } else {
-            Op::Mach(MachOp::X86Ucomisd)
+        // A composite condition code needs two flag tests, so it cannot share the
+        // plain `X86Ucomisd` node with the one-test codes: hashconsing would give
+        // every comparison of the same pair one class and the code would be lost.
+        // Carrying it on the node keeps them distinct, which is what lets these
+        // reach `lower_op` like any other machine op instead of being lowered by
+        // a separate path that bypasses isel.
+        let composite = matches!(cc, CondCode::OrdEq | CondCode::UnordNe);
+        let x86_op = match (composite, is_f32) {
+            (true, true) => Op::Mach(MachOp::X86UcomissCc(cc)),
+            (true, false) => Op::Mach(MachOp::X86UcomisdCc(cc)),
+            (false, true) => Op::Mach(MachOp::X86Ucomiss),
+            (false, false) => Op::Mach(MachOp::X86Ucomisd),
         };
 
         let ucomis = egraph.add(ENode {

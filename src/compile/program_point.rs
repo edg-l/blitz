@@ -1,4 +1,4 @@
-use crate::ir::op::{Op, PseudoOp, PureOp};
+use crate::ir::op::{Op, PseudoOp};
 use crate::schedule::scheduler::ScheduledInst;
 
 /// A stable, total-ordered program point within a function.
@@ -100,6 +100,7 @@ impl ProgramPoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::op::PureOp;
 
     #[test]
     fn ordering() {
