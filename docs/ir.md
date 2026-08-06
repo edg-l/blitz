@@ -153,6 +153,137 @@ For locals, `create_stack_slot(size, align)` reserves frame space and
 `stack_addr(slot)` gives you its address as an `I64` value. `global_addr(name)`
 does the same for a named global.
 
+## Structs
+
+There is no struct type, and you do not need one. A struct is a block of memory
+plus a constant offset per field, so you decide the layout and address the fields
+with ordinary arithmetic. Nothing about it is special-cased.
+
+Take `struct Point { int x; int y; long tag; }`. On SysV that is offsets 0, 4 and
+8, size 16, align 8; pick the offsets to match whatever ABI you are
+interoperating with:
+
+```rust
+# use blitz::ir::builder::FunctionBuilder;
+# use blitz::ir::types::Type;
+const X: i64 = 0;
+const Y: i64 = 4;
+const TAG: i64 = 8;
+
+// fn dot(p: *const Point) -> i64 { p->x * p->y + p->tag }
+let mut b = FunctionBuilder::new("dot", &[Type::I64], &[Type::I64]);
+let p = b.params()[0];
+
+let mut field = |b: &mut FunctionBuilder, off: i64, ty: Type| {
+    let o = b.iconst(off, Type::I64);
+    let addr = b.add(p, o);
+    b.load(addr, ty)
+};
+let x = field(&mut b, X, Type::I32);
+let y = field(&mut b, Y, Type::I32);
+let tag = field(&mut b, TAG, Type::I64);
+
+let prod = b.mul(x, y);
+let prod = b.sext(prod, Type::I64);
+let r = b.add(prod, tag);
+b.ret(Some(r));
+# let _ = b.finalize()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Note the field's own type on each `load`: `I32` for the `int`s, `I64` for the
+`long`. That is what decides the access width, and `sext` widens the `I32`
+product before it is added to the `I64` tag.
+
+Writing fields is the same with `store`, and a *local* struct is a stack slot:
+
+```rust
+# use blitz::ir::builder::FunctionBuilder;
+# use blitz::ir::types::Type;
+# const X: i64 = 0;
+let mut b = FunctionBuilder::new("local", &[], &[Type::I64]);
+let slot = b.create_stack_slot(16, 8);   // sizeof(Point), _Alignof(Point)
+let base = b.stack_addr(slot);
+
+let o = b.iconst(X, Type::I64);
+let addr = b.add(base, o);
+let six = b.iconst(6, Type::I32);
+b.store(addr, six);                       // p.x = 6
+# b.ret(Some(base));
+# let _ = b.finalize()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Arrays work the same way with a computed offset instead of a constant one:
+multiply the index by the element size and add. The optimizer folds what it can
+into x86 addressing modes, including the scale.
+
+Two fields of one struct are two locations, and the alias analysis knows it: a
+store to `p->x` does not stop a load of `p->tag` being forwarded, because their
+`[offset, offset + width)` ranges do not overlap.
+
+## Tagged enums
+
+A tagged enum is a struct whose first field is the tag and whose second is a
+payload big enough for the widest variant. Reading one is a load of the tag, a
+comparison, and a branch per variant; the arms rejoin at a block that takes the
+result as a parameter.
+
+`enum Value { Int(i64), Float(f64) }` as `{ i64 tag; union { i64; f64 } payload; }`:
+
+```rust
+# use blitz::ir::builder::FunctionBuilder;
+# use blitz::ir::condcode::CondCode;
+# use blitz::ir::types::Type;
+const TAG: i64 = 0;
+const PAYLOAD: i64 = 8;
+const TAG_INT: i64 = 0;
+
+// fn as_i64(v: *const Value) -> i64 {
+//     match v { Int(i) => i, Float(f) => f as i64 }
+// }
+let mut b = FunctionBuilder::new("as_i64", &[Type::I64], &[Type::I64]);
+let v = b.params()[0];
+
+let int_arm = b.create_block();
+let float_arm = b.create_block();
+let (done, done_p) = b.create_block_with_params(&[Type::I64]);
+
+let o = b.iconst(TAG, Type::I64);
+let tag_addr = b.add(v, o);
+let tag = b.load(tag_addr, Type::I64);
+let want = b.iconst(TAG_INT, Type::I64);
+let is_int = b.icmp(CondCode::Eq, tag, want);
+b.branch(is_int, int_arm, float_arm, &[], &[]);
+
+b.set_block(int_arm);
+let o = b.iconst(PAYLOAD, Type::I64);
+let a = b.add(v, o);
+let i = b.load(a, Type::I64);            // read the payload as i64
+b.jump(done, &[i]);
+
+b.set_block(float_arm);
+let o = b.iconst(PAYLOAD, Type::I64);
+let a = b.add(v, o);
+let f = b.load(a, Type::F64);            // same address, read as f64
+let as_int = b.float_to_int(f, Type::I64);
+b.jump(done, &[as_int]);
+
+b.set_block(done);
+b.ret(Some(done_p[0]));                  // whichever arm ran passed its value
+# let _ = b.finalize()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The union is just the two `load`s: one address, two types. Because the payload is
+read with the variant's own type, the `F64` arm lands in an XMM register and the
+`I64` arm in a general-purpose one, without you saying so.
+
+The merge block's parameter is the `match` expression's value. This is the
+pattern for any expression whose value depends on which branch ran; with more
+than two variants, chain the comparisons and have every arm jump to the same
+`done`.
+
 ## Calls
 
 ```rust
