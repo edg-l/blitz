@@ -1596,15 +1596,22 @@ fn detect_blockparam_slot_routing(
                 if (at_point as usize).saturating_sub(budget as usize) * 2 <= spillable {
                     continue;
                 }
-                let mut candidates: Vec<VReg> = groups
+                // Walked from what is live here rather than from every
+                // parameter in the function: the candidates are the parameters
+                // live at this point, and there are a handful of those against
+                // thousands of the others. Scanning the groups instead made this
+                // the hottest loop in the compiler on a function with 3763
+                // blocks. The sort below is a total order, so the order the
+                // candidates arrive in does not reach the result.
+                let mut candidates: Vec<VReg> = live_sets[point]
                     .iter()
-                    .filter(|(vreg, group)| {
-                        group.reg_class == class
-                            && !route.contains(*vreg)
-                            && live_sets[point].contains(**vreg)
-                            && routable(**vreg, group)
+                    .filter(|vreg| {
+                        groups.get(vreg).is_some_and(|group| {
+                            group.reg_class == class
+                                && !route.contains(vreg)
+                                && routable(*vreg, group)
+                        })
                     })
-                    .map(|(vreg, _)| *vreg)
                     .collect();
                 // Cheapest first: a parameter read fewer times costs fewer reloads.
                 candidates.sort_by_key(|v| (use_counts.get(v).copied().unwrap_or(0), v.0));

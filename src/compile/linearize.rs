@@ -120,7 +120,7 @@ pub(super) fn linearize(
     // block to block and only the difference is paid -- a bucket leaves when
     // its emitter stops dominating and comes back, with the VRegs it had, when
     // it starts again.
-    let mut removed_emitters: BTreeSet<usize> = BTreeSet::new();
+    let mut emitter_removed: Vec<bool> = vec![false; func.blocks.len()];
     let mut removed_vregs: BTreeMap<ClassId, VReg> = BTreeMap::new();
     // Emitter blocks with at least one class that must be re-emitted even under
     // a dominating emitter. Those depend on which block is being processed, so
@@ -153,33 +153,33 @@ pub(super) fn linearize(
         // blocks are out of the map, so they get fresh VRegs here, and classes
         // whose value lives in a fixed physical register are out of it too,
         // since no such register survives a block boundary.
-        let want: BTreeSet<usize> = emitter_blocks
-            .iter()
-            .copied()
-            .filter(|&e| !dom.dominates(e, block_idx))
-            .collect();
-        for &emitter in want.difference(&removed_emitters) {
-            for &cid in &emitted_by[emitter] {
-                if let Some(vreg) = class_to_vreg.remove(cid) {
-                    removed_vregs.insert(cid, vreg);
+        for &emitter in &emitter_blocks {
+            let out_of_scope = !dom.dominates(emitter, block_idx);
+            if out_of_scope == emitter_removed[emitter] {
+                continue;
+            }
+            emitter_removed[emitter] = out_of_scope;
+            if out_of_scope {
+                for &cid in &emitted_by[emitter] {
+                    if let Some(vreg) = class_to_vreg.remove(cid) {
+                        removed_vregs.insert(cid, vreg);
+                    }
+                }
+            } else {
+                for &cid in &emitted_by[emitter] {
+                    if let Some(vreg) = removed_vregs.remove(&cid) {
+                        class_to_vreg.insert_single(cid, vreg);
+                    }
                 }
             }
         }
-        for &emitter in removed_emitters.difference(&want) {
-            for &cid in &emitted_by[emitter] {
-                if let Some(vreg) = removed_vregs.remove(&cid) {
-                    class_to_vreg.insert_single(cid, vreg);
-                }
-            }
-        }
-        removed_emitters = want;
 
         // Flags are clobbered by any arithmetic instruction and a division's
         // pair lives in RAX and RDX, so those are re-emitted in every block that
         // names them, dominating emitter or not.
         let mut reemit_removed: Vec<(ClassId, VReg)> = Vec::new();
         for &emitter in &reemit_emitters {
-            if emitter == block_idx || removed_emitters.contains(&emitter) {
+            if emitter == block_idx || emitter_removed[emitter] {
                 continue;
             }
             for &cid in &reemit_per_block[emitter] {

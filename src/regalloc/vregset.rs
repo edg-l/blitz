@@ -19,17 +19,61 @@ use crate::egraph::extract::VReg;
 
 const BITS: usize = 64;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// A set is sized for the whole function's VRegs but holds a handful of live
+/// values, so every query that walked all of `words` walked a thousand empty
+/// ones to reach them. `summary` marks which words are non-empty -- one bit per
+/// word, so a second level 64 times smaller -- and the walks go through it. On a
+/// function with 16161 values that turned the pressure query from 253 word reads
+/// per program point into one or two.
+#[derive(Clone, Debug, Default, Eq)]
 pub struct VRegSet {
     words: Vec<u64>,
+    /// Bit `w` is set exactly when `words[w] != 0`.
+    summary: Vec<u64>,
+}
+
+impl PartialEq for VRegSet {
+    fn eq(&self, other: &Self) -> bool {
+        // `summary` is derived, and two equal sets can carry different trailing
+        // capacity, so the members are the comparison.
+        let common = self.words.len().min(other.words.len());
+        self.words[..common] == other.words[..common]
+            && self.words[common..].iter().all(|w| *w == 0)
+            && other.words[common..].iter().all(|w| *w == 0)
+    }
 }
 
 impl VRegSet {
     /// An empty set sized for VRegs `0..vregs` without reallocating.
     pub fn with_capacity(vregs: usize) -> Self {
+        let words = vregs.div_ceil(BITS);
         Self {
-            words: vec![0; vregs.div_ceil(BITS)],
+            words: vec![0; words],
+            summary: vec![0; words.div_ceil(BITS)],
         }
+    }
+
+    fn mark(&mut self, w: usize) {
+        let (sw, bit) = (w / BITS, w % BITS);
+        if sw >= self.summary.len() {
+            self.summary.resize(sw + 1, 0);
+        }
+        self.summary[sw] |= 1u64 << bit;
+    }
+
+    fn unmark(&mut self, w: usize) {
+        let (sw, bit) = (w / BITS, w % BITS);
+        if let Some(word) = self.summary.get_mut(sw) {
+            *word &= !(1u64 << bit);
+        }
+    }
+
+    /// The indices of the non-empty words, ascending.
+    fn live_words(&self) -> impl Iterator<Item = usize> + '_ {
+        self.summary
+            .iter()
+            .enumerate()
+            .flat_map(|(sw, &word)| BitsOf(word).map(move |bit| sw * BITS + bit as usize))
     }
 
     pub fn insert(&mut self, v: VReg) {
@@ -38,12 +82,16 @@ impl VRegSet {
             self.words.resize(w + 1, 0);
         }
         self.words[w] |= 1u64 << bit;
+        self.mark(w);
     }
 
     pub fn remove(&mut self, v: VReg) {
         let (w, bit) = (v.0 as usize / BITS, v.0 as usize % BITS);
         if let Some(word) = self.words.get_mut(w) {
             *word &= !(1u64 << bit);
+            if *word == 0 {
+                self.unmark(w);
+            }
         }
     }
 
@@ -53,11 +101,11 @@ impl VRegSet {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.words.iter().all(|w| *w == 0)
+        self.summary.iter().all(|w| *w == 0)
     }
 
     pub fn len(&self) -> u32 {
-        self.words.iter().map(|w| w.count_ones()).sum()
+        self.live_words().map(|w| self.words[w].count_ones()).sum()
     }
 
     /// Add every member of `other`.
@@ -65,25 +113,27 @@ impl VRegSet {
         if other.words.len() > self.words.len() {
             self.words.resize(other.words.len(), 0);
         }
-        for (w, o) in self.words.iter_mut().zip(&other.words) {
-            *w |= *o;
+        for w in other.live_words().collect::<Vec<_>>() {
+            self.words[w] |= other.words[w];
+            self.mark(w);
         }
     }
 
     /// How many members are also in `mask`. This is the pressure query: `mask`
     /// holds the VRegs of one register class.
     pub fn count_in(&self, mask: &VRegSet) -> u32 {
-        self.words
-            .iter()
-            .zip(&mask.words)
-            .map(|(w, m)| (w & m).count_ones())
+        self.live_words()
+            .map(|w| match mask.words.get(w) {
+                Some(m) => (self.words[w] & m).count_ones(),
+                None => 0,
+            })
             .sum()
     }
 
     /// Members in ascending VReg order.
     pub fn iter(&self) -> impl Iterator<Item = VReg> + '_ {
-        self.words.iter().enumerate().flat_map(|(w, &word)| {
-            BitsOf(word).map(move |bit| VReg((w * BITS + bit as usize) as u32))
+        self.live_words().flat_map(move |w| {
+            BitsOf(self.words[w]).map(move |bit| VReg((w * BITS + bit as usize) as u32))
         })
     }
 }

@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::x86::abi::{CALLEE_SAVED, CALLER_SAVED_GPR, SCRATCH_GPR};
 use crate::x86::reg::{Reg, RegClass};
@@ -23,13 +24,31 @@ pub fn mcs_ordering(graph: &InterferenceGraph) -> Vec<usize> {
     let mut processed = vec![false; n];
     let mut ordering = Vec::with_capacity(n);
 
+    // Which vertex has the highest weight, kept in a heap rather than found by
+    // scanning every vertex at every step -- that scan is quadratic in the
+    // number of VRegs, and on a function with 16161 values it was the single
+    // hottest thing in the compiler.
+    //
+    // Entries are never updated in place; a vertex is pushed again whenever its
+    // weight rises, and an entry whose weight no longer matches the vertex's is
+    // skipped when it surfaces. The total number of pushes is the number of
+    // vertices plus the sum of their degrees.
+    //
+    // `Reverse` on the index reproduces the scan's tie-break exactly: highest
+    // weight first, and the smallest index among equal weights. The ordering
+    // decides the colours, so anything else here changes the emitted code.
+    let mut queue: BinaryHeap<(usize, Reverse<usize>)> = BinaryHeap::with_capacity(n);
+    for v in 0..n {
+        queue.push((0, Reverse(v)));
+    }
+
     for _ in 0..n {
-        // Pick the unprocessed vertex with the highest weight.
-        // On ties, pick the one with the smallest index (stable).
-        let v = (0..n)
-            .filter(|&i| !processed[i])
-            .max_by_key(|&i| (weight[i], usize::MAX - i))
-            .expect("at least one unprocessed vertex");
+        let v = loop {
+            let (w, Reverse(cand)) = queue.pop().expect("at least one unprocessed vertex");
+            if !processed[cand] && weight[cand] == w {
+                break cand;
+            }
+        };
 
         processed[v] = true;
         ordering.push(v);
@@ -38,6 +57,7 @@ pub fn mcs_ordering(graph: &InterferenceGraph) -> Vec<usize> {
         for &neighbor in &graph.adj[v] {
             if !processed[neighbor] {
                 weight[neighbor] += 1;
+                queue.push((weight[neighbor], Reverse(neighbor)));
             }
         }
     }
