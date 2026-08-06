@@ -1,6 +1,13 @@
-// KNOWN FAILING -- wrong value at BOTH levels. Do not "fix" by weakening it.
+// NO LONGER REPRODUCES. Kept for the shape it exercises; it belongs in
+// `tests/lit/` as a regression test rather than here. Do not "fix" it by
+// weakening it.
 //
 //   cc -O0 and cc -O2   666
+//   blitz -O0           666
+//   blitz -O1           666
+//
+// What it looked like when it was found, and why that mattered:
+//
 //   blitz -O0            742
 //   blitz -O1            742
 //

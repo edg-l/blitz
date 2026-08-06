@@ -1484,13 +1484,13 @@ stops being a hazard the pipeline has to remember.
 
 ---
 
-## State after steps 0 through 5b
+## State after steps 0 through 5c
 
-Gates: 934 unit, 474 lit at `BLITZ_VERIFY` off/1/strict, 299 differential + `cc`,
+Gates: 934 unit, 476 lit at `BLITZ_VERIFY` off/1/strict, 300 differential + `cc`,
 and 0 machine-verifier violations over 180 generated program-levels. Code quality
-has a baseline too: `bash tests/run_codesize.sh --check`, 888 rows.
+has a baseline too: `bash tests/run_codesize.sh --check`, 890 rows.
 
-Steps 0, 1, 2, 3, 3b, 4, 5 and 5b are done. What each measured is in its own
+Steps 0, 1, 2, 3, 3b, 4, 5, 5b and 5c are done. What each measured is in its own
 notes above, including the predictions that were stated first and the ones that
 were wrong.
 
@@ -1509,11 +1509,13 @@ The 60-seed figures this section quoted before steps 1 and 2, for comparison:
 | `args` | 53/60 | 8, mostly `-O0` |
 | `pressure` | 24/60 | 36, **all** `-O1` |
 
-**Every remaining failure on every shape is `register pressure overshoot`.** No
-wrong-value program is open and `tests/fuzz/findings/` is empty — a first for this
-corpus. Widening the generator past 30 seeds per shape is now worth doing: three
-of the four remaining failures are a shape no seed exercised until step 5b closed
-the terminator one.
+**Nothing on this corpus fails any more**, of either kind: no
+`register pressure overshoot` and no wrong value. `tests/fuzz/findings/` holds
+one file, `mixed58_extra_array_store.c`, and it no longer reproduces either --
+it prints 666 at both levels, agreeing with `cc`, so its `KNOWN FAILING` header
+is stale and it belongs in `tests/lit/` as a regression test. Widening the
+generator past 30 seeds per shape is what the corpus needs next: at this width
+it no longer distinguishes anything.
 
 Redundant block parameters, `tests/fuzz/count_trivial_phis.py`:
 

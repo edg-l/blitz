@@ -30,18 +30,21 @@ rather than overhead against it.
   atomics, sanitizers, LTO, PGO. These are what a *shipping* compiler needs, not
   what a *good* optimizer needs. Revisit only if one blocks measurement.
 
-## Current state (2026-08-05)
+## Current state (2026-08-06)
 
-- 934 Rust tests + 474 lit tests, all green. `cargo fmt` clean.
+- 934 Rust tests + 476 lit tests, all green. `cargo fmt` clean.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 298 tests compared O0-vs-O1 and against a
+- `bash tests/lit/run_diff.sh`: 300 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
-- Generated programs, per (seed, level) pair at 30 seeds per shape: `mixed`
-  29/30, `args` 29/30, `pressure` 14/30. **Every remaining failure on every shape
-  is capacity** (`register pressure overshoot`); no wrong-value program is open
-  and `tests/fuzz/findings/` is empty. (The 60-seed figures this section used to
-  quote were `mixed` 58/60, `args` 53/60, `pressure` 24/60 -- the same picture.)
-- Code quality has a baseline: `bash tests/run_codesize.sh --check`, 888 rows
+- Generated programs, per (seed, level) pair at 30 seeds per shape: **`mixed`
+  30/30, `args` 30/30, `pressure` 30/30 -- every generated program compiles and
+  prints what the generator predicted.** No failure of any kind is open on this
+  corpus, and no wrong-value program is open. `tests/fuzz/findings/` holds one
+  file, `mixed58_extra_array_store.c`, which no longer reproduces: it prints 666
+  at both levels, agreeing with `cc`. It belongs in `tests/lit/` as a regression
+  test now rather than in `findings/`. (The 60-seed figures this section used to
+  quote were `mixed` 58/60, `args` 53/60, `pressure` 24/60.)
+- Code quality has a baseline: `bash tests/run_codesize.sh --check`, 890 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
