@@ -125,18 +125,23 @@ impl ClassVRegMap {
     /// Implemented as `insert_full_range`. Retained for construction sites that
     /// haven't been migrated to `insert_full_range` yet.
     pub fn insert_single(&mut self, class: ClassId, vreg: VReg) {
-        // Remove the old segment for this class (if any) from the inverse index.
-        if let Some(segs) = self.segments.get(&class) {
-            for seg in segs.iter() {
-                self.vreg_to_class_segs.remove(&seg.vreg);
-            }
+        // One `entry` for the class rather than a get, a remove and an insert:
+        // linearize's scope restore calls this once per class per block, so each
+        // extra descent of the tree is paid block-count times.
+        let segs = self.segments.entry(class).or_default();
+        for seg in segs.drain(..) {
+            self.vreg_to_class_segs.remove(&seg.vreg);
         }
-        self.segments.remove(&class);
-        // Also remove the target vreg's existing inverse-index entry if it was
-        // previously assigned to a different class; insert_single is an explicit
-        // overwrite and may legitimately move a VReg to a new class.
-        self.vreg_to_class_segs.remove(&vreg);
-        self.insert_full_range(class, vreg);
+        let start = ProgramPoint::block_entry(0);
+        let end = ProgramPoint {
+            block: u32::MAX,
+            inst: u32::MAX,
+        };
+        segs.push(Segment { vreg, start, end });
+        // The insert overwrites whatever class previously claimed `vreg`:
+        // insert_single is an explicit overwrite and may legitimately move a
+        // VReg to a new class.
+        self.vreg_to_class_segs.insert(vreg, (class, start, end));
     }
 
     // ── Lookup ───────────────────────────────────────────────────────────────
