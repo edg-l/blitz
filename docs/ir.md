@@ -156,67 +156,101 @@ does the same for a named global.
 ## Structs
 
 There is no struct type, and you do not need one. A struct is a block of memory
-plus a constant offset per field, so you decide the layout and address the fields
-with ordinary arithmetic. Nothing about it is special-cased.
+plus a constant offset per field, so the layout is the frontend's decision —
+padding rules belong to your source language, not to the backend — and blitz only
+ever sees the resulting integers.
 
-Take `struct Point { int x; int y; long tag; }`. On SysV that is offsets 0, 4 and
-8, size 16, align 8; pick the offsets to match whatever ABI you are
-interoperating with:
+`Layout` works those integers out for you. `Layout::c` applies C and SysV rules,
+`Layout::packed` adds no padding, `Layout::array` strides by the element's size,
+and `Layout::explicit` takes offsets you state outright:
+
+```rust
+# use blitz::ir::layout::Layout;
+# use blitz::ir::types::Type;
+// struct Point { int x; int y; long tag; }
+let point = Layout::c(&[Type::I32, Type::I32, Type::I64]);
+assert_eq!(point.offsets(), [0, 4, 8]);
+assert_eq!(point.size(), 16);
+assert_eq!(point.align(), 8);
+```
+
+`field_addr`, `load_field` and `store_field` then address a field by index, using
+the field's own type as the access width:
 
 ```rust
 # use blitz::ir::builder::FunctionBuilder;
+# use blitz::ir::layout::Layout;
 # use blitz::ir::types::Type;
-const X: i64 = 0;
-const Y: i64 = 4;
-const TAG: i64 = 8;
-
+# let point = Layout::c(&[Type::I32, Type::I32, Type::I64]);
 // fn dot(p: *const Point) -> i64 { p->x * p->y + p->tag }
 let mut b = FunctionBuilder::new("dot", &[Type::I64], &[Type::I64]);
 let p = b.params()[0];
 
-let mut field = |b: &mut FunctionBuilder, off: i64, ty: Type| {
-    let o = b.iconst(off, Type::I64);
-    let addr = b.add(p, o);
-    b.load(addr, ty)
-};
-let x = field(&mut b, X, Type::I32);
-let y = field(&mut b, Y, Type::I32);
-let tag = field(&mut b, TAG, Type::I64);
+let x = b.load_field(p, &point, 0);      // I32, at offset 0
+let y = b.load_field(p, &point, 1);      // I32, at offset 4
+let tag = b.load_field(p, &point, 2);    // I64, at offset 8
 
 let prod = b.mul(x, y);
-let prod = b.sext(prod, Type::I64);
+let prod = b.sext(prod, Type::I64);      // widen before adding to the I64 tag
 let r = b.add(prod, tag);
 b.ret(Some(r));
 # let _ = b.finalize()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Note the field's own type on each `load`: `I32` for the `int`s, `I64` for the
-`long`. That is what decides the access width, and `sext` widens the `I32`
-product before it is added to the `I64` tag.
-
-Writing fields is the same with `store`, and a *local* struct is a stack slot:
+A *local* struct is a stack slot sized and aligned from the same layout:
 
 ```rust
 # use blitz::ir::builder::FunctionBuilder;
+# use blitz::ir::layout::Layout;
 # use blitz::ir::types::Type;
-# const X: i64 = 0;
+# let point = Layout::c(&[Type::I32, Type::I32, Type::I64]);
 let mut b = FunctionBuilder::new("local", &[], &[Type::I64]);
-let slot = b.create_stack_slot(16, 8);   // sizeof(Point), _Alignof(Point)
-let base = b.stack_addr(slot);
+let base = b.alloc_layout(&point);       // stack slot + its address
 
-let o = b.iconst(X, Type::I64);
-let addr = b.add(base, o);
 let six = b.iconst(6, Type::I32);
-b.store(addr, six);                       // p.x = 6
-# b.ret(Some(base));
+b.store_field(base, &point, 0, six);     // p.x = 6
+let tag = b.load_field(base, &point, 2);
+b.ret(Some(tag));
 # let _ = b.finalize()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Arrays work the same way with a computed offset instead of a constant one:
-multiply the index by the element size and add. The optimizer folds what it can
-into x86 addressing modes, including the scale.
+Arrays use `elem_addr(base, index, elem_size)`, which is `base + index *
+elem_size` written the way the addressing-mode rules expect, so an element size
+of 1, 2, 4 or 8 folds into the scale:
+
+```rust
+# use blitz::ir::builder::FunctionBuilder;
+# use blitz::ir::types::Type;
+// fn nth(a: *const i64, i: i64) -> i64 { a[i] }
+let mut b = FunctionBuilder::new("nth", &[Type::I64, Type::I64], &[Type::I64]);
+let p = b.params().to_vec();
+let addr = b.elem_addr(p[0], p[1], 8);
+let v = b.load(addr, Type::I64);
+b.ret(Some(v));
+# let _ = b.finalize()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+That is one instruction, the index scaled inside the addressing mode:
+
+```asm
+nth:
+    mov    (%rdi,%rsi,8),%rax
+    ret
+```
+
+Prefer these over hand-written `add`/`iconst`. The rules that fold arithmetic
+into an addressing mode match on *structure*, so an address built a different way
+can silently miss the fold and cost an instruction with nothing to report it.
+Going through `offset`, `elem_addr` and the field helpers is the supported way
+onto that path. Nothing stops you doing the arithmetic yourself when you need a
+shape they do not cover.
+
+Layouts nest. `Layout::compose` takes members rather than types, so a struct can
+contain a struct or an array, and a nested field's `ty` is `None` because it has
+no single access width — take its `field_addr` and read its own fields.
 
 Two fields of one struct are two locations, and the alias analysis knows it: a
 store to `p->x` does not stop a load of `p->tag` being forwarded, because their

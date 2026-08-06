@@ -35,7 +35,11 @@ impl Type {
     }
 
     /// Byte size of the type, or `None` for `Flags` and `Pair`.
-    pub(crate) fn byte_size(&self) -> Option<usize> {
+    ///
+    /// The natural size a frontend lays a field out with; see
+    /// [`Self::align_bytes`] for the matching alignment and
+    /// [`crate::ir::layout::Layout`] for putting the two together.
+    pub fn byte_size(&self) -> Option<usize> {
         match self {
             Type::I8 => Some(1),
             Type::I16 => Some(2),
@@ -45,5 +49,16 @@ impl Type {
             Type::F64 => Some(8),
             Type::Flags | Type::Pair(_, _) => None,
         }
+    }
+
+    /// Natural alignment in bytes, or `None` for `Flags` and `Pair`.
+    ///
+    /// Every scalar this backend has is naturally aligned to its own size on
+    /// x86-64, so this equals [`Self::byte_size`]. It exists separately because
+    /// a layout is written in terms of both, and a frontend that says
+    /// `align_bytes` where it means alignment keeps saying what it means if that
+    /// ever stops being true.
+    pub fn align_bytes(&self) -> Option<usize> {
+        self.byte_size()
     }
 }

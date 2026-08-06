@@ -6,6 +6,7 @@ use crate::egraph::{EGraph, ENode};
 use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function, StackSlot, StackSlotData};
+use crate::ir::layout::Layout;
 use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 
@@ -525,6 +526,77 @@ impl FunctionBuilder {
             children: smallvec![flags.0, t.0, f.0],
         };
         self.add_node(node)
+    }
+
+    // ── Address arithmetic ────────────────────────────────────────────────────
+    //
+    // Sugar over `add` and `iconst`, emitting the shape the addressing-mode
+    // rules match. They exist for two reasons. One is that a frontend should not
+    // have to spell out `iconst` and `add` to reach a struct field. The other is
+    // that the rules that fold arithmetic into an x86 addressing mode match on
+    // structure, so an address built a different way silently misses the fold
+    // and costs an instruction with nothing to report it -- going through these
+    // is the supported way onto that path.
+
+    /// `base + bytes`, the address of something at a constant displacement.
+    ///
+    /// Folds into the displacement of a load or store rather than becoming an
+    /// instruction of its own.
+    pub fn offset(&mut self, base: Value, bytes: i64) -> Value {
+        if bytes == 0 {
+            return base;
+        }
+        let off = self.iconst(bytes, Type::I64);
+        self.add(base, off)
+    }
+
+    /// `base + index * elem_size`, the address of an array element.
+    ///
+    /// An `elem_size` of 1, 2, 4 or 8 folds into the scale of an x86 addressing
+    /// mode; any other size becomes a multiply first, which is what the machine
+    /// requires.
+    pub fn elem_addr(&mut self, base: Value, index: Value, elem_size: i64) -> Value {
+        if elem_size == 1 {
+            return self.add(base, index);
+        }
+        let size = self.iconst(elem_size, Type::I64);
+        let scaled = self.mul(index, size);
+        self.add(base, scaled)
+    }
+
+    /// The address of field `i` of the aggregate at `base`.
+    pub fn field_addr(&mut self, base: Value, layout: &Layout, i: usize) -> Value {
+        self.offset(base, i64::from(layout.offset(i)))
+    }
+
+    /// Load field `i` of the aggregate at `base`, using the field's own type.
+    ///
+    /// # Panics
+    ///
+    /// If the field is a nested aggregate, which has no single access width.
+    /// Take its [`Self::field_addr`] and read its own fields instead.
+    pub fn load_field(&mut self, base: Value, layout: &Layout, i: usize) -> Value {
+        let ty = layout.field(i).ty.clone().unwrap_or_else(|| {
+            panic!("field {i} is a nested aggregate; use field_addr and load its fields")
+        });
+        let addr = self.field_addr(base, layout, i);
+        self.load(addr, ty)
+    }
+
+    /// Store `val` into field `i` of the aggregate at `base`.
+    pub fn store_field(&mut self, base: Value, layout: &Layout, i: usize, val: Value) {
+        let addr = self.field_addr(base, layout, i);
+        self.store(addr, val);
+    }
+
+    /// Reserve a stack slot sized and aligned for `layout`, and return the
+    /// address of it.
+    ///
+    /// The local-variable form of a struct: pair it with [`Self::load_field`]
+    /// and [`Self::store_field`].
+    pub fn alloc_layout(&mut self, layout: &Layout) -> Value {
+        let slot = self.create_stack_slot(layout.size(), layout.align());
+        self.stack_addr(slot)
     }
 
     // ── Stack slot API ────────────────────────────────────────────────────────
