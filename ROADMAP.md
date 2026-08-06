@@ -58,111 +58,72 @@ rather than overhead against it.
 
 **`docs/refactor-roadmap.md`** -- eight ordered steps with the reason for the order.
 Read it before starting anything in the register allocator, the splitter, or the
-block-parameter machinery. The two that matter:
+block-parameter machinery. **Steps 0 through 5c are done**, which closed both the
+CFG-holds-ClassIds seam (steps 1-4, the root cause behind nine wrong-code bugs and
+both failed rematerialization attempts) and the capacity failures (step 5, which
+gave the function-scope allocator a spill loop). Two steps remain, and each is
+blocked by something the document already measured:
 
-- **The CFG should hold VRegs, not ClassIds** (steps 1-4). The root cause behind the
-  seven wrong-code bugs that seam has produced -- nine now, after two more of the
-  same shape on 2026-08-05 -- and behind both failed attempts at rematerialization.
-  Steps 0, 1 and 2 are done; step 3 is next and `docs/refactor-roadmap.md` says
-  which slice first.
-
-  **It is *not* behind the capacity failures, which this plan used to claim.**
-  Step 2 shipped and cleared none of them: on the failing programs 57 of 97
-  parameters are real phis and 27 carry a value already placed in a register, so
-  neither of its conditions binds. The 85-94% figure is measured on the
-  pre-extraction IR by a tool asking a weaker question than soundness does. What
-  step 2 did buy is fewer spills and reloads everywhere (`fuzz` -8.3% spills).
-- **The function-scope allocator cannot spill** (step 5), and this is where the
-  capacity failures actually live. `run_phase5` is `Ok`-or-`Err` with no spill
-  loop, so "the splitter must be perfect" and every capacity failure is a compile
-  error rather than slow code. It comes *after* the steps above on purpose -- a
-  spiller mints new VRegs for existing classes, which is exactly what the current
-  representation handles worst. Evidence that it is the right target: removing
-  block parameters more aggressively than step 2 does made a program stop
-  compiling, because the parameter had been holding apart a live range the
-  allocator could not colour.
+- **Step 6, fold the two allocators.** The merge is not the blocker. Sending
+  single-block functions down the multi-block path is correct but costs 12 lit
+  rows, because the splitter and the early-barrier pass spill before knowing
+  whether the allocator needs them to. Skipping the splitter fails 159 lit tests.
+  So the target is `score_victim`, and the obvious replacement is wrong: dividing
+  by use count -- the standard Chaitin ratio -- costs `pressure` 28/30 -> 24/30
+  and 157 regressed fuzz rows. Whatever replaces it has to beat those numbers
+  rather than be reasoned from first principles.
+- **Step 7, split `Op` into `PureOp` / `MachOp` / `Pseudo`.** 89 variants wearing
+  one hat, and every 2026-08-03 bug in that area was a pseudo-op sitting in a
+  structure that assumes an op defines a value. It also carries a latent live
+  defect: `lower.rs` rejects every `Op::Fcmp(_)` while `cost.rs` prices
+  `Fcmp(OrdEq)` and `Fcmp(UnordNe)` finitely, so extraction may pick a node the
+  lowering match refuses. Unreachable today only because the branch path consumes
+  those nodes first.
 
 ## Priorities
 
 ### P0 -- Correctness
 
 A fast wrong answer is worthless, and an optimizer this size certainly has
-subtle bugs left. Every miscompile found so far was found by a hand-written
-test that happened to hit the right shape (see the 04-18 regalloc fix wave,
-`2c6cc8d`, `752ed7e`, `78850a2`). Hand-written tests are a weak oracle. The
-priors on where bugs live: **regalloc** (splitting, coalescing, spill/remat,
-cross-block liveness) first by a wide margin, then the **memory passes**
-(forwarding/DSE resting on a conservative alias model), then **isel width and
-type handling** (the `X86CmpI` `ty` bug was exactly this class).
+subtle bugs left. Every miscompile of the last several months was found by the
+generated corpus and its two oracles, not by a hand-written test happening to hit
+the right shape -- which is the argument for keeping the generator ahead of the
+compiler rather than treating a green suite as evidence. The priors on where bugs
+live: **regalloc** (splitting, coalescing, spill/remat, cross-block liveness)
+first by a wide margin, then the **memory passes** (forwarding/DSE resting on a
+conservative alias model), then **isel width and type handling** (the `X86CmpI`
+`ty` bug was exactly this class).
 
-- [x] **Differential execution over the lit corpus** (`tests/lit/run_diff.sh`).
-      Compiles every runnable lit test at -O0 and -O1 and compares exit status
-      and stdout; no expected output needed, only that optimization preserve
-      behavior. Found a wrong-code bug on its first run.
-- [x] **Random program generator** (`tests/fuzz/gen_c.py`, `run_fuzz.sh`).
-      UB-free by construction, interprets as it generates so the expected
-      output is known, and aims at what the corpus misses: 7-12 parameter
-      functions past the argument registers, interleaved int/double
-      signatures, and more live values than registers. Checks blitz against
-      its own prediction, -O0 vs -O1, and `cc`.
-- [x] **Shrinking** (`tests/fuzz/reduce.py`). Line-based delta debugging: a
-      candidate still counts as failing only when the reference accepts it, `cc`
-      at two levels agree, blitz still compiles it, and blitz still disagrees.
-      That last condition is what keeps the search on the bug it started from --
-      without it, it drifts onto any panic it can reach. Typical result 666 -> 247
-      lines. It cannot see a deleted `arr[k] =` initializer, since the generated
-      loops index arr by a computed expression; count them by hand afterwards.
-- [x] **A gcc/clang oracle in the harness.** O0-vs-O1 self-consistency cannot
-      see a bug that is equally wrong at both levels -- exactly how the
-      `cvtsi2sd` REX.W bug and the missing variadic `AL` survived.
-      `run_diff.sh` now also compiles with `cc` and compares. Clean against
-      both gcc and clang over 262 tests.
-- [ ] **Reference IR interpreter.** The stronger oracle: execute the IR
-      directly and compare against the compiled binary. Also lets a failure be
-      attributed to a specific pass by re-running the interpreter on the IR
-      after each stage.
-- [x] **Per-pass IR verifier** behind `BLITZ_VERIFY=1` (`src/verify.rs`): block
-      shape, unique block ids, edge targets, block-param arity and types,
-      entry-block params, `Ret`/`Call` arity, and e-graph class resolvability.
-      Green across all tests and lit.
-- [x] **Canonicalize CFG class references after every merging pass**
-      (`src/compile/canon.rs`). Effectful ops used to keep pre-merge `ClassId`s,
-      leaving every consumer to canonicalize on read -- soundness-neutral until
-      one forgets, which is what `ca2e400` was. `BLITZ_VERIFY=strict` is the
-      standing acceptance test and is green.
-- [x] **Two overlapping live ranges must not share a register**
-      (`verify::verify_register_sharing`). Runs under `BLITZ_VERIFY` after
-      allocation, against liveness recomputed from the schedules **as emitted**;
-      asking the allocator's own interference graph would be circular. Silent on
-      all 400 lit tests and every unit test, and it flags 3 of 40 fuzz programs.
-      Making it mean anything required naming everything by its coalesce
-      representative, and canonicalising `phi_uses` the same way -- it is built
-      before coalescing, so a renamed VReg there is a use with no def, which
-      carried it to the function entry and produced 101 false reports.
+**What exists**, all green and described in `CLAUDE.md`: the `-O0`-vs-`-O1`
+differential with a `cc` oracle beside it (`run_diff.sh`), the UB-free generator
+and its shrinker (`gen_c.py`, `reduce.py`), the per-pass IR verifier and its
+strict mode (`BLITZ_VERIFY`), and the machine-level verifier over the final
+instruction stream. The gate set is **fixed at four runs**; new invariants go
+inside the runs that already happen. A battery that grows every time something is
+learned stops being run between every change, and one-change-at-a-time is what
+makes attribution possible here.
 
-      What it found immediately: division quotients were pinned to RAX for their
-      whole live range, so two live quotients clobbered each other (fixed,
-      `1851865`). What it points at next: **the allocator's liveness disagrees
-      with the emitted code's.** `build_interference_into` adds an edge for every
-      simultaneously-live pair, so two VRegs could only share a register if the
-      allocator's liveness never had them live together -- while liveness
-      recomputed from the emitted schedules does. Neither VReg in the seed-20
+- [ ] **The allocator's liveness disagrees with the emitted code's.** What
+      `verify::verify_register_sharing` points at now that it is in.
+      `build_interference_into` adds an edge for every simultaneously-live pair,
+      so two VRegs could only share a register if the allocator's liveness never
+      had them live together -- while liveness recomputed from the emitted
+      schedules does. It flags 3 of 40 fuzz programs. Neither VReg in the seed-20
       report is pre-colored, so it is not a pre-coloring artifact.
 
       Related hole worth an assertion regardless: `greedy_color` and
       `interval_color` apply pre-colorings unconditionally, without checking that
       two of them sharing a color do not interfere.
-- [~] **Machine-level verification.** Frame layout is covered: four properties
-      (RSP 16-byte aligned at call sites, frame reserves spills + outgoing args,
-      red-zone preconditions, spill area does not overlap outgoing args) are
-      checked exhaustively over 12k configurations in `src/x86/abi.rs`.
-      `MachInst::defs()`/`uses()` now exist and carry three more, all under
-      `BLITZ_VERIFY` after branch relaxation: no vreg survives the rewrite, no
-      register is read that is unwritten on some path to it (forward dataflow over
-      the CFG recovered from labels and branches), and no slot is reloaded that
-      nothing stored. Still missing: callee-saved actually preserved. And none of
-      it can see a register holding the *wrong* value -- that is the differential
-      harness's job.
+- [ ] **Callee-saved registers actually preserved.** The one machine-level
+      property `MachInst::defs()`/`uses()` do not yet carry.
+- [ ] **A stronger UB guard in `reduce.py`.** It does not know about undefined
+      behaviour the reference compilers agree on by luck, which is how it deleted
+      the array initialisers and had to be corrected by hand. A third compiler, or
+      the generator re-simulating the candidate, would close it.
+- [ ] **Reference IR interpreter.** The stronger oracle: execute the IR
+      directly and compare against the compiled binary. Also lets a failure be
+      attributed to a specific pass by re-running the interpreter on the IR
+      after each stage.
 - [ ] **Rewrite-rule equivalence tests.** For each algebraic/strength rule,
       randomized equivalence check of LHS vs RHS over the operand space
       (including boundary values: 0, 1, -1, INT_MIN, INT_MAX, wraparound).
@@ -184,16 +145,12 @@ type handling** (the `X86CmpI` `ty` bug was exactly this class).
 
 Without numbers, "most optimized" is unfalsifiable and every session drifts.
 
-- [x] Benchmark harness: `bash tests/run_codesize.sh [--check|--update]`, over
-      three corpora with a baseline each in `tests/baselines/`. Instruction
-      count, `.text` bytes, spill stores and reloads per (program, level);
-      `--check` prints every change and exits non-zero on any increase. 888
-      rows: 678 `lit`, 30 `bench`, 180 `fuzz`. A generated program that does not
-      compile is a `-` row rather than an omission, so the 11 holes stay
-      visible.
-- [x] Per-function codegen stats behind a flag: `BLITZ_DEBUG=stats` prints
-      `name= insts= bytes= spills= reloads= frame= slots=` per function, counted
-      off the final instruction stream.
+**What exists**: `bash tests/run_codesize.sh [--check|--update]` over three
+corpora with a baseline each in `tests/baselines/`, fed by `BLITZ_DEBUG=stats`.
+Instruction count, `.text` bytes, spill stores and reloads per (program, level);
+a generated program that does not compile is a `-` row rather than an omission,
+so the holes stay visible.
+
 - [ ] Wall-clock via hyperfine, and the same table for `gcc -O2` / `clang -O2`
       beside blitz's own numbers. Deferred deliberately: blitz-against-itself is
       what refereed the decisions so far, and an external column moves when the
@@ -298,256 +255,61 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-All found by `bash tests/fuzz/run_fuzz.sh` and the `-O0`-vs-`-O1` differential,
-and all in the register allocator or the class-to-VReg plumbing feeding it,
-matching the standing prior that regalloc carries the highest bug density.
+**None open.** Every wrong-value bug this corpus has produced is fixed and lives
+as a lit test; `tests/fuzz/findings/` is empty. What the fixed ones are worth is
+the shape they kept having, which is the first thing to check on any new one:
 
-Three of the four fixed this session were the same shape: **a block resolved an
-e-class to the wrong VReg.** Check that first on any new wrong-value bug --
-`BLITZ_DEBUG=regalloc` dumps the final assignment, and a value with several
-VRegs where only one has the right register is the signature.
+- **A block resolved an e-class to the wrong VReg** -- nine bugs, and the reason
+  steps 1-4 of `docs/refactor-roadmap.md` exist. `BLITZ_DEBUG=regalloc` dumps the
+  final assignment, and a value with several VRegs where only one has the right
+  register is the signature.
+- **Liveness measured against one instruction order while another is emitted.**
+- **A pseudo-op's position taken for its value's position.** `Op::BlockParam` is
+  a marker; every parameter of a block already holds its register before the
+  block's first instruction runs.
 
-- [ ] **The allocator cannot resolve the pressure the splitter leaves.**
-      Overshoots reach phase 5, which aborts compilation. Every `run_fuzz.sh`
-      failure is this one.
+`CLAUDE.md` and `DEBUGGING-NOTES.md` carry these with the techniques that found
+them.
 
-      The iterate-to-fixpoint loop is now in (`7d60eab`): the caller re-plans
-      until a round finds nothing to do. It compiles three of the fuzzer's 16
-      failing configurations that could not compile before and drives every XMM
-      call-crossing overshoot to zero. It does not close the gap, and the reason
-      is now measured rather than guessed: **the splitter converges** -- it
-      reports no overshoot -- **while the allocator still needs more colors.**
-      Max live values is a lower bound on colors, not the count; precolored ABI
-      nodes and clobber phantoms constrain which color each neighbour may take,
-      so a value set that fits by pressure can still fail to color.
-      `BLITZ_DEBUG=split` prints the disagreement with each over-budget VReg,
-      the op that defines it, and its neighbours' colors.
+**The capacity failures are closed as far as this corpus can see.** They were the
+whole of `run_fuzz.sh`'s failures for months -- an overshoot reaching phase 5,
+which aborted compilation rather than spilling -- and step 5's spill loop plus
+5c's slot routing took all three shapes to 30/30. Read that as "no longer
+observable at 30 seeds a shape", not as proof: widening the generator is what
+would turn it into evidence, and the corpus no longer distinguishes anything at
+its current width.
 
-      On every remaining case the offenders are long-lived hash-consed
-      constants: one `Iconst(3)` serves `arr[3]`'s index in the entry block and
-      a `+ 3` twenty blocks later, so it holds a register in between. In one
-      fuzzer function ~100 of them are simultaneously live and the graph needs
-      117 colors. `mov reg, imm` is one instruction with no memory traffic, so
-      the register is never worth keeping.
+**The constant-remat lever is still open and still worth taking.** The offenders
+were long-lived hash-consed constants: one `Iconst(3)` serving `arr[3]`'s index
+in the entry block and a `+ 3` twenty blocks later holds a register in between,
+and one fuzzer function had ~100 simultaneously live needing 117 colors.
+`mov reg, imm` is one instruction with no memory traffic, so the register is
+never worth keeping. Two implementations were reverted, **both on the seam step 4
+has since removed rather than on the policy**:
 
-      Two ways to shorten those ranges were implemented and **both reverted**,
-      failing on the same seam rather than on the policy:
-
-      1. A splitter pre-pass rematerializing constants at cross-block uses of
-         `Iconst`, with the copies pinned to their consuming barrier's group.
-         Green on 392 lit, 264 differential and the unit tests, and it dropped
-         the -O1 overshoots from 14-18 to 10-15. **`BLITZ_VERIFY=strict`
-         rejects it**: `control/compound_assign_complex.c` emits
-         `MovMR { src: RAX }` where nothing writes RAX on the path. Segment
-         points are fixed against the post-split schedule, but coalescing and the
-         Phase 3 rebuild move instructions again, so by lowering the indices have
-         shifted a second time and the barrier resolves the value to a register
-         whose def is gone. That is the thing to fix; the pass itself is sound
-         and ~70 lines.
-         Not attempted: `StackAddr`/`GlobalAddr`, which segfault 7 lit tests on
-         their own by defeating `build_mem_addr`'s folding check, and terminator
-         uses -- where the constants that still defeat the allocator are -- which
-         need a copy at block end with a segment covering block exit.
-      2. Re-emitting `Iconst` classes per block, reusing the mechanism that
-         already does this for flags-typed classes. 62 lit failures.
-
-      **The blocker is not the policy.** Role-tagged barrier operands landed in
-      `437fd60`: the leading operands of a barrier are now the address, the
-      value, or the arguments in ABI order, and Phase 7 reads operand `i` off
-      the post-coalesce schedule instead of reconstructing which VReg holds a
-      class. That deleted `resolve_arg_regs_after_spilling` and
-      `resolve_store_val_reg_after_spilling` (-180 lines) and closed the
-      wrong-operand half of the seam.
-
-      The double-grouping defect this item used to name as the whole blocker is
-      **fixed** (`ae55ce9`): Phase 7 emits in schedule order and places each
-      effectful op at its own barrier instruction, instead of computing a second
-      barrier-group assignment on the post-allocation schedule. That was what
-      experiment 1's `BLITZ_VERIFY=strict` failure was, seen from the other end,
-      so **that experiment is unblocked and worth redoing**.
-
-      Where it stands, measured over 40 `run_fuzz.sh` mixed programs: 28 fail to
-      allocate at -O0 and 37 at -O1. That is now the dominant failure mode by a
-      wide margin -- more than four times the wrong-answer count -- and the
-      offenders are still long-lived constants.
-
-      Reserving R11 as the compiler's scratch (`SCRATCH_GPR`) cost a color, 15
-      down to 14, and moved that count by nothing: 28 before and after. Pressure
-      here is not a matter of one or two registers.
-
-      Then allocator-level spilling becomes possible too (`run_phase5` is an
-      `Err(...)` today -- the global allocator has no spill loop of its own, which
-      is why the splitter has to be perfect, and why an overshoot is a compile
-      error rather than a spill).
-- [ ] **Stack array access corrupts the frame**
-      (`tests/lit/regalloc/array_spill_frame_corruption.c`; reduced
-      from `seed5_miscompile.c`). Summing elements of an `int arr[8]`:
-      5 elements is correct, 6 prints the right value but returns exit 2, and
-      **Fixed** (`8acd79b`, `350d36a`, `386116e`) and now a live regression
-      test: four defects compounded -- a stale addressing-mode fold, load/store
-      addresses resolving to the pre-spill register, `return 0` dropped after a
-      call, and a reload emitted ahead of the store to its slot.
-- [x] **Rematerialized address emitted after the store that uses it** -- fixed
-      in `f4d36ff`. The constraint-propagation fixpoint in
-      `assign_barrier_groups` did not mark itself changed when it *created* a
-      constraint, so propagation stopped one level short of the value that
-      needed it. `seed5_miscompile.c` prints 606 at -O1, matching gcc, clang
-      and the generator.
-- [x] **seed5 segfaulted at -O0** -- fixed in `c0da070`, now a live regression
-      test at `tests/lit/regalloc/cross_block_spill_addr_reload.c`. The reloads
-      wrote RAX while the loads read RCX. Lowering resolves a Load's address
-      through a ClassId, which no operand rewrite reaches, against a per-block
-      snapshot of the class map taken before the splitter ran; without the
-      splitter's segments the address resolved to the pre-spill register.
-      `apply_plan_to` now returns what it committed and the caller replays it
-      onto every snapshot, in coordinates recomputed against the final
-      schedules -- the plan measures indices before insertion, and every
-      insertion shifts what follows.
-- [x] **A parameter re-emitted in sibling blocks lost its ABI register** --
-      fixed in `438bdc4`, test
-      `tests/lit/functions/param_reemitted_in_sibling_blocks.c`. A Param op
-      names a value the ABI already placed in a register. Emitted lazily in the
-      first block that reads it, a parameter read by both arms of a branch got
-      one VReg per arm and only one carried the precolor, so a phi copy read a
-      parameter out of a register that never held it.
-- [x] **Phi args resolved through the global class map** -- fixed in `ccc64b7`.
-      A class re-emitted per block has one VReg per block; the global map holds
-      whichever was restored last, so a block's own copies had no recorded use,
-      the allocator called them dead and gave them all one register, and every
-      phi copy read the last constant computed.
-- [x] **A live XMM parameter is clobbered by an intermediate in the merge
-      block** -- fixed in `dee0768`, and the reproducer is now
-      `tests/lit/regalloc/blockparam_live_from_block_entry.c`. Same cause as the
-      entry below.
-- [x] **A register clobbered between its def and its use because the compiler
-      grouped instructions twice** -- fixed in `ae55ce9`. The schedule is ordered
-      by barrier group before allocation and the allocator measures liveness on
-      that order; Phase 7 was computing a second grouping on the post-allocation
-      schedule and emitting in that one. It now emits in schedule order, with each
-      barrier instruction standing in for its effectful op.
-- [x] **A block param was not live from block entry** -- fixed in `dee0768`, test
-      `tests/lit/regalloc/blockparam_live_from_block_entry.c`. A `BlockParam`
-      computes nothing, but its pseudo-op sat wherever scheduling left it and
-      liveness reads a def position as the start of a live range, so a param
-      whose pseudo-op the backward pass pulled down next to its use looked dead
-      over the earlier part of its own block. Hoisting the markers to the front
-      of the block was necessary and not sufficient: later passes *insert* between
-      them, and a value that lives and dies in that run still takes a parameter's
-      register. Closed by `b5c0667`, test
-      `tests/lit/regalloc/param_shadow_const_v7.c` -- each parameter now
-      interferes with everything the block names before its last marker, the
-      splitter measures the same thing, and the slot-routing target is the budget
-      less what else that run names.
-- [x] **Parallel copy sequentialization dropped copies and panicked** -- fixed in
-      `12719c3`. It walked cycles through a `src -> dst` map, which cannot
-      represent a source fanning out to two destinations, and a one-element cycle
-      (a self-copy) indexed past the end. Now driven by the invariant rather than
-      the cycle shape, with a property test that simulates the emitted sequence
-      over ten copy shapes.
-- [x] **The integer half of a long sum was a constant unrelated to its inputs**
-      -- fixed, and now `tests/lit/regalloc/loop_latch_param_passthrough.c`
-      (blitz printed 25 against cc's -134). One-term perturbation located it:
-      all eight array terms contributed correctly and all ten integer terms
-      contributed nothing. Two seams disagreed about where a block param lives at
-      the exit of a latch that hands every param back to its header. Liveness
-      resolved the arg class at the latch's exit, which nothing covers once the
-      header spills the param, so the value looked dead over the loop body and
-      the allocator gave its register to the latch's counter increment. Emission
-      resolved the same class through the coalesce-alias fallback, which was
-      built one `insert_single` per segment and so answered with whichever
-      segment came last -- a reload from an unrelated block, sharing one scratch
-      register with every other reload.
-- [x] **The scratch register was allocatable.** Lowering used R11 for the
-      three-address fixup, 64-bit constant materialisation and parallel-copy
-      cycle breaking while `allocatable_gpr_order` still handed it out, so a
-      value living there was clobbered by any of them. A phi copy that *read*
-      R11 inside a cycle hung the compiler outright: parking the scratch in
-      itself rewrites nothing, so `sequentialize_copies` spun on an unchanged
-      worklist. `SCRATCH_GPR` is excluded from allocation now, which is what
-      makes all of those sound. Found only because a fuzz sweep sat at 99.9% CPU;
-      `run_fuzz.sh` times each compile out and reports a hang as one.
-
-Measured per (seed, level) pair, 60 seeds per generator shape: `mixed` 57/60,
-`args` 52/60, `pressure` 24/60. Every `pressure` failure is
-`register pressure overshoot` -- capacity, not correctness. Two wrong-value
-programs remain, both wrong at *both* optimization levels, which is a signature
-only the `cc` oracle sees; the smaller is
-`tests/fuzz/findings/mixed58_extra_array_store.c` and
-`docs/terminator-args-next-steps.md` item 9 has the analysis.
-
-## Tooling to build next
-
-Ranked by what actually cost time while fixing the bugs above, not by
-generality.
-
-- [x] **Machine-level verifier over the final MachInst stream** (`8d99493`).
-      `MachInst::defs()`/`uses()` for all 79 variants, plus forward dataflow
-      over the CFG recovered from labels and branches, meeting predecessors
-      with intersection. Reports a read of a register not written on some path
-      to it, and any surviving virtual register. Runs under `BLITZ_VERIFY`
-      after branch relaxation; green everywhere.
-      Known limit: it cannot see a register that holds the *wrong* value, which
-      is what seed5 does at -O0. Value errors stay the differential harness's
-      job.
-- [x] **Spill-slot check** (`12719c3`). A reload must not read a slot nothing
-      stored: same forward dataflow, keyed by frame displacement, scoped to the
-      slot region of the frame (user stack slots are written through computed
-      addresses this does not track, and the outgoing-argument area belongs to
-      the caller). Green everywhere including the open findings, which is itself
-      evidence about where those bugs are not.
-- [ ] **Callee-saved preservation**: a callee-saved register written in the body
-      must be saved and restored.
-- [ ] **Two live ranges in one register.** The def-before-use check cannot see
-      it, and it is what three of this session's bugs came down to. Needs the
-      allocator's own liveness at hand to compare against the emitted stream.
-- [x] **Effectful-operand resolution check** (`BLITZ_VERIFY`, in
-      `lower_effectful_op`). The register a Load or Store reads must be one the
-      barrier consuming it declares as an operand. Kept as a backstop now that
-      `437fd60` reads roles positionally: the fallback to the class map is still
-      there for a barrier that records nothing, and this catches it resolving
-      outside the operand list, which is what the seed5 bug did. It cannot see a
-      register that holds the wrong *value* -- that stays the differential
-      harness's job.
-- [x] **Splitter/allocator disagreement report** (`7d60eab`). When the coloring
-      needs more colors than the budget, `BLITZ_DEBUG=split` prints each
-      over-budget VReg with the op that defines it, whether it is precolored, its
-      degree, and the colors its neighbours hold -- which separates real clique
-      pressure from a precolor or ordering artifact. This is what identified
-      long-lived constants as the whole remaining overshoot. Not an assertion:
-      the two models legitimately differ (pressure bounds colors from below), so
-      the useful artifact is the explanation, not equality.
-- [x] **`BLITZ_DEBUG=split`** (`7d60eab`). Per-instruction pressure beside the
-      live sets that produced it, every overshoot the splitter acts on, the plan
-      it commits (insertions, operand rewrites, segments, truncations, slots),
-      and the schedules after it. `BLITZ_DEBUG=regalloc` also dumps the final
-      function-wide VReg-to-register assignment, which the global allocator
-      never printed.
-- [x] **Delta debugger** (`tests/fuzz/reduce.py`, `12719c3`). Line-based; keeps a
-      deletion when the reference compiler still accepts the program, `cc -O0`
-      and `cc -O2` still agree (the cheap check that the reduction has not
-      introduced undefined behaviour and started comparing against noise), blitz
-      still compiles it, and blitz still disagrees. That third condition is
-      load-bearing: without it the search drifts onto any panic it can reach, and
-      the first run turned a wrong-value bug into a missing-return crash in nine
-      steps. Cut seed 6 from 120 lines to 64.
-      It does not know about UB the reference compilers agree on by luck -- it
-      deleted the array initialisers and had to be corrected by hand. A stronger
-      guard (a third compiler, or the generator re-simulating the candidate)
-      would help.
+1. A splitter pre-pass rematerializing constants at cross-block `Iconst` uses,
+   with copies pinned to their consuming barrier's group. Sound and ~70 lines; it
+   dropped -O1 overshoots from 14-18 to 10-15 and was rejected by
+   `BLITZ_VERIFY=strict` because segment points were fixed against the post-split
+   schedule while coalescing moved instructions again.
+   Not attempted: `StackAddr`/`GlobalAddr`, which segfault 7 lit tests on their
+   own by defeating `build_mem_addr`'s folding check, and terminator uses, which
+   need a copy at block end with a segment covering block exit.
+2. Re-emitting `Iconst` classes per block, reusing the flags-typed mechanism. 62
+   lit failures.
 
 ## Tech debt
 
 - [ ] `docs/split-pass-plan.md` Phase 8 and Final Audit are unchecked. The audit
-      requires zero hits for `coalesce_aliases`; there are 17 across
-      `regalloc/mod.rs`, `global_allocator.rs`, `compile/terminator.rs`,
-      `compile/mod.rs`. Decide whether it is now load-bearing, then finish or
-      amend the plan.
-- [ ] `src/compile/mod.rs` is ~1600 lines; split it.
-- [ ] Clear the remaining clippy backlog (~29 warnings, cosmetic).
-- [ ] `README.md` says 315 tests and omits forwarding/DSE/splitter from the
-      pipeline diagram.
-- [ ] Handoffs live in gitignored `.claude/handoff/` and are not in Engram, so
-      session continuity is invisible to a fresh agent.
+      requires zero hits for `coalesce_aliases`; there are 25. Decide whether it
+      is now load-bearing, then finish or amend the plan.
+- [ ] Clear the clippy backlog (47 warnings, cosmetic), including the
+      `unused_mut` on `let mut emit` at `src/schedule/scheduler.rs:265`.
+- [ ] `README.md` quotes 917 unit / 406 lit / 268 differential and omits
+      forwarding, DSE and the splitter from its pipeline diagram.
+- [ ] File sizes, with no evidence of harm attached to any of them:
+      `compile/tests.rs` 3751 lines, `egraph/algebraic.rs` 2289,
+      `compile/mod.rs` 1865. A rule set being long is fine.
 
 ## Decisions worth not relitigating
 
