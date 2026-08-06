@@ -55,6 +55,7 @@ mod licm;
 mod lower;
 use lower::lower_block_pure_ops;
 mod precolor;
+pub(crate) mod pressure;
 use precolor::{add_call_precolors_for_block, assign_param_vregs_from_map};
 mod terminator;
 use terminator::{lower_terminator, thread_branches};

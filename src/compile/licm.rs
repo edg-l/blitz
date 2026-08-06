@@ -344,50 +344,16 @@ fn collect_effectful_operands(func: &Function, block_indices: &BTreeSet<usize>) 
 
 /// How many values of each register class the loop body already needs.
 ///
-/// Hoisting is paid for out of what is left of the register file, so the budget
-/// needs the demand. Counted as the distinct classes the body's effectful ops
-/// name, plus the header's parameters -- every one of those is a value the loop
-/// carries. It is an estimate: this runs before saturation and long before
-/// scheduling, so the classes here are not yet the VRegs the allocator will
-/// colour. It does not have to be exact. It has to separate a loop that is
-/// already full from one with room, and on this corpus that is not a close call.
+/// A header parameter is live across the whole body by construction, so the
+/// loop carries every one of them; the rest is the widest single point in the
+/// body. See [`super::pressure`] for why it is the widest point and not the sum.
 fn loop_demand(func: &Function, egraph: &EGraph, loop_info: &LoopInfo) -> (u32, u32) {
-    // What the loop carries: a header parameter is live across the whole body by
-    // construction, so every one of them is occupied the entire time.
-    let mut gpr = 0;
-    let mut xmm = 0;
-    for ty in &func.blocks[loop_info.header_idx].param_types {
-        if ty.is_float() {
-            xmm += 1;
-        } else {
-            gpr += 1;
-        }
-    }
-    // What the body needs at once, taken as the widest single effectful op
-    // rather than the sum over the body. Summing counts a long straight run of
-    // statements as though all of its values were live together, which reads
-    // every large body as full and refuses the hoists that pay on small loops.
-    let mut widest_gpr = 0;
-    let mut widest_xmm = 0;
-    for &block_idx in &loop_info.body {
-        for op in &func.blocks[block_idx].ops {
-            let mut named: BTreeSet<ClassId> = BTreeSet::new();
-            op.for_each_class_id(|cid| {
-                named.insert(egraph.unionfind.find_immutable(cid));
-            });
-            let (mut g, mut x) = (0, 0);
-            for cid in named {
-                if egraph.class(cid).ty.is_float() {
-                    x += 1;
-                } else {
-                    g += 1;
-                }
-            }
-            widest_gpr = widest_gpr.max(g);
-            widest_xmm = widest_xmm.max(x);
-        }
-    }
-    (gpr + widest_gpr, xmm + widest_xmm)
+    super::pressure::concurrent_demand(
+        func,
+        egraph,
+        loop_info.body.iter().copied(),
+        &func.blocks[loop_info.header_idx].param_types,
+    )
 }
 
 /// How much work hoisting this class saves per iteration, as the number of
@@ -498,14 +464,10 @@ fn within_budget(
     invariant: Vec<ClassId>,
     trace: bool,
 ) -> Vec<ClassId> {
-    use crate::regalloc::coloring::{AVAILABLE_XMM_COLORS, available_gpr_colors};
-
     let (gpr_demand, xmm_demand) = loop_demand(func, egraph, loop_info);
-    // The frame pointer costs a GPR, and a loop this pass would overfill is
-    // exactly the shape that forces one. Assume it: the cheaper assumption is
-    // the one that hoists more, which is the behaviour being corrected.
-    let mut gpr_room = available_gpr_colors(true).saturating_sub(gpr_demand);
-    let mut xmm_room = AVAILABLE_XMM_COLORS.saturating_sub(xmm_demand);
+    let (gpr_budget, xmm_budget) = super::pressure::budgets();
+    let mut gpr_room = gpr_budget.saturating_sub(gpr_demand);
+    let mut xmm_room = xmm_budget.saturating_sub(xmm_demand);
 
     if trace {
         eprintln!(
