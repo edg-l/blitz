@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use super::interference::InterferenceGraph;
 use crate::egraph::extract::VReg;
+use crate::regalloc::interference::VRegSet;
 use crate::x86::reg::RegClass;
 
 /// Follow a coalescing alias chain to the VReg that survived the merge.
@@ -64,7 +65,7 @@ pub fn coalesce(
     // v9, then v9 must not coalesce with v0. Without union, `adj[v0]` never
     // learned about v6's interference with v9 and the second coalesce
     // succeeds incorrectly.
-    let mut adj: Vec<std::collections::BTreeSet<usize>> = graph.adj.clone();
+    let mut adj: Vec<VRegSet> = graph.adj.clone();
 
     let find = |parent: &mut Vec<usize>, mut x: usize| -> usize {
         while parent[x] != x {
@@ -118,7 +119,7 @@ pub fn coalesce(
             // Whether the two representative groups interfere. `adj` is kept in
             // sync with merges, so this considers every member of either group,
             // and interference only ever grows as groups merge.
-            if adj[src_root].contains(&dst_root) || adj[dst_root].contains(&src_root) {
+            if adj[src_root].contains(dst_root) || adj[dst_root].contains(src_root) {
                 *why.entry("groups interfere").or_default() += 1;
                 continue;
             }
@@ -142,9 +143,8 @@ pub fn coalesce(
             // Briggs: the merged node must have fewer than k neighbours of
             // significant degree. Degrees are read from `adj`, which merges
             // keep current, so this measures the graph as it stands.
-            let mut significant: std::collections::BTreeSet<usize> =
-                std::collections::BTreeSet::new();
-            for &n in adj[src_root].iter().chain(adj[dst_root].iter()) {
+            let mut significant = VRegSet::new();
+            for n in adj[src_root].iter().chain(adj[dst_root].iter()) {
                 let n_root = find(&mut parent, n);
                 if n_root == src_root || n_root == dst_root {
                     continue;
@@ -165,12 +165,12 @@ pub fn coalesce(
             // Checked in both orientations: either one passing justifies the
             // same merged node.
             let george = |a: usize, b: usize, parent: &mut Vec<usize>| {
-                adj[a].iter().all(|&t| {
+                adj[a].iter().all(|t| {
                     let t_root = find(parent, t);
                     t_root == a
                         || t_root == b
                         || graph.reg_class[t_root] != class
-                        || adj[b].contains(&t_root)
+                        || adj[b].contains(t_root)
                         || adj[t_root].len() < k
                 })
             };
@@ -196,7 +196,7 @@ pub fn coalesce(
                     target: "blitz::coalesce",
                     "merge v{src_root} <- v{dst_root} for copy (v{src}, v{dst}); \
                      pre_merge_edge={} degrees {}/{} against k={k}",
-                    graph.adj[src_root].contains(&dst_root),
+                    graph.adj[src_root].contains(dst_root),
                     adj[src_root].len(),
                     adj[dst_root].len(),
                 );
@@ -204,7 +204,7 @@ pub fn coalesce(
 
             // Merge dst_root into src_root. Transfer adjacency so subsequent
             // checks against src_root see dst_root's neighbours too.
-            let dst_neighbors: Vec<usize> = adj[dst_root].iter().copied().collect();
+            let dst_neighbors: Vec<usize> = adj[dst_root].iter().collect();
             for n in dst_neighbors {
                 let n_root = find(&mut parent, n);
                 if n_root == src_root {
@@ -244,13 +244,13 @@ pub fn coalesce(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::regalloc::interference::InterferenceGraph;
+    use crate::regalloc::interference::{InterferenceGraph, VRegSet};
     use crate::x86::reg::RegClass;
 
     fn make_graph(n: usize, edges: &[(usize, usize)]) -> InterferenceGraph {
         let mut g = InterferenceGraph {
             num_vregs: n,
-            adj: vec![std::collections::BTreeSet::new(); n],
+            adj: vec![VRegSet::new(); n],
             reg_class: vec![RegClass::GPR; n],
         };
         for &(a, b) in edges {

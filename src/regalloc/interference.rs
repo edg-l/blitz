@@ -7,10 +7,79 @@ use crate::x86::reg::RegClass;
 
 use super::liveness::LivenessInfo;
 
+/// A set of VReg indices held as a sorted `Vec`.
+///
+/// The interference graph is the allocator's densest structure -- every program
+/// point contributes an all-pairs edge insert over its live set, and coalescing
+/// unions whole neighbourhoods -- so the per-element cost of the set is what the
+/// pass costs. A `BTreeSet` pays an allocation and a tree descent per insert; a
+/// sorted `Vec` pays a binary search and a memmove over a contiguous run, and
+/// stores four bytes per neighbour instead of a node.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct VRegSet {
+    elems: Vec<u32>,
+}
+
+impl VRegSet {
+    pub fn new() -> Self {
+        Self { elems: Vec::new() }
+    }
+
+    /// Insert `v`; returns whether it was absent.
+    pub fn insert(&mut self, v: usize) -> bool {
+        match self.elems.binary_search(&(v as u32)) {
+            Ok(_) => false,
+            Err(i) => {
+                self.elems.insert(i, v as u32);
+                true
+            }
+        }
+    }
+
+    pub fn contains(&self, v: usize) -> bool {
+        self.elems.binary_search(&(v as u32)).is_ok()
+    }
+
+    pub fn len(&self) -> usize {
+        self.elems.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.elems.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.elems.clear();
+    }
+
+    /// Ascending, which is what every caller that cares about order wants.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.elems.iter().map(|&v| v as usize)
+    }
+}
+
+impl FromIterator<usize> for VRegSet {
+    fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
+        let mut elems: Vec<u32> = iter.into_iter().map(|v| v as u32).collect();
+        elems.sort_unstable();
+        elems.dedup();
+        Self { elems }
+    }
+}
+
+impl<'a> IntoIterator for &'a VRegSet {
+    type Item = usize;
+    type IntoIter = std::iter::Map<std::slice::Iter<'a, u32>, fn(&u32) -> usize>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.elems.iter().map(|&v| v as usize)
+    }
+}
+
 pub struct InterferenceGraph {
     pub num_vregs: usize,
     /// Adjacency list: VReg index -> set of interfering VReg indices.
-    pub adj: Vec<BTreeSet<usize>>,
+    pub adj: Vec<VRegSet>,
     /// Register class of each VReg.
     pub reg_class: Vec<RegClass>,
 }
@@ -180,7 +249,7 @@ pub fn resolve_precoloring_conflicts(
             if ca != cb
                 || dropped.contains(&vb)
                 || vb >= graph.num_vregs
-                || !graph.adj[va].contains(&vb)
+                || !graph.adj[va].contains(vb)
             {
                 continue;
             }
@@ -262,7 +331,7 @@ pub fn build_interference(
 
     let mut graph = InterferenceGraph {
         num_vregs,
-        adj: vec![BTreeSet::new(); num_vregs],
+        adj: vec![VRegSet::new(); num_vregs],
         reg_class,
     };
 
@@ -334,7 +403,7 @@ mod tests {
 
         // v0 and v1 are both live before inst 2, so they should interfere.
         assert!(
-            graph.adj[0].contains(&1),
+            graph.adj[0].contains(1),
             "v0 and v1 should interfere (both live before add)"
         );
     }
@@ -368,7 +437,7 @@ mod tests {
         // v0 is used at inst 1 and then dead; v2 is defined at inst 2.
         // v0 and v2 should not be simultaneously live.
         assert!(
-            !graph.adj[0].contains(&2),
+            !graph.adj[0].contains(2),
             "v0 and v2 should NOT interfere (non-overlapping live ranges)"
         );
     }
@@ -391,7 +460,7 @@ mod tests {
 
         // v0 (GPR) and v1 (XMM) are simultaneously live but different classes.
         assert!(
-            !graph.adj[0].contains(&1),
+            !graph.adj[0].contains(1),
             "GPR v0 and XMM v1 should NOT interfere"
         );
     }

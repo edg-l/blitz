@@ -66,7 +66,7 @@ use super::build_vreg_classes_from_all_blocks;
 use super::coalesce::coalesce;
 use super::coloring::{allocatable_gpr_order, allocatable_xmm_order};
 use super::interference::{
-    InterferenceGraph, build_interference_into, dying_clobber_operands,
+    InterferenceGraph, VRegSet, build_interference_into, dying_clobber_operands,
     resolve_precoloring_conflicts,
 };
 use super::liveness::{LivenessInfo, compute_liveness};
@@ -304,7 +304,7 @@ fn build_global_interference(
 
     let mut graph = InterferenceGraph {
         num_vregs,
-        adj: vec![BTreeSet::new(); num_vregs],
+        adj: vec![VRegSet::new(); num_vregs],
         reg_class,
     };
 
@@ -612,7 +612,7 @@ fn add_clobber_interferences_global(
 
             if phantom_idx >= graph.num_vregs {
                 let new_n = phantom_idx + 1;
-                graph.adj.resize(new_n, BTreeSet::new());
+                graph.adj.resize(new_n, VRegSet::new());
                 graph.reg_class.resize(new_n, config.reg_class);
                 graph.num_vregs = new_n;
             }
@@ -752,7 +752,7 @@ fn merge_precolorings_global(
                 pc == phantom_color
                     && phantom_vreg < graph.num_vregs
                     && pv < graph.num_vregs
-                    && graph.adj[phantom_vreg].contains(&pv)
+                    && graph.adj[phantom_vreg].contains(pv)
             })
             .map(|(&pv, _)| pv)
             .collect();
@@ -1476,14 +1476,13 @@ fn exceeds_budget(
 fn greedy_clique_containing(phase3: &Phase3State, idx: usize, class: RegClass) -> Vec<usize> {
     let mut candidates: Vec<usize> = phase3.graph.adj[idx]
         .iter()
-        .copied()
         .filter(|&n| phase3.graph.reg_class[n] == class)
         .collect();
     candidates.sort_by_key(|&n| std::cmp::Reverse(phase3.graph.adj[n].len()));
 
     let mut clique = vec![idx];
     for cand in candidates {
-        if clique.iter().all(|&m| phase3.graph.adj[cand].contains(&m)) {
+        if clique.iter().all(|&m| phase3.graph.adj[cand].contains(m)) {
             clique.push(cand);
         }
     }
@@ -1525,8 +1524,8 @@ fn format_overshoot(
         }
         let mut neighbor_colors: Vec<u32> = phase3.graph.adj[idx]
             .iter()
-            .filter(|&&n| phase3.graph.reg_class[n] == class)
-            .filter_map(|&n| coloring.colors[n])
+            .filter(|&n| phase3.graph.reg_class[n] == class)
+            .filter_map(|n| coloring.colors[n])
             .collect();
         neighbor_colors.sort_unstable();
         neighbor_colors.dedup();
@@ -2321,7 +2320,7 @@ mod tests {
         if ai >= state.graph.num_vregs || bi >= state.graph.num_vregs {
             return false;
         }
-        state.graph.adj[ai].contains(&bi)
+        state.graph.adj[ai].contains(bi)
     }
 
     fn interfere_in(graph: &InterferenceGraph, a: u32, b: u32) -> bool {
@@ -2330,7 +2329,7 @@ mod tests {
         if ai >= graph.num_vregs || bi >= graph.num_vregs {
             return false;
         }
-        graph.adj[ai].contains(&bi)
+        graph.adj[ai].contains(bi)
     }
 
     // ── Two-block straight-line CFG ────────────────────────────────

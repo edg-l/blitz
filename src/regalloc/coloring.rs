@@ -54,7 +54,7 @@ pub fn mcs_ordering(graph: &InterferenceGraph) -> Vec<usize> {
         ordering.push(v);
 
         // Update weights of unprocessed neighbors.
-        for &neighbor in &graph.adj[v] {
+        for neighbor in &graph.adj[v] {
             if !processed[neighbor] {
                 weight[neighbor] += 1;
                 queue.push((weight[neighbor], Reverse(neighbor)));
@@ -95,7 +95,7 @@ fn check_precolorings(graph: &InterferenceGraph, pre_coloring: &BTreeMap<usize, 
         .collect();
     for (i, &(va, ca)) in by_color.iter().enumerate() {
         for &(vb, cb) in &by_color[i + 1..] {
-            if ca == cb && graph.adj[va].contains(&vb) {
+            if ca == cb && graph.adj[va].contains(vb) {
                 panic!(
                     "BLITZ_VERIFY: VReg {va} and VReg {vb} interfere but are both \
                      pre-colored to color {ca}"
@@ -150,7 +150,7 @@ pub fn greedy_color(
 
         // Collect colors used by already-colored neighbors.
         let mut forbidden: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-        for &neighbor in &graph.adj[v] {
+        for neighbor in &graph.adj[v] {
             if let Some(c) = colors[neighbor] {
                 forbidden.insert(c);
             }
@@ -338,13 +338,13 @@ pub fn allocatable_xmm_order() -> Vec<Reg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::regalloc::interference::InterferenceGraph;
+    use crate::regalloc::interference::{InterferenceGraph, VRegSet};
     use crate::x86::reg::RegClass;
 
     fn make_graph(n: usize, edges: &[(usize, usize)]) -> InterferenceGraph {
         let mut g = InterferenceGraph {
             num_vregs: n,
-            adj: vec![std::collections::BTreeSet::new(); n],
+            adj: vec![VRegSet::new(); n],
             reg_class: vec![RegClass::GPR; n],
         };
         for &(a, b) in edges {
