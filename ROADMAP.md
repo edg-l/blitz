@@ -35,16 +35,16 @@ rather than overhead against it.
 Ordered. Each says what it is, why it is placed there, and what would tell you it
 is done.
 
-1. **Fix the five open miscompiles.** `mixed` seeds 92 and 109, `args` seeds 52,
-   108 and 175, with reproducers at `~/.cache/blitz-fuzz-fails/`. Correctness is a
-   precondition of this project's goal, not a competing priority. Take `mixed` 92
-   first: it is wrong at *both* levels, so only the `cc` oracle sees it, and it
-   widened from `-O1`-only during the refactor rather than sitting still.
-   Separately, `mixed` 57 is a **capacity regression** step 6's fold introduced;
-   it is the one open failure this tree caused rather than inherited.
-   Done when a 200-seed run of each shape is clean.
+1. **Fix the four open miscompiles.** `mixed` seed 109, `args` seeds 52 and 175,
+   `pressure` seed 128, 131, 158 or 165, with reproducers at
+   `~/.cache/blitz-fuzz-fails/`. Correctness is a precondition of this project's
+   goal, not a competing priority. All four are right at `-O0` and wrong at
+   `-O1`, which narrows where to look: the passes `-O0` does not run, or the ones
+   whose input `-O0` leaves small. Separately, `mixed` 57 is a **capacity
+   regression** step 6's fold introduced; it is the one open failure this tree
+   caused rather than inherited. Done when a 200-seed run of each shape is clean.
 2. **Make the gate able to see them.** `run_fuzz.sh` is pinned at 30 seeds
-   everywhere, and at 30 seeds all three shapes are green while five programs
+   everywhere, and at 30 seeds all three shapes are green while four programs
    miscompile. **A session can work all day, see every gate pass, and never learn
    that.** Widening costs 67s a shape; a saved corpus of known-failing programs
    would make the routine check seconds. Do this alongside 1, or 1 has no oracle.
@@ -73,18 +73,27 @@ gated on pressure because it runs before global liveness exists, and
 
 ## Current state (2026-08-06)
 
-- 925 Rust tests + 478 lit tests, all green. `cargo fmt` clean, zero build warnings.
+- 925 Rust tests + 480 lit tests, all green. `cargo fmt` clean, zero build warnings.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 301 tests compared O0-vs-O1 and against a
+- `bash tests/lit/run_diff.sh`: 302 tests compared O0-vs-O1 and against a
   reference compiler; no skips, no differences under gcc or clang.
 - Generated programs at 30 seeds a shape -- the width every gate runs -- are
   `mixed` 30/30, `args` 30/30, `pressure` 30/30. **That width measures nothing.**
-  At 200 seeds `mixed` is 194/200 and `args` 183/200: **5 wrong-value programs
-  and 17 capacity failures.** The 30-seed run is green because it is too narrow,
-  not because the compiler is correct. See Known bugs, and item 2 of Start here.
-- Code quality has a baseline: `bash tests/run_codesize.sh --check`, 892 rows
+  At 200 seeds it is `mixed` 195/200, `args` 185/200, `pressure` 189/200: **4
+  wrong-value programs and 27 capacity failures.** The 30-seed run is green
+  because it is too narrow, not because the compiler is correct. See Known bugs,
+  and item 2 of Start here.
+- Code quality has a baseline: `bash tests/run_codesize.sh --check`, 894 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
+- **Compile time is quadratic in blocks x classes.** `secs ~ (B*C)^0.86`,
+  R2=0.92 over 44 (program, level) points, and both levels sit on one line, so
+  `-O1` is not intrinsically cheaper -- it just hands the same pipeline a smaller
+  IR. DCE is what shrinks it: `args` seed 108 takes 33s at `-O0` and 4.8s with
+  `BLITZ_PASSES=+dce`, and `-O1 -dce` is slower than `-O0`. The two Theta(B*C)
+  loops are `linearize`'s per-block evict-and-restore of the whole class map and
+  the splitter's pressure scan. `bash tests/profile.sh <src> [flags]` is the way
+  in; `perf report` hangs on these profiles, `perf script` does not.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
   e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> trivial
   block-parameter removal (re-extract + linearize again) -> DAG schedule ->
@@ -282,26 +291,33 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**Five wrong-value programs and seventeen capacity failures are open**, found by
-running the generator at 200 seeds a shape instead of the 30 every gate is pinned
-at. Reproducers are kept outside the repo at `~/.cache/blitz-fuzz-fails/` and are
-unreduced; `gen_c.py --seed N --shape S` regenerates one until the generator
-changes, which is why the files are the durable artifact and the seed is not.
+**Four wrong-value programs and twenty-seven capacity failures are open**, found
+by running the generator at 200 seeds a shape instead of the 30 every gate is
+pinned at. Reproducers are kept outside the repo at `~/.cache/blitz-fuzz-fails/`
+and are unreduced; `gen_c.py --seed N --shape S` regenerates one until the
+generator changes, which is why the files are the durable artifact and the seed
+is not.
 
 | shape | passing | wrong value | capacity |
 | --- | --- | --- | --- |
-| `mixed` at 200 | 194/200 | 92, 109 | 57, 123, 135, 150 |
-| `args` at 200 | 183/200 | 52, 108, 175 | 13 seeds |
+| `mixed` at 200 | 195/200 | 109 | 57, 123, 135, 150 |
+| `args` at 200 | 185/200 | 52, 175 | 13 seeds |
+| `pressure` at 200 | 189/200 | 128, 131, 158, 165 | 7 seeds |
 
-**Three of these closed themselves during the refactor**, which is the argument
-for re-measuring rather than trusting the list: `mixed` 137 and 196 and `args` 146
-stopped miscompiling when step 6's fold removed the single-block path's RAX
-dividend pin. **`mixed` 57 went the other way** -- a capacity failure the same
-fold introduced -- and `mixed` 92 widened from `-O1` to both levels.
+**Re-measure rather than trust the list.** Four entries left it without anyone
+fixing them: `mixed` 137 and 196 and `args` 146 stopped miscompiling when step
+6's fold removed the single-block path's RAX dividend pin, and `args` 108 was
+already passing by the time it was taken up. **`mixed` 57 went the other way** --
+a capacity failure the same fold introduced.
 
-Both oracles are contributing, which is the argument for keeping both: `mixed` 109
-is right at `-O0` and wrong at `-O1` (1571 against 675), while 92 is now wrong at
-both and only the `cc` oracle sees it.
+The `pressure` row is new information rather than a regression: that shape had
+never been run at this width, and every one of its wrong-value programs predates
+the runs that found them.
+
+Every remaining wrong-value program is right at `-O0` and wrong at `-O1`, so the
+self-consistency oracle carries all four. The one that needed the `cc` oracle was
+`mixed` 92, wrong at both levels: a block took `Proj0` of a division emitted in
+another block, where RAX no longer held the quotient.
 
 The capacity failures are the two shapes the allocator names itself: *"spilling
 did not reduce it, so the pressure point is one instruction whose own operands are
