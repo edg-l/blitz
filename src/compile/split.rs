@@ -1179,10 +1179,18 @@ fn detect_blockparam_slot_routing(
     // recomputed per comparison, and each count is a scan of every instruction of
     // every block, so a block with 28 parameters re-read the function a hundred
     // times over.
+    //
+    // The blocks each VReg is read in come out of the same pass, for
+    // `stores_reach_every_use` below: asking it per candidate is otherwise a
+    // scan of every instruction of every block, once per over-budget point.
     let mut use_counts: BTreeMap<VReg, usize> = BTreeMap::new();
-    for inst in block_schedules.iter().flatten() {
-        for &v in &inst.operands {
-            *use_counts.entry(v).or_insert(0) += 1;
+    let mut use_blocks: BTreeMap<VReg, BTreeSet<usize>> = BTreeMap::new();
+    for (block_idx, sched) in block_schedules.iter().enumerate() {
+        for inst in sched {
+            for &v in &inst.operands {
+                *use_counts.entry(v).or_insert(0) += 1;
+                use_blocks.entry(v).or_default().insert(block_idx);
+            }
         }
     }
 
@@ -1289,9 +1297,8 @@ fn detect_blockparam_slot_routing(
     let idom = super::cfg::compute_idom(func, &rpo);
     let stores_reach_every_use = |vreg: VReg, group: &ParamGroup| {
         let def_block = value_defs.get(&vreg).copied();
-        block_schedules.iter().enumerate().all(|(use_bi, sched)| {
+        use_blocks.get(&vreg).into_iter().flatten().all(|&use_bi| {
             def_block == Some(use_bi)
-                || !sched.iter().any(|i| i.operands.contains(&vreg))
                 || group
                     .positions
                     .iter()
@@ -1510,6 +1517,21 @@ fn detect_blockparam_slot_routing(
     // and hold different values at their respective entries, and one cell cannot
     // carry both. The rules above never reach that shape; this one does.
     let vreg_count = *next_vreg as usize;
+    // One mask per class for the whole function: `vreg_classes` is function-wide
+    // and does not change here, so rebuilding it per block walked the entire map
+    // twice for every block in the function.
+    let class_masks = [
+        (
+            RegClass::GPR,
+            gpr_budget,
+            class_mask(vreg_classes, RegClass::GPR, vreg_count),
+        ),
+        (
+            RegClass::XMM,
+            xmm_budget,
+            class_mask(vreg_classes, RegClass::XMM, vreg_count),
+        ),
+    ];
     for (block_idx, schedule) in block_schedules.iter().enumerate() {
         let Some(live_out) = global_liveness.live_out.get(block_idx) else {
             continue;
@@ -1518,9 +1540,9 @@ fn detect_blockparam_slot_routing(
             continue;
         }
         let live_sets = compute_local_liveness(block_idx, schedule, live_out, vreg_count);
-        for (class, budget) in [(RegClass::GPR, gpr_budget), (RegClass::XMM, xmm_budget)] {
-            let mask = class_mask(vreg_classes, class, vreg_count);
-            let pressure = compute_pressure_for_class(&live_sets, schedule, &mask);
+        for (class, budget, mask) in &class_masks {
+            let (class, budget) = (*class, *budget);
+            let pressure = compute_pressure_for_class(&live_sets, schedule, mask);
             for (point, &at_point) in pressure.iter().enumerate() {
                 if at_point <= budget {
                     continue;
