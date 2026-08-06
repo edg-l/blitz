@@ -555,8 +555,23 @@ fn build_phi_copies(
         // this op exists to stop.
         //
         // No operand means the argument travels through a stack slot, and the
-        // slot store the splitter placed in this block already wrote it.
+        // slot store the splitter placed in this block already wrote it -- which
+        // is only true when the parameter reads that slot rather than a
+        // register. Where it does not, nothing on this edge writes the
+        // parameter at all: the copy is not emitted here and no store stands in
+        // for it, so the block reads whatever its register last held.
         let Some(&arg_vreg) = term_args.get(&((arg_base + param_idx) as u32)) else {
+            if !slot_spilled_params.contains_key(&(target, param_idx as u32)) {
+                return Err(CompileError {
+                    phase: "phi-elim".into(),
+                    message: format!(
+                        "block {src_block_idx} -> {target} p{param_idx}: argument has no \
+                         operand, so nothing writes the parameter on this edge, and the \
+                         parameter is not slot-routed either (param class {param_cid:?})"
+                    ),
+                    location: None,
+                });
+            }
             continue;
         };
         // Chase the alias chain, exactly as the destination side below does.
