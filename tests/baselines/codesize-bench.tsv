@@ -19,7 +19,7 @@ matmul.c	O1	173	617	2	23
 nbody_step.c	O0	233	1060	6	8
 nbody_step.c	O1	221	953	6	10
 queens.c	O0	258	985	12	59
-queens.c	O1	254	950	12	56
+queens.c	O1	254	948	12	54
 sieve.c	O0	78	276	0	0
 sieve.c	O1	75	263	0	0
 sort_insert.c	O0	180	596	0	0

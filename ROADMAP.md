@@ -13,9 +13,9 @@ is fair game here.
 The measure of success is code quality against `gcc -O2` / `clang -O2` on the
 same input: fewer instructions, fewer bytes, fewer spills, better loops.
 
-**Where that stands: `x1.42` against `gcc -O2` and `x1.14` against `clang -O2`**,
+**Where that stands: `x1.39` against `gcc -O2` and `x1.11` against `clang -O2`**,
 geometric mean of the per-program instruction ratio over the 15 `bench` kernels,
-from `bash tests/run_codesize.sh --gap`. Worst is `hash_table` at `x3.25`. Five
+from `bash tests/run_codesize.sh --gap`. Worst is `queens` at `x2.82`. Five
 kernels are already *below* 1.0, which is not a win and is the first thing to
 misread: this counts static instructions, and a compiler that inlines or unrolls
 emits more of them and runs faster. `gcc` turns `fib_memo` into 436 instructions
@@ -44,19 +44,30 @@ rather than overhead against it.
 Ordered. Each says what it is, why it is placed there, and what would tell you it
 is done.
 
-1. **Fix the seven open miscompiles.** `mixed` 109, `args` 52 and 175, and
-   `pressure` 128, 131, 158 and 165, with reproducers at
-   `~/.cache/blitz-fuzz-fails/`. Correctness is a precondition of this project's
-   goal, not a competing priority. All seven are right at `-O0` and wrong at
-   `-O1`, which narrows where to look: the passes `-O0` does not run, or the ones
-   whose input `-O0` leaves small. Separately, `mixed` 57 is a **capacity
-   regression** step 6's fold introduced; it is the one open failure this tree
-   caused rather than inherited. Done when a 200-seed run of each shape is clean.
-2. **Make the gate able to see them.** `run_fuzz.sh` is pinned at 30 seeds
-   everywhere, and at 30 seeds all three shapes are green while seven programs
-   miscompile. **A session can work all day, see every gate pass, and never learn
-   that.** Widening costs 67s a shape; a saved corpus of known-failing programs
-   would make the routine check seconds. Do this alongside 1, or 1 has no oracle.
+1. **One bug is behind every open miscompile: a block parameter routed through
+   a slot that does not carry the value the block reads.** It is what
+   `tests/lit/regalloc/multi_block_param_group.c` records -- term 10 of that
+   program's sum reads -58 where 0 belongs -- and the corpus reaches it on
+   `mixed` 109 and 128, `args` 175 and `pressure` 14 and 128. Reproducers in
+   `tests/fuzz/corpus/open/`, checked in seconds by `run_corpus.sh`.
+
+   All of them are right at `-O0` and wrong at `-O1`, which narrows where to
+   look: the passes `-O0` does not run, or the ones whose input `-O0` leaves
+   small. What is **ruled out by check, not by argument**: the group spanning
+   more than one block (`split::routable` now refuses that from every rule, and
+   no such group survives on the failing programs), and a parameter written by
+   neither a phi copy nor a slot store (`build_phi_copies` errors on that shape
+   and does not fire). Start by naming which predecessor stores the wrong value:
+   `read_frame.py --sum-chain` gives the wrong term, and the slot it reads has
+   exactly two writes.
+
+   Separately, `mixed` 57 and `pressure` 39 are **capacity failures**, not wrong
+   values. Done when a 200-seed run of each shape is clean.
+2. ~~**Make the gate able to see them.**~~ Done: `tests/fuzz/corpus/` plus
+   `run_corpus.sh`, and `oracles.sh` so the saved programs and the generated ones
+   are judged by the same three oracles. Save a failing program there before
+   chasing it -- `run_fuzz.sh` is still pinned at 30 seeds everywhere, and at 30
+   seeds all three shapes are green while five programs miscompile.
 3. **Give the inliner a pressure check, as LICM now has.** `-O1` still emits
    worse code than `-O0` on 7 of the 15 `bench` kernels. LICM was 60% of that and
    is now budgeted; the rest is inlining, which decides without looking at
@@ -83,21 +94,25 @@ gated on pressure because it runs before global liveness exists, and
 
 ## Current state (2026-08-06)
 
-- 925 Rust tests + 480 lit tests, all green. `cargo fmt` clean, zero build warnings.
-- `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 302 tests compared O0-vs-O1 and against a
-  reference compiler; no skips, no differences under gcc or clang.
+- 925 Rust tests green. 479 of 480 lit tests: `regalloc/multi_block_param_group.c`
+  fails, and it is item 1's bug reproducing rather than a test to fix. `cargo fmt`
+  clean, zero build warnings.
+- `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` change nothing about which tests pass.
+- `bash tests/lit/run_diff.sh`: 302 compared O0-vs-O1 and against a reference
+  compiler; 301 match, the differing one is that same test.
+- `bash tests/fuzz/run_corpus.sh`: the saved corpus, seconds. 4 `fixed` pass,
+  6 `open` fail as recorded.
 - Generated programs at 30 seeds a shape -- the width every gate runs -- are
   `mixed` 30/30, `args` 30/30, `pressure` 30/30. **That width measures nothing.**
-  At 200 seeds it is `mixed` 195/200, `args` 183/200, `pressure` 189/200: **7
-  wrong-value programs and 26 capacity failures.** The 30-seed run is green
-  because it is too narrow, not because the compiler is correct. See Known bugs,
-  and item 2 of Start here.
+  At 200 seeds it is `mixed` 196/200, `args` 184/200, `pressure` 192/200: **5
+  wrong-value programs and 23 capacity failures.** The 30-seed run is green
+  because it is too narrow, not because the compiler is correct. This is what
+  `run_corpus.sh` exists to make cheap.
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 894 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
 - Code quality also has an *absolute* number now, which is the one the Goal is
-  written against: `--gap`, `x1.42` vs `gcc -O2` and `x1.14` vs `clang -O2` on
+  written against: `--gap`, `x1.39` vs `gcc -O2` and `x1.11` vs `clang -O2` on
   `bench`. **`bench` is the only corpus that can produce it.** `lit` and `fuzz`
   compute a fixed answer from no runtime input, so `gcc -O2` evaluates the whole
   program and emits the constant -- a generated program becomes
@@ -346,18 +361,18 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**Seven wrong-value programs and twenty-six capacity failures are open**, found
+**Five wrong-value programs and twenty-three capacity failures are open**, found
 by running the generator at 200 seeds a shape instead of the 30 every gate is
-pinned at. Reproducers are kept outside the repo at `~/.cache/blitz-fuzz-fails/`
-and are unreduced; `gen_c.py --seed N --shape S` regenerates one until the
-generator changes, which is why the files are the durable artifact and the seed
-is not.
+pinned at. The ones worth keeping are checked in under `tests/fuzz/corpus/open/`,
+where `run_corpus.sh` re-checks them in seconds; the files are the durable
+artifact and the seed is not, since `gen_c.py --seed N --shape S` only
+regenerates a program until the generator changes.
 
 | shape | passing | wrong value | capacity |
 | --- | --- | --- | --- |
-| `mixed` at 200 | 195/200 | 109 | 57, 123, 135, 150 |
-| `args` at 200 | 183/200 | 52, 175 | 15 seeds |
-| `pressure` at 200 | 189/200 | 128, 131, 158, 165 | 7 seeds |
+| `mixed` at 200 | 196/200 | 109, 128 | 57, 123 |
+| `args` at 200 | 184/200 | 175 | 15 seeds |
+| `pressure` at 200 | 192/200 | 14, 128 | 6 seeds |
 
 **Re-measure rather than trust the list.** Four entries left it without anyone
 fixing them: `mixed` 137 and 196 and `args` 146 stopped miscompiling when step
@@ -370,9 +385,16 @@ never been run at this width, and every one of its wrong-value programs predates
 the runs that found them.
 
 Every remaining wrong-value program is right at `-O0` and wrong at `-O1`, so the
-self-consistency oracle carries all seven. The one that needed the `cc` oracle was
+self-consistency oracle carries all five. The one that needed the `cc` oracle was
 `mixed` 92, wrong at both levels: a block took `Proj0` of a division emitted in
 another block, where RAX no longer held the quotient.
+
+**Which programs are in the list moved when LICM stopped building preheaders it
+hoists nothing into.** `args` 52 and `pressure` 131, 158 and 165 were the empty
+preheaders' own doing and are fixed; `mixed` 128 and `pressure` 14 and 39 are the
+block-parameter slot-routing bug, which is unchanged -- what reaches it is not.
+`pressure` 14 is `tests/lit/regalloc/multi_block_param_group.c`, so that test
+fails, and it is the most reduced form of item 1 available.
 
 The capacity failures are the two shapes the allocator names itself: *"spilling
 did not reduce it, so the pressure point is one instruction whose own operands are

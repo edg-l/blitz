@@ -32,3 +32,5 @@ something different after it does.
 | `open/args-seed175.c` | args 175 | `-O1` prints 1298 for 544. Also needs store forwarding. |
 | `open/pressure-seed128.c` | pressure 128 | `-O1` prints 1878 for 1911. |
 | `open/mixed-seed57.c` | mixed 57 | `-O0` does not compile: register pressure overshoot where every over-budget value is one instruction's own operand. |
+| `open/mixed-seed128.c` | mixed 128 | `-O1` prints 1221 for 1178. The block-parameter slot-routing bug `tests/lit/regalloc/multi_block_param_group.c` records; it started reaching this program when LICM stopped building preheaders it hoists nothing into. |
+| `open/pressure-seed39.c` | pressure 39 | `-O1` does not compile, same change in what reaches the allocator. |
