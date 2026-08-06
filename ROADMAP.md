@@ -13,9 +13,9 @@ is fair game here.
 The measure of success is code quality against `gcc -O2` / `clang -O2` on the
 same input: fewer instructions, fewer bytes, fewer spills, better loops.
 
-**Where that stands: `x1.43` against `gcc -O2` and `x1.15` against `clang -O2`**,
+**Where that stands: `x1.42` against `gcc -O2` and `x1.14` against `clang -O2`**,
 geometric mean of the per-program instruction ratio over the 15 `bench` kernels,
-from `bash tests/run_codesize.sh --gap`. Worst is `hash_table` at `x3.45`. Five
+from `bash tests/run_codesize.sh --gap`. Worst is `hash_table` at `x3.25`. Five
 kernels are already *below* 1.0, which is not a win and is the first thing to
 misread: this counts static instructions, and a compiler that inlines or unrolls
 emits more of them and runs faster. `gcc` turns `fib_memo` into 436 instructions
@@ -94,15 +94,15 @@ gated on pressure because it runs before global liveness exists, and
   reference compiler; no skips, no differences under gcc or clang.
 - Generated programs at 30 seeds a shape -- the width every gate runs -- are
   `mixed` 30/30, `args` 30/30, `pressure` 30/30. **That width measures nothing.**
-  At 200 seeds it is `mixed` 195/200, `args` 185/200, `pressure` 189/200: **4
-  wrong-value programs and 27 capacity failures.** The 30-seed run is green
+  At 200 seeds it is `mixed` 195/200, `args` 184/200, `pressure` 189/200: **4
+  wrong-value programs and 28 capacity failures.** The 30-seed run is green
   because it is too narrow, not because the compiler is correct. See Known bugs,
   and item 2 of Start here.
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 894 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
 - Code quality also has an *absolute* number now, which is the one the Goal is
-  written against: `--gap`, `x1.43` vs `gcc -O2` and `x1.15` vs `clang -O2` on
+  written against: `--gap`, `x1.42` vs `gcc -O2` and `x1.14` vs `clang -O2` on
   `bench`. **`bench` is the only corpus that can produce it.** `lit` and `fuzz`
   compute a fixed answer from no runtime input, so `gcc -O2` evaluates the whole
   program and emits the constant -- a generated program becomes
