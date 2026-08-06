@@ -524,6 +524,20 @@ fn apply_splits_for_overshoot(
         .filter(|v| !plan.planned_victims.contains(v))
         .filter(|&v| {
             if let Some(&def_idx) = def_inst_map.get(&v) {
+                // Both split shapes store the value after its def, so neither
+                // can remove it from the live set at a point the def does not
+                // precede. A block parameter is the case that matters: the phi
+                // copies on the edge have written it before the block's first
+                // instruction, so it is live at [0] whatever its marker's
+                // position, and a store placed after the marker leaves the
+                // count at [0] exactly where it was. Selecting one anyway is a
+                // round that plans work and moves nothing, and the round after
+                // it selects the same value again -- 48 of them on a loop
+                // preheader carrying 16 parameters, each chaining one more slot
+                // onto the last round's store.
+                if def_idx >= overshoot_inst_idx {
+                    return false;
+                }
                 let op = &block_schedule[def_idx].op;
                 // Skip spill pseudo-ops (no result_type) and Flags-typed defs.
                 if matches!(
@@ -589,6 +603,10 @@ fn apply_splits_for_overshoot(
                         "already a victim".to_string()
                     } else {
                         match def_inst_map.get(&v) {
+                            Some(&def_idx) if def_idx >= overshoot_inst_idx => format!(
+                                "def {:?} at [{def_idx}] does not precede this point",
+                                block_schedule[def_idx].op
+                            ),
                             Some(&def_idx) => format!("def {:?}", block_schedule[def_idx].op),
                             None => "no local def".to_string(),
                         }
