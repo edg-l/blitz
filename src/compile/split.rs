@@ -1293,8 +1293,7 @@ fn detect_blockparam_slot_routing(
     }
     let value_def = |v: VReg| -> Option<usize> { value_defs.get(v.0 as usize).copied().flatten() };
 
-    for block_idx in 0..n_blocks.min(func.blocks.len()) {
-        let block = &func.blocks[block_idx];
+    for (block_idx, block) in func.blocks.iter().enumerate().take(n_blocks) {
         for pidx in 0..block.param_types.len() as u32 {
             // Already routed through a slot by an earlier round. Routing it again
             // would allocate a second slot, and only the newer entry survives in
@@ -1482,8 +1481,8 @@ fn detect_blockparam_slot_routing(
     // them, so a reload lands immediately in front of it and is live there too.
     // That is what the function-scope allocator's spill loop reports when it
     // stops -- the overshoot grows with each round.
-    for block_idx in 0..n_blocks.min(func.blocks.len()) {
-        let Some(terminator) = func.blocks[block_idx].ops.last() else {
+    for (block_idx, block) in func.blocks.iter().enumerate().take(n_blocks) {
+        let Some(terminator) = block.ops.last() else {
             continue;
         };
         let dests = super::barrier::terminator_arg_destinations(terminator);
@@ -2197,6 +2196,7 @@ mod tests {
     use crate::ir::types::Type;
     use crate::regalloc::global_liveness::GlobalLiveness;
     use crate::schedule::scheduler::ScheduledInst;
+    use std::cmp::Reverse;
     use std::collections::{BTreeMap, BTreeSet};
 
     fn fconst_inst(dst: u32, val: f64) -> ScheduledInst {
@@ -3133,7 +3133,7 @@ mod tests {
 
         // Apply insertions so we can check the schedules.
         for (bi, mut insertions) in per_block_insertions.into_iter().enumerate() {
-            insertions.sort_by(|a, b| b.0.cmp(&a.0));
+            insertions.sort_by_key(|i| Reverse(i.0));
             for (pos, inst) in insertions {
                 let insert_at = pos.min(all_block_schedules[bi].len());
                 all_block_schedules[bi].insert(insert_at, inst);
@@ -3160,11 +3160,8 @@ mod tests {
         );
 
         // SpillLoad must appear in each use block (1-4).
-        for b in 1..5 {
-            let loads = all_block_schedules[b]
-                .iter()
-                .filter(|i| is_spill_load(i))
-                .count();
+        for (b, sched) in all_block_schedules.iter().enumerate().skip(1).take(4) {
+            let loads = sched.iter().filter(|i| is_spill_load(i)).count();
             assert!(
                 loads >= 1,
                 "block {b} must have at least one SpillLoad, got {loads}"
@@ -3212,7 +3209,7 @@ mod tests {
 
         // Apply insertions.
         for (bi, mut insertions) in per_block_insertions.into_iter().enumerate() {
-            insertions.sort_by(|a, b| b.0.cmp(&a.0));
+            insertions.sort_by_key(|i| Reverse(i.0));
             for (pos, inst) in insertions {
                 let insert_at = pos.min(all_block_schedules[bi].len());
                 all_block_schedules[bi].insert(insert_at, inst);
@@ -3281,7 +3278,7 @@ mod tests {
 
         // Apply insertions.
         for (bi, mut insertions) in per_block_insertions.into_iter().enumerate() {
-            insertions.sort_by(|a, b| b.0.cmp(&a.0));
+            insertions.sort_by_key(|i| Reverse(i.0));
             for (pos, inst) in insertions {
                 let insert_at = pos.min(all_block_schedules[bi].len());
                 all_block_schedules[bi].insert(insert_at, inst);

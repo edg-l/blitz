@@ -186,8 +186,11 @@ fn apply_shift_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 /// into the other, so matching either side here would emit `sub x, c` for
 /// `c - x`.
 fn apply_alu_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
-    /// The immediate form of an ALU op, and whether its operands commute.
-    fn imm_form(op: &Op) -> Option<(fn(i32) -> Op, bool)> {
+    /// A constructor for the immediate form of an ALU op, and whether its
+    /// operands commute.
+    type ImmForm = (fn(i32) -> Op, bool);
+
+    fn imm_form(op: &Op) -> Option<ImmForm> {
         match op {
             Op::Mach(MachOp::X86Add) => {
                 Some(((|n| Op::Mach(MachOp::X86AddI(n))) as fn(i32) -> Op, true))

@@ -65,6 +65,10 @@ fn pad_to(buf: &mut Vec<u8>, align: usize) {
 // ── Dynamic section layout ───────────────────────────────────────────────────
 
 /// Computed section indices that adjust based on which optional sections exist.
+/// A built section's bytes, plus where each global in it landed: section index,
+/// byte offset within the section, and size.
+type SectionBuild = (Vec<u8>, HashMap<String, (u16, u64, u64)>);
+
 struct SectionLayout {
     sec_text: u16,
     sec_rodata: Option<u16>,
@@ -247,10 +251,7 @@ impl ObjectFile {
         buf
     }
 
-    fn build_rodata_section(
-        &self,
-        layout: &SectionLayout,
-    ) -> (Vec<u8>, HashMap<String, (u16, u64, u64)>) {
+    fn build_rodata_section(&self, layout: &SectionLayout) -> SectionBuild {
         let mut content: Vec<u8> = Vec::new();
         let mut section_info: HashMap<String, (u16, u64, u64)> = HashMap::new();
         for g in &self.rodata {
@@ -275,7 +276,7 @@ impl ObjectFile {
         &self,
         layout: &SectionLayout,
         data_globals: &[&GlobalInfo],
-    ) -> (Vec<u8>, HashMap<String, (u16, u64, u64)>) {
+    ) -> SectionBuild {
         let mut content: Vec<u8> = Vec::new();
         let mut section_info: HashMap<String, (u16, u64, u64)> = HashMap::new();
         for g in data_globals {
@@ -683,7 +684,7 @@ impl ObjectFile {
         );
     }
 
-    fn write_elf_header(&self, buf: &mut Vec<u8>, shoff: u64, layout: &SectionLayout) {
+    fn write_elf_header(&self, buf: &mut [u8], shoff: u64, layout: &SectionLayout) {
         let mut e_ident = [0u8; 16];
         e_ident[0] = 0x7f;
         e_ident[1] = b'E';

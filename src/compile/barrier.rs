@@ -18,14 +18,14 @@ pub(super) fn mark_branch_cond_barrier(
     non_term_count: usize,
     vreg_to_arg: &mut BTreeMap<VReg, usize>,
 ) {
-    if let Some(EffectfulOp::Branch { cond, .. }) = terminator {
-        if let Some(vreg) = cond.vreg() {
-            // Force the cond VReg into the group after all effectful ops.
-            // Use max (not min like mark_arg) because we need this to come
-            // AFTER all calls, overriding any earlier constraint.
-            let entry = vreg_to_arg.entry(vreg).or_insert(non_term_count);
-            *entry = (*entry).max(non_term_count);
-        }
+    if let Some(EffectfulOp::Branch { cond, .. }) = terminator
+        && let Some(vreg) = cond.vreg()
+    {
+        // Force the cond VReg into the group after all effectful ops.
+        // Use max (not min like mark_arg) because we need this to come
+        // AFTER all calls, overriding any earlier constraint.
+        let entry = vreg_to_arg.entry(vreg).or_insert(non_term_count);
+        *entry = (*entry).max(non_term_count);
     }
 }
 

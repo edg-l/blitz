@@ -23,13 +23,13 @@ fn format_context(lines: &[&str], pos: usize) -> String {
     let start = pos.saturating_sub(3);
     let end = (pos + 3).min(lines.len());
     let mut s = String::from("  output near search start:\n");
-    for i in start..end {
+    for (i, line) in lines.iter().enumerate().take(end).skip(start) {
         let marker = if i == pos {
             "  <-- search starts here"
         } else {
             ""
         };
-        s.push_str(&format!("    {}: {}{}\n", i + 1, lines[i], marker));
+        s.push_str(&format!("    {}: {}{}\n", i + 1, line, marker));
     }
     s
 }

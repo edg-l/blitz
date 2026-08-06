@@ -1,5 +1,7 @@
 //! SystemV AMD64 ABI calling convention support.
 
+use std::cmp::Reverse;
+
 use crate::ir::types::Type;
 use crate::x86::encode::Encoder;
 use crate::x86::inst::{MachInst, OpSize, Operand};
@@ -462,7 +464,7 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
 
     // Sort descending by offset (rightmost = highest offset pushed first).
     let mut stack_args = stack_args;
-    stack_args.sort_by(|a, b| b.0.cmp(&a.0));
+    stack_args.sort_by_key(|a| Reverse(a.0));
     for (_, src) in stack_args {
         insts.push(MachInst::Push {
             src: Operand::Reg(src),

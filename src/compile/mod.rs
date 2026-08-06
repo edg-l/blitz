@@ -14,6 +14,7 @@
 //! 10. Encoding
 //! 11. ELF emission
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::cost::{CostModel, OptGoal};
@@ -1210,7 +1211,7 @@ pub fn compile(
                     })
                     .collect();
                 // Descending, so an insertion never moves a position not yet used.
-                planned.sort_by(|a, b| b.0.cmp(&a.0));
+                planned.sort_by_key(|p| Reverse(p.0));
                 for (at, store) in planned {
                     schedule.insert(at.min(schedule.len()), store);
                 }
@@ -1616,7 +1617,7 @@ pub fn compile(
             // it names EFLAGS, which no instruction addresses and no allocation
             // can hand out. Its consumer reads the flags the comparison left.
             let flags_vregs = crate::regalloc::build_vreg_classes_from_all_blocks(
-                std::slice::from_ref(&rewritten),
+                std::slice::from_ref(rewritten),
             );
             for inst in rewritten.iter() {
                 for &op in &inst.operands {

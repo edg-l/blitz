@@ -934,12 +934,12 @@ fn apply_extension_folding_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> boo
             if inner_node.children.len() != 1 {
                 continue;
             }
-            let same_kind = match (&snap.op, &inner_node.op) {
-                (Op::Pure(PureOp::Sext(_)), Op::Pure(PureOp::Sext(_))) => true,
-                (Op::Pure(PureOp::Zext(_)), Op::Pure(PureOp::Zext(_))) => true,
-                (Op::Pure(PureOp::Trunc(_)), Op::Pure(PureOp::Trunc(_))) => true,
-                _ => false,
-            };
+            let same_kind = matches!(
+                (&snap.op, &inner_node.op),
+                (Op::Pure(PureOp::Sext(_)), Op::Pure(PureOp::Sext(_)))
+                    | (Op::Pure(PureOp::Zext(_)), Op::Pure(PureOp::Zext(_)))
+                    | (Op::Pure(PureOp::Trunc(_)), Op::Pure(PureOp::Trunc(_)))
+            );
             if !same_kind {
                 continue;
             }
@@ -1187,11 +1187,10 @@ pub fn propagate_block_params(func: &Function, egraph: &mut EGraph) {
             _ => continue,
         };
         let (_, ref args) = preds[0];
-        for i in 0..block.param_types.len() {
+        for (i, &source_class) in args.iter().enumerate().take(block.param_types.len()) {
             let Some(&bp_class) = block_param_map.get(&(block.id, i as u32)) else {
                 continue;
             };
-            let source_class = args[i];
             // Only propagate constants to avoid extraction scheduling issues.
             if egraph.get_constant(source_class).is_none() {
                 continue;

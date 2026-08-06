@@ -480,12 +480,22 @@ fn precolors_to_color_map(
 
 // ── Call/div point collection ─────────────────────────────────────
 
+/// The `(block_idx, inst_idx)` positions of every call and every div.
+type CallDivPoints = (Vec<(usize, usize)>, Vec<(usize, usize)>);
+
+/// An interference graph with clobber phantoms injected, and the phantom node
+/// index each call or div point contributed: GPR call, XMM call, then div.
+type PhantomGraph = (
+    InterferenceGraph,
+    BTreeMap<usize, u32>,
+    BTreeMap<usize, u32>,
+    BTreeMap<usize, u32>,
+);
+
 /// Collect all call and div program points across all blocks.
 ///
 /// Returns `(call_points, div_points)` where each entry is `(block_idx, inst_idx)`.
-fn collect_call_div_points(
-    block_schedules: &[Vec<ScheduledInst>],
-) -> (Vec<(usize, usize)>, Vec<(usize, usize)>) {
+fn collect_call_div_points(block_schedules: &[Vec<ScheduledInst>]) -> CallDivPoints {
     let mut call_points: Vec<(usize, usize)> = Vec::new();
     let mut div_points: Vec<(usize, usize)> = Vec::new();
 
@@ -637,12 +647,7 @@ fn inject_clobber_phantoms(
     div_points: &[(usize, usize)],
     uses_frame_pointer: bool,
     next_vreg: &mut u32,
-) -> (
-    InterferenceGraph,
-    BTreeMap<usize, u32>, // gpr_call_phantoms
-    BTreeMap<usize, u32>, // xmm_call_phantoms
-    BTreeMap<usize, u32>, // div_phantoms
-) {
+) -> PhantomGraph {
     let gpr_clobbers: Vec<Reg> = CALLER_SAVED_GPR
         .iter()
         .copied()
@@ -713,6 +718,7 @@ fn inject_clobber_phantoms(
 ///
 /// Mirrors `merge_precolorings` from `allocator.rs` but operates at function
 /// scope with the global `param_vreg_to_reg` map and `unprecolored_params`.
+#[allow(clippy::too_many_arguments)] // Four phantom/precolor maps that have no other owner.
 fn merge_precolorings_global(
     param_color_map: &BTreeMap<usize, u32>,
     gpr_call_phantoms: &BTreeMap<usize, u32>,
@@ -797,12 +803,12 @@ fn merge_precolorings_global(
 /// 2. Collect call/div points.
 /// 3. **Coalesce on the PRE-phantom graph** produced by Phase 2.
 /// 4. Apply coalescing aliases to each block's schedule.
-/// 5. Rebuild interference graph from scratch on post-coalesce schedules
-///   .
+/// 5. Rebuild interference graph from scratch on post-coalesce schedules.
 /// 6. Inject clobber phantoms into the rebuilt graph (Tasks 3.3/3.4/3.7).
 /// 7. Rebuild precolorings on the post-coalesce VReg set; apply
 ///    `merge_precolorings_global` to detect and drop conflicting param
 ///    precolorings (Tasks 3.5/3.7).
+#[allow(clippy::too_many_arguments)] // A phase's inputs are the previous phase's outputs.
 fn run_phase3(
     phase2: Phase2State,
     block_schedules: Vec<Vec<ScheduledInst>>,
@@ -1650,6 +1656,7 @@ fn compute_overshoot_from_coloring(
 ///   (phi destinations); these are excluded from cross-block reload insertion.
 /// * `func_name` - Function name used for debug tracing.
 /// * `uses_frame_pointer` - When `false`, RBP is allocatable as a general-purpose register.
+#[allow(clippy::too_many_arguments)] // The allocator's entry point; bundling these hides what each phase reads.
 pub fn allocate_global(
     block_schedules: &[Vec<ScheduledInst>],
     param_vregs: &[(VReg, Reg)],
