@@ -146,10 +146,15 @@ fn compute_local_liveness(
     let n = schedule.len();
     // result[i] = live set before instruction i.
     // result[n] = live set at exit of block (= live_out_seed for this block).
-    let mut result: Vec<VRegSet> = vec![VRegSet::with_capacity(vreg_count); n + 1];
+    // Every slot is overwritten below, so there is nothing to gain from sizing
+    // them here -- and sizing them to the function's VReg count made each one a
+    // couple of kilobytes on a function with 16161 values, allocated and cleared
+    // once per program point per block per split round, to be thrown away.
+    let mut result: Vec<VRegSet> = vec![VRegSet::default(); n + 1];
+    let _ = vreg_count;
 
     // Seed the backward scan from live_out: values live at the exit of the block.
-    let mut live = VRegSet::with_capacity(vreg_count);
+    let mut live = VRegSet::default();
     live.extend(live_out_seed.iter().copied());
     result[n] = live.clone();
 
@@ -1208,16 +1213,31 @@ fn detect_blockparam_slot_routing(
     // The blocks each VReg is read in come out of the same pass, for `routable`
     // below: asking it per candidate is otherwise a scan of every instruction of
     // every block, once per over-budget point.
-    let mut use_counts: BTreeMap<VReg, usize> = BTreeMap::new();
-    let mut use_blocks: BTreeMap<VReg, BTreeSet<usize>> = BTreeMap::new();
+    //
+    // Indexed by VReg rather than keyed by it: this whole pass runs once per
+    // split round, a dozen times on a large function, and a map node per value
+    // is most of what those rounds spend. Blocks are visited in ascending order,
+    // so `use_blocks` stays sorted and deduplicating means comparing the last
+    // entry.
+    let vreg_slots = *next_vreg as usize;
+    let mut use_counts: Vec<u32> = vec![0; vreg_slots];
+    let mut use_blocks: Vec<Vec<usize>> = vec![Vec::new(); vreg_slots];
     for (block_idx, sched) in block_schedules.iter().enumerate() {
         for inst in sched {
             for &v in &inst.operands {
-                *use_counts.entry(v).or_insert(0) += 1;
-                use_blocks.entry(v).or_default().insert(block_idx);
+                let i = v.0 as usize;
+                if i >= use_counts.len() {
+                    use_counts.resize(i + 1, 0);
+                    use_blocks.resize(i + 1, Vec::new());
+                }
+                use_counts[i] += 1;
+                if use_blocks[i].last() != Some(&block_idx) {
+                    use_blocks[i].push(block_idx);
+                }
             }
         }
     }
+    let use_count = |v: VReg| -> u32 { use_counts.get(v.0 as usize).copied().unwrap_or(0) };
 
     // Build a set of blocks that contain calls.
     let call_blocks: BTreeSet<usize> = (0..n_blocks)
@@ -1257,15 +1277,21 @@ fn detect_blockparam_slot_routing(
     // of its own -- the block defining it keeps it in a register rather than
     // reloading it, and every predecessor stores it. Both are conditioned on
     // this map below.
-    let value_defs: BTreeMap<VReg, usize> = block_schedules
-        .iter()
-        .enumerate()
-        .flat_map(|(bi, sched)| sched.iter().map(move |inst| (bi, inst)))
-        .filter(|(_, inst)| {
-            !matches!(inst.op, Op::Pure(PureOp::BlockParam(..))) && !inst.op.has_no_result()
-        })
-        .map(|(bi, inst)| (inst.dst, bi))
-        .collect();
+    let mut value_defs: Vec<Option<usize>> = vec![None; use_counts.len()];
+    for (bi, sched) in block_schedules.iter().enumerate() {
+        for inst in sched {
+            if matches!(inst.op, Op::Pure(PureOp::BlockParam(..))) || inst.op.has_no_result() {
+                continue;
+            }
+            let i = inst.dst.0 as usize;
+            if i >= value_defs.len() {
+                value_defs.resize(i + 1, None);
+            }
+            // The last definition wins, as collecting into a map did.
+            value_defs[i] = Some(bi);
+        }
+    }
+    let value_def = |v: VReg| -> Option<usize> { value_defs.get(v.0 as usize).copied().flatten() };
 
     for block_idx in 0..n_blocks.min(func.blocks.len()) {
         let block = &func.blocks[block_idx];
@@ -1338,14 +1364,18 @@ fn detect_blockparam_slot_routing(
         if !group.positions.iter().all(|p| p.0 == group.positions[0].0) {
             return false;
         }
-        let def_block = value_defs.get(&vreg).copied();
-        use_blocks.get(&vreg).into_iter().flatten().all(|&use_bi| {
-            def_block == Some(use_bi)
-                || group
-                    .positions
-                    .iter()
-                    .any(|&(_, _, param_bi)| super::cfg::dominates(param_bi, use_bi, &idom))
-        })
+        let def_block = value_def(vreg);
+        use_blocks
+            .get(vreg.0 as usize)
+            .into_iter()
+            .flatten()
+            .all(|&use_bi| {
+                def_block == Some(use_bi)
+                    || group
+                        .positions
+                        .iter()
+                        .any(|&(_, _, param_bi)| super::cfg::dominates(param_bi, use_bi, &idom))
+            })
     };
 
     // Which VRegs must leave the register file.
@@ -1404,7 +1434,7 @@ fn detect_blockparam_slot_routing(
         // Cheapest first: a parameter read fewer times costs fewer reloads to
         // route. Ties by VReg, so the choice is deterministic.
         let mut by_cost: Vec<VReg> = params.iter().copied().collect();
-        by_cost.sort_by_key(|&vreg| (use_counts.get(&vreg).copied().unwrap_or(0), vreg.0));
+        by_cost.sort_by_key(|&vreg| (use_count(vreg), vreg.0));
         for (class, budget) in [(RegClass::GPR, gpr_budget), (RegClass::XMM, xmm_budget)] {
             let of_class = |v: &VReg| {
                 groups
@@ -1476,7 +1506,7 @@ fn detect_blockparam_slot_routing(
             // naming a value that reaches the terminator on some paths only would
             // be stored from a register nothing wrote.
             let defined_here = |v: &VReg| {
-                value_defs.get(v) == Some(&block_idx)
+                value_def(*v) == Some(block_idx)
                     || global_liveness
                         .live_in
                         .get(block_idx)
@@ -1520,10 +1550,7 @@ fn detect_blockparam_slot_routing(
                 .collect();
             by_cost.sort_by_key(|(arg, params)| {
                 (
-                    params
-                        .iter()
-                        .map(|p| use_counts.get(p).copied().unwrap_or(0))
-                        .sum::<usize>(),
+                    params.iter().map(|p| use_count(*p) as usize).sum::<usize>(),
                     arg.0,
                 )
             });
@@ -1614,7 +1641,7 @@ fn detect_blockparam_slot_routing(
                     })
                     .collect();
                 // Cheapest first: a parameter read fewer times costs fewer reloads.
-                candidates.sort_by_key(|v| (use_counts.get(v).copied().unwrap_or(0), v.0));
+                candidates.sort_by_key(|v| (use_count(*v), v.0));
                 let mut holding = at_point;
                 for vreg in candidates {
                     if holding <= budget {
@@ -1633,7 +1660,7 @@ fn detect_blockparam_slot_routing(
         // One slot for the value, whatever number of parameter positions name it.
         let slot = slots.alloc(SlotOwner::Splitter) as i64;
         // The block defining the value this parameter aliases, if it aliases one.
-        let value_def_block = value_defs.get(&vreg).copied();
+        let value_def_block = value_def(vreg);
         // An aliasing parameter names a definition that dominates its block, so
         // the definition is in another block and skipping that block's reloads
         // leaves the parameter's own uses reloaded. A block defining the value it

@@ -79,7 +79,11 @@ impl VRegSet {
     pub fn insert(&mut self, v: VReg) {
         let (w, bit) = (v.0 as usize / BITS, v.0 as usize % BITS);
         if w >= self.words.len() {
-            self.words.resize(w + 1, 0);
+            // Geometric, so a set built by inserting ascending VRegs does not
+            // copy itself once per word. A set sized on demand rather than to
+            // the function's VReg count is what keeps a per-program-point live
+            // set the size of what is live there.
+            self.words.resize((w + 1).max(self.words.len() * 2), 0);
         }
         self.words[w] |= 1u64 << bit;
         self.mark(w);
