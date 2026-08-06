@@ -9,10 +9,10 @@ branchy_filter.c	O1	94	303	0	0
 call_hot.c	O0	62	196	0	0
 call_hot.c	O1	71	245	3	7
 float_reduce.c	O0	103	411	4	4
-float_reduce.c	O1	98	376	4	4
+float_reduce.c	O1	95	364	4	4
 matmul_rt.c	O0	114	402	0	0
-matmul_rt.c	O1	113	380	0	0
+matmul_rt.c	O1	110	364	0	0
 pointer_chase.c	O0	66	243	0	0
-pointer_chase.c	O1	64	235	0	0
+pointer_chase.c	O1	62	227	0	0
 struct_fields.c	O0	105	350	0	0
-struct_fields.c	O1	107	357	2	2
+struct_fields.c	O1	103	341	2	2

@@ -1,4 +1,5 @@
-use crate::x86::inst::{MachInst, OpSize};
+use crate::x86::inst::{MachInst, OpSize, Operand};
+use crate::x86::reg::Reg;
 
 /// Returns true if `inst` is a flag-consuming instruction (conditional jump,
 /// unconditional jump, or setcc).
@@ -63,6 +64,97 @@ pub fn flags_dead_after(insts: &[MachInst], idx: usize) -> bool {
     true
 }
 
+/// The register `inst` overwrites outright, if any: written without being read,
+/// unconditionally, and over the whole 64 bits.
+///
+/// A 32-bit destination zero-extends into the full register, so `S32` kills what
+/// the register held just as `S64` does. An 8- or 16-bit write leaves the upper
+/// bits in place and `cmov` writes only when its condition holds, so neither
+/// ends a value's live range. Two-address forms (`add`, `neg`, `inc`) read their
+/// destination and so are reads, not kills.
+fn kills_reg(inst: &MachInst) -> Option<Reg> {
+    let (size, dst) = match inst {
+        MachInst::MovRR { size, dst, src } => {
+            if dst == src {
+                return None;
+            }
+            (size, dst)
+        }
+        // `xor r, r` and `sub r, r` materialize zero; they do not read `r`.
+        MachInst::XorRR { size, dst, src } | MachInst::SubRR { size, dst, src } if dst == src => {
+            (size, dst)
+        }
+        MachInst::MovRI { size, dst, .. }
+        | MachInst::MovRM { size, dst, .. }
+        | MachInst::Lea { size, dst, .. }
+        | MachInst::Imul3RRI { size, dst, .. } => (size, dst),
+        // Widening moves and the moves out of an XMM register carry no size:
+        // each writes the whole destination by construction.
+        MachInst::MovzxBR { dst, .. }
+        | MachInst::MovzxWR { dst, .. }
+        | MachInst::MovsxBR { dst, .. }
+        | MachInst::MovsxWR { dst, .. }
+        | MachInst::MovsxDR { dst, .. }
+        | MachInst::Cvttsd2siRR { dst, .. }
+        | MachInst::Cvttss2siRR { dst, .. }
+        | MachInst::MovqFromXmm { dst, .. } => {
+            return match dst {
+                Operand::Reg(r) => Some(*r),
+                Operand::VReg(_) => None,
+            };
+        }
+        _ => return None,
+    };
+    match (size, dst) {
+        (OpSize::S32 | OpSize::S64, Operand::Reg(r)) => Some(*r),
+        _ => None,
+    }
+}
+
+/// True when the LEA at `idx` computes an address this block then discards.
+///
+/// A load or store whose address folded into its own addressing mode leaves the
+/// LEA that computed it behind: the fold happens in `compile::effectful`, after
+/// the address has already been scheduled and lowered as an instruction of its
+/// own, and nothing between the two removes it.
+///
+/// The scan is block-local and stops at anything it cannot reason about, so the
+/// address is dead only where this block overwrites the register outright before
+/// reaching a branch, a call, or its own end.
+fn lea_result_dead(insts: &[MachInst], idx: usize) -> bool {
+    let MachInst::Lea {
+        dst: Operand::Reg(dst),
+        ..
+    } = &insts[idx]
+    else {
+        return false;
+    };
+    // The frame registers are read by the epilogue and by every stack access,
+    // neither of which this scan sees.
+    if matches!(dst, Reg::RSP | Reg::RBP) {
+        return false;
+    }
+    for inst in &insts[idx + 1..] {
+        if matches!(
+            inst,
+            MachInst::CallDirect { .. }
+                | MachInst::CallIndirect { .. }
+                | MachInst::Jmp { .. }
+                | MachInst::Jcc { .. }
+                | MachInst::Ret
+        ) {
+            return false;
+        }
+        if inst.uses().contains(dst) {
+            return false;
+        }
+        if kills_reg(inst) == Some(*dst) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Apply peephole optimizations to a sequence of `MachInst`s.
 ///
 /// Optimizations applied (in order of pattern matching):
@@ -74,12 +166,20 @@ pub fn flags_dead_after(insts: &[MachInst], idx: usize) -> bool {
 /// 5. `sub rX, 1` -> `dec rX` when flags are dead after the sub.
 /// 6. `add rX, -1` -> `dec rX` when flags are dead.
 /// 7. `sub rX, -1` -> `inc rX` when flags are dead.
+/// 8. Delete a LEA whose address the block overwrites before reading.
 pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
     let mut result = Vec::with_capacity(insts.len());
     let mut i = 0;
 
     while i < insts.len() {
         match &insts[i] {
+            // 8. An address computation nothing reads: the load or store that
+            // wanted it folded it into its own addressing mode.
+            MachInst::Lea { .. } if lea_result_dead(&insts, i) => {
+                i += 1;
+                continue;
+            }
+
             // 0. Redundant round-trip mov elimination: mov rA, rB; mov rB, rA -> mov rA, rB.
             // Only for S64 (S32 zero-extends upper 32 bits).
             MachInst::MovRR {
@@ -661,5 +761,98 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], MachInst::MovMR { .. }));
         assert!(matches!(out[1], MachInst::MovRM { .. }));
+    }
+
+    fn lea(dst: Reg, base: Reg, disp: i32) -> MachInst {
+        MachInst::Lea {
+            size: OpSize::S64,
+            dst: reg(dst),
+            addr: crate::x86::addr::Addr::new(Some(base), None, 1, disp),
+        }
+    }
+
+    #[test]
+    fn dead_lea_deleted() {
+        // The store folded the address into its own operand; nothing reads RAX
+        // before the block overwrites it.
+        let insts = vec![
+            lea(Reg::RAX, Reg::RCX, 8),
+            MachInst::MovMR {
+                size: OpSize::S64,
+                addr: crate::x86::addr::Addr::new(Some(Reg::RCX), None, 1, 8),
+                src: reg(Reg::RDX),
+            },
+            MachInst::MovRI {
+                size: OpSize::S32,
+                dst: reg(Reg::RAX),
+                imm: 3,
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], MachInst::MovMR { .. }));
+    }
+
+    #[test]
+    fn live_lea_kept() {
+        let insts = vec![
+            lea(Reg::RAX, Reg::RCX, 8),
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RDX),
+                src: reg(Reg::RAX),
+            },
+            MachInst::MovRI {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                imm: 3,
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0], MachInst::Lea { .. }));
+    }
+
+    #[test]
+    fn lea_kept_when_block_never_overwrites_it() {
+        // No redefinition before the end of the list: a later block may read it.
+        let insts = vec![lea(Reg::RAX, Reg::RCX, 8)];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn lea_kept_across_a_call() {
+        // A call is where an address is most likely to be an argument already
+        // placed in its register; the scan stops rather than guess.
+        let insts = vec![
+            lea(Reg::RDI, Reg::RSP, 0),
+            MachInst::CallDirect {
+                target: "f".to_string(),
+            },
+            MachInst::MovRI {
+                size: OpSize::S64,
+                dst: reg(Reg::RDI),
+                imm: 3,
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0], MachInst::Lea { .. }));
+    }
+
+    #[test]
+    fn byte_write_does_not_kill_a_lea() {
+        // `setcc` writes 8 bits; the upper 56 still hold the address.
+        let insts = vec![
+            lea(Reg::RAX, Reg::RCX, 8),
+            MachInst::Setcc {
+                cc: CondCode::Eq,
+                dst: reg(Reg::RAX),
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], MachInst::Lea { .. }));
     }
 }
