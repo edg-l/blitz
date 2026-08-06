@@ -4,7 +4,7 @@ use crate::egraph::unionfind::UnionFind;
 use crate::ir::Type;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
-use crate::ir::op::Op;
+use crate::ir::op::{Op, PseudoOp, PureOp};
 use crate::regalloc::allocator::RegAllocResult;
 use crate::x86::abi::{ArgLoc, FP_RETURN_REG, GPR_RETURN_REG, assign_args, setup_call_args};
 use crate::x86::addr::Addr;
@@ -52,11 +52,11 @@ fn build_mem_addr(
         schedule
             .iter()
             .enumerate()
-            .find(|(_, inst)| inst.dst == v && matches!(inst.op, Op::Addr { .. }))
+            .find(|(_, inst)| inst.dst == v && matches!(inst.op, Op::Pure(PureOp::Addr { .. })))
     });
 
     if let Some((addr_pos, inst)) = addr_inst
-        && let Op::Addr { scale, disp } = &inst.op
+        && let Op::Pure(PureOp::Addr { scale, disp }) = &inst.op
     {
         let reg_of = |v: VReg| regalloc.vreg_to_reg.get(&v).copied();
         let base_reg = inst.operands.first().copied().and_then(reg_of);
@@ -128,10 +128,10 @@ pub(super) fn lower_effectful_op(
         .filter(|(_, i)| {
             matches!(
                 i.op,
-                Op::CallResult(_, _)
-                    | Op::LoadResult(_, _)
-                    | Op::VoidCallBarrier
-                    | Op::StoreBarrier
+                Op::Pseudo(PseudoOp::CallResult(_, _))
+                    | Op::Pseudo(PseudoOp::LoadResult(_, _))
+                    | Op::Pseudo(PseudoOp::VoidCallBarrier)
+                    | Op::Pseudo(PseudoOp::StoreBarrier)
             )
         })
         .map(|(idx, _)| idx)

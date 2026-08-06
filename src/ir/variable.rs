@@ -3,7 +3,7 @@ use smallvec::smallvec;
 use crate::egraph::ENode;
 use crate::ir::builder::{FunctionBuilder, Value};
 use crate::ir::effectful::{BlockId, EffectfulOp};
-use crate::ir::op::Op;
+use crate::ir::op::{Op, PureOp};
 use crate::ir::types::Type;
 
 // ── Variable handle ──────────────────────────────────────────────────────────
@@ -141,7 +141,7 @@ impl FunctionBuilder {
         let param_idx = block_data.param_types.len() as u32;
 
         let node = ENode {
-            op: Op::BlockParam(block, param_idx, ty.clone()),
+            op: Op::Pure(PureOp::BlockParam(block, param_idx, ty.clone())),
             children: smallvec![],
         };
         let cid = self.egraph.add(node);

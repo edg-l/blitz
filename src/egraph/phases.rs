@@ -102,12 +102,12 @@ mod tests {
 
     use super::*;
     use crate::egraph::enode::ENode;
-    use crate::ir::op::{ClassId, Op};
+    use crate::ir::op::{ClassId, MachOp, Op, PureOp};
     use crate::ir::types::Type;
 
     fn iconst(g: &mut EGraph, v: i64) -> ClassId {
         g.add(ENode {
-            op: Op::Iconst(v, Type::I64),
+            op: Op::Pure(PureOp::Iconst(v, Type::I64)),
             children: smallvec![],
         })
     }
@@ -130,19 +130,19 @@ mod tests {
 
         // i * 8
         let i_times_8 = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![i, eight],
         });
 
         // base + i*8
         let addr = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![base, i_times_8],
         });
 
         // (base + i*8) + 1
         let val_plus_one = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![addr, one],
         });
 
@@ -151,7 +151,7 @@ mod tests {
         // After phases, i*8 should be equivalent to Shl(i, 3)
         let three = iconst(&mut g, 3);
         let shl3 = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![i, three],
         });
         assert_eq!(
@@ -163,10 +163,12 @@ mod tests {
         // val_plus_one should contain X86Lea4{scale:1, disp:1} or similar LEA form
         let val_canon = g.find(val_plus_one);
         let val_class = g.class(val_canon);
-        let has_lea = val_class
-            .nodes
-            .iter()
-            .any(|n| matches!(n.op, Op::X86Lea4 { disp: 1, .. } | Op::X86Lea2));
+        let has_lea = val_class.nodes.iter().any(|n| {
+            matches!(
+                n.op,
+                Op::Mach(MachOp::X86Lea4 { disp: 1, .. }) | Op::Mach(MachOp::X86Lea2)
+            )
+        });
         assert!(
             has_lea,
             "val+1 class should contain an X86Lea node after addr mode rules"
@@ -185,7 +187,7 @@ mod tests {
         // Insert enough classes to exceed the limit
         for i in 0..10i64 {
             let _ = g.add(ENode {
-                op: Op::Iconst(i, Type::I64),
+                op: Op::Pure(PureOp::Iconst(i, Type::I64)),
                 children: smallvec![],
             });
         }
@@ -206,14 +208,14 @@ mod tests {
 
         // Add(a, 0) => a (algebraic)
         let add_zero = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, zero],
         });
 
         // Mul(a, 4) => Shl(a, 2) (strength reduction)
         let four = iconst(&mut g, 4);
         let mul4 = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, four],
         });
 
@@ -224,7 +226,7 @@ mod tests {
 
         // Strength: Mul(a,4) = Shl(a,2)
         let shl2 = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![a, two],
         });
         assert_eq!(g.find(mul4), g.find(shl2));
@@ -240,17 +242,17 @@ mod tests {
         let opts = CompileOptions::default();
 
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let four = iconst(&mut g, 4);
         let zero = iconst(&mut g, 0);
         let mul = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, four],
         });
         let add_zero = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![mul, zero],
         });
 
@@ -262,7 +264,7 @@ mod tests {
         // mul class should contain Shl(a, 2) from strength reduction
         let two = iconst(&mut g, 2);
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![a, two],
         });
         assert_eq!(g.find(mul), g.find(shl));
@@ -271,10 +273,12 @@ mod tests {
         // (the Proj0/X86Shl class is merged with the mul class)
         let mul_canon = g.find(mul);
         let class = g.class(mul_canon);
-        let has_x86 = class
-            .nodes
-            .iter()
-            .any(|n| matches!(n.op, Op::Proj0 | Op::X86Lea3 { .. }));
+        let has_x86 = class.nodes.iter().any(|n| {
+            matches!(
+                n.op,
+                Op::Pure(PureOp::Proj0) | Op::Mach(MachOp::X86Lea3 { .. })
+            )
+        });
         assert!(has_x86, "unified saturation should produce x86 lowering");
     }
 
@@ -304,18 +308,18 @@ mod tests {
         let opts = CompileOptions::default();
 
         let param = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let two = iconst(&mut g, 2);
         let three = iconst(&mut g, 3);
 
         let mul2 = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![param, two],
         });
         let shl_outer = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![mul2, three],
         });
 
@@ -323,7 +327,7 @@ mod tests {
 
         let four = iconst(&mut g, 4);
         let expected = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![param, four],
         });
         assert_eq!(
@@ -343,17 +347,17 @@ mod tests {
         // --- Phased approach: algebraic to fixpoint, then strength to fixpoint ---
         let mut g = EGraph::new();
         let param = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let two = iconst(&mut g, 2);
         let three = iconst(&mut g, 3);
         let mul2 = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![param, two],
         });
         let shl_outer = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![mul2, three],
         });
 
@@ -375,7 +379,7 @@ mod tests {
         // Phased approach should NOT find Shl(param, 4)
         let four = iconst(&mut g, 4);
         let combined = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![param, four],
         });
         assert_ne!(
@@ -387,17 +391,17 @@ mod tests {
         // --- Unified approach on a fresh graph ---
         let mut g2 = EGraph::new();
         let param2 = g2.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let two2 = iconst(&mut g2, 2);
         let three2 = iconst(&mut g2, 3);
         let mul2_2 = g2.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![param2, two2],
         });
         let shl_outer2 = g2.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![mul2_2, three2],
         });
 
@@ -405,7 +409,7 @@ mod tests {
 
         let four2 = iconst(&mut g2, 4);
         let combined2 = g2.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![param2, four2],
         });
         assert_eq!(
@@ -430,7 +434,7 @@ mod tests {
         let opts = CompileOptions::default();
 
         let param = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let zero = iconst(&mut g, 0);
@@ -439,17 +443,17 @@ mod tests {
 
         // Add(param, 0)
         let add_zero = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![param, zero],
         });
         // Mul(Add(param, 0), 2)
         let mul2 = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![add_zero, two],
         });
         // Shl(Mul(...), 3)
         let outer = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![mul2, three],
         });
 
@@ -458,7 +462,7 @@ mod tests {
         // Full chain should produce Shl(param, 4)
         let four = iconst(&mut g, 4);
         let expected = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![param, four],
         });
         assert_eq!(
@@ -483,11 +487,11 @@ mod tests {
         let opts = CompileOptions::default();
 
         let base = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let idx = g.add(ENode {
-            op: Op::Param(1, Type::I64),
+            op: Op::Pure(PureOp::Param(1, Type::I64)),
             children: smallvec![],
         });
         let two = iconst(&mut g, 2);
@@ -495,17 +499,17 @@ mod tests {
 
         // Mul(idx, 2)
         let mul2 = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![idx, two],
         });
         // Shl(Mul(idx, 2), 1)
         let shl1 = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![mul2, one],
         });
         // Add(base, Shl(Mul(idx, 2), 1))
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![base, shl1],
         });
 
@@ -518,7 +522,8 @@ mod tests {
         let has_scale4_addr = add_class.nodes.iter().any(|n| {
             matches!(
                 n.op,
-                Op::Addr { scale: 4, disp: 0 } | Op::X86Lea3 { scale: 4 }
+                Op::Pure(PureOp::Addr { scale: 4, disp: 0 })
+                    | Op::Mach(MachOp::X86Lea3 { scale: 4 })
             )
         });
         assert!(
@@ -535,17 +540,17 @@ mod tests {
         let opts = CompileOptions::default();
 
         let param = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let c3 = iconst(&mut g, 3);
         let c5 = iconst(&mut g, 5);
         let inner = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![param, c3],
         });
         let outer = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![inner, c5],
         });
 
@@ -554,7 +559,7 @@ mod tests {
         // Should find param + 8 in the same class
         let c8 = iconst(&mut g, 8);
         let folded = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![param, c8],
         });
         assert_eq!(
@@ -578,22 +583,22 @@ mod tests {
         let opts = CompileOptions::default();
 
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let c4 = iconst(&mut g, 4);
         let c8 = iconst(&mut g, 8);
 
         let mul4 = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, c4],
         });
         let mul8 = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, c8],
         });
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![mul4, mul8],
         });
 
@@ -602,7 +607,7 @@ mod tests {
         // Factoring: Mul(a,4) + Mul(a,8) = Mul(a, 12)
         let c12 = iconst(&mut g, 12);
         let mul12 = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, c12],
         });
         assert_eq!(
@@ -622,26 +627,26 @@ mod tests {
         let opts = CompileOptions::default();
 
         let x = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let a = g.add(ENode {
-            op: Op::Param(1, Type::I64),
+            op: Op::Pure(PureOp::Param(1, Type::I64)),
             children: smallvec![],
         });
         let zero = iconst(&mut g, 0);
         let garbage = iconst(&mut g, 999);
 
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![x, x],
         });
         let add_zero = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, zero],
         });
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, add_zero, garbage],
         });
 
@@ -670,15 +675,15 @@ mod tests {
         let c2 = iconst(&mut g, 2);
 
         let shl3 = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![c1, c3],
         });
         let shl2 = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![c1, c2],
         });
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![shl3, shl2],
         });
 
@@ -705,7 +710,7 @@ mod tests {
         let c4 = iconst(&mut g, 4);
 
         let udiv = g.add(ENode {
-            op: Op::UDiv,
+            op: Op::Pure(PureOp::UDiv),
             children: smallvec![c16, c4],
         });
 
@@ -734,7 +739,7 @@ mod tests {
         let opts = CompileOptions::default();
 
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let x = iconst(&mut g, 42);
@@ -746,21 +751,21 @@ mod tests {
 
         // Inner: Select(Icmp(Slt, 3, 5), x, y) → x (since 3 < 5 is true)
         let inner_cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Slt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Slt)),
             children: smallvec![c3, c5],
         });
         let inner_sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![inner_cond, x, y],
         });
 
         // Outer: Select(Icmp(Eq, a, a), inner_sel, z) → inner_sel (since a==a)
         let outer_cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![a, a],
         });
         let outer_sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![outer_cond, inner_sel, z],
         });
 
@@ -783,29 +788,29 @@ mod tests {
         let opts = CompileOptions::default();
 
         let base = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let idx = g.add(ENode {
-            op: Op::Param(1, Type::I64),
+            op: Op::Pure(PureOp::Param(1, Type::I64)),
             children: smallvec![],
         });
         let c2 = iconst(&mut g, 2);
 
         let mul_a = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![idx, c2],
         });
         let mul_b = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![idx, c2],
         });
         let inner_add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![mul_a, mul_b],
         });
         let outer_add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![base, inner_add],
         });
 
@@ -816,10 +821,12 @@ mod tests {
         // Addr mode: Add(base, Shl(idx, 2)) → Addr{scale:4} or LEA3{scale:4}
         let outer_canon = g.find(outer_add);
         let class = g.class(outer_canon);
-        let has_scale4 = class
-            .nodes
-            .iter()
-            .any(|n| matches!(n.op, Op::Addr { scale: 4, .. } | Op::X86Lea3 { scale: 4 }));
+        let has_scale4 = class.nodes.iter().any(|n| {
+            matches!(
+                n.op,
+                Op::Pure(PureOp::Addr { scale: 4, .. }) | Op::Mach(MachOp::X86Lea3 { scale: 4 })
+            )
+        });
         assert!(
             has_scale4,
             "factoring + strength + addr mode should produce scale-4 addressing"

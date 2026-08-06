@@ -47,7 +47,7 @@ mod tests {
     use crate::egraph::enode::ENode;
     use crate::ir::builder::FunctionBuilder;
     use crate::ir::effectful::{EffOperand, EffectfulOp};
-    use crate::ir::op::Op;
+    use crate::ir::op::{Op, PureOp};
     use crate::ir::types::Type;
     use crate::verify::{VerifyLevel, verify_function_at};
 
@@ -70,7 +70,7 @@ mod tests {
         };
 
         let other = egraph.add(ENode {
-            op: Op::Iconst(4242, Type::I64),
+            op: Op::Pure(PureOp::Iconst(4242, Type::I64)),
             children: smallvec![],
         });
         egraph.merge(returned.class(), other);

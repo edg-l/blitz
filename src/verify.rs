@@ -362,7 +362,7 @@ mod tests {
     use crate::ir::builder::FunctionBuilder;
     use crate::ir::effectful::{EffOperand, EffectfulOp};
     use crate::ir::function::BasicBlock;
-    use crate::ir::op::Op;
+    use crate::ir::op::{Op, PureOp};
 
     /// `fn f(a: I64) -> I64 { return a + 1; }`
     fn simple_function() -> (Function, EGraph) {
@@ -406,7 +406,7 @@ mod tests {
         block1_uses: &[u32],
     ) -> Vec<String> {
         let inst = |dst: u32, operands: Vec<u32>| ScheduledInst {
-            op: Op::Iconst(0, Type::I32),
+            op: Op::Pure(PureOp::Iconst(0, Type::I32)),
             dst: VReg(dst),
             operands: operands.into_iter().map(VReg).collect(),
         };
@@ -579,7 +579,7 @@ mod tests {
         // Merge the returned class with a fresh one; whichever of the two loses
         // union-find is now a stale id that still resolves. Point the CFG at it.
         let other = egraph.add(ENode {
-            op: Op::Iconst(4242, Type::I64),
+            op: Op::Pure(PureOp::Iconst(4242, Type::I64)),
             children: smallvec![],
         });
         egraph.merge(returned.class(), other);

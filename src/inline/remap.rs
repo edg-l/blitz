@@ -6,7 +6,7 @@ use crate::egraph::EGraph;
 use crate::egraph::enode::ENode;
 use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 
 /// Context for remapping ClassIds, BlockIds, stack slots, and UIDs
 /// when importing a callee's e-graph and blocks into a caller.
@@ -68,7 +68,7 @@ impl RemapContext {
             let enode = &eclass.nodes[0];
 
             // Param nodes must have been pre-seeded; panic if we encounter one unmapped.
-            if matches!(enode.op, Op::Param(..)) {
+            if matches!(enode.op, Op::Pure(PureOp::Param(..))) {
                 panic!(
                     "import_egraph: encountered unmapped Param node at ClassId({})",
                     class_idx
@@ -77,13 +77,19 @@ impl RemapContext {
 
             // Rewrite the op.
             let new_op = match &enode.op {
-                Op::BlockParam(block_id, idx, ty) => {
+                Op::Pure(PureOp::BlockParam(block_id, idx, ty)) => {
                     let new_block = self.remap_block_id(*block_id);
-                    Op::BlockParam(new_block, *idx, ty.clone())
+                    Op::Pure(PureOp::BlockParam(new_block, *idx, ty.clone()))
                 }
-                Op::LoadResult(uid, ty) => Op::LoadResult(uid + self.uid_offset, ty.clone()),
-                Op::CallResult(uid, ty) => Op::CallResult(uid + self.uid_offset, ty.clone()),
-                Op::StackAddr(slot) => Op::StackAddr(slot + self.slot_offset),
+                Op::Pseudo(PseudoOp::LoadResult(uid, ty)) => {
+                    Op::Pseudo(PseudoOp::LoadResult(uid + self.uid_offset, ty.clone()))
+                }
+                Op::Pseudo(PseudoOp::CallResult(uid, ty)) => {
+                    Op::Pseudo(PseudoOp::CallResult(uid + self.uid_offset, ty.clone()))
+                }
+                Op::Pseudo(PseudoOp::StackAddr(slot)) => {
+                    Op::Pseudo(PseudoOp::StackAddr(slot + self.slot_offset))
+                }
                 other => other.clone(),
             };
 
@@ -247,7 +253,8 @@ fn max_uid_in_function(func: &Function) -> u32 {
         for eclass in &egraph.classes {
             for enode in &eclass.nodes {
                 match &enode.op {
-                    Op::LoadResult(uid, _) | Op::CallResult(uid, _) => {
+                    Op::Pseudo(PseudoOp::LoadResult(uid, _))
+                    | Op::Pseudo(PseudoOp::CallResult(uid, _)) => {
                         max_uid = max_uid.max(*uid);
                     }
                     _ => {}
@@ -271,7 +278,8 @@ fn max_uid_in_function(func: &Function) -> u32 {
                     if (canon.0 as usize) < egraph.classes.len() {
                         for enode in &egraph.classes[canon.0 as usize].nodes {
                             match &enode.op {
-                                Op::LoadResult(uid, _) | Op::CallResult(uid, _) => {
+                                Op::Pseudo(PseudoOp::LoadResult(uid, _))
+                                | Op::Pseudo(PseudoOp::CallResult(uid, _)) => {
                                     max_uid = max_uid.max(*uid);
                                 }
                                 _ => {}

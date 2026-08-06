@@ -1,4 +1,5 @@
-use crate::ir::op::Op;
+use crate::ir::condcode::CondCode;
+use crate::ir::op::{MachOp, Op, PseudoOp, PureOp};
 
 /// Optimization objective for the cost model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,34 +47,38 @@ impl CostModel {
     pub fn cost(&self, op: &Op) -> f64 {
         match op {
             // ── Constants: free (materialized as immediate or folded into insn) ──
-            Op::Iconst(..) | Op::Fconst(_, _) => 0.0,
+            Op::Pure(PureOp::Iconst(..)) | Op::Pure(PureOp::Fconst(_, _)) => 0.0,
 
             // ── Function parameters: free (value lives in an ABI register on entry) ──
-            Op::Param(..) => 0.0,
+            Op::Pure(PureOp::Param(..)) => 0.0,
 
             // ── Stack slot address: free (LEA emitted during lowering) ───────────
-            Op::StackAddr(..) => 0.0,
+            Op::Pseudo(PseudoOp::StackAddr(..)) => 0.0,
 
             // ── Global variable address: free (LEA [RIP+disp32] emitted during lowering) ──
-            Op::GlobalAddr(_) => 0.0,
+            Op::Pseudo(PseudoOp::GlobalAddr(_)) => 0.0,
 
             // ── Block parameters: free (value comes from predecessor block) ──────────
-            Op::BlockParam(..) => 0.0,
+            Op::Pure(PureOp::BlockParam(..)) => 0.0,
 
             // ── Load result placeholder: free (instruction emitted by effectful lowering) ──
-            Op::LoadResult(_, _) => 0.0,
+            Op::Pseudo(PseudoOp::LoadResult(_, _)) => 0.0,
 
             // ── Call result placeholder: free (result captured after CallDirect) ──
-            Op::CallResult(_, _) => 0.0,
+            Op::Pseudo(PseudoOp::CallResult(_, _)) => 0.0,
 
             // ── Addr: inlined into load/store, no separate instruction ───────────
-            Op::Addr { .. } => 0.0,
+            Op::Pure(PureOp::Addr { .. }) => 0.0,
 
             // ── Projections: no separate instruction ─────────────────────────────
-            Op::Proj0 | Op::Proj1 => 0.0,
+            Op::Pure(PureOp::Proj0) | Op::Pure(PureOp::Proj1) => 0.0,
 
             // ── x86-64 ALU: latency=1, throughput=0.25, size=3 ──────────────────
-            Op::X86Add | Op::X86Sub | Op::X86And | Op::X86Or | Op::X86Xor => CostTuple {
+            Op::Mach(MachOp::X86Add)
+            | Op::Mach(MachOp::X86Sub)
+            | Op::Mach(MachOp::X86And)
+            | Op::Mach(MachOp::X86Or)
+            | Op::Mach(MachOp::X86Xor) => CostTuple {
                 latency: 1.0,
                 throughput: 0.25,
                 size: 3.0,
@@ -81,15 +86,19 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── x86-64 shifts (variable count via CL): latency=1, throughput=0.5, size=3 ──
-            Op::X86Shl | Op::X86Sar | Op::X86Shr => CostTuple {
-                latency: 1.0,
-                throughput: 0.5,
-                size: 3.0,
+            Op::Mach(MachOp::X86Shl) | Op::Mach(MachOp::X86Sar) | Op::Mach(MachOp::X86Shr) => {
+                CostTuple {
+                    latency: 1.0,
+                    throughput: 0.5,
+                    size: 3.0,
+                }
+                .weighted(self.goal)
             }
-            .weighted(self.goal),
 
             // ── x86-64 immediate-form shifts: slightly cheaper (no CL constraint) ─
-            Op::X86ShlImm(_) | Op::X86ShrImm(_) | Op::X86SarImm(_) => {
+            Op::Mach(MachOp::X86ShlImm(_))
+            | Op::Mach(MachOp::X86ShrImm(_))
+            | Op::Mach(MachOp::X86SarImm(_)) => {
                 CostTuple {
                     latency: 1.0,
                     throughput: 0.5,
@@ -103,7 +112,7 @@ impl CostModel {
             //    cheaper than Proj1(X86Sub) since we don't pay for the sub's
             //    dst register write. imm=0 lowers to `test r, r` (2 bytes, even
             //    cheaper). imm!=0 lowers to `cmp r, imm8/imm32`.
-            Op::X86CmpI { imm, .. } => {
+            Op::Mach(MachOp::X86CmpI { imm, .. }) => {
                 let size = if *imm == 0 {
                     2.0
                 } else if (-128..=127).contains(imm) {
@@ -121,19 +130,19 @@ impl CostModel {
             } // discount so extraction prefers it over Proj1(X86Sub) when possible
 
             // ── LEA variants ─────────────────────────────────────────────────────
-            Op::X86Lea2 => CostTuple {
+            Op::Mach(MachOp::X86Lea2) => CostTuple {
                 latency: 1.0,
                 throughput: 0.5,
                 size: 4.0,
             }
             .weighted(self.goal),
-            Op::X86Lea3 { .. } => CostTuple {
+            Op::Mach(MachOp::X86Lea3 { .. }) => CostTuple {
                 latency: 1.0,
                 throughput: 0.5,
                 size: 5.0,
             }
             .weighted(self.goal),
-            Op::X86Lea4 { .. } => CostTuple {
+            Op::Mach(MachOp::X86Lea4 { .. }) => CostTuple {
                 latency: 1.0,
                 throughput: 0.5,
                 size: 7.0,
@@ -141,7 +150,7 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── X86Idiv / X86Div: latency=35, throughput=21, size=5 (64-bit div) ──
-            Op::X86Idiv(..) | Op::X86Div(..) => CostTuple {
+            Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..)) => CostTuple {
                 latency: 35.0,
                 throughput: 21.0,
                 size: 5.0,
@@ -149,7 +158,7 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── X86Imul3: latency=3, throughput=1.0, size=4 ──────────────────────
-            Op::X86Imul3 => CostTuple {
+            Op::Mach(MachOp::X86Imul3) => CostTuple {
                 latency: 3.0,
                 throughput: 1.0,
                 size: 4.0,
@@ -157,7 +166,7 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── X86Cmov: latency=1, throughput=0.5, size=4 ───────────────────────
-            Op::X86Cmov(_) => CostTuple {
+            Op::Mach(MachOp::X86Cmov(_)) => CostTuple {
                 latency: 1.0,
                 throughput: 0.5,
                 size: 4.0,
@@ -165,7 +174,7 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── X86Setcc: latency=1, throughput=0.5, size=3 ──────────────────────
-            Op::X86Setcc(_) => CostTuple {
+            Op::Mach(MachOp::X86Setcc(_)) => CostTuple {
                 latency: 1.0,
                 throughput: 0.5,
                 size: 3.0,
@@ -173,19 +182,19 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── x86 FP ops SSE2 double (sd) ───────────────────────────────────────
-            Op::X86Addsd | Op::X86Subsd => CostTuple {
+            Op::Mach(MachOp::X86Addsd) | Op::Mach(MachOp::X86Subsd) => CostTuple {
                 latency: 3.0,
                 throughput: 0.5,
                 size: 4.0,
             }
             .weighted(self.goal),
-            Op::X86Mulsd => CostTuple {
+            Op::Mach(MachOp::X86Mulsd) => CostTuple {
                 latency: 5.0,
                 throughput: 0.5,
                 size: 4.0,
             }
             .weighted(self.goal),
-            Op::X86Divsd | Op::X86Sqrtsd => CostTuple {
+            Op::Mach(MachOp::X86Divsd) | Op::Mach(MachOp::X86Sqrtsd) => CostTuple {
                 latency: 13.0,
                 throughput: 4.0,
                 size: 4.0,
@@ -193,19 +202,19 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── x86 FP ops SSE single (ss) ────────────────────────────────────────
-            Op::X86Addss | Op::X86Subss => CostTuple {
+            Op::Mach(MachOp::X86Addss) | Op::Mach(MachOp::X86Subss) => CostTuple {
                 latency: 3.0,
                 throughput: 0.5,
                 size: 4.0,
             }
             .weighted(self.goal),
-            Op::X86Mulss => CostTuple {
+            Op::Mach(MachOp::X86Mulss) => CostTuple {
                 latency: 5.0,
                 throughput: 0.5,
                 size: 4.0,
             }
             .weighted(self.goal),
-            Op::X86Divss | Op::X86Sqrtss => CostTuple {
+            Op::Mach(MachOp::X86Divss) | Op::Mach(MachOp::X86Sqrtss) => CostTuple {
                 latency: 13.0,
                 throughput: 4.0,
                 size: 4.0,
@@ -213,19 +222,19 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── x86 FP conversion ops ─────────────────────────────────────────────
-            Op::X86Cvtsi2sd(_) | Op::X86Cvtsi2ss(_) => CostTuple {
+            Op::Mach(MachOp::X86Cvtsi2sd(_)) | Op::Mach(MachOp::X86Cvtsi2ss(_)) => CostTuple {
                 latency: 4.0,
                 throughput: 1.0,
                 size: 5.0,
             }
             .weighted(self.goal),
-            Op::X86Cvttsd2si(_) | Op::X86Cvttss2si(_) => CostTuple {
+            Op::Mach(MachOp::X86Cvttsd2si(_)) | Op::Mach(MachOp::X86Cvttss2si(_)) => CostTuple {
                 latency: 4.0,
                 throughput: 1.0,
                 size: 5.0,
             }
             .weighted(self.goal),
-            Op::X86Cvtsd2ss | Op::X86Cvtss2sd => CostTuple {
+            Op::Mach(MachOp::X86Cvtsd2ss) | Op::Mach(MachOp::X86Cvtss2sd) => CostTuple {
                 latency: 3.0,
                 throughput: 1.0,
                 size: 4.0,
@@ -233,7 +242,7 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── x86 FP comparison ops ─────────────────────────────────────────────
-            Op::X86Ucomisd | Op::X86Ucomiss => CostTuple {
+            Op::Mach(MachOp::X86Ucomisd) | Op::Mach(MachOp::X86Ucomiss) => CostTuple {
                 latency: 3.0,
                 throughput: 1.0,
                 size: 4.0,
@@ -241,7 +250,7 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── X86Movsx/X86Movzx: latency=1, throughput=0.25, size=4 ────────────
-            Op::X86Movsx { .. } | Op::X86Movzx { .. } => CostTuple {
+            Op::Mach(MachOp::X86Movsx { .. }) | Op::Mach(MachOp::X86Movzx { .. }) => CostTuple {
                 latency: 1.0,
                 throughput: 0.25,
                 size: 4.0,
@@ -249,10 +258,10 @@ impl CostModel {
             .weighted(self.goal),
 
             // ── X86Trunc: free — upper bits are simply ignored on x86-64 ──────────
-            Op::X86Trunc { .. } => 0.0,
+            Op::Mach(MachOp::X86Trunc { .. }) => 0.0,
 
             // ── X86Bitcast: one MOVQ instruction for cross-class, or free for same ─
-            Op::X86Bitcast { from, to } => {
+            Op::Mach(MachOp::X86Bitcast { from, to }) => {
                 if from.is_integer() == to.is_integer() {
                     // Same register class (int->int or float->float same size): just a copy.
                     0.0
@@ -268,56 +277,32 @@ impl CostModel {
             }
 
             // ── Generic IR ops: must be lowered before extraction ─────────────────
-            Op::Add
-            | Op::Sub
-            | Op::Mul
-            | Op::UDiv
-            | Op::SDiv
-            | Op::URem
-            | Op::SRem
-            | Op::And
-            | Op::Or
-            | Op::Xor
-            | Op::Shl
-            | Op::Shr
-            | Op::Sar
-            | Op::Sext(_)
-            | Op::Zext(_)
-            | Op::Trunc(_)
-            | Op::Bitcast(_)
-            | Op::Icmp(_)
-            | Op::Fadd
-            | Op::Fsub
-            | Op::Fmul
-            | Op::Fdiv
-            | Op::Fsqrt
-            | Op::Select
-            | Op::IntToFloat(_)
-            | Op::FloatToInt(_)
-            | Op::FloatExt
-            | Op::FloatTrunc => f64::INFINITY,
-            // OrdEq/UnordNe Fcmp are lowered directly (skip isel); need finite cost.
-            // Regular Fcmp gets INFINITY (lowered to X86Ucomisd/Ucomiss via isel).
-            Op::Fcmp(cc) => {
-                use crate::ir::condcode::CondCode;
-                if matches!(cc, CondCode::OrdEq | CondCode::UnordNe) {
-                    CostTuple {
-                        latency: 3.0,
-                        throughput: 1.0,
-                        size: 5.0,
-                    }
-                    .weighted(self.goal)
-                } else {
-                    f64::INFINITY
-                }
+            //
+            // One arm for the whole type. This and `lower.rs`'s rejection used to
+            // be two hand-written lists of the same 30 variants, and they had
+            // already drifted over `Fcmp`.
+            //
+            // The exception below is the only real one, and it is stated once:
+            // `Fcmp(OrdEq)` and `Fcmp(UnordNe)` skip isel and are lowered directly
+            // by `lower_block_pure_ops`, so extraction must be able to afford them.
+            Op::Pure(PureOp::Fcmp(CondCode::OrdEq | CondCode::UnordNe)) => CostTuple {
+                latency: 3.0,
+                throughput: 1.0,
+                size: 5.0,
             }
-
+            .weighted(self.goal),
+            Op::Pure(_) => f64::INFINITY,
             // Spill pseudo-ops are never costed by the e-graph.
-            Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
+            Op::Pseudo(PseudoOp::SpillStore(_))
+            | Op::Pseudo(PseudoOp::SpillLoad(_))
+            | Op::Pseudo(PseudoOp::XmmSpillStore(_))
+            | Op::Pseudo(PseudoOp::XmmSpillLoad(_)) => {
                 unreachable!("spill pseudo-ops are not part of the e-graph")
             }
 
-            Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_) => {
+            Op::Pseudo(PseudoOp::StoreBarrier)
+            | Op::Pseudo(PseudoOp::VoidCallBarrier)
+            | Op::Pseudo(PseudoOp::TerminatorArgs(_)) => {
                 unreachable!("barrier pseudo-ops are not part of the e-graph")
             }
         }
@@ -331,34 +316,34 @@ mod tests {
     #[test]
     fn x86add_balanced_is_finite() {
         let cm = CostModel::new(OptGoal::Balanced);
-        let c = cm.cost(&Op::X86Add);
+        let c = cm.cost(&Op::Mach(MachOp::X86Add));
         assert!(c.is_finite(), "X86Add should have finite balanced cost");
     }
 
     #[test]
     fn add_is_infinite() {
         let cm = CostModel::new(OptGoal::Balanced);
-        assert_eq!(cm.cost(&Op::Add), f64::INFINITY);
+        assert_eq!(cm.cost(&Op::Pure(PureOp::Add)), f64::INFINITY);
     }
 
     #[test]
     fn iconst_is_free() {
         let cm = CostModel::new(OptGoal::Latency);
         use crate::ir::types::Type;
-        assert_eq!(cm.cost(&Op::Iconst(42, Type::I64)), 0.0);
+        assert_eq!(cm.cost(&Op::Pure(PureOp::Iconst(42, Type::I64))), 0.0);
     }
 
     #[test]
     fn addr_is_free() {
         let cm = CostModel::new(OptGoal::CodeSize);
-        assert_eq!(cm.cost(&Op::Addr { scale: 4, disp: 0 }), 0.0);
+        assert_eq!(cm.cost(&Op::Pure(PureOp::Addr { scale: 4, disp: 0 })), 0.0);
     }
 
     #[test]
     fn lea_vs_add_cost_size() {
         let cm = CostModel::new(OptGoal::CodeSize);
-        let add_cost = cm.cost(&Op::X86Add);
-        let lea2_cost = cm.cost(&Op::X86Lea2);
+        let add_cost = cm.cost(&Op::Mach(MachOp::X86Add));
+        let lea2_cost = cm.cost(&Op::Mach(MachOp::X86Lea2));
         // X86Add size=3, X86Lea2 size=4 — add is cheaper by code size
         assert!(add_cost < lea2_cost);
     }
@@ -366,8 +351,8 @@ mod tests {
     #[test]
     fn x86imul3_higher_latency_than_add() {
         let cm = CostModel::new(OptGoal::Latency);
-        let add_cost = cm.cost(&Op::X86Add);
-        let imul_cost = cm.cost(&Op::X86Imul3);
+        let add_cost = cm.cost(&Op::Mach(MachOp::X86Add));
+        let imul_cost = cm.cost(&Op::Mach(MachOp::X86Imul3));
         assert!(
             imul_cost > add_cost,
             "imul3 latency=3 should exceed add latency=1"
@@ -377,24 +362,24 @@ mod tests {
     #[test]
     fn proj0_proj1_free() {
         let cm = CostModel::new(OptGoal::Balanced);
-        assert_eq!(cm.cost(&Op::Proj0), 0.0);
-        assert_eq!(cm.cost(&Op::Proj1), 0.0);
+        assert_eq!(cm.cost(&Op::Pure(PureOp::Proj0)), 0.0);
+        assert_eq!(cm.cost(&Op::Pure(PureOp::Proj1)), 0.0);
     }
 
     #[test]
     fn select_is_infinite() {
         let cm = CostModel::new(OptGoal::Balanced);
-        assert_eq!(cm.cost(&Op::Select), f64::INFINITY);
+        assert_eq!(cm.cost(&Op::Pure(PureOp::Select)), f64::INFINITY);
     }
 
     #[test]
     fn x86movsx_has_finite_cost() {
         use crate::ir::types::Type;
         let cm = CostModel::new(OptGoal::Balanced);
-        let cost = cm.cost(&Op::X86Movsx {
+        let cost = cm.cost(&Op::Mach(MachOp::X86Movsx {
             from: Type::I32,
             to: Type::I64,
-        });
+        }));
         assert!(cost.is_finite(), "X86Movsx should have finite cost");
     }
 
@@ -402,10 +387,10 @@ mod tests {
     fn x86movzx_has_finite_cost() {
         use crate::ir::types::Type;
         let cm = CostModel::new(OptGoal::Balanced);
-        let cost = cm.cost(&Op::X86Movzx {
+        let cost = cm.cost(&Op::Mach(MachOp::X86Movzx {
             from: Type::I8,
             to: Type::I64,
-        });
+        }));
         assert!(cost.is_finite(), "X86Movzx should have finite cost");
     }
 
@@ -413,10 +398,10 @@ mod tests {
     fn x86trunc_is_free() {
         use crate::ir::types::Type;
         let cm = CostModel::new(OptGoal::Balanced);
-        let cost = cm.cost(&Op::X86Trunc {
+        let cost = cm.cost(&Op::Mach(MachOp::X86Trunc {
             from: Type::I64,
             to: Type::I32,
-        });
+        }));
         assert_eq!(cost, 0.0, "X86Trunc should be free");
     }
 
@@ -425,7 +410,7 @@ mod tests {
         use crate::ir::types::Type;
         let cm = CostModel::new(OptGoal::Balanced);
         assert_eq!(
-            cm.cost(&Op::Sext(Type::I64)),
+            cm.cost(&Op::Pure(PureOp::Sext(Type::I64))),
             f64::INFINITY,
             "generic Sext should have infinite cost"
         );

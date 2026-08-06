@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::egraph::egraph::EGraph;
 use crate::egraph::enode::ENode;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PureOp};
 
 pub type VarId = u32;
 
@@ -42,7 +42,7 @@ pub fn match_pattern(egraph: &EGraph, pattern: &Pattern, class_id: ClassId) -> V
         Pattern::ConstPred(pred) => {
             let mut results = vec![];
             for node in &class.nodes {
-                if let Op::Iconst(val, _) = &node.op
+                if let Op::Pure(PureOp::Iconst(val, _)) = &node.op
                     && pred(*val)
                 {
                     results.push(Substitution::new());
@@ -173,7 +173,7 @@ mod tests {
 
     fn iconst(g: &mut EGraph, v: i64) -> ClassId {
         g.add(ENode {
-            op: Op::Iconst(v, Type::I64),
+            op: Op::Pure(PureOp::Iconst(v, Type::I64)),
             children: smallvec![],
         })
     }
@@ -196,12 +196,15 @@ mod tests {
         let c1 = iconst(&mut g, 1);
         let c2 = iconst(&mut g, 2);
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![c1, c2],
         });
 
         // Pattern: Add(?0, ?1)
-        let pat = Pattern::Op(Op::Add, vec![Pattern::Var(0), Pattern::Var(1)]);
+        let pat = Pattern::Op(
+            Op::Pure(PureOp::Add),
+            vec![Pattern::Var(0), Pattern::Var(1)],
+        );
         let matches = match_pattern(&g, &pat, add);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0][&0], c1);
@@ -234,7 +237,10 @@ mod tests {
         let mut g = EGraph::new();
         let c = iconst(&mut g, 1);
         // Pattern expects Add, but c is Iconst
-        let pat = Pattern::Op(Op::Add, vec![Pattern::Var(0), Pattern::Var(1)]);
+        let pat = Pattern::Op(
+            Op::Pure(PureOp::Add),
+            vec![Pattern::Var(0), Pattern::Var(1)],
+        );
         let matches = match_pattern(&g, &pat, c);
         assert!(matches.is_empty());
     }
@@ -246,22 +252,22 @@ mod tests {
         let a = iconst(&mut g, 10);
         let two = iconst(&mut g, 2);
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![a, two],
         });
         let b = iconst(&mut g, 5);
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![b, shl],
         });
 
         // Pattern: Add(?0, Shl(?1, ConstPred(==2)))
         let pat = Pattern::Op(
-            Op::Add,
+            Op::Pure(PureOp::Add),
             vec![
                 Pattern::Var(0),
                 Pattern::Op(
-                    Op::Shl,
+                    Op::Pure(PureOp::Shl),
                     vec![Pattern::Var(1), Pattern::ConstPred(Box::new(|v| v == 2))],
                 ),
             ],

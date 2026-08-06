@@ -23,7 +23,7 @@ use crate::emit::object::{FunctionInfo, ObjectFile};
 use crate::emit::peephole::peephole;
 use crate::ir::effectful::{BlockId, EffectfulOp};
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 use crate::regalloc::allocate_global;
 use crate::regalloc::allocator::RegAllocResult;
 use crate::regalloc::slots::SlotAllocator;
@@ -633,7 +633,7 @@ pub fn compile(
                 // (the ALU op that sets EFLAGS, e.g. x86_sub).
                 for inst in sched {
                     if inst.dst == vreg {
-                        if matches!(inst.op, Op::Proj1) {
+                        if matches!(inst.op, Op::Pure(PureOp::Proj1)) {
                             for &op in &inst.operands {
                                 branch_cond_chain.insert(op);
                             }
@@ -657,15 +657,17 @@ pub fn compile(
         indexed.sort_by_key(|(orig_idx, inst)| {
             let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
             let param_order: u8 = match inst.op {
-                Op::Param(_, _) => 0,
-                Op::LoadResult(_, _) | Op::CallResult(_, _) => 1,
+                Op::Pure(PureOp::Param(_, _)) => 0,
+                Op::Pseudo(PseudoOp::LoadResult(_, _)) | Op::Pseudo(PseudoOp::CallResult(_, _)) => {
+                    1
+                }
                 // Spill reloads must happen early in their consumer group,
                 // BEFORE any op that uses the reloaded value. Pushing the
                 // SpillLoad's orig_idx to the end of the block (via barrier.rs)
                 // would otherwise place it after its consumer under the
                 // default param_order=2 tier. param_order=1 places it right
                 // after the group's barrier result and before pure ops.
-                Op::SpillLoad(_) | Op::XmmSpillLoad(_) => 1,
+                Op::Pseudo(PseudoOp::SpillLoad(_)) | Op::Pseudo(PseudoOp::XmmSpillLoad(_)) => 1,
                 _ if branch_cond_chain.contains(&inst.dst) => 3,
                 _ => 2,
             };
@@ -702,7 +704,10 @@ pub fn compile(
     // Hoisting makes the def position match where the value actually arrives.
     for sched in block_schedules.iter_mut() {
         sched.sort_by_key(|inst| {
-            if matches!(inst.op, Op::Param(_, _) | Op::BlockParam(_, _, _)) {
+            if matches!(
+                inst.op,
+                Op::Pure(PureOp::Param(_, _)) | Op::Pure(PureOp::BlockParam(_, _, _))
+            ) {
                 0u8
             } else {
                 1
@@ -1069,7 +1074,7 @@ pub fn compile(
                         .iter()
                         .enumerate()
                         .filter(|(_, inst)| {
-                            !matches!(inst.op, Op::TerminatorArgs(_))
+                            !matches!(inst.op, Op::Pseudo(PseudoOp::TerminatorArgs(_)))
                                 && (inst.dst == vreg || inst.operands.contains(&vreg))
                         })
                         .map(|(i, _)| i + 1)
@@ -1085,7 +1090,7 @@ pub fn compile(
                             .iter()
                             .enumerate()
                             .filter(|(_, inst)| {
-                                matches!(inst.op, Op::SpillLoad(s) | Op::XmmSpillLoad(s) if s == slot)
+                                matches!(inst.op, Op::Pseudo(PseudoOp::SpillLoad(s)) | Op::Pseudo(PseudoOp::XmmSpillLoad(s)) if s == slot)
                             })
                             .map(|(i, _)| i + 1)
                             .max()
@@ -1094,10 +1099,9 @@ pub fn compile(
                     // A projection reads a register its producer still owns, so
                     // nothing goes between a division and the projections taking
                     // its quotient and remainder out of RAX and RDX.
-                    while sched
-                        .get(at)
-                        .is_some_and(|inst| matches!(inst.op, Op::Proj0 | Op::Proj1))
-                    {
+                    while sched.get(at).is_some_and(|inst| {
+                        matches!(inst.op, Op::Pure(PureOp::Proj0) | Op::Pure(PureOp::Proj1))
+                    }) {
                         at += 1;
                     }
                     at
@@ -1107,8 +1111,12 @@ pub fn compile(
                     .map(|(vreg, info)| {
                         let store = ScheduledInst {
                             op: match info.reg_class {
-                                crate::x86::reg::RegClass::XMM => Op::XmmSpillStore(info.slot),
-                                crate::x86::reg::RegClass::GPR => Op::SpillStore(info.slot),
+                                crate::x86::reg::RegClass::XMM => {
+                                    Op::Pseudo(PseudoOp::XmmSpillStore(info.slot))
+                                }
+                                crate::x86::reg::RegClass::GPR => {
+                                    Op::Pseudo(PseudoOp::SpillStore(info.slot))
+                                }
                             },
                             dst: VReg(next_vreg),
                             operands: vec![vreg],
@@ -1260,10 +1268,12 @@ pub fn compile(
             .iter()
             .flatten()
             .filter_map(|inst| match inst.op {
-                Op::SpillStore(slot)
-                | Op::SpillLoad(slot)
-                | Op::XmmSpillStore(slot)
-                | Op::XmmSpillLoad(slot) => slots.owner(slot as u32).is_none().then_some(slot),
+                Op::Pseudo(PseudoOp::SpillStore(slot))
+                | Op::Pseudo(PseudoOp::SpillLoad(slot))
+                | Op::Pseudo(PseudoOp::XmmSpillStore(slot))
+                | Op::Pseudo(PseudoOp::XmmSpillLoad(slot)) => {
+                    slots.owner(slot as u32).is_none().then_some(slot)
+                }
                 _ => None,
             })
             .collect();
@@ -1352,7 +1362,12 @@ pub fn compile(
         // are not in barrier maps and would be misrouted to group 0.
         let rewritten: Vec<ScheduledInst> = block_rewritten[block_idx]
             .iter()
-            .filter(|inst| !matches!(inst.op, Op::StoreBarrier | Op::VoidCallBarrier))
+            .filter(|inst| {
+                !matches!(
+                    inst.op,
+                    Op::Pseudo(PseudoOp::StoreBarrier) | Op::Pseudo(PseudoOp::VoidCallBarrier)
+                )
+            })
             .cloned()
             .collect();
         let rewritten = &rewritten;
@@ -1378,7 +1393,7 @@ pub fn compile(
         // the function, before any call arg setup.
         let arg_locs = &func_arg_locs;
         for inst in rewritten.iter() {
-            if let Op::Param(param_idx, _) = &inst.op
+            if let Op::Pure(PureOp::Param(param_idx, _)) = &inst.op
                 && !param_vreg_set.contains(&inst.dst)
                 && let Some(crate::x86::abi::ArgLoc::Reg(abi_reg)) =
                     arg_locs.get(*param_idx as usize)
@@ -1465,10 +1480,10 @@ pub fn compile(
         for inst in full_schedule_for_barriers.iter() {
             if !matches!(
                 inst.op,
-                Op::CallResult(_, _)
-                    | Op::LoadResult(_, _)
-                    | Op::VoidCallBarrier
-                    | Op::StoreBarrier
+                Op::Pseudo(PseudoOp::CallResult(_, _))
+                    | Op::Pseudo(PseudoOp::LoadResult(_, _))
+                    | Op::Pseudo(PseudoOp::VoidCallBarrier)
+                    | Op::Pseudo(PseudoOp::StoreBarrier)
             ) {
                 pending.push(inst.clone());
                 continue;

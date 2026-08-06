@@ -1,7 +1,7 @@
 use crate::egraph::extract::ClassVRegMap;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 use crate::schedule::scheduler::ScheduledInst;
 
@@ -9,147 +9,151 @@ use crate::schedule::scheduler::ScheduledInst;
 pub fn fmt_op(op: &Op) -> String {
     match op {
         // Arithmetic
-        Op::Add => "add".into(),
-        Op::Sub => "sub".into(),
-        Op::Mul => "mul".into(),
-        Op::UDiv => "udiv".into(),
-        Op::SDiv => "sdiv".into(),
-        Op::URem => "urem".into(),
-        Op::SRem => "srem".into(),
+        Op::Pure(PureOp::Add) => "add".into(),
+        Op::Pure(PureOp::Sub) => "sub".into(),
+        Op::Pure(PureOp::Mul) => "mul".into(),
+        Op::Pure(PureOp::UDiv) => "udiv".into(),
+        Op::Pure(PureOp::SDiv) => "sdiv".into(),
+        Op::Pure(PureOp::URem) => "urem".into(),
+        Op::Pure(PureOp::SRem) => "srem".into(),
 
         // Bitwise
-        Op::And => "and".into(),
-        Op::Or => "or".into(),
-        Op::Xor => "xor".into(),
-        Op::Shl => "shl".into(),
-        Op::Shr => "shr".into(),
-        Op::Sar => "sar".into(),
+        Op::Pure(PureOp::And) => "and".into(),
+        Op::Pure(PureOp::Or) => "or".into(),
+        Op::Pure(PureOp::Xor) => "xor".into(),
+        Op::Pure(PureOp::Shl) => "shl".into(),
+        Op::Pure(PureOp::Shr) => "shr".into(),
+        Op::Pure(PureOp::Sar) => "sar".into(),
 
         // Conversion
-        Op::Sext(ty) => format!("sext({ty:?})"),
-        Op::Zext(ty) => format!("zext({ty:?})"),
-        Op::Trunc(ty) => format!("trunc({ty:?})"),
-        Op::Bitcast(ty) => format!("bitcast({ty:?})"),
+        Op::Pure(PureOp::Sext(ty)) => format!("sext({ty:?})"),
+        Op::Pure(PureOp::Zext(ty)) => format!("zext({ty:?})"),
+        Op::Pure(PureOp::Trunc(ty)) => format!("trunc({ty:?})"),
+        Op::Pure(PureOp::Bitcast(ty)) => format!("bitcast({ty:?})"),
 
         // Constants
-        Op::Iconst(val, ty) => format!("iconst({val}, {ty:?})"),
-        Op::Fconst(bits, ty) => format!("fconst(0x{bits:x}, {ty:?})"),
+        Op::Pure(PureOp::Iconst(val, ty)) => format!("iconst({val}, {ty:?})"),
+        Op::Pure(PureOp::Fconst(bits, ty)) => format!("fconst(0x{bits:x}, {ty:?})"),
 
         // Parameters
-        Op::Param(idx, ty) => format!("param({idx}, {ty:?})"),
-        Op::BlockParam(bid, pidx, ty) => format!("block_param(b{bid}, {pidx}, {ty:?})"),
+        Op::Pure(PureOp::Param(idx, ty)) => format!("param({idx}, {ty:?})"),
+        Op::Pure(PureOp::BlockParam(bid, pidx, ty)) => {
+            format!("block_param(b{bid}, {pidx}, {ty:?})")
+        }
 
         // Comparison
-        Op::Icmp(cc) => format!("icmp({cc:?})"),
-        Op::Fcmp(cc) => format!("fcmp({cc:?})"),
+        Op::Pure(PureOp::Icmp(cc)) => format!("icmp({cc:?})"),
+        Op::Pure(PureOp::Fcmp(cc)) => format!("fcmp({cc:?})"),
 
         // Float/int conversions
-        Op::IntToFloat(ty) => format!("int_to_float({ty:?})"),
-        Op::FloatToInt(ty) => format!("float_to_int({ty:?})"),
-        Op::FloatExt => "float_ext".into(),
-        Op::FloatTrunc => "float_trunc".into(),
+        Op::Pure(PureOp::IntToFloat(ty)) => format!("int_to_float({ty:?})"),
+        Op::Pure(PureOp::FloatToInt(ty)) => format!("float_to_int({ty:?})"),
+        Op::Pure(PureOp::FloatExt) => "float_ext".into(),
+        Op::Pure(PureOp::FloatTrunc) => "float_trunc".into(),
 
         // FP ops
-        Op::Fadd => "fadd".into(),
-        Op::Fsub => "fsub".into(),
-        Op::Fmul => "fmul".into(),
-        Op::Fdiv => "fdiv".into(),
-        Op::Fsqrt => "fsqrt".into(),
+        Op::Pure(PureOp::Fadd) => "fadd".into(),
+        Op::Pure(PureOp::Fsub) => "fsub".into(),
+        Op::Pure(PureOp::Fmul) => "fmul".into(),
+        Op::Pure(PureOp::Fdiv) => "fdiv".into(),
+        Op::Pure(PureOp::Fsqrt) => "fsqrt".into(),
 
         // Select
-        Op::Select => "select".into(),
+        Op::Pure(PureOp::Select) => "select".into(),
 
         // Projections
-        Op::Proj0 => "proj0".into(),
-        Op::Proj1 => "proj1".into(),
+        Op::Pure(PureOp::Proj0) => "proj0".into(),
+        Op::Pure(PureOp::Proj1) => "proj1".into(),
 
         // x86 ALU
-        Op::X86Add => "x86_add".into(),
-        Op::X86Sub => "x86_sub".into(),
-        Op::X86And => "x86_and".into(),
-        Op::X86Or => "x86_or".into(),
-        Op::X86Xor => "x86_xor".into(),
-        Op::X86Shl => "x86_shl".into(),
-        Op::X86Sar => "x86_sar".into(),
-        Op::X86Shr => "x86_shr".into(),
+        Op::Mach(MachOp::X86Add) => "x86_add".into(),
+        Op::Mach(MachOp::X86Sub) => "x86_sub".into(),
+        Op::Mach(MachOp::X86And) => "x86_and".into(),
+        Op::Mach(MachOp::X86Or) => "x86_or".into(),
+        Op::Mach(MachOp::X86Xor) => "x86_xor".into(),
+        Op::Mach(MachOp::X86Shl) => "x86_shl".into(),
+        Op::Mach(MachOp::X86Sar) => "x86_sar".into(),
+        Op::Mach(MachOp::X86Shr) => "x86_shr".into(),
 
         // x86 immediate shifts
-        Op::X86ShlImm(n) => format!("x86_shl_imm({n})"),
-        Op::X86ShrImm(n) => format!("x86_shr_imm({n})"),
-        Op::X86SarImm(n) => format!("x86_sar_imm({n})"),
+        Op::Mach(MachOp::X86ShlImm(n)) => format!("x86_shl_imm({n})"),
+        Op::Mach(MachOp::X86ShrImm(n)) => format!("x86_shr_imm({n})"),
+        Op::Mach(MachOp::X86SarImm(n)) => format!("x86_sar_imm({n})"),
 
         // x86 flag-only compare with immediate
-        Op::X86CmpI { imm, ty } => format!("x86_cmp_imm({imm}, {ty:?})"),
+        Op::Mach(MachOp::X86CmpI { imm, ty }) => format!("x86_cmp_imm({imm}, {ty:?})"),
 
         // x86 LEA
-        Op::X86Lea2 => "x86_lea2".into(),
-        Op::X86Lea3 { scale } => format!("x86_lea3(scale={scale})"),
-        Op::X86Lea4 { scale, disp } => format!("x86_lea4(scale={scale}, disp={disp})"),
+        Op::Mach(MachOp::X86Lea2) => "x86_lea2".into(),
+        Op::Mach(MachOp::X86Lea3 { scale }) => format!("x86_lea3(scale={scale})"),
+        Op::Mach(MachOp::X86Lea4 { scale, disp }) => {
+            format!("x86_lea4(scale={scale}, disp={disp})")
+        }
 
         // x86 multiply/divide
-        Op::X86Imul3 => "x86_imul3".into(),
-        Op::X86Idiv(..) => "x86_idiv".into(),
-        Op::X86Div(..) => "x86_div".into(),
+        Op::Mach(MachOp::X86Imul3) => "x86_imul3".into(),
+        Op::Mach(MachOp::X86Idiv(..)) => "x86_idiv".into(),
+        Op::Mach(MachOp::X86Div(..)) => "x86_div".into(),
 
         // x86 conditional ops
-        Op::X86Cmov(cc) => format!("x86_cmov({cc:?})"),
-        Op::X86Setcc(cc) => format!("x86_setcc({cc:?})"),
+        Op::Mach(MachOp::X86Cmov(cc)) => format!("x86_cmov({cc:?})"),
+        Op::Mach(MachOp::X86Setcc(cc)) => format!("x86_setcc({cc:?})"),
 
         // Addressing
-        Op::Addr { scale, disp } => format!("addr(scale={scale}, disp={disp})"),
+        Op::Pure(PureOp::Addr { scale, disp }) => format!("addr(scale={scale}, disp={disp})"),
 
         // Load/Call result placeholders
-        Op::LoadResult(id, ty) => format!("load_result({id}, {ty:?})"),
-        Op::CallResult(id, ty) => format!("call_result({id}, {ty:?})"),
+        Op::Pseudo(PseudoOp::LoadResult(id, ty)) => format!("load_result({id}, {ty:?})"),
+        Op::Pseudo(PseudoOp::CallResult(id, ty)) => format!("call_result({id}, {ty:?})"),
 
         // x86 FP double
-        Op::X86Addsd => "x86_addsd".into(),
-        Op::X86Subsd => "x86_subsd".into(),
-        Op::X86Mulsd => "x86_mulsd".into(),
-        Op::X86Divsd => "x86_divsd".into(),
-        Op::X86Sqrtsd => "x86_sqrtsd".into(),
+        Op::Mach(MachOp::X86Addsd) => "x86_addsd".into(),
+        Op::Mach(MachOp::X86Subsd) => "x86_subsd".into(),
+        Op::Mach(MachOp::X86Mulsd) => "x86_mulsd".into(),
+        Op::Mach(MachOp::X86Divsd) => "x86_divsd".into(),
+        Op::Mach(MachOp::X86Sqrtsd) => "x86_sqrtsd".into(),
 
         // x86 FP single
-        Op::X86Addss => "x86_addss".into(),
-        Op::X86Subss => "x86_subss".into(),
-        Op::X86Mulss => "x86_mulss".into(),
-        Op::X86Divss => "x86_divss".into(),
-        Op::X86Sqrtss => "x86_sqrtss".into(),
+        Op::Mach(MachOp::X86Addss) => "x86_addss".into(),
+        Op::Mach(MachOp::X86Subss) => "x86_subss".into(),
+        Op::Mach(MachOp::X86Mulss) => "x86_mulss".into(),
+        Op::Mach(MachOp::X86Divss) => "x86_divss".into(),
+        Op::Mach(MachOp::X86Sqrtss) => "x86_sqrtss".into(),
 
         // x86 FP conversion
-        Op::X86Cvtsi2sd(ty) => format!("x86_cvtsi2sd({ty:?})"),
-        Op::X86Cvtsi2ss(ty) => format!("x86_cvtsi2ss({ty:?})"),
-        Op::X86Cvttsd2si(ty) => format!("x86_cvttsd2si({ty:?})"),
-        Op::X86Cvttss2si(ty) => format!("x86_cvttss2si({ty:?})"),
-        Op::X86Cvtsd2ss => "x86_cvtsd2ss".into(),
-        Op::X86Cvtss2sd => "x86_cvtss2sd".into(),
+        Op::Mach(MachOp::X86Cvtsi2sd(ty)) => format!("x86_cvtsi2sd({ty:?})"),
+        Op::Mach(MachOp::X86Cvtsi2ss(ty)) => format!("x86_cvtsi2ss({ty:?})"),
+        Op::Mach(MachOp::X86Cvttsd2si(ty)) => format!("x86_cvttsd2si({ty:?})"),
+        Op::Mach(MachOp::X86Cvttss2si(ty)) => format!("x86_cvttss2si({ty:?})"),
+        Op::Mach(MachOp::X86Cvtsd2ss) => "x86_cvtsd2ss".into(),
+        Op::Mach(MachOp::X86Cvtss2sd) => "x86_cvtss2sd".into(),
 
         // x86 FP comparison
-        Op::X86Ucomisd => "x86_ucomisd".into(),
-        Op::X86Ucomiss => "x86_ucomiss".into(),
+        Op::Mach(MachOp::X86Ucomisd) => "x86_ucomisd".into(),
+        Op::Mach(MachOp::X86Ucomiss) => "x86_ucomiss".into(),
 
         // Stack address
-        Op::StackAddr(slot) => format!("stack_addr({slot})"),
+        Op::Pseudo(PseudoOp::StackAddr(slot)) => format!("stack_addr({slot})"),
 
         // Global address
-        Op::GlobalAddr(name) => format!("global_addr(\"{}\")", name),
+        Op::Pseudo(PseudoOp::GlobalAddr(name)) => format!("global_addr(\"{}\")", name),
 
         // x86 conversion ops
-        Op::X86Movsx { from, to } => format!("x86_movsx({from:?} -> {to:?})"),
-        Op::X86Movzx { from, to } => format!("x86_movzx({from:?} -> {to:?})"),
-        Op::X86Trunc { from, to } => format!("x86_trunc({from:?} -> {to:?})"),
-        Op::X86Bitcast { from, to } => format!("x86_bitcast({from:?} -> {to:?})"),
+        Op::Mach(MachOp::X86Movsx { from, to }) => format!("x86_movsx({from:?} -> {to:?})"),
+        Op::Mach(MachOp::X86Movzx { from, to }) => format!("x86_movzx({from:?} -> {to:?})"),
+        Op::Mach(MachOp::X86Trunc { from, to }) => format!("x86_trunc({from:?} -> {to:?})"),
+        Op::Mach(MachOp::X86Bitcast { from, to }) => format!("x86_bitcast({from:?} -> {to:?})"),
 
         // Spill ops
-        Op::SpillStore(s) => format!("spill_store({s})"),
-        Op::SpillLoad(s) => format!("spill_load({s})"),
-        Op::XmmSpillStore(s) => format!("xmm_spill_store({s})"),
-        Op::XmmSpillLoad(s) => format!("xmm_spill_load({s})"),
+        Op::Pseudo(PseudoOp::SpillStore(s)) => format!("spill_store({s})"),
+        Op::Pseudo(PseudoOp::SpillLoad(s)) => format!("spill_load({s})"),
+        Op::Pseudo(PseudoOp::XmmSpillStore(s)) => format!("xmm_spill_store({s})"),
+        Op::Pseudo(PseudoOp::XmmSpillLoad(s)) => format!("xmm_spill_load({s})"),
 
         // Barrier pseudo-ops
-        Op::StoreBarrier => "store_barrier".into(),
-        Op::TerminatorArgs(_) => "terminator_args".into(),
-        Op::VoidCallBarrier => "void_call_barrier".into(),
+        Op::Pseudo(PseudoOp::StoreBarrier) => "store_barrier".into(),
+        Op::Pseudo(PseudoOp::TerminatorArgs(_)) => "terminator_args".into(),
+        Op::Pseudo(PseudoOp::VoidCallBarrier) => "void_call_barrier".into(),
     }
 }
 
@@ -290,7 +294,9 @@ pub fn print_function_ir(
             for inst in &group.pure_ops {
                 if matches!(
                     inst.op,
-                    Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_)
+                    Op::Pseudo(PseudoOp::StoreBarrier)
+                        | Op::Pseudo(PseudoOp::VoidCallBarrier)
+                        | Op::Pseudo(PseudoOp::TerminatorArgs(_))
                 ) {
                     continue;
                 }

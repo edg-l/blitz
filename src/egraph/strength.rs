@@ -2,7 +2,7 @@ use smallvec::smallvec;
 
 use crate::egraph::egraph::EGraph;
 use crate::egraph::enode::ENode;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PureOp};
 use crate::ir::types::Type;
 
 pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
@@ -27,7 +27,7 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
     for (class_id, op, children) in &snaps {
         let class_id = *class_id;
         match op {
-            Op::Mul if children.len() == 2 => {
+            Op::Pure(PureOp::Mul) if children.len() == 2 => {
                 let a = children[0];
                 let b = children[1];
                 // Check both orderings for the constant
@@ -49,11 +49,11 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                         .ty
                         .clone();
                     let n_class = egraph.add(ENode {
-                        op: Op::Iconst(n, ty.clone()),
+                        op: Op::Pure(PureOp::Iconst(n, ty.clone())),
                         children: smallvec![],
                     });
                     let shl = egraph.add(ENode {
-                        op: Op::Shl,
+                        op: Op::Pure(PureOp::Shl),
                         children: smallvec![non_const, n_class],
                     });
                     let canon = egraph.unionfind.find_immutable(class_id);
@@ -76,15 +76,15 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                         .ty
                         .clone();
                     let n_class = egraph.add(ENode {
-                        op: Op::Iconst(n, ty),
+                        op: Op::Pure(PureOp::Iconst(n, ty)),
                         children: smallvec![],
                     });
                     let shl = egraph.add(ENode {
-                        op: Op::Shl,
+                        op: Op::Pure(PureOp::Shl),
                         children: smallvec![non_const, n_class],
                     });
                     let sum = egraph.add(ENode {
-                        op: Op::Add,
+                        op: Op::Pure(PureOp::Add),
                         children: smallvec![non_const, shl],
                     });
                     let canon = egraph.unionfind.find_immutable(class_id);
@@ -95,7 +95,7 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                 }
             }
 
-            Op::UDiv if children.len() == 2 => {
+            Op::Pure(PureOp::UDiv) if children.len() == 2 => {
                 let a = children[0];
                 let b = children[1];
                 let Some((val, _ty)) = egraph.get_constant(b) else {
@@ -109,11 +109,11 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                         .ty
                         .clone();
                     let n_class = egraph.add(ENode {
-                        op: Op::Iconst(n, ty),
+                        op: Op::Pure(PureOp::Iconst(n, ty)),
                         children: smallvec![],
                     });
                     let shr = egraph.add(ENode {
-                        op: Op::Shr,
+                        op: Op::Pure(PureOp::Shr),
                         children: smallvec![a, n_class],
                     });
                     let canon = egraph.unionfind.find_immutable(class_id);
@@ -124,7 +124,7 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                 }
             }
 
-            Op::URem if children.len() == 2 => {
+            Op::Pure(PureOp::URem) if children.len() == 2 => {
                 let a = children[0];
                 let b = children[1];
                 let Some((val, _ty)) = egraph.get_constant(b) else {
@@ -138,11 +138,11 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                         .ty
                         .clone();
                     let mask_class = egraph.add(ENode {
-                        op: Op::Iconst(mask, ty),
+                        op: Op::Pure(PureOp::Iconst(mask, ty)),
                         children: smallvec![],
                     });
                     let and = egraph.add(ENode {
-                        op: Op::And,
+                        op: Op::Pure(PureOp::And),
                         children: smallvec![a, mask_class],
                     });
                     let canon = egraph.unionfind.find_immutable(class_id);
@@ -153,7 +153,7 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                 }
             }
 
-            Op::SDiv if children.len() == 2 => {
+            Op::Pure(PureOp::SDiv) if children.len() == 2 => {
                 let a = children[0];
                 let b = children[1];
                 let Some((val, ty)) = egraph.get_constant(b) else {
@@ -164,35 +164,35 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                 if ty == Type::I64 && val > 1 && val.count_ones() == 1 {
                     let n = val.trailing_zeros() as i64;
                     let c63 = egraph.add(ENode {
-                        op: Op::Iconst(63, Type::I64),
+                        op: Op::Pure(PureOp::Iconst(63, Type::I64)),
                         children: smallvec![],
                     });
                     let c64_minus_n = egraph.add(ENode {
-                        op: Op::Iconst(64 - n, Type::I64),
+                        op: Op::Pure(PureOp::Iconst(64 - n, Type::I64)),
                         children: smallvec![],
                     });
                     let cn = egraph.add(ENode {
-                        op: Op::Iconst(n, Type::I64),
+                        op: Op::Pure(PureOp::Iconst(n, Type::I64)),
                         children: smallvec![],
                     });
                     // Sar(a, 63)
                     let sar63 = egraph.add(ENode {
-                        op: Op::Sar,
+                        op: Op::Pure(PureOp::Sar),
                         children: smallvec![a, c63],
                     });
                     // Shr(Sar(a, 63), 64-n)
                     let shr_adj = egraph.add(ENode {
-                        op: Op::Shr,
+                        op: Op::Pure(PureOp::Shr),
                         children: smallvec![sar63, c64_minus_n],
                     });
                     // Add(a, Shr(...))
                     let adj_add = egraph.add(ENode {
-                        op: Op::Add,
+                        op: Op::Pure(PureOp::Add),
                         children: smallvec![a, shr_adj],
                     });
                     // Sar(Add(...), n)
                     let result = egraph.add(ENode {
-                        op: Op::Sar,
+                        op: Op::Pure(PureOp::Sar),
                         children: smallvec![adj_add, cn],
                     });
                     let canon = egraph.unionfind.find_immutable(class_id);
@@ -218,7 +218,7 @@ mod tests {
 
     fn iconst(g: &mut EGraph, v: i64, ty: Type) -> ClassId {
         g.add(ENode {
-            op: Op::Iconst(v, ty),
+            op: Op::Pure(PureOp::Iconst(v, ty)),
             children: smallvec![],
         })
     }
@@ -228,12 +228,12 @@ mod tests {
     fn mul_pow2_becomes_shl() {
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Iconst(99, Type::I64),
+            op: Op::Pure(PureOp::Iconst(99, Type::I64)),
             children: smallvec![],
         });
         let eight = iconst(&mut g, 8, Type::I64);
         let mul = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, eight],
         });
         apply_strength_reduction(&mut g);
@@ -242,7 +242,7 @@ mod tests {
         // Shl(a, 3) should be in same class as mul
         let three = iconst(&mut g, 3, Type::I64);
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![a, three],
         });
         assert_eq!(g.find(mul), g.find(shl));
@@ -253,12 +253,12 @@ mod tests {
     fn udiv_pow2_becomes_shr() {
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Iconst(100, Type::I64),
+            op: Op::Pure(PureOp::Iconst(100, Type::I64)),
             children: smallvec![],
         });
         let four = iconst(&mut g, 4, Type::I64);
         let udiv = g.add(ENode {
-            op: Op::UDiv,
+            op: Op::Pure(PureOp::UDiv),
             children: smallvec![a, four],
         });
         apply_strength_reduction(&mut g);
@@ -266,7 +266,7 @@ mod tests {
 
         let two = iconst(&mut g, 2, Type::I64);
         let shr = g.add(ENode {
-            op: Op::Shr,
+            op: Op::Pure(PureOp::Shr),
             children: smallvec![a, two],
         });
         assert_eq!(g.find(udiv), g.find(shr));
@@ -277,12 +277,12 @@ mod tests {
     fn urem_pow2_becomes_and() {
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Iconst(200, Type::I64),
+            op: Op::Pure(PureOp::Iconst(200, Type::I64)),
             children: smallvec![],
         });
         let eight = iconst(&mut g, 8, Type::I64);
         let urem = g.add(ENode {
-            op: Op::URem,
+            op: Op::Pure(PureOp::URem),
             children: smallvec![a, eight],
         });
         apply_strength_reduction(&mut g);
@@ -290,7 +290,7 @@ mod tests {
 
         let seven = iconst(&mut g, 7, Type::I64);
         let and = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![a, seven],
         });
         assert_eq!(g.find(urem), g.find(and));
@@ -301,12 +301,12 @@ mod tests {
     fn mul_by_3_lea_form() {
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Iconst(7, Type::I64),
+            op: Op::Pure(PureOp::Iconst(7, Type::I64)),
             children: smallvec![],
         });
         let three = iconst(&mut g, 3, Type::I64);
         let mul = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, three],
         });
         apply_strength_reduction(&mut g);
@@ -314,11 +314,11 @@ mod tests {
 
         let one = iconst(&mut g, 1, Type::I64);
         let shl1 = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![a, one],
         });
         let sum = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, shl1],
         });
         assert_eq!(g.find(mul), g.find(sum));
@@ -329,12 +329,12 @@ mod tests {
     fn sdiv_pow2_signed_pattern() {
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Iconst(1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(1, Type::I64)),
             children: smallvec![],
         });
         let four = iconst(&mut g, 4, Type::I64);
         let sdiv = g.add(ENode {
-            op: Op::SDiv,
+            op: Op::Pure(PureOp::SDiv),
             children: smallvec![a, four],
         });
         apply_strength_reduction(&mut g);

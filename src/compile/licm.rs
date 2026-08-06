@@ -5,7 +5,7 @@ use smallvec::smallvec;
 use crate::egraph::{EGraph, ENode};
 use crate::ir::effectful::{BlockId, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 
 use super::cfg::{compute_idom, compute_rpo, dominates, predecessor_indices, successor_indices};
@@ -192,7 +192,11 @@ pub(super) fn insert_preheader(
         .enumerate()
         .map(|(param_idx, ty)| {
             egraph.add(ENode {
-                op: Op::BlockParam(preheader_id, param_idx as u32, ty.clone()),
+                op: Op::Pure(PureOp::BlockParam(
+                    preheader_id,
+                    param_idx as u32,
+                    ty.clone(),
+                )),
                 children: smallvec![],
             })
         })
@@ -306,7 +310,10 @@ pub(super) fn is_class_loop_invariant(
         // Effectful placeholder ops are not invariant.
         let is_effectful = matches!(
             node.op,
-            Op::LoadResult(..) | Op::CallResult(..) | Op::StoreBarrier | Op::VoidCallBarrier
+            Op::Pseudo(PseudoOp::LoadResult(..))
+                | Op::Pseudo(PseudoOp::CallResult(..))
+                | Op::Pseudo(PseudoOp::StoreBarrier)
+                | Op::Pseudo(PseudoOp::VoidCallBarrier)
         );
         if is_effectful {
             return false;
@@ -933,7 +940,7 @@ mod tests {
         let mut bb1 = BasicBlock::new(1, vec![]);
         // Add a BlockParam for bb1 so it shows up as loop-defined.
         let header_param = egraph.add(ENode {
-            op: Op::BlockParam(1, 0, Type::I64),
+            op: Op::Pure(PureOp::BlockParam(1, 0, Type::I64)),
             children: smallvec![],
         });
         bb1.ops.push(branch(header_param, 2, 3));
@@ -968,7 +975,7 @@ mod tests {
 
         let (f, mut egraph, loop_info) = build_while_with_egraph();
         let iconst = egraph.add(ENode {
-            op: Op::Iconst(42, Type::I64),
+            op: Op::Pure(PureOp::Iconst(42, Type::I64)),
             children: smallvec![],
         });
         let loop_defined = collect_loop_defined_classes(&f, &egraph, &loop_info.body);
@@ -991,15 +998,15 @@ mod tests {
 
         let (f, mut egraph, loop_info) = build_while_with_egraph();
         let param = egraph.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let iconst = egraph.add(ENode {
-            op: Op::Iconst(1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(1, Type::I64)),
             children: smallvec![],
         });
         let add_node = egraph.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![param, iconst],
         });
         let loop_defined = collect_loop_defined_classes(&f, &egraph, &loop_info.body);
@@ -1024,7 +1031,7 @@ mod tests {
         // Add a BlockParam for the loop header (bb1, index 1).
         let header_id = f.blocks[loop_info.header_idx].id;
         let bp = egraph.add(ENode {
-            op: Op::BlockParam(header_id, 1, Type::I64),
+            op: Op::Pure(PureOp::BlockParam(header_id, 1, Type::I64)),
             children: smallvec![],
         });
         let loop_defined = collect_loop_defined_classes(&f, &egraph, &loop_info.body);
@@ -1049,7 +1056,7 @@ mod tests {
         // Add a LoadResult node that is NOT referenced by any loop body op, so
         // collect_loop_defined_classes won't include it. Still should be rejected.
         let lr = egraph.add(ENode {
-            op: Op::LoadResult(99, Type::I64),
+            op: Op::Pseudo(PseudoOp::LoadResult(99, Type::I64)),
             children: smallvec![],
         });
         let loop_defined = collect_loop_defined_classes(&f, &egraph, &loop_info.body);
@@ -1074,15 +1081,15 @@ mod tests {
         // BlockParam for the loop body block (bb2, index 2).
         let body_id = f.blocks[2].id;
         let body_bp = egraph.add(ENode {
-            op: Op::BlockParam(body_id, 0, Type::I64),
+            op: Op::Pure(PureOp::BlockParam(body_id, 0, Type::I64)),
             children: smallvec![],
         });
         let iconst = egraph.add(ENode {
-            op: Op::Iconst(5, Type::I64),
+            op: Op::Pure(PureOp::Iconst(5, Type::I64)),
             children: smallvec![],
         });
         let add_node = egraph.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![body_bp, iconst],
         });
         let loop_defined = collect_loop_defined_classes(&f, &egraph, &loop_info.body);

@@ -2,7 +2,7 @@ use smallvec::smallvec;
 
 use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
-use crate::ir::op::Op;
+use crate::ir::op::{Op, PureOp};
 use crate::ir::types::Type;
 
 /// Tracks which bits of an integer value are provably zero or one.
@@ -135,7 +135,7 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
     for snap in &snaps {
         let result = match &snap.op {
             // Bitwise AND: bit is 1 only if both are 1, bit is 0 if either is 0
-            Op::And if snap.children.len() == 2 => {
+            Op::Pure(PureOp::And) if snap.children.len() == 2 => {
                 let a = egraph.get_known_bits(snap.children[0]);
                 let b = egraph.get_known_bits(snap.children[1]);
                 Some(KnownBits {
@@ -144,7 +144,7 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
                 })
             }
             // Bitwise OR: bit is 1 if either is 1, bit is 0 only if both are 0
-            Op::Or if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Or) if snap.children.len() == 2 => {
                 let a = egraph.get_known_bits(snap.children[0]);
                 let b = egraph.get_known_bits(snap.children[1]);
                 Some(KnownBits {
@@ -153,7 +153,7 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
                 })
             }
             // Bitwise XOR: bit is 1 if inputs differ, bit is 0 if inputs are the same
-            Op::Xor if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Xor) if snap.children.len() == 2 => {
                 let a = egraph.get_known_bits(snap.children[0]);
                 let b = egraph.get_known_bits(snap.children[1]);
                 Some(KnownBits {
@@ -162,23 +162,25 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
                 })
             }
             // Shift left by constant: shift known bits left, low bits become known-zero
-            Op::Shl if snap.children.len() == 2 => shift_by_constant(egraph, snap).map(|s| {
-                let low_mask = if s.n == 0 { 0 } else { (1u64 << s.n) - 1 };
-                KnownBits {
-                    known_ones: (s.bits.known_ones << s.n) & s.mask,
-                    known_zeros: ((s.bits.known_zeros << s.n) | low_mask) & s.mask,
-                }
-            }),
+            Op::Pure(PureOp::Shl) if snap.children.len() == 2 => shift_by_constant(egraph, snap)
+                .map(|s| {
+                    let low_mask = if s.n == 0 { 0 } else { (1u64 << s.n) - 1 };
+                    KnownBits {
+                        known_ones: (s.bits.known_ones << s.n) & s.mask,
+                        known_zeros: ((s.bits.known_zeros << s.n) | low_mask) & s.mask,
+                    }
+                }),
             // Logical shift right by constant: shift right, high bits become known-zero
-            Op::Shr if snap.children.len() == 2 => shift_by_constant(egraph, snap).map(|s| {
-                let high_mask = s.mask & !(s.mask >> s.n);
-                KnownBits {
-                    known_ones: (s.bits.known_ones >> s.n) & s.mask,
-                    known_zeros: ((s.bits.known_zeros >> s.n) | high_mask) & s.mask,
-                }
-            }),
+            Op::Pure(PureOp::Shr) if snap.children.len() == 2 => shift_by_constant(egraph, snap)
+                .map(|s| {
+                    let high_mask = s.mask & !(s.mask >> s.n);
+                    KnownBits {
+                        known_ones: (s.bits.known_ones >> s.n) & s.mask,
+                        known_zeros: ((s.bits.known_zeros >> s.n) | high_mask) & s.mask,
+                    }
+                }),
             // Arithmetic shift right by constant: high bits replicate sign bit
-            Op::Sar if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Sar) if snap.children.len() == 2 => {
                 shift_by_constant(egraph, snap).map(|s| {
                     let sign_bit = 1u64 << (s.width - 1);
                     let high_mask = s.mask & !(s.mask >> s.n);
@@ -199,7 +201,7 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
                 })
             }
             // Zero-extend: upper bits are known-zero
-            Op::Zext(target_ty) if snap.children.len() == 1 => {
+            Op::Pure(PureOp::Zext(target_ty)) if snap.children.len() == 1 => {
                 let a = egraph.get_known_bits(snap.children[0]);
                 let child_canon = egraph.unionfind.find_immutable(snap.children[0]);
                 let child_ty = &egraph.class(child_canon).ty;
@@ -216,7 +218,7 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
                 }
             }
             // Sign-extend: upper bits replicate sign bit
-            Op::Sext(target_ty) if snap.children.len() == 1 => {
+            Op::Pure(PureOp::Sext(target_ty)) if snap.children.len() == 1 => {
                 let a = egraph.get_known_bits(snap.children[0]);
                 let child_canon = egraph.unionfind.find_immutable(snap.children[0]);
                 let child_ty = &egraph.class(child_canon).ty;
@@ -242,7 +244,7 @@ pub fn propagate_known_bits(egraph: &mut EGraph) -> bool {
                 }
             }
             // Truncate: keep only the lower bits
-            Op::Trunc(target_ty) if snap.children.len() == 1 => {
+            Op::Pure(PureOp::Trunc(target_ty)) if snap.children.len() == 1 => {
                 let a = egraph.get_known_bits(snap.children[0]);
                 if target_ty.is_integer() {
                     let target_mask = type_mask(target_ty);
@@ -294,7 +296,7 @@ pub fn apply_known_bits_rules(egraph: &mut EGraph) -> bool {
         match &snap.op {
             // Redundant And removal: And(x, mask_const) where the mask preserves all
             // possibly-set bits of x (i.e., bits outside the mask are already known-zero in x).
-            Op::And if snap.children.len() == 2 => {
+            Op::Pure(PureOp::And) if snap.children.len() == 2 => {
                 // Try both orderings: And(x, const) and And(const, x)
                 let (val_child, const_child) = if egraph.get_constant(snap.children[1]).is_some() {
                     (snap.children[0], snap.children[1])
@@ -355,7 +357,7 @@ pub fn apply_known_bits_rules(egraph: &mut EGraph) -> bool {
         let kb = egraph.classes[canon.0 as usize].known_bits;
         if let Some(val) = kb.is_constant(&ty) {
             let iconst_id = egraph.add(ENode {
-                op: Op::Iconst(val, ty),
+                op: Op::Pure(PureOp::Iconst(val, ty)),
                 children: smallvec![],
             });
             let iconst_canon = egraph.unionfind.find_immutable(iconst_id);
@@ -478,7 +480,7 @@ mod tests {
 
         let mut g = EGraph::new();
         let id = g.add(ENode {
-            op: Op::Iconst(42, Type::I64),
+            op: Op::Pure(PureOp::Iconst(42, Type::I64)),
             children: smallvec![],
         });
         let kb = g.get_known_bits(id);
@@ -495,7 +497,7 @@ mod tests {
 
         let mut g = EGraph::new();
         let id = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let kb = g.get_known_bits(id);
@@ -511,15 +513,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let param = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let mask = g.add(ENode {
-            op: Op::Iconst(0xFF, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0xFF, Type::I64)),
             children: smallvec![],
         });
         let and = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![param, mask],
         });
         propagate_known_bits(&mut g);
@@ -539,15 +541,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let param = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let val = g.add(ENode {
-            op: Op::Iconst(0xF0, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0xF0, Type::I64)),
             children: smallvec![],
         });
         let or = g.add(ENode {
-            op: Op::Or,
+            op: Op::Pure(PureOp::Or),
             children: smallvec![param, val],
         });
         propagate_known_bits(&mut g);
@@ -565,15 +567,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Iconst(0xFF, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0xFF, Type::I64)),
             children: smallvec![],
         });
         let b = g.add(ENode {
-            op: Op::Iconst(0x0F, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0x0F, Type::I64)),
             children: smallvec![],
         });
         let xor = g.add(ENode {
-            op: Op::Xor,
+            op: Op::Pure(PureOp::Xor),
             children: smallvec![a, b],
         });
         propagate_known_bits(&mut g);
@@ -592,15 +594,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(1, Type::I64)),
             children: smallvec![],
         });
         let shift = g.add(ENode {
-            op: Op::Iconst(3, Type::I64),
+            op: Op::Pure(PureOp::Iconst(3, Type::I64)),
             children: smallvec![],
         });
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![val, shift],
         });
         propagate_known_bits(&mut g);
@@ -620,11 +622,11 @@ mod tests {
 
         let mut g = EGraph::new();
         let param = g.add(ENode {
-            op: Op::Param(0, Type::I8),
+            op: Op::Pure(PureOp::Param(0, Type::I8)),
             children: smallvec![],
         });
         let zext = g.add(ENode {
-            op: Op::Zext(Type::I64),
+            op: Op::Pure(PureOp::Zext(Type::I64)),
             children: smallvec![param],
         });
         propagate_known_bits(&mut g);
@@ -644,11 +646,11 @@ mod tests {
 
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(0x1FF, Type::I32),
+            op: Op::Pure(PureOp::Iconst(0x1FF, Type::I32)),
             children: smallvec![],
         });
         let trunc = g.add(ENode {
-            op: Op::Trunc(Type::I8),
+            op: Op::Pure(PureOp::Trunc(Type::I8)),
             children: smallvec![val],
         });
         propagate_known_bits(&mut g);
@@ -668,11 +670,11 @@ mod tests {
         let mut g = EGraph::new();
         // Iconst(42, I8): 42 = 0x2A, sign bit (bit 7) is 0
         let val = g.add(ENode {
-            op: Op::Iconst(42, Type::I8),
+            op: Op::Pure(PureOp::Iconst(42, Type::I8)),
             children: smallvec![],
         });
         let sext = g.add(ENode {
-            op: Op::Sext(Type::I32),
+            op: Op::Pure(PureOp::Sext(Type::I32)),
             children: smallvec![val],
         });
         propagate_known_bits(&mut g);
@@ -693,11 +695,11 @@ mod tests {
         let mut g = EGraph::new();
         // Iconst(-1, I8): 0xFF, sign bit (bit 7) is 1
         let val = g.add(ENode {
-            op: Op::Iconst(-1, Type::I8),
+            op: Op::Pure(PureOp::Iconst(-1, Type::I8)),
             children: smallvec![],
         });
         let sext = g.add(ENode {
-            op: Op::Sext(Type::I32),
+            op: Op::Pure(PureOp::Sext(Type::I32)),
             children: smallvec![val],
         });
         propagate_known_bits(&mut g);
@@ -719,19 +721,19 @@ mod tests {
 
         let mut g = EGraph::new();
         let param = g.add(ENode {
-            op: Op::Param(0, Type::I8),
+            op: Op::Pure(PureOp::Param(0, Type::I8)),
             children: smallvec![],
         });
         let zext = g.add(ENode {
-            op: Op::Zext(Type::I64),
+            op: Op::Pure(PureOp::Zext(Type::I64)),
             children: smallvec![param],
         });
         let mask = g.add(ENode {
-            op: Op::Iconst(0xFF, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0xFF, Type::I64)),
             children: smallvec![],
         });
         let and = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![zext, mask],
         });
 
@@ -759,15 +761,15 @@ mod tests {
         let mut g = EGraph::new();
         // Build: Shl(Iconst(1), Iconst(3)) -- this is 8
         let one = g.add(ENode {
-            op: Op::Iconst(1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(1, Type::I64)),
             children: smallvec![],
         });
         let three = g.add(ENode {
-            op: Op::Iconst(3, Type::I64),
+            op: Op::Pure(PureOp::Iconst(3, Type::I64)),
             children: smallvec![],
         });
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![one, three],
         });
 
@@ -776,7 +778,7 @@ mod tests {
 
         // After propagation + constant promotion, Shl(1, 3) should be in same class as Iconst(8)
         let eight = g.add(ENode {
-            op: Op::Iconst(8, Type::I64),
+            op: Op::Pure(PureOp::Iconst(8, Type::I64)),
             children: smallvec![],
         });
         assert_eq!(
@@ -797,23 +799,23 @@ mod tests {
         let mut g = EGraph::new();
         // And(Shl(1, 4), 0xFF) -- Shl(1,4) = 0x10, And with 0xFF doesn't change it
         let one = g.add(ENode {
-            op: Op::Iconst(1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(1, Type::I64)),
             children: smallvec![],
         });
         let four = g.add(ENode {
-            op: Op::Iconst(4, Type::I64),
+            op: Op::Pure(PureOp::Iconst(4, Type::I64)),
             children: smallvec![],
         });
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![one, four],
         });
         let mask = g.add(ENode {
-            op: Op::Iconst(0xFF, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0xFF, Type::I64)),
             children: smallvec![],
         });
         let and = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![shl, mask],
         });
 
@@ -840,15 +842,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(0xFF, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0xFF, Type::I64)),
             children: smallvec![],
         });
         let zero = g.add(ENode {
-            op: Op::Iconst(0, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0, Type::I64)),
             children: smallvec![],
         });
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![val, zero],
         });
         propagate_known_bits(&mut g);
@@ -866,15 +868,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(1, Type::I64)),
             children: smallvec![],
         });
         let neg = g.add(ENode {
-            op: Op::Iconst(-1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(-1, Type::I64)),
             children: smallvec![],
         });
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![val, neg],
         });
         propagate_known_bits(&mut g);
@@ -892,15 +894,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(1, Type::I64)),
             children: smallvec![],
         });
         let big = g.add(ENode {
-            op: Op::Iconst(64, Type::I64),
+            op: Op::Pure(PureOp::Iconst(64, Type::I64)),
             children: smallvec![],
         });
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![val, big],
         });
         propagate_known_bits(&mut g);
@@ -918,15 +920,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(0xFF, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0xFF, Type::I64)),
             children: smallvec![],
         });
         let neg = g.add(ENode {
-            op: Op::Iconst(-1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(-1, Type::I64)),
             children: smallvec![],
         });
         let shr = g.add(ENode {
-            op: Op::Shr,
+            op: Op::Pure(PureOp::Shr),
             children: smallvec![val, neg],
         });
         propagate_known_bits(&mut g);
@@ -946,15 +948,15 @@ mod tests {
         let mut g = EGraph::new();
         // 0xF000 in I16: sign bit (bit 15) is 1
         let val = g.add(ENode {
-            op: Op::Iconst(0xF000u16 as i64, Type::I16),
+            op: Op::Pure(PureOp::Iconst(0xF000u16 as i64, Type::I16)),
             children: smallvec![],
         });
         let shift = g.add(ENode {
-            op: Op::Iconst(4, Type::I16),
+            op: Op::Pure(PureOp::Iconst(4, Type::I16)),
             children: smallvec![],
         });
         let sar = g.add(ENode {
-            op: Op::Sar,
+            op: Op::Pure(PureOp::Sar),
             children: smallvec![val, shift],
         });
         propagate_known_bits(&mut g);
@@ -974,15 +976,15 @@ mod tests {
         let mut g = EGraph::new();
         // 0x0F00 in I16: sign bit (bit 15) is 0
         let val = g.add(ENode {
-            op: Op::Iconst(0x0F00, Type::I16),
+            op: Op::Pure(PureOp::Iconst(0x0F00, Type::I16)),
             children: smallvec![],
         });
         let shift = g.add(ENode {
-            op: Op::Iconst(4, Type::I16),
+            op: Op::Pure(PureOp::Iconst(4, Type::I16)),
             children: smallvec![],
         });
         let sar = g.add(ENode {
-            op: Op::Sar,
+            op: Op::Pure(PureOp::Sar),
             children: smallvec![val, shift],
         });
         propagate_known_bits(&mut g);
@@ -1002,15 +1004,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(0xFF, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0xFF, Type::I64)),
             children: smallvec![],
         });
         let neg = g.add(ENode {
-            op: Op::Iconst(-1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(-1, Type::I64)),
             children: smallvec![],
         });
         let sar = g.add(ENode {
-            op: Op::Sar,
+            op: Op::Pure(PureOp::Sar),
             children: smallvec![val, neg],
         });
         propagate_known_bits(&mut g);
@@ -1029,15 +1031,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let param = g.add(ENode {
-            op: Op::Param(0, Type::I32),
+            op: Op::Pure(PureOp::Param(0, Type::I32)),
             children: smallvec![],
         });
         let mask = g.add(ENode {
-            op: Op::Iconst(0xF, Type::I32),
+            op: Op::Pure(PureOp::Iconst(0xF, Type::I32)),
             children: smallvec![],
         });
         let and = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![param, mask],
         });
         propagate_known_bits(&mut g);
@@ -1055,15 +1057,15 @@ mod tests {
 
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(1, Type::I8),
+            op: Op::Pure(PureOp::Iconst(1, Type::I8)),
             children: smallvec![],
         });
         let shift = g.add(ENode {
-            op: Op::Iconst(4, Type::I8),
+            op: Op::Pure(PureOp::Iconst(4, Type::I8)),
             children: smallvec![],
         });
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![val, shift],
         });
         propagate_known_bits(&mut g);
@@ -1086,19 +1088,19 @@ mod tests {
 
         let mut g = EGraph::new();
         let param = g.add(ENode {
-            op: Op::Param(0, Type::I8),
+            op: Op::Pure(PureOp::Param(0, Type::I8)),
             children: smallvec![],
         });
         let zext = g.add(ENode {
-            op: Op::Zext(Type::I32),
+            op: Op::Pure(PureOp::Zext(Type::I32)),
             children: smallvec![param],
         });
         let mask = g.add(ENode {
-            op: Op::Iconst(0xFFFF, Type::I32),
+            op: Op::Pure(PureOp::Iconst(0xFFFF, Type::I32)),
             children: smallvec![],
         });
         let and = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![zext, mask],
         });
 
@@ -1124,15 +1126,15 @@ mod tests {
         let mut g = EGraph::new();
         // And(0xFF, 0x0F) in I8 = 0x0F
         let a = g.add(ENode {
-            op: Op::Iconst(-1, Type::I8),
+            op: Op::Pure(PureOp::Iconst(-1, Type::I8)),
             children: smallvec![],
         });
         let b = g.add(ENode {
-            op: Op::Iconst(0x0F, Type::I8),
+            op: Op::Pure(PureOp::Iconst(0x0F, Type::I8)),
             children: smallvec![],
         });
         let and = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![a, b],
         });
 
@@ -1141,7 +1143,7 @@ mod tests {
 
         // Should fold to Iconst(0x0F, I8)
         let expected = g.add(ENode {
-            op: Op::Iconst(0x0F, Type::I8),
+            op: Op::Pure(PureOp::Iconst(0x0F, Type::I8)),
             children: smallvec![],
         });
         assert_eq!(g.find(and), g.find(expected));

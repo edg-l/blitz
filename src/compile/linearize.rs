@@ -20,7 +20,7 @@ use crate::egraph::extract::{
 };
 use crate::ir::effectful::BlockId;
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PureOp};
 use crate::ir::types::Type;
 
 use super::cfg::{self, collect_block_roots, compute_idom, compute_rpo, dominates};
@@ -184,11 +184,11 @@ pub(super) fn linearize(
                     class_to_vreg.lookup(canon, ProgramPoint::block_entry(block_idx))
                 {
                     if let Some(inst) = insts.iter_mut().find(|i| i.dst == vreg) {
-                        inst.op = Op::BlockParam(
+                        inst.op = Op::Pure(PureOp::BlockParam(
                             block_id,
                             pidx,
                             block.param_types[pidx as usize].clone(),
-                        );
+                        ));
                         inst.operands.clear();
                         block_param_vregs.insert((block_id, pidx), vreg);
                     } else if pre_emission.contains(&canon) && block_preds[block_idx].len() <= 1 {
@@ -234,11 +234,11 @@ pub(super) fn linearize(
                         // Add a BlockParam instruction for the fresh VReg.
                         insts.push(VRegInst {
                             dst: fresh_vreg,
-                            op: Op::BlockParam(
+                            op: Op::Pure(PureOp::BlockParam(
                                 block_id,
                                 pidx,
                                 block.param_types[pidx as usize].clone(),
-                            ),
+                            )),
                             operands: vec![],
                         });
                         block_param_vregs.insert((block_id, pidx), fresh_vreg);

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
-use crate::ir::op::Op;
+use crate::ir::op::{Op, PseudoOp, PureOp};
 use crate::schedule::scheduler::ScheduledInst;
 
 use super::slots::{SlotAllocator, SlotOwner};
@@ -11,35 +11,35 @@ pub(crate) const LOOP_DEPTH_PENALTY_BASE: u64 = 10;
 // ── Spill/reload pseudo-op markers ───────────────────────────────────────────
 //
 // Spills and reloads are encoded as dedicated Op variants:
-//   Op::SpillStore(slot)    - GPR spill store; operands = [vreg_being_spilled]
-//   Op::SpillLoad(slot)     - GPR spill load;  dst = reload VReg
-//   Op::XmmSpillStore(slot) - XMM spill store; operands = [vreg_being_spilled]
-//   Op::XmmSpillLoad(slot)  - XMM spill load;  dst = reload VReg
+//   Op::Pseudo(PseudoOp::SpillStore(slot))    - GPR spill store; operands = [vreg_being_spilled]
+//   Op::Pseudo(PseudoOp::SpillLoad(slot))     - GPR spill load;  dst = reload VReg
+//   Op::Pseudo(PseudoOp::XmmSpillStore(slot)) - XMM spill store; operands = [vreg_being_spilled]
+//   Op::Pseudo(PseudoOp::XmmSpillLoad(slot))  - XMM spill load;  dst = reload VReg
 //
 // These are lowered to real MovMR/MovRM (GPR) or MovsdMR/MovsdRM (XMM) by the backend.
 
 pub fn is_spill_store(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::SpillStore(_))
+    matches!(&inst.op, Op::Pseudo(PseudoOp::SpillStore(_)))
 }
 
 pub fn is_spill_load(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::SpillLoad(_))
+    matches!(&inst.op, Op::Pseudo(PseudoOp::SpillLoad(_)))
 }
 
 pub fn is_xmm_spill_store(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::XmmSpillStore(_))
+    matches!(&inst.op, Op::Pseudo(PseudoOp::XmmSpillStore(_)))
 }
 
 pub fn is_xmm_spill_load(inst: &ScheduledInst) -> bool {
-    matches!(&inst.op, Op::XmmSpillLoad(_))
+    matches!(&inst.op, Op::Pseudo(PseudoOp::XmmSpillLoad(_)))
 }
 
 pub fn spill_slot_of(inst: &ScheduledInst) -> u32 {
     match &inst.op {
-        Op::SpillStore(slot)
-        | Op::SpillLoad(slot)
-        | Op::XmmSpillStore(slot)
-        | Op::XmmSpillLoad(slot) => *slot as u32,
+        Op::Pseudo(PseudoOp::SpillStore(slot))
+        | Op::Pseudo(PseudoOp::SpillLoad(slot))
+        | Op::Pseudo(PseudoOp::XmmSpillStore(slot))
+        | Op::Pseudo(PseudoOp::XmmSpillLoad(slot)) => *slot as u32,
         _ => unreachable!("spill_slot_of called on non-spill inst"),
     }
 }
@@ -93,7 +93,10 @@ pub fn is_rematerializable(inst: &ScheduledInst) -> bool {
 pub fn collect_call_arg_vregs(insts: &[ScheduledInst]) -> BTreeSet<usize> {
     let mut call_args = BTreeSet::new();
     for inst in insts {
-        if matches!(inst.op, Op::CallResult(_, _) | Op::VoidCallBarrier) {
+        if matches!(
+            inst.op,
+            Op::Pseudo(PseudoOp::CallResult(_, _)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
+        ) {
             for &op in &inst.operands {
                 call_args.insert(op.0 as usize);
             }
@@ -275,9 +278,9 @@ impl SpillPlacement<'_> {
                         *next_vreg += 1;
                         let is_xmm = super::is_xmm_vreg(op, vreg_classes);
                         let load_op = if is_xmm {
-                            Op::XmmSpillLoad(slot as i64)
+                            Op::Pseudo(PseudoOp::XmmSpillLoad(slot as i64))
                         } else {
-                            Op::SpillLoad(slot as i64)
+                            Op::Pseudo(PseudoOp::SpillLoad(slot as i64))
                         };
                         let load_inst = ScheduledInst {
                             op: load_op,
@@ -318,9 +321,9 @@ impl SpillPlacement<'_> {
                 let spilled_vreg = VReg(dst_idx as u32);
                 let is_xmm = super::is_xmm_vreg(spilled_vreg, vreg_classes);
                 let store_op = if is_xmm {
-                    Op::XmmSpillStore(slot as i64)
+                    Op::Pseudo(PseudoOp::XmmSpillStore(slot as i64))
                 } else {
-                    Op::SpillStore(slot as i64)
+                    Op::Pseudo(PseudoOp::SpillStore(slot as i64))
                 };
                 let dummy_dst = VReg(*next_vreg);
                 *next_vreg += 1;
@@ -345,7 +348,7 @@ mod tests {
 
     fn iconst_inst(dst: u32, val: i64) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Iconst(val, Type::I64),
+            op: Op::Pure(PureOp::Iconst(val, Type::I64)),
             dst: VReg(dst),
             operands: vec![],
         }
@@ -353,7 +356,7 @@ mod tests {
 
     fn use_inst(dst: u32, src: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             dst: VReg(dst),
             operands: vec![VReg(src)],
         }
@@ -367,7 +370,7 @@ mod tests {
         // Actually let's use: v0 = proj0(v_dummy), v1 = use(v0), v2 = use(v0)
         let insts_base = vec![
             ScheduledInst {
-                op: Op::Proj0,
+                op: Op::Pure(PureOp::Proj0),
                 dst: VReg(0),
                 operands: vec![VReg(99)], // dummy operand
             },
@@ -462,7 +465,7 @@ mod tests {
         // v1 = use(v0); v2 = use(v0)
         let mut insts = vec![
             ScheduledInst {
-                op: Op::Proj0,
+                op: Op::Pure(PureOp::Proj0),
                 dst: VReg(0),
                 operands: vec![VReg(99)],
             },

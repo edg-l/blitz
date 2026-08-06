@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::ir::builder::FunctionBuilder;
+use crate::ir::op::{MachOp, PseudoOp, PureOp};
 use crate::ir::types::Type;
 use crate::test_utils::has_tool;
 
@@ -1063,7 +1064,7 @@ int main(void) {
 //
 // Build: neg_arith(a, b) -> (a - b) - (a + b)  i.e. -2b
 // Tests signed add/sub with negative inputs and negative iconst values.
-// Avoids Op::Mul (not yet supported with two variable operands).
+// Avoids Op::Pure(PureOp::Mul) (not yet supported with two variable operands).
 #[test]
 fn e2e_negative_arithmetic() {
     if !has_tool("cc") {
@@ -3150,9 +3151,9 @@ fn assign_barrier_groups_load_result_anchored_at_barrier_plus_one() {
     // LoadResult from barrier 0 (should land in group 1).
     // It is also in vreg_to_arg at barrier 2 (would push it to group 2 in the old code).
     let sched = vec![
-        make_inst(0, Op::LoadResult(0, Type::I64), &[]),
-        make_inst(1, Op::Iconst(10, Type::I64), &[]),
-        make_inst(2, Op::X86Add, &[0, 1]),
+        make_inst(0, Op::Pseudo(PseudoOp::LoadResult(0, Type::I64)), &[]),
+        make_inst(1, Op::Pure(PureOp::Iconst(10, Type::I64)), &[]),
+        make_inst(2, Op::Mach(MachOp::X86Add), &[0, 1]),
     ];
     let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     // vreg_to_arg says VReg(0) is consumed by barrier 2 — the old bug would
@@ -3174,9 +3175,9 @@ fn assign_barrier_groups_load_result_anchored_at_barrier_plus_one() {
 fn assign_barrier_groups_multiple_load_results_distinct_groups() {
     // Barrier 0 produces VReg(0), barrier 1 produces VReg(1).
     let sched = vec![
-        make_inst(0, Op::LoadResult(0, Type::I64), &[]),
-        make_inst(1, Op::LoadResult(1, Type::I64), &[]),
-        make_inst(2, Op::X86Add, &[0, 1]),
+        make_inst(0, Op::Pseudo(PseudoOp::LoadResult(0, Type::I64)), &[]),
+        make_inst(1, Op::Pseudo(PseudoOp::LoadResult(1, Type::I64)), &[]),
+        make_inst(2, Op::Mach(MachOp::X86Add), &[0, 1]),
     ];
     let vreg_to_result = BTreeMap::from([(VReg(0), 0usize), (VReg(1), 1usize)]);
     let vreg_to_arg = BTreeMap::new();
@@ -3198,10 +3199,10 @@ fn assign_barrier_groups_multiple_load_results_distinct_groups() {
 fn assign_barrier_groups_call_result_anchored_at_barrier_plus_one() {
     // CallResult from barrier 2 (should land in group 3).
     let sched = vec![
-        make_inst(0, Op::Iconst(1, Type::I64), &[]),
-        make_inst(1, Op::Iconst(2, Type::I64), &[]),
-        make_inst(2, Op::CallResult(0, Type::I64), &[]),
-        make_inst(3, Op::X86Add, &[2, 1]),
+        make_inst(0, Op::Pure(PureOp::Iconst(1, Type::I64)), &[]),
+        make_inst(1, Op::Pure(PureOp::Iconst(2, Type::I64)), &[]),
+        make_inst(2, Op::Pseudo(PseudoOp::CallResult(0, Type::I64)), &[]),
+        make_inst(3, Op::Mach(MachOp::X86Add), &[2, 1]),
     ];
     let vreg_to_result = BTreeMap::from([(VReg(2), 2usize)]);
     let vreg_to_arg = BTreeMap::new();
@@ -3223,8 +3224,8 @@ fn assign_barrier_groups_pure_op_after_load_result_group() {
     // LoadResult at barrier 0 -> group 1.
     // Pure add depends on it -> must be >= group 1.
     let sched = vec![
-        make_inst(0, Op::LoadResult(0, Type::I64), &[]),
-        make_inst(1, Op::X86Add, &[0, 0]),
+        make_inst(0, Op::Pseudo(PseudoOp::LoadResult(0, Type::I64)), &[]),
+        make_inst(1, Op::Mach(MachOp::X86Add), &[0, 0]),
     ];
     let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     let vreg_to_arg = BTreeMap::new();
@@ -3248,10 +3249,10 @@ fn assign_barrier_groups_load_result_backward_pass_skipped() {
     // LoadResult backward-pass into a later group (barrier results are skipped
     // in the backward propagation).
     let sched = vec![
-        make_inst(0, Op::LoadResult(0, Type::I64), &[]),
-        make_inst(1, Op::Iconst(0, Type::I64), &[]),
-        make_inst(2, Op::Iconst(0, Type::I64), &[]),
-        make_inst(3, Op::X86Add, &[0, 2]),
+        make_inst(0, Op::Pseudo(PseudoOp::LoadResult(0, Type::I64)), &[]),
+        make_inst(1, Op::Pure(PureOp::Iconst(0, Type::I64)), &[]),
+        make_inst(2, Op::Pure(PureOp::Iconst(0, Type::I64)), &[]),
+        make_inst(3, Op::Mach(MachOp::X86Add), &[0, 2]),
     ];
     let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     // vreg_to_arg pushes VReg(0) to barrier 3, but LoadResult must stay at 1.
@@ -3281,11 +3282,11 @@ fn assign_barrier_groups_load_result_backward_pass_skipped() {
 fn assign_barrier_groups_load_result_not_pushed_behind_pure_ops() {
     // Many pure ops in group 0, then a LoadResult from barrier 0, then a consumer.
     let sched = vec![
-        make_inst(10, Op::Iconst(1, Type::I64), &[]),
-        make_inst(11, Op::Iconst(2, Type::I64), &[]),
-        make_inst(12, Op::X86Add, &[10, 11]),
-        make_inst(0, Op::LoadResult(0, Type::I64), &[]), // barrier 0 result
-        make_inst(13, Op::X86Add, &[0, 12]),             // uses LoadResult
+        make_inst(10, Op::Pure(PureOp::Iconst(1, Type::I64)), &[]),
+        make_inst(11, Op::Pure(PureOp::Iconst(2, Type::I64)), &[]),
+        make_inst(12, Op::Mach(MachOp::X86Add), &[10, 11]),
+        make_inst(0, Op::Pseudo(PseudoOp::LoadResult(0, Type::I64)), &[]), // barrier 0 result
+        make_inst(13, Op::Mach(MachOp::X86Add), &[0, 12]),                 // uses LoadResult
     ];
     let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     let vreg_to_arg = BTreeMap::new();
@@ -3520,11 +3521,11 @@ fn early_spill_distant_barrier_result() {
     // LoadResult at barrier 0, consumer at group 3 (distance = 2).
     // Should insert SpillStore in group 1, SpillLoad in group 3.
     let mut schedule = vec![
-        make_inst(0, Op::LoadResult(0, Type::I32), &[]), // barrier 0 result
-        make_inst(1, Op::Iconst(10, Type::I32), &[]),    // filler
-        make_inst(2, Op::Iconst(20, Type::I32), &[]),    // filler
-        make_inst(3, Op::X86Add, &[0, 2]),               // consumer of LoadResult
-        make_inst(4, Op::Proj0, &[3]),
+        make_inst(0, Op::Pseudo(PseudoOp::LoadResult(0, Type::I32)), &[]), // barrier 0 result
+        make_inst(1, Op::Pure(PureOp::Iconst(10, Type::I32)), &[]),        // filler
+        make_inst(2, Op::Pure(PureOp::Iconst(20, Type::I32)), &[]),        // filler
+        make_inst(3, Op::Mach(MachOp::X86Add), &[0, 2]),                   // consumer of LoadResult
+        make_inst(4, Op::Pure(PureOp::Proj0), &[3]),
     ];
     let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     let vreg_to_arg = BTreeMap::new();
@@ -3561,11 +3562,11 @@ fn early_spill_distant_barrier_result() {
     // Should have inserted SpillStore and SpillLoad.
     let spill_stores: Vec<_> = schedule
         .iter()
-        .filter(|i| matches!(i.op, Op::SpillStore(_)))
+        .filter(|i| matches!(i.op, Op::Pseudo(PseudoOp::SpillStore(_))))
         .collect();
     let spill_loads: Vec<_> = schedule
         .iter()
-        .filter(|i| matches!(i.op, Op::SpillLoad(_)))
+        .filter(|i| matches!(i.op, Op::Pseudo(PseudoOp::SpillLoad(_))))
         .collect();
     assert_eq!(spill_stores.len(), 1, "one SpillStore inserted");
     assert_eq!(spill_loads.len(), 1, "one SpillLoad inserted");
@@ -3583,7 +3584,7 @@ fn early_spill_distant_barrier_result() {
     // Consumer's operand should be rewritten to the reload VReg.
     let consumer = schedule
         .iter()
-        .find(|i| matches!(i.op, Op::X86Add))
+        .find(|i| matches!(i.op, Op::Mach(MachOp::X86Add)))
         .unwrap();
     assert!(
         consumer.operands.contains(&reload_vreg),
@@ -3600,8 +3601,8 @@ fn early_spill_skips_close_consumer() {
     // LoadResult at barrier 0, consumer at group 2 (distance = 1).
     // Should NOT insert any spills.
     let mut schedule = vec![
-        make_inst(0, Op::LoadResult(0, Type::I32), &[]),
-        make_inst(1, Op::X86Add, &[0, 0]),
+        make_inst(0, Op::Pseudo(PseudoOp::LoadResult(0, Type::I32)), &[]),
+        make_inst(1, Op::Mach(MachOp::X86Add), &[0, 0]),
     ];
     let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     let vreg_to_arg = BTreeMap::new();
@@ -3633,9 +3634,9 @@ fn early_spill_skips_effectful_consumer() {
     // BUT the LoadResult is also consumed by a later effectful op
     // (vreg_to_arg_of_barrier has it). Should NOT spill.
     let mut schedule = vec![
-        make_inst(0, Op::LoadResult(0, Type::I32), &[]),
-        make_inst(1, Op::Iconst(10, Type::I32), &[]),
-        make_inst(2, Op::X86Add, &[0, 1]),
+        make_inst(0, Op::Pseudo(PseudoOp::LoadResult(0, Type::I32)), &[]),
+        make_inst(1, Op::Pure(PureOp::Iconst(10, Type::I32)), &[]),
+        make_inst(2, Op::Mach(MachOp::X86Add), &[0, 1]),
     ];
     let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     // VReg(0) is also consumed by barrier 2 (a Store).
@@ -3665,7 +3666,11 @@ fn early_spill_skips_effectful_consumer() {
 #[test]
 fn early_spill_skips_no_consumers() {
     // LoadResult at barrier 0 with no scheduled consumers at all.
-    let mut schedule = vec![make_inst(0, Op::LoadResult(0, Type::I32), &[])];
+    let mut schedule = vec![make_inst(
+        0,
+        Op::Pseudo(PseudoOp::LoadResult(0, Type::I32)),
+        &[],
+    )];
     let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     let vreg_to_arg = BTreeMap::new();
     let mut vreg_group = BTreeMap::from([(VReg(0), 1usize)]);
@@ -3692,11 +3697,11 @@ fn early_spill_multiple_consumers_uses_earliest() {
     // Should spill with reload at group 4 (earliest consumer).
     // Both consumers should be rewritten.
     let mut schedule = vec![
-        make_inst(0, Op::LoadResult(0, Type::I32), &[]),
-        make_inst(1, Op::Iconst(1, Type::I32), &[]),
-        make_inst(2, Op::Iconst(2, Type::I32), &[]),
-        make_inst(3, Op::X86Add, &[0, 1]), // consumer 1 in group 4
-        make_inst(4, Op::X86Sub, &[0, 2]), // consumer 2 in group 5
+        make_inst(0, Op::Pseudo(PseudoOp::LoadResult(0, Type::I32)), &[]),
+        make_inst(1, Op::Pure(PureOp::Iconst(1, Type::I32)), &[]),
+        make_inst(2, Op::Pure(PureOp::Iconst(2, Type::I32)), &[]),
+        make_inst(3, Op::Mach(MachOp::X86Add), &[0, 1]), // consumer 1 in group 4
+        make_inst(4, Op::Mach(MachOp::X86Sub), &[0, 2]), // consumer 2 in group 5
     ];
     let vreg_to_result = BTreeMap::from([(VReg(0), 0usize)]);
     let vreg_to_arg = BTreeMap::new();
@@ -3731,7 +3736,7 @@ fn early_spill_multiple_consumers_uses_earliest() {
 
     let spill_loads: Vec<_> = schedule
         .iter()
-        .filter(|i| matches!(i.op, Op::SpillLoad(_)))
+        .filter(|i| matches!(i.op, Op::Pseudo(PseudoOp::SpillLoad(_))))
         .collect();
     let reload_vreg = spill_loads[0].dst;
     // Reload should be at group 4 (earliest consumer).
@@ -3740,11 +3745,11 @@ fn early_spill_multiple_consumers_uses_earliest() {
     // Both consumers should use the reload VReg.
     let add = schedule
         .iter()
-        .find(|i| matches!(i.op, Op::X86Add))
+        .find(|i| matches!(i.op, Op::Mach(MachOp::X86Add)))
         .unwrap();
     let sub = schedule
         .iter()
-        .find(|i| matches!(i.op, Op::X86Sub))
+        .find(|i| matches!(i.op, Op::Mach(MachOp::X86Sub)))
         .unwrap();
     assert!(add.operands.contains(&reload_vreg));
     assert!(sub.operands.contains(&reload_vreg));

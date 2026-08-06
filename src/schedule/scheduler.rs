@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::egraph::extract::{VReg, VRegInst};
-use crate::ir::op::Op;
+use crate::ir::op::{MachOp, Op, PureOp};
 
 // ── DAG representation (9.1) ──────────────────────────────────────────────────
 
@@ -301,13 +301,16 @@ pub fn schedule(dag: &ScheduleDag) -> Vec<ScheduledInst> {
             &mut ready,
         );
 
-        if matches!(dag.nodes[node_idx].op, Op::X86Idiv(..) | Op::X86Div(..)) {
+        if matches!(
+            dag.nodes[node_idx].op,
+            Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..))
+        ) {
             let div_dst = dag.nodes[node_idx].dst;
             let projs: Vec<usize> = dag
                 .nodes
                 .iter()
                 .filter(|p| {
-                    matches!(p.op, Op::Proj0 | Op::Proj1)
+                    matches!(p.op, Op::Pure(PureOp::Proj0) | Op::Pure(PureOp::Proj1))
                         && p.operands.first() == Some(&div_dst)
                         && !emitted[p.id]
                         && remaining_preds[p.id] == 0
@@ -347,7 +350,7 @@ mod tests {
     fn iconst_inst(dst: u32) -> VRegInst {
         VRegInst {
             dst: VReg(dst),
-            op: Op::Iconst(dst as i64, Type::I64),
+            op: Op::Pure(PureOp::Iconst(dst as i64, Type::I64)),
             operands: vec![],
         }
     }
@@ -355,7 +358,7 @@ mod tests {
     fn x86add_inst(dst: u32, a: u32, b: u32) -> VRegInst {
         VRegInst {
             dst: VReg(dst),
-            op: Op::X86Add,
+            op: Op::Mach(MachOp::X86Add),
             operands: vec![Some(VReg(a)), Some(VReg(b))],
         }
     }
@@ -363,7 +366,7 @@ mod tests {
     fn proj0_inst(dst: u32, src: u32) -> VRegInst {
         VRegInst {
             dst: VReg(dst),
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             operands: vec![Some(VReg(src))],
         }
     }
@@ -474,7 +477,7 @@ mod tests {
         let nodes = vec![
             DagNode {
                 id: 0,
-                op: Op::Iconst(10, Type::I64),
+                op: Op::Pure(PureOp::Iconst(10, Type::I64)),
                 dst: v0,
                 operands: vec![],
                 is_effectful: true,
@@ -482,7 +485,7 @@ mod tests {
             },
             DagNode {
                 id: 1,
-                op: Op::Iconst(20, Type::I64),
+                op: Op::Pure(PureOp::Iconst(20, Type::I64)),
                 dst: v1,
                 operands: vec![],
                 is_effectful: true,

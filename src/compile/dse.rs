@@ -101,7 +101,7 @@ mod tests {
     use crate::egraph::enode::ENode;
     use crate::ir::effectful::{EffOperand, EffectfulOp};
     use crate::ir::function::{BasicBlock, Function};
-    use crate::ir::op::Op;
+    use crate::ir::op::{Op, PseudoOp, PureOp};
     use crate::ir::types::Type;
 
     fn add_node(eg: &mut EGraph, op: Op, children: &[ClassId]) -> ClassId {
@@ -112,15 +112,15 @@ mod tests {
     }
 
     fn stack_addr(eg: &mut EGraph, n: u32) -> ClassId {
-        add_node(eg, Op::StackAddr(n), &[])
+        add_node(eg, Op::Pseudo(PseudoOp::StackAddr(n)), &[])
     }
 
     fn iconst(eg: &mut EGraph, v: i64) -> ClassId {
-        add_node(eg, Op::Iconst(v, Type::I64), &[])
+        add_node(eg, Op::Pure(PureOp::Iconst(v, Type::I64)), &[])
     }
 
     fn load_result_class(eg: &mut EGraph, uid: u32, ty: Type) -> ClassId {
-        add_node(eg, Op::LoadResult(uid, ty), &[])
+        add_node(eg, Op::Pseudo(PseudoOp::LoadResult(uid, ty)), &[])
     }
 
     fn make_func(ops: Vec<EffectfulOp>) -> Function {
@@ -323,8 +323,8 @@ mod tests {
         let base = stack_addr(&mut eg, 0);
         let c0 = iconst(&mut eg, 0);
         let c8 = iconst(&mut eg, 8);
-        let a0 = add_node(&mut eg, Op::Add, &[base, c0]);
-        let a8 = add_node(&mut eg, Op::Add, &[base, c8]);
+        let a0 = add_node(&mut eg, Op::Pure(PureOp::Add), &[base, c0]);
+        let a8 = add_node(&mut eg, Op::Pure(PureOp::Add), &[base, c8]);
         let val = iconst(&mut eg, 42);
         let mut func = make_func(vec![
             EffectfulOp::Store {
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn param_based_address_self_kill() {
         let mut eg = EGraph::new();
-        let p = add_node(&mut eg, Op::Param(0, Type::I64), &[]);
+        let p = add_node(&mut eg, Op::Pure(PureOp::Param(0, Type::I64)), &[]);
         let a = iconst(&mut eg, 10);
         let b = iconst(&mut eg, 20);
         let mut func = make_func(vec![

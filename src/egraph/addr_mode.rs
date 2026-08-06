@@ -2,7 +2,7 @@ use smallvec::smallvec;
 
 use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, MachOp, Op, PureOp};
 use crate::ir::types::Type;
 
 pub fn apply_addr_mode_rules(egraph: &mut EGraph) -> bool {
@@ -25,7 +25,7 @@ fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
     for snap in snaps {
         let class_id = snap.class_id;
-        if snap.op != Op::Add || snap.children.len() != 2 {
+        if snap.op != Op::Pure(PureOp::Add) || snap.children.len() != 2 {
             continue;
         }
 
@@ -48,10 +48,10 @@ fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             && d <= i32::MAX as i64
         {
             let addr = egraph.add(ENode {
-                op: Op::Addr {
+                op: Op::Pure(PureOp::Addr {
                     scale: 1,
                     disp: d as i32,
-                },
+                }),
                 children: smallvec![base, ClassId::NONE],
             });
             let canon = egraph.unionfind.find_immutable(class_id);
@@ -68,7 +68,7 @@ fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             let rhs_class = egraph.class(rhs_canon);
             let rhs_nodes: Vec<_> = rhs_class.nodes.clone();
             for rhs_node in &rhs_nodes {
-                if rhs_node.op == Op::Shl && rhs_node.children.len() == 2 {
+                if rhs_node.op == Op::Pure(PureOp::Shl) && rhs_node.children.len() == 2 {
                     let idx = rhs_node.children[0];
                     let shift = rhs_node.children[1];
                     if let Some((n, _)) = egraph.get_constant(shift)
@@ -76,7 +76,7 @@ fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                     {
                         let scale = 1u8 << n;
                         let addr = egraph.add(ENode {
-                            op: Op::Addr { scale, disp: 0 },
+                            op: Op::Pure(PureOp::Addr { scale, disp: 0 }),
                             children: smallvec![base, idx],
                         });
                         let canon = egraph.unionfind.find_immutable(class_id);
@@ -88,7 +88,7 @@ fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                 }
                 // Pattern: Add(base, Mul(idx, Iconst(s))) -> Addr{scale:s, disp:0}(base, idx)
                 //   for s in {2,4,8}
-                if rhs_node.op == Op::Mul && rhs_node.children.len() == 2 {
+                if rhs_node.op == Op::Pure(PureOp::Mul) && rhs_node.children.len() == 2 {
                     let [mc0, mc1] = [rhs_node.children[0], rhs_node.children[1]];
                     let (scale_opt, idx) = if let Some((s, _)) = egraph.get_constant(mc1) {
                         if s > 0 && s <= 8 {
@@ -110,7 +110,7 @@ fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                         && s != 1
                     {
                         let addr = egraph.add(ENode {
-                            op: Op::Addr { scale: s, disp: 0 },
+                            op: Op::Pure(PureOp::Addr { scale: s, disp: 0 }),
                             children: smallvec![base, idx],
                         });
                         let canon = egraph.unionfind.find_immutable(class_id);
@@ -126,7 +126,7 @@ fn apply_addr_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         // Pattern 3: Add(base, idx) -> Addr{scale:1, disp:0}(base, idx) [generic]
         {
             let addr = egraph.add(ENode {
-                op: Op::Addr { scale: 1, disp: 0 },
+                op: Op::Pure(PureOp::Addr { scale: 1, disp: 0 }),
                 children: smallvec![base, rhs],
             });
             let canon = egraph.unionfind.find_immutable(class_id);
@@ -149,7 +149,7 @@ fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
         match &snap.op {
             // Add(a, b) -> X86Lea2(a, b)
-            Op::Add if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Add) if snap.children.len() == 2 => {
                 let a = snap.children[0];
                 let b = snap.children[1];
                 // Apply LEA to I32 and I64 operands (no byte/word form)
@@ -157,7 +157,7 @@ fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                 let b_ty = egraph.class(egraph.unionfind.find_immutable(b)).ty.clone();
                 if matches!(a_ty, Type::I32 | Type::I64) && a_ty == b_ty {
                     let lea2 = egraph.add(ENode {
-                        op: Op::X86Lea2,
+                        op: Op::Mach(MachOp::X86Lea2),
                         children: smallvec![a, b],
                     });
                     let canon = egraph.unionfind.find_immutable(class_id);
@@ -171,7 +171,7 @@ fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                 let rhs_canon = egraph.unionfind.find_immutable(b);
                 let rhs_nodes: Vec<_> = egraph.class(rhs_canon).nodes.clone();
                 for rhs_node in &rhs_nodes {
-                    if rhs_node.op == Op::Shl && rhs_node.children.len() == 2 {
+                    if rhs_node.op == Op::Pure(PureOp::Shl) && rhs_node.children.len() == 2 {
                         let idx = rhs_node.children[0];
                         let shift = rhs_node.children[1];
                         if let Some((n, _)) = egraph.get_constant(shift)
@@ -184,7 +184,7 @@ fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                                 .clone();
                             if matches!(a_ty, Type::I32 | Type::I64) && a_ty == idx_ty {
                                 let lea3 = egraph.add(ENode {
-                                    op: Op::X86Lea3 { scale },
+                                    op: Op::Mach(MachOp::X86Lea3 { scale }),
                                     children: smallvec![a, idx],
                                 });
                                 let canon = egraph.unionfind.find_immutable(class_id);
@@ -204,10 +204,10 @@ fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                     && matches!(a_ty, Type::I32 | Type::I64)
                 {
                     let lea4 = egraph.add(ENode {
-                        op: Op::X86Lea4 {
+                        op: Op::Mach(MachOp::X86Lea4 {
                             scale: 1,
                             disp: d as i32,
-                        },
+                        }),
                         children: smallvec![a, ClassId::NONE],
                     });
                     let canon = egraph.unionfind.find_immutable(class_id);
@@ -221,7 +221,7 @@ fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             // Mul(a, 3) -> X86Lea3(a, a, 2)
             // Mul(a, 5) -> X86Lea3(a, a, 4)
             // Mul(a, 9) -> X86Lea3(a, a, 8)
-            Op::Mul if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Mul) if snap.children.len() == 2 => {
                 let a = snap.children[0];
                 let b = snap.children[1];
                 let (val_opt, base) = if let Some((v, _)) = egraph.get_constant(b) {
@@ -247,7 +247,7 @@ fn apply_lea_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                     };
                     if let Some(s) = scale {
                         let lea3 = egraph.add(ENode {
-                            op: Op::X86Lea3 { scale: s },
+                            op: Op::Mach(MachOp::X86Lea3 { scale: s }),
                             children: smallvec![base, base],
                         });
                         let canon = egraph.unionfind.find_immutable(class_id);
@@ -275,7 +275,7 @@ fn apply_three_component_lea(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
     for snap in snaps {
         let class_id = snap.class_id;
-        if snap.op != Op::Add || snap.children.len() != 2 {
+        if snap.op != Op::Pure(PureOp::Add) || snap.children.len() != 2 {
             continue;
         }
 
@@ -300,7 +300,7 @@ fn apply_three_component_lea(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let inner_canon = egraph.unionfind.find_immutable(inner_class);
         let inner_nodes: Vec<_> = egraph.class(inner_canon).nodes.clone();
         for inner_node in &inner_nodes {
-            if inner_node.op != Op::Add || inner_node.children.len() != 2 {
+            if inner_node.op != Op::Pure(PureOp::Add) || inner_node.children.len() != 2 {
                 continue;
             }
             let [ia, ib] = [inner_node.children[0], inner_node.children[1]];
@@ -311,14 +311,14 @@ fn apply_three_component_lea(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                 let ia_nodes: Vec<_> = egraph.class(ia_canon).nodes.clone();
                 let has_shl_ia = ia_nodes
                     .iter()
-                    .any(|n| n.op == Op::Shl && n.children.len() == 2);
+                    .any(|n| n.op == Op::Pure(PureOp::Shl) && n.children.len() == 2);
                 if has_shl_ia { (ia, ib) } else { (ib, ia) }
             };
 
             let shl_canon = egraph.unionfind.find_immutable(shl_class);
             let shl_nodes: Vec<_> = egraph.class(shl_canon).nodes.clone();
             for shl_node in &shl_nodes {
-                if shl_node.op != Op::Shl || shl_node.children.len() != 2 {
+                if shl_node.op != Op::Pure(PureOp::Shl) || shl_node.children.len() != 2 {
                     continue;
                 }
                 let idx = shl_node.children[0];
@@ -342,10 +342,10 @@ fn apply_three_component_lea(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                     continue;
                 }
                 let lea4 = egraph.add(ENode {
-                    op: Op::X86Lea4 {
+                    op: Op::Mach(MachOp::X86Lea4 {
                         scale,
                         disp: disp as i32,
-                    },
+                    }),
                     children: smallvec![base, idx],
                 });
                 let canon = egraph.unionfind.find_immutable(class_id);
@@ -368,7 +368,7 @@ mod tests {
 
     fn iconst(g: &mut EGraph, v: i64) -> ClassId {
         g.add(ENode {
-            op: Op::Iconst(v, Type::I64),
+            op: Op::Pure(PureOp::Iconst(v, Type::I64)),
             children: smallvec![],
         })
     }
@@ -378,7 +378,7 @@ mod tests {
         static COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1000);
         let v = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         g.add(ENode {
-            op: Op::Iconst(v, Type::I64),
+            op: Op::Pure(PureOp::Iconst(v, Type::I64)),
             children: smallvec![],
         })
     }
@@ -390,14 +390,14 @@ mod tests {
         let base = var(&mut g);
         let disp = iconst(&mut g, 16);
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![base, disp],
         });
         apply_addr_mode_rules(&mut g);
         g.rebuild();
 
         let addr = g.add(ENode {
-            op: Op::Addr { scale: 1, disp: 16 },
+            op: Op::Pure(PureOp::Addr { scale: 1, disp: 16 }),
             children: smallvec![base, ClassId::NONE],
         });
         assert_eq!(g.find(add), g.find(addr));
@@ -411,18 +411,18 @@ mod tests {
         let idx = var(&mut g);
         let three = iconst(&mut g, 3);
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![idx, three],
         });
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![base, shl],
         });
         apply_addr_mode_rules(&mut g);
         g.rebuild();
 
         let addr = g.add(ENode {
-            op: Op::Addr { scale: 8, disp: 0 },
+            op: Op::Pure(PureOp::Addr { scale: 8, disp: 0 }),
             children: smallvec![base, idx],
         });
         assert_eq!(g.find(add), g.find(addr));
@@ -436,11 +436,11 @@ mod tests {
         let idx = var(&mut g);
         let six = iconst(&mut g, 6);
         let mul = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![idx, six],
         });
         let _add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![base, mul],
         });
         apply_addr_mode_rules(&mut g);
@@ -449,7 +449,7 @@ mod tests {
         // Verify no Addr{scale:6} was created
         for class in &g.classes {
             for node in &class.nodes {
-                if let Op::Addr { scale: 6, .. } = node.op {
+                if let Op::Pure(PureOp::Addr { scale: 6, .. }) = node.op {
                     panic!("Addr with invalid scale=6 was created");
                 }
             }
@@ -463,14 +463,14 @@ mod tests {
         let base = var(&mut g);
         let idx = var(&mut g);
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![base, idx],
         });
         apply_addr_mode_rules(&mut g);
         g.rebuild();
 
         let addr = g.add(ENode {
-            op: Op::Addr { scale: 1, disp: 0 },
+            op: Op::Pure(PureOp::Addr { scale: 1, disp: 0 }),
             children: smallvec![base, idx],
         });
         assert_eq!(g.find(add), g.find(addr));
@@ -483,14 +483,14 @@ mod tests {
         let a = var(&mut g);
         let five = iconst(&mut g, 5);
         let mul = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, five],
         });
         apply_addr_mode_rules(&mut g);
         g.rebuild();
 
         let lea3 = g.add(ENode {
-            op: Op::X86Lea3 { scale: 4 },
+            op: Op::Mach(MachOp::X86Lea3 { scale: 4 }),
             children: smallvec![a, a],
         });
         assert_eq!(g.find(mul), g.find(lea3));
@@ -505,15 +505,15 @@ mod tests {
         let two = iconst(&mut g, 2);
         let sixteen = iconst(&mut g, 16);
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![b, two],
         });
         let inner_add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, shl],
         });
         let outer_add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![inner_add, sixteen],
         });
         // Run two passes so inner add gets its Addr/LEA forms first
@@ -523,7 +523,7 @@ mod tests {
         g.rebuild();
 
         let lea4 = g.add(ENode {
-            op: Op::X86Lea4 { scale: 4, disp: 16 },
+            op: Op::Mach(MachOp::X86Lea4 { scale: 4, disp: 16 }),
             children: smallvec![a, b],
         });
         assert_eq!(g.find(outer_add), g.find(lea4));

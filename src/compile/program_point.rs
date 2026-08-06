@@ -1,4 +1,4 @@
-use crate::ir::op::Op;
+use crate::ir::op::{Op, PseudoOp, PureOp};
 use crate::schedule::scheduler::ScheduledInst;
 
 /// A stable, total-ordered program point within a function.
@@ -71,10 +71,10 @@ impl ProgramPoint {
             .filter(|(_, inst)| {
                 matches!(
                     &inst.op,
-                    Op::LoadResult(..)
-                        | Op::CallResult(..)
-                        | Op::VoidCallBarrier
-                        | Op::StoreBarrier
+                    Op::Pseudo(PseudoOp::LoadResult(..))
+                        | Op::Pseudo(PseudoOp::CallResult(..))
+                        | Op::Pseudo(PseudoOp::VoidCallBarrier)
+                        | Op::Pseudo(PseudoOp::StoreBarrier)
                 )
             })
             .map(|(i, _)| i)
@@ -152,17 +152,17 @@ mod tests {
 
         let schedule = vec![
             ScheduledInst {
-                op: Op::Iconst(1, Type::I64),
+                op: Op::Pure(PureOp::Iconst(1, Type::I64)),
                 dst: v0,
                 operands: vec![],
             },
             ScheduledInst {
-                op: Op::CallResult(0, Type::I64),
+                op: Op::Pseudo(PseudoOp::CallResult(0, Type::I64)),
                 dst: v1,
                 operands: vec![],
             },
             ScheduledInst {
-                op: Op::Iconst(2, Type::I64),
+                op: Op::Pure(PureOp::Iconst(2, Type::I64)),
                 dst: v2,
                 operands: vec![],
             },

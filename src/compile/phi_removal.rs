@@ -31,7 +31,7 @@ use crate::egraph::EGraph;
 use crate::egraph::extract::{ExtractionResult, VReg};
 use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp};
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 
 use super::barrier::{terminator_edges, terminator_edges_mut};
 use super::cfg::dominates;
@@ -267,7 +267,10 @@ fn is_placed_value(extraction: &ExtractionResult, class: ClassId) -> bool {
     match extraction.choices.get(&class) {
         Some(node) => matches!(
             node.op,
-            Op::LoadResult(..) | Op::CallResult(..) | Op::Param(..) | Op::BlockParam(..)
+            Op::Pseudo(PseudoOp::LoadResult(..))
+                | Op::Pseudo(PseudoOp::CallResult(..))
+                | Op::Pure(PureOp::Param(..))
+                | Op::Pure(PureOp::BlockParam(..))
         ),
         None => true,
     }
@@ -390,7 +393,12 @@ pub(super) fn barrier_offenders(func: &Function, lin: &Linearized) -> BTreeSet<B
             .count();
         let emitted = lin.block_vreg_insts[idx]
             .iter()
-            .filter(|inst| matches!(inst.op, Op::LoadResult(..) | Op::CallResult(..)))
+            .filter(|inst| {
+                matches!(
+                    inst.op,
+                    Op::Pseudo(PseudoOp::LoadResult(..)) | Op::Pseudo(PseudoOp::CallResult(..))
+                )
+            })
             .count();
         if emitted > owned {
             offenders.insert(block.id);

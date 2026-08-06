@@ -6,7 +6,7 @@ use crate::egraph::{EGraph, ENode};
 use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function, StackSlot, StackSlotData};
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 
 // ── Value handle ──────────────────────────────────────────────────────────────
@@ -137,7 +137,7 @@ impl FunctionBuilder {
     pub fn new(name: &str, param_types: &[Type], return_types: &[Type]) -> Self {
         let mut egraph = EGraph::new();
 
-        // Create e-classes for function parameters using Op::Param(i, ty).
+        // Create e-classes for function parameters using Op::Pure(PureOp::Param(i, ty)).
         // Param nodes have cost 0 and are not touched by algebraic rules or isel,
         // so they won't be constant-folded or rewritten.
         let entry_params: Vec<Value> = param_types
@@ -145,7 +145,7 @@ impl FunctionBuilder {
             .enumerate()
             .map(|(i, ty)| {
                 let node = ENode {
-                    op: Op::Param(i as u32, ty.clone()),
+                    op: Op::Pure(PureOp::Param(i as u32, ty.clone())),
                     children: smallvec![],
                 };
                 Value(egraph.add(node))
@@ -214,7 +214,7 @@ impl FunctionBuilder {
                 // Use Op::BlockParam with unique (block_id, param_idx) to force distinct
                 // classes without colliding with real Iconst constants or Param nodes.
                 let node = ENode {
-                    op: Op::BlockParam(id, i as u32, ty.clone()),
+                    op: Op::Pure(PureOp::BlockParam(id, i as u32, ty.clone())),
                     children: smallvec![],
                 };
                 Value(self.egraph.add(node))
@@ -309,27 +309,27 @@ impl FunctionBuilder {
 
     // ── Pure op builders ──────────────────────────────────────────────────────
 
-    binop!(add, Op::Add);
-    binop!(sub, Op::Sub);
-    binop!(mul, Op::Mul);
-    binop!(udiv, Op::UDiv);
-    binop!(sdiv, Op::SDiv);
-    binop!(urem, Op::URem);
-    binop!(srem, Op::SRem);
-    binop!(and, Op::And);
-    binop!(or, Op::Or);
-    binop!(xor, Op::Xor);
-    binop!(shl, Op::Shl);
-    binop!(shr, Op::Shr);
-    binop!(sar, Op::Sar);
-    binop!(fadd, Op::Fadd);
-    binop!(fsub, Op::Fsub);
-    binop!(fmul, Op::Fmul);
-    binop!(fdiv, Op::Fdiv);
+    binop!(add, Op::Pure(PureOp::Add));
+    binop!(sub, Op::Pure(PureOp::Sub));
+    binop!(mul, Op::Pure(PureOp::Mul));
+    binop!(udiv, Op::Pure(PureOp::UDiv));
+    binop!(sdiv, Op::Pure(PureOp::SDiv));
+    binop!(urem, Op::Pure(PureOp::URem));
+    binop!(srem, Op::Pure(PureOp::SRem));
+    binop!(and, Op::Pure(PureOp::And));
+    binop!(or, Op::Pure(PureOp::Or));
+    binop!(xor, Op::Pure(PureOp::Xor));
+    binop!(shl, Op::Pure(PureOp::Shl));
+    binop!(shr, Op::Pure(PureOp::Shr));
+    binop!(sar, Op::Pure(PureOp::Sar));
+    binop!(fadd, Op::Pure(PureOp::Fadd));
+    binop!(fsub, Op::Pure(PureOp::Fsub));
+    binop!(fmul, Op::Pure(PureOp::Fmul));
+    binop!(fdiv, Op::Pure(PureOp::Fdiv));
 
     pub fn iconst(&mut self, val: i64, ty: Type) -> Value {
         let node = ENode {
-            op: Op::Iconst(val, ty),
+            op: Op::Pure(PureOp::Iconst(val, ty)),
             children: smallvec![],
         };
         self.add_node(node)
@@ -337,7 +337,7 @@ impl FunctionBuilder {
 
     pub fn fconst(&mut self, val: f64) -> Value {
         let node = ENode {
-            op: Op::Fconst(val.to_bits(), Type::F64),
+            op: Op::Pure(PureOp::Fconst(val.to_bits(), Type::F64)),
             children: smallvec![],
         };
         self.add_node(node)
@@ -345,7 +345,7 @@ impl FunctionBuilder {
 
     pub fn fconst_f32(&mut self, val: f32) -> Value {
         let node = ENode {
-            op: Op::Fconst(val.to_bits() as u64, Type::F32),
+            op: Op::Pure(PureOp::Fconst(val.to_bits() as u64, Type::F32)),
             children: smallvec![],
         };
         self.add_node(node)
@@ -353,7 +353,7 @@ impl FunctionBuilder {
 
     pub fn sext(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
-            op: Op::Sext(target),
+            op: Op::Pure(PureOp::Sext(target)),
             children: smallvec![val.0],
         };
         self.add_node(node)
@@ -361,7 +361,7 @@ impl FunctionBuilder {
 
     pub fn zext(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
-            op: Op::Zext(target),
+            op: Op::Pure(PureOp::Zext(target)),
             children: smallvec![val.0],
         };
         self.add_node(node)
@@ -369,7 +369,7 @@ impl FunctionBuilder {
 
     pub fn trunc(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
-            op: Op::Trunc(target),
+            op: Op::Pure(PureOp::Trunc(target)),
             children: smallvec![val.0],
         };
         self.add_node(node)
@@ -377,7 +377,7 @@ impl FunctionBuilder {
 
     pub fn bitcast(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
-            op: Op::Bitcast(target),
+            op: Op::Pure(PureOp::Bitcast(target)),
             children: smallvec![val.0],
         };
         self.add_node(node)
@@ -385,7 +385,7 @@ impl FunctionBuilder {
 
     pub fn icmp(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
         let node = ENode {
-            op: Op::Icmp(cc),
+            op: Op::Pure(PureOp::Icmp(cc)),
             children: smallvec![a.0, b.0],
         };
         self.add_node(node)
@@ -393,7 +393,7 @@ impl FunctionBuilder {
 
     pub fn fcmp(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
         let node = ENode {
-            op: Op::Fcmp(cc),
+            op: Op::Pure(PureOp::Fcmp(cc)),
             children: smallvec![a.0, b.0],
         };
         self.add_node(node)
@@ -404,11 +404,11 @@ impl FunctionBuilder {
     pub fn fcmp_to_int(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
         let flags = self.fcmp(cc, a, b);
         let setcc = self.add_node(ENode {
-            op: Op::X86Setcc(cc),
+            op: Op::Mach(MachOp::X86Setcc(cc)),
             children: smallvec![flags.0],
         });
         let node = ENode {
-            op: Op::Zext(Type::I32),
+            op: Op::Pure(PureOp::Zext(Type::I32)),
             children: smallvec![setcc.0],
         };
         self.add_node(node)
@@ -416,7 +416,7 @@ impl FunctionBuilder {
 
     pub fn int_to_float(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
-            op: Op::IntToFloat(target),
+            op: Op::Pure(PureOp::IntToFloat(target)),
             children: smallvec![val.0],
         };
         self.add_node(node)
@@ -424,7 +424,7 @@ impl FunctionBuilder {
 
     pub fn float_to_int(&mut self, val: Value, target: Type) -> Value {
         let node = ENode {
-            op: Op::FloatToInt(target),
+            op: Op::Pure(PureOp::FloatToInt(target)),
             children: smallvec![val.0],
         };
         self.add_node(node)
@@ -432,7 +432,7 @@ impl FunctionBuilder {
 
     pub fn float_ext(&mut self, val: Value) -> Value {
         let node = ENode {
-            op: Op::FloatExt,
+            op: Op::Pure(PureOp::FloatExt),
             children: smallvec![val.0],
         };
         self.add_node(node)
@@ -440,7 +440,7 @@ impl FunctionBuilder {
 
     pub fn float_trunc(&mut self, val: Value) -> Value {
         let node = ENode {
-            op: Op::FloatTrunc,
+            op: Op::Pure(PureOp::FloatTrunc),
             children: smallvec![val.0],
         };
         self.add_node(node)
@@ -448,7 +448,7 @@ impl FunctionBuilder {
 
     pub fn fsqrt(&mut self, val: Value) -> Value {
         let node = ENode {
-            op: Op::Fsqrt,
+            op: Op::Pure(PureOp::Fsqrt),
             children: smallvec![val.0],
         };
         self.add_node(node)
@@ -456,7 +456,7 @@ impl FunctionBuilder {
 
     pub fn select(&mut self, flags: Value, t: Value, f: Value) -> Value {
         let node = ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![flags.0, t.0, f.0],
         };
         self.add_node(node)
@@ -474,7 +474,7 @@ impl FunctionBuilder {
     /// Return the address of a stack slot as an I64 value.
     pub fn stack_addr(&mut self, slot: StackSlot) -> Value {
         self.add_node(ENode {
-            op: Op::StackAddr(slot.0),
+            op: Op::Pseudo(PseudoOp::StackAddr(slot.0)),
             children: smallvec![],
         })
     }
@@ -482,7 +482,7 @@ impl FunctionBuilder {
     /// Return the address of a global variable as an I64 value.
     pub fn global_addr(&mut self, name: &str) -> Value {
         self.add_node(ENode {
-            op: Op::GlobalAddr(name.to_string()),
+            op: Op::Pseudo(PseudoOp::GlobalAddr(name.to_string())),
             children: smallvec![],
         })
     }
@@ -497,7 +497,7 @@ impl FunctionBuilder {
         self.next_uid += 1;
         // Create a fresh e-class for the loaded value using a LoadResult placeholder.
         let node = ENode {
-            op: Op::LoadResult(uid, ty.clone()),
+            op: Op::Pseudo(PseudoOp::LoadResult(uid, ty.clone())),
             children: smallvec![],
         };
         let load_result = Value(self.egraph.add(node));
@@ -537,7 +537,7 @@ impl FunctionBuilder {
             .map(|(i, ty)| {
                 let uid = uid_base + i as u32;
                 let node = ENode {
-                    op: Op::CallResult(uid, ty.clone()),
+                    op: Op::Pseudo(PseudoOp::CallResult(uid, ty.clone())),
                     children: smallvec![],
                 };
                 Value(self.egraph.add(node))
@@ -587,7 +587,7 @@ impl FunctionBuilder {
                 .nodes
                 .iter()
                 .find_map(|n| match &n.op {
-                    Op::Icmp(cc) | Op::Fcmp(cc) => Some(*cc),
+                    Op::Pure(PureOp::Icmp(cc)) | Op::Pure(PureOp::Fcmp(cc)) => Some(*cc),
                     _ => None,
                 })
                 .unwrap_or(CondCode::Ne)

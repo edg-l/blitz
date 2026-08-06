@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::compile::CompileOptions;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
-use crate::ir::op::Op;
+use crate::ir::op::{MachOp, Op, PseudoOp, PureOp};
 
 /// Build a call graph: caller name -> set of callee names.
 pub fn build_call_graph(functions: &[Function]) -> BTreeMap<String, BTreeSet<String>> {
@@ -78,50 +78,62 @@ pub fn inline_cost(callee: &Function) -> u32 {
 fn op_cost(op: &Op) -> u32 {
     match op {
         // Free: constants, params, projections, addresses
-        Op::Iconst(..)
-        | Op::Fconst(..)
-        | Op::Param(..)
-        | Op::BlockParam(..)
-        | Op::LoadResult(..)
-        | Op::CallResult(..)
-        | Op::StoreBarrier
-        | Op::VoidCallBarrier
-        | Op::StackAddr(..)
-        | Op::GlobalAddr(..)
-        | Op::Proj0
-        | Op::Proj1 => 0,
+        Op::Pure(PureOp::Iconst(..))
+        | Op::Pure(PureOp::Fconst(..))
+        | Op::Pure(PureOp::Param(..))
+        | Op::Pure(PureOp::BlockParam(..))
+        | Op::Pseudo(PseudoOp::LoadResult(..))
+        | Op::Pseudo(PseudoOp::CallResult(..))
+        | Op::Pseudo(PseudoOp::StoreBarrier)
+        | Op::Pseudo(PseudoOp::VoidCallBarrier)
+        | Op::Pseudo(PseudoOp::StackAddr(..))
+        | Op::Pseudo(PseudoOp::GlobalAddr(..))
+        | Op::Pure(PureOp::Proj0)
+        | Op::Pure(PureOp::Proj1) => 0,
 
         // Cheap: simple ALU, comparisons, conversions
-        Op::Add
-        | Op::Sub
-        | Op::And
-        | Op::Or
-        | Op::Xor
-        | Op::Shl
-        | Op::Shr
-        | Op::Sar
-        | Op::Sext(..)
-        | Op::Zext(..)
-        | Op::Trunc(..)
-        | Op::Bitcast(..)
-        | Op::Icmp(..)
-        | Op::Fcmp(..)
-        | Op::Select
-        | Op::IntToFloat(..)
-        | Op::FloatToInt(..)
-        | Op::FloatExt
-        | Op::FloatTrunc => 1,
+        Op::Pure(PureOp::Add)
+        | Op::Pure(PureOp::Sub)
+        | Op::Pure(PureOp::And)
+        | Op::Pure(PureOp::Or)
+        | Op::Pure(PureOp::Xor)
+        | Op::Pure(PureOp::Shl)
+        | Op::Pure(PureOp::Shr)
+        | Op::Pure(PureOp::Sar)
+        | Op::Pure(PureOp::Sext(..))
+        | Op::Pure(PureOp::Zext(..))
+        | Op::Pure(PureOp::Trunc(..))
+        | Op::Pure(PureOp::Bitcast(..))
+        | Op::Pure(PureOp::Icmp(..))
+        | Op::Pure(PureOp::Fcmp(..))
+        | Op::Pure(PureOp::Select)
+        | Op::Pure(PureOp::IntToFloat(..))
+        | Op::Pure(PureOp::FloatToInt(..))
+        | Op::Pure(PureOp::FloatExt)
+        | Op::Pure(PureOp::FloatTrunc) => 1,
 
         // Medium: multiplies, float ALU
-        Op::Mul | Op::Fadd | Op::Fsub | Op::Fmul => 2,
+        Op::Pure(PureOp::Mul)
+        | Op::Pure(PureOp::Fadd)
+        | Op::Pure(PureOp::Fsub)
+        | Op::Pure(PureOp::Fmul) => 2,
 
         // Expensive: division, remainder, sqrt
-        Op::UDiv | Op::SDiv | Op::URem | Op::SRem | Op::Fdiv | Op::Fsqrt => 10,
+        Op::Pure(PureOp::UDiv)
+        | Op::Pure(PureOp::SDiv)
+        | Op::Pure(PureOp::URem)
+        | Op::Pure(PureOp::SRem)
+        | Op::Pure(PureOp::Fdiv)
+        | Op::Pure(PureOp::Fsqrt) => 10,
 
         // x86 machine ops: same weight as their generic counterpart
-        Op::X86Add | Op::X86Sub | Op::X86And | Op::X86Or | Op::X86Xor => 1,
-        Op::X86Shl | Op::X86Shr | Op::X86Sar => 1,
-        Op::X86Imul3 => 2,
+        Op::Mach(MachOp::X86Add)
+        | Op::Mach(MachOp::X86Sub)
+        | Op::Mach(MachOp::X86And)
+        | Op::Mach(MachOp::X86Or)
+        | Op::Mach(MachOp::X86Xor) => 1,
+        Op::Mach(MachOp::X86Shl) | Op::Mach(MachOp::X86Shr) | Op::Mach(MachOp::X86Sar) => 1,
+        Op::Mach(MachOp::X86Imul3) => 2,
 
         // Anything else (address modes, lea, etc.): 1
         _ => 1,

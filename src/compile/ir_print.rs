@@ -1,6 +1,6 @@
 use crate::egraph::extract::{ClassVRegMap, VReg, vreg_insts_for_block};
 use crate::ir::function::Function;
-use crate::ir::op::Op;
+use crate::ir::op::{Op, PseudoOp, PureOp};
 use crate::ir::print::{PrintableBlock, PrintableGroup, print_function_ir};
 use crate::schedule::scheduler::{ScheduleDag, ScheduledInst, schedule};
 
@@ -58,11 +58,11 @@ pub fn compile_to_ir_string(
                 let canon = egraph.unionfind.find_immutable(cid);
                 if let Some(vreg) = class_to_vreg.lookup_any(canon) {
                     if let Some(inst) = insts.iter_mut().find(|i| i.dst == vreg) {
-                        inst.op = Op::BlockParam(
+                        inst.op = Op::Pure(PureOp::BlockParam(
                             block_id,
                             pidx,
                             block.param_types[pidx as usize].clone(),
-                        );
+                        ));
                         inst.operands.clear();
                     } else {
                         // VReg emitted by a prior block -- allocate a fresh one.
@@ -77,11 +77,11 @@ pub fn compile_to_ir_string(
                         }
                         insts.push(crate::egraph::extract::VRegInst {
                             dst: fresh_vreg,
-                            op: Op::BlockParam(
+                            op: Op::Pure(PureOp::BlockParam(
                                 block_id,
                                 pidx,
                                 block.param_types[pidx as usize].clone(),
-                            ),
+                            )),
                             operands: vec![],
                         });
                     }
@@ -117,8 +117,10 @@ pub fn compile_to_ir_string(
         indexed.sort_by_key(|(orig_idx, inst)| {
             let g = *vreg_group.get(&inst.dst).unwrap_or(&0);
             let param_order: u8 = match inst.op {
-                Op::Param(_, _) => 0,
-                Op::LoadResult(_, _) | Op::CallResult(_, _) => 1,
+                Op::Pure(PureOp::Param(_, _)) => 0,
+                Op::Pseudo(PseudoOp::LoadResult(_, _)) | Op::Pseudo(PseudoOp::CallResult(_, _)) => {
+                    1
+                }
                 _ => 2,
             };
             (g, param_order, *orig_idx)

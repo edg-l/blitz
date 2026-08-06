@@ -3,7 +3,7 @@ use smallvec::smallvec;
 use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::condcode::CondCode;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, MachOp, Op, PureOp};
 use crate::ir::types::Type;
 
 pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
@@ -50,10 +50,10 @@ fn apply_div_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             continue;
         }
         let (x86_op, use_proj0) = match &snap.op {
-            Op::SDiv => (Op::X86Idiv(operand_ty), true),
-            Op::SRem => (Op::X86Idiv(operand_ty), false),
-            Op::UDiv => (Op::X86Div(operand_ty), true),
-            Op::URem => (Op::X86Div(operand_ty), false),
+            Op::Pure(PureOp::SDiv) => (Op::Mach(MachOp::X86Idiv(operand_ty)), true),
+            Op::Pure(PureOp::SRem) => (Op::Mach(MachOp::X86Idiv(operand_ty)), false),
+            Op::Pure(PureOp::UDiv) => (Op::Mach(MachOp::X86Div(operand_ty)), true),
+            Op::Pure(PureOp::URem) => (Op::Mach(MachOp::X86Div(operand_ty)), false),
             _ => continue,
         };
 
@@ -64,7 +64,11 @@ fn apply_div_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         });
 
         let proj = egraph.add(ENode {
-            op: if use_proj0 { Op::Proj0 } else { Op::Proj1 },
+            op: if use_proj0 {
+                Op::Pure(PureOp::Proj0)
+            } else {
+                Op::Pure(PureOp::Proj1)
+            },
             children: smallvec![div_node],
         });
 
@@ -81,12 +85,12 @@ fn apply_div_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 /// Map IR ALU binary ops to their x86 equivalents.
 fn alu_x86_op(op: &Op) -> Option<Op> {
     match op {
-        Op::Add => Some(Op::X86Add),
-        Op::Sub => Some(Op::X86Sub),
-        Op::And => Some(Op::X86And),
-        Op::Or => Some(Op::X86Or),
-        Op::Xor => Some(Op::X86Xor),
-        Op::Mul => Some(Op::X86Imul3),
+        Op::Pure(PureOp::Add) => Some(Op::Mach(MachOp::X86Add)),
+        Op::Pure(PureOp::Sub) => Some(Op::Mach(MachOp::X86Sub)),
+        Op::Pure(PureOp::And) => Some(Op::Mach(MachOp::X86And)),
+        Op::Pure(PureOp::Or) => Some(Op::Mach(MachOp::X86Or)),
+        Op::Pure(PureOp::Xor) => Some(Op::Mach(MachOp::X86Xor)),
+        Op::Pure(PureOp::Mul) => Some(Op::Mach(MachOp::X86Imul3)),
         _ => None,
     }
 }
@@ -115,7 +119,7 @@ fn apply_alu_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
         // Proj0 extracts the value result
         let proj0 = egraph.add(ENode {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             children: smallvec![x86_node],
         });
 
@@ -139,9 +143,9 @@ fn apply_shift_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             continue;
         }
         let x86_op = match &snap.op {
-            Op::Shl => Op::X86Shl,
-            Op::Sar => Op::X86Sar,
-            Op::Shr => Op::X86Shr,
+            Op::Pure(PureOp::Shl) => Op::Mach(MachOp::X86Shl),
+            Op::Pure(PureOp::Sar) => Op::Mach(MachOp::X86Sar),
+            Op::Pure(PureOp::Shr) => Op::Mach(MachOp::X86Shr),
             _ => continue,
         };
 
@@ -153,7 +157,7 @@ fn apply_shift_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             children: smallvec![a, b],
         });
         let proj0 = egraph.add(ENode {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             children: smallvec![x86_node],
         });
 
@@ -177,7 +181,7 @@ fn apply_shift_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let class_id = snap.class_id;
 
         // Look for Proj0 nodes whose child is X86Shl/X86Shr/X86Sar.
-        if snap.op != Op::Proj0 || snap.children.len() != 1 {
+        if snap.op != Op::Pure(PureOp::Proj0) || snap.children.len() != 1 {
             continue;
         }
         let shift_class = snap.children[0];
@@ -189,16 +193,19 @@ fn apply_shift_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         // Find an X86Shl/Shr/Sar node in the shift class with its operands.
         let shift_class_data = egraph.class(shift_canon);
         let shift_node = shift_class_data.nodes.iter().find(|n| {
-            matches!(n.op, Op::X86Shl | Op::X86Shr | Op::X86Sar) && n.children.len() == 2
+            matches!(
+                n.op,
+                Op::Mach(MachOp::X86Shl) | Op::Mach(MachOp::X86Shr) | Op::Mach(MachOp::X86Sar)
+            ) && n.children.len() == 2
         });
         let Some(shift_node) = shift_node else {
             continue;
         };
 
         let mk_imm_op: fn(u8) -> Op = match &shift_node.op {
-            Op::X86Shl => |n| Op::X86ShlImm(n),
-            Op::X86Shr => |n| Op::X86ShrImm(n),
-            Op::X86Sar => |n| Op::X86SarImm(n),
+            Op::Mach(MachOp::X86Shl) => |n| Op::Mach(MachOp::X86ShlImm(n)),
+            Op::Mach(MachOp::X86Shr) => |n| Op::Mach(MachOp::X86ShrImm(n)),
+            Op::Mach(MachOp::X86Sar) => |n| Op::Mach(MachOp::X86SarImm(n)),
             _ => unreachable!(),
         };
 
@@ -220,7 +227,7 @@ fn apply_shift_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             children: smallvec![a],
         });
         let proj0_imm = egraph.add(ENode {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             children: smallvec![imm_node],
         });
 
@@ -250,20 +257,22 @@ fn apply_icmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         if snap.children.len() != 2 {
             continue;
         }
-        let Op::Icmp(_cc) = &snap.op else { continue };
+        let Op::Pure(PureOp::Icmp(_cc)) = &snap.op else {
+            continue;
+        };
 
         let a = snap.children[0];
         let b = snap.children[1];
 
         // Create (or reuse) X86Sub(a, b) — memo dedup handles reuse
         let x86sub = egraph.add(ENode {
-            op: Op::X86Sub,
+            op: Op::Mach(MachOp::X86Sub),
             children: smallvec![a, b],
         });
 
         // Proj1 is the FLAGS output
         let proj1 = egraph.add(ENode {
-            op: Op::Proj1,
+            op: Op::Pure(PureOp::Proj1),
             children: smallvec![x86sub],
         });
 
@@ -286,7 +295,7 @@ fn apply_icmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             let a_ty = egraph.class(a_canon).ty.clone();
             if a_ty.is_integer() {
                 let x86cmpi = egraph.add(ENode {
-                    op: Op::X86CmpI { imm, ty: a_ty },
+                    op: Op::Mach(MachOp::X86CmpI { imm, ty: a_ty }),
                     children: smallvec![a],
                 });
                 let cmpi_canon = egraph.unionfind.find_immutable(x86cmpi);
@@ -311,7 +320,9 @@ fn apply_fcmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         if snap.children.len() != 2 {
             continue;
         }
-        let Op::Fcmp(_cc) = &snap.op else { continue };
+        let Op::Pure(PureOp::Fcmp(_cc)) = &snap.op else {
+            continue;
+        };
         // OrdEq/UnordNe are composite CCs lowered directly (not via shared Ucomisd).
         // Skip isel to prevent merging with other Fcmp classes via Ucomisd hashcons.
         if matches!(_cc, CondCode::OrdEq | CondCode::UnordNe) {
@@ -326,9 +337,9 @@ fn apply_fcmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let is_f32 = matches!(child_ty, Some(Type::F32));
 
         let x86_op = if is_f32 {
-            Op::X86Ucomiss
+            Op::Mach(MachOp::X86Ucomiss)
         } else {
-            Op::X86Ucomisd
+            Op::Mach(MachOp::X86Ucomisd)
         };
 
         let ucomis = egraph.add(ENode {
@@ -353,7 +364,7 @@ fn apply_select_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
     for snap in snaps {
         let class_id = snap.class_id;
-        if snap.op != Op::Select || snap.children.len() != 3 {
+        if snap.op != Op::Pure(PureOp::Select) || snap.children.len() != 3 {
             continue;
         }
 
@@ -365,7 +376,7 @@ fn apply_select_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let cc = find_cc_in_class(egraph, flags).unwrap_or(CondCode::Ne);
 
         let cmov = egraph.add(ENode {
-            op: Op::X86Cmov(cc),
+            op: Op::Mach(MachOp::X86Cmov(cc)),
             children: smallvec![flags, t, f],
         });
 
@@ -412,18 +423,18 @@ fn apply_sext_zext_trunc_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         };
 
         let machine_op = match &snap.op {
-            Op::Sext(to) => Op::X86Movsx {
+            Op::Pure(PureOp::Sext(to)) => Op::Mach(MachOp::X86Movsx {
                 from: from_ty,
                 to: to.clone(),
-            },
-            Op::Zext(to) => Op::X86Movzx {
+            }),
+            Op::Pure(PureOp::Zext(to)) => Op::Mach(MachOp::X86Movzx {
                 from: from_ty,
                 to: to.clone(),
-            },
-            Op::Trunc(to) => Op::X86Trunc {
+            }),
+            Op::Pure(PureOp::Trunc(to)) => Op::Mach(MachOp::X86Trunc {
                 from: from_ty,
                 to: to.clone(),
-            },
+            }),
             _ => continue,
         };
 
@@ -451,7 +462,9 @@ fn apply_bitcast_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         if snap.children.len() != 1 {
             continue;
         }
-        let Op::Bitcast(to) = &snap.op else { continue };
+        let Op::Pure(PureOp::Bitcast(to)) = &snap.op else {
+            continue;
+        };
 
         let child = snap.children[0];
         let Some(from_ty) = infer_class_type(egraph, child) else {
@@ -459,10 +472,10 @@ fn apply_bitcast_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         };
 
         let machine_node = egraph.add(ENode {
-            op: Op::X86Bitcast {
+            op: Op::Mach(MachOp::X86Bitcast {
                 from: from_ty,
                 to: to.clone(),
-            },
+            }),
             children: smallvec![child],
         });
 
@@ -493,39 +506,39 @@ fn apply_fp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let is_f32 = matches!(child_ty, Some(Type::F32));
 
         let (machine_op, expected_children) = match &snap.op {
-            Op::Fadd if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Fadd) if snap.children.len() == 2 => {
                 if is_f32 {
-                    (Op::X86Addss, 2)
+                    (Op::Mach(MachOp::X86Addss), 2)
                 } else {
-                    (Op::X86Addsd, 2)
+                    (Op::Mach(MachOp::X86Addsd), 2)
                 }
             }
-            Op::Fsub if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Fsub) if snap.children.len() == 2 => {
                 if is_f32 {
-                    (Op::X86Subss, 2)
+                    (Op::Mach(MachOp::X86Subss), 2)
                 } else {
-                    (Op::X86Subsd, 2)
+                    (Op::Mach(MachOp::X86Subsd), 2)
                 }
             }
-            Op::Fmul if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Fmul) if snap.children.len() == 2 => {
                 if is_f32 {
-                    (Op::X86Mulss, 2)
+                    (Op::Mach(MachOp::X86Mulss), 2)
                 } else {
-                    (Op::X86Mulsd, 2)
+                    (Op::Mach(MachOp::X86Mulsd), 2)
                 }
             }
-            Op::Fdiv if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Fdiv) if snap.children.len() == 2 => {
                 if is_f32 {
-                    (Op::X86Divss, 2)
+                    (Op::Mach(MachOp::X86Divss), 2)
                 } else {
-                    (Op::X86Divsd, 2)
+                    (Op::Mach(MachOp::X86Divsd), 2)
                 }
             }
-            Op::Fsqrt if snap.children.len() == 1 => {
+            Op::Pure(PureOp::Fsqrt) if snap.children.len() == 1 => {
                 if is_f32 {
-                    (Op::X86Sqrtss, 1)
+                    (Op::Mach(MachOp::X86Sqrtss), 1)
                 } else {
-                    (Op::X86Sqrtsd, 1)
+                    (Op::Mach(MachOp::X86Sqrtsd), 1)
                 }
             }
             _ => continue,
@@ -561,7 +574,7 @@ fn apply_conv_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let mut child = snap.children[0];
 
         let machine_op = match &snap.op {
-            Op::IntToFloat(target) => {
+            Op::Pure(PureOp::IntToFloat(target)) => {
                 // cvtsi2sd/ss encode a 32- or 64-bit source only. Anything
                 // narrower has to be widened first: the high bits of a register
                 // holding an i8/i16 are undefined, and so is the high half of
@@ -580,34 +593,34 @@ fn apply_conv_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                         // its own lowering alternative and extraction would
                         // find the class has none.
                         child = egraph.add(ENode {
-                            op: Op::X86Movsx {
+                            op: Op::Mach(MachOp::X86Movsx {
                                 from: narrow,
                                 to: Type::I32,
-                            },
+                            }),
                             children: smallvec![child],
                         });
                         Type::I32
                     }
                 };
                 match target {
-                    Type::F64 => Op::X86Cvtsi2sd(src_ty),
-                    Type::F32 => Op::X86Cvtsi2ss(src_ty),
+                    Type::F64 => Op::Mach(MachOp::X86Cvtsi2sd(src_ty)),
+                    Type::F32 => Op::Mach(MachOp::X86Cvtsi2ss(src_ty)),
                     other => {
                         unreachable!("IntToFloat target must be F32 or F64, got {:?}", other);
                     }
                 }
             }
-            Op::FloatToInt(target) => {
+            Op::Pure(PureOp::FloatToInt(target)) => {
                 let child_ty = infer_class_type(egraph, child);
                 let is_f32 = matches!(child_ty, Some(Type::F32));
                 if is_f32 {
-                    Op::X86Cvttss2si(target.clone())
+                    Op::Mach(MachOp::X86Cvttss2si(target.clone()))
                 } else {
-                    Op::X86Cvttsd2si(target.clone())
+                    Op::Mach(MachOp::X86Cvttsd2si(target.clone()))
                 }
             }
-            Op::FloatExt => Op::X86Cvtss2sd,
-            Op::FloatTrunc => Op::X86Cvtsd2ss,
+            Op::Pure(PureOp::FloatExt) => Op::Mach(MachOp::X86Cvtss2sd),
+            Op::Pure(PureOp::FloatTrunc) => Op::Mach(MachOp::X86Cvtsd2ss),
             _ => continue,
         };
 
@@ -634,10 +647,10 @@ pub(crate) fn find_cc_in_class(egraph: &EGraph, flags_class: ClassId) -> Option<
     }
     let class = egraph.class(canon);
     for node in &class.nodes {
-        if let Op::Icmp(cc) = &node.op {
+        if let Op::Pure(PureOp::Icmp(cc)) = &node.op {
             return Some(*cc);
         }
-        if let Op::Fcmp(cc) = &node.op {
+        if let Op::Pure(PureOp::Fcmp(cc)) = &node.op {
             return Some(*cc);
         }
         // Also look through Proj1 -> X86Sub nodes: the cc comes from the original Icmp
@@ -656,7 +669,7 @@ mod tests {
 
     fn iconst(g: &mut EGraph, v: i64) -> ClassId {
         g.add(ENode {
-            op: Op::Iconst(v, Type::I64),
+            op: Op::Pure(PureOp::Iconst(v, Type::I64)),
             children: smallvec![],
         })
     }
@@ -668,18 +681,18 @@ mod tests {
         let a = iconst(&mut g, 1);
         let b = iconst(&mut g, 2);
         let ir_add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, b],
         });
         apply_isel_rules(&mut g);
         g.rebuild();
 
         let x86add = g.add(ENode {
-            op: Op::X86Add,
+            op: Op::Mach(MachOp::X86Add),
             children: smallvec![a, b],
         });
         let proj0 = g.add(ENode {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             children: smallvec![x86add],
         });
         assert_eq!(g.find(ir_add), g.find(proj0));
@@ -692,11 +705,11 @@ mod tests {
         let a = iconst(&mut g, 10);
         let b = iconst(&mut g, 5);
         let ir_sub = g.add(ENode {
-            op: Op::Sub,
+            op: Op::Pure(PureOp::Sub),
             children: smallvec![a, b],
         });
         let icmp = g.add(ENode {
-            op: Op::Icmp(CondCode::Slt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Slt)),
             children: smallvec![a, b],
         });
         apply_isel_rules(&mut g);
@@ -704,15 +717,15 @@ mod tests {
 
         // Both should reference the same X86Sub
         let x86sub = g.add(ENode {
-            op: Op::X86Sub,
+            op: Op::Mach(MachOp::X86Sub),
             children: smallvec![a, b],
         });
         let proj0 = g.add(ENode {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             children: smallvec![x86sub],
         });
         let proj1 = g.add(ENode {
-            op: Op::Proj1,
+            op: Op::Pure(PureOp::Proj1),
             children: smallvec![x86sub],
         });
         assert_eq!(g.find(ir_sub), g.find(proj0));
@@ -726,22 +739,22 @@ mod tests {
         let a = iconst(&mut g, 10);
         let b = iconst(&mut g, 5);
         let icmp_slt = g.add(ENode {
-            op: Op::Icmp(CondCode::Slt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Slt)),
             children: smallvec![a, b],
         });
         let icmp_ult = g.add(ENode {
-            op: Op::Icmp(CondCode::Ult),
+            op: Op::Pure(PureOp::Icmp(CondCode::Ult)),
             children: smallvec![a, b],
         });
         apply_isel_rules(&mut g);
         g.rebuild();
 
         let x86sub = g.add(ENode {
-            op: Op::X86Sub,
+            op: Op::Mach(MachOp::X86Sub),
             children: smallvec![a, b],
         });
         let proj1 = g.add(ENode {
-            op: Op::Proj1,
+            op: Op::Pure(PureOp::Proj1),
             children: smallvec![x86sub],
         });
         // Both icmp classes merge with the same Proj1(X86Sub)
@@ -756,20 +769,20 @@ mod tests {
         let a = iconst(&mut g, 10);
         let b = iconst(&mut g, 5);
         let flags = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![a, b],
         });
         let t = iconst(&mut g, 1);
         let f = iconst(&mut g, 0);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![flags, t, f],
         });
         apply_isel_rules(&mut g);
         g.rebuild();
 
         let cmov = g.add(ENode {
-            op: Op::X86Cmov(CondCode::Eq),
+            op: Op::Mach(MachOp::X86Cmov(CondCode::Eq)),
             children: smallvec![flags, t, f],
         });
         assert_eq!(g.find(sel), g.find(cmov));
@@ -780,21 +793,21 @@ mod tests {
     fn sext_i32_to_i64_isel() {
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(42, Type::I32),
+            op: Op::Pure(PureOp::Iconst(42, Type::I32)),
             children: smallvec![],
         });
         let sext = g.add(ENode {
-            op: Op::Sext(Type::I64),
+            op: Op::Pure(PureOp::Sext(Type::I64)),
             children: smallvec![val],
         });
         apply_isel_rules(&mut g);
         g.rebuild();
 
         let movsx = g.add(ENode {
-            op: Op::X86Movsx {
+            op: Op::Mach(MachOp::X86Movsx {
                 from: Type::I32,
                 to: Type::I64,
-            },
+            }),
             children: smallvec![val],
         });
         assert_eq!(g.find(sext), g.find(movsx));
@@ -805,21 +818,21 @@ mod tests {
     fn zext_i8_to_i64_isel() {
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(1, Type::I8),
+            op: Op::Pure(PureOp::Iconst(1, Type::I8)),
             children: smallvec![],
         });
         let zext = g.add(ENode {
-            op: Op::Zext(Type::I64),
+            op: Op::Pure(PureOp::Zext(Type::I64)),
             children: smallvec![val],
         });
         apply_isel_rules(&mut g);
         g.rebuild();
 
         let movzx = g.add(ENode {
-            op: Op::X86Movzx {
+            op: Op::Mach(MachOp::X86Movzx {
                 from: Type::I8,
                 to: Type::I64,
-            },
+            }),
             children: smallvec![val],
         });
         assert_eq!(g.find(zext), g.find(movzx));
@@ -830,21 +843,21 @@ mod tests {
     fn trunc_i64_to_i32_isel() {
         let mut g = EGraph::new();
         let val = g.add(ENode {
-            op: Op::Iconst(0xFF_FFFF_FFFFi64, Type::I64),
+            op: Op::Pure(PureOp::Iconst(0xFF_FFFF_FFFFi64, Type::I64)),
             children: smallvec![],
         });
         let trunc = g.add(ENode {
-            op: Op::Trunc(Type::I32),
+            op: Op::Pure(PureOp::Trunc(Type::I32)),
             children: smallvec![val],
         });
         apply_isel_rules(&mut g);
         g.rebuild();
 
         let x86trunc = g.add(ENode {
-            op: Op::X86Trunc {
+            op: Op::Mach(MachOp::X86Trunc {
                 from: Type::I64,
                 to: Type::I32,
-            },
+            }),
             children: smallvec![val],
         });
         assert_eq!(g.find(trunc), g.find(x86trunc));

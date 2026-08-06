@@ -5,7 +5,7 @@ use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp, TermArg, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PureOp};
 use crate::schedule::scheduler::ScheduledInst;
 
 // ── RPO helpers ───────────────────────────────────────────────────────────────
@@ -520,7 +520,7 @@ pub(super) fn resolve_block_param_vreg(
 ) -> Option<VReg> {
     let target = target_block.id;
     let from_schedule = target_schedule.iter().find_map(|inst| match inst.op {
-        Op::BlockParam(bid, i, _) if bid == target && i == pidx => Some(inst.dst),
+        Op::Pure(PureOp::BlockParam(bid, i, _)) if bid == target && i == pidx => Some(inst.dst),
         _ => None,
     });
     let from_map = || -> Option<VReg> {

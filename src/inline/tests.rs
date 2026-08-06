@@ -10,7 +10,7 @@ mod tests {
     use crate::ir::builder::FunctionBuilder;
     use crate::ir::effectful::EffectfulOp;
     use crate::ir::function::Function;
-    use crate::ir::op::Op;
+    use crate::ir::op::{Op, PseudoOp, PureOp};
     use crate::ir::types::Type;
 
     fn inline_opts() -> CompileOptions {
@@ -206,7 +206,7 @@ mod tests {
         let has_42 = egraph.classes.iter().any(|c| {
             c.nodes
                 .iter()
-                .any(|n| matches!(n.op, Op::Iconst(42, Type::I64)))
+                .any(|n| matches!(n.op, Op::Pure(PureOp::Iconst(42, Type::I64))))
         });
         assert!(
             has_42,
@@ -257,7 +257,7 @@ mod tests {
             .iter()
             .flat_map(|c| {
                 c.nodes.iter().filter_map(|n| {
-                    if let Op::StackAddr(slot) = n.op
+                    if let Op::Pseudo(PseudoOp::StackAddr(slot)) = n.op
                         && slot >= caller_slots_before as u32
                     {
                         return Some(slot);

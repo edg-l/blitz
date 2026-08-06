@@ -8,7 +8,7 @@ use crate::compile::alias::AliasInfo;
 use crate::egraph::egraph::EGraph;
 use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 
 // ── PendingMem ────────────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ pub fn run_forwarding(func: &mut Function, egraph: &mut EGraph, alias: &AliasInf
                             .class(canon_result)
                             .nodes
                             .iter()
-                            .find(|n| matches!(n.op, Op::LoadResult(_, _)))
+                            .find(|n| matches!(n.op, Op::Pseudo(PseudoOp::LoadResult(_, _))))
                         {
                             dead_placeholders.push(node.op.clone());
                         }
@@ -193,15 +193,15 @@ mod tests {
     }
 
     fn stack_addr(eg: &mut EGraph, n: u32) -> ClassId {
-        add_node(eg, Op::StackAddr(n), &[])
+        add_node(eg, Op::Pseudo(PseudoOp::StackAddr(n)), &[])
     }
 
     fn iconst_i64(eg: &mut EGraph, v: i64) -> ClassId {
-        add_node(eg, Op::Iconst(v, Type::I64), &[])
+        add_node(eg, Op::Pure(PureOp::Iconst(v, Type::I64)), &[])
     }
 
     fn load_result_class(eg: &mut EGraph, uid: u32, ty: Type) -> ClassId {
-        add_node(eg, Op::LoadResult(uid, ty), &[])
+        add_node(eg, Op::Pseudo(PseudoOp::LoadResult(uid, ty)), &[])
     }
 
     fn make_func_with_block(ops: Vec<EffectfulOp>) -> Function {
@@ -443,13 +443,13 @@ mod tests {
             .class(canon)
             .nodes
             .iter()
-            .any(|n| matches!(n.op, Op::LoadResult(_, _)));
+            .any(|n| matches!(n.op, Op::Pseudo(PseudoOp::LoadResult(_, _))));
         assert!(
             !has_placeholder,
             "dead LoadResult must be stripped from merged class"
         );
         let key = ENode {
-            op: Op::LoadResult(42, Type::I64),
+            op: Op::Pseudo(PseudoOp::LoadResult(42, Type::I64)),
             children: smallvec::SmallVec::new(),
         };
         assert!(

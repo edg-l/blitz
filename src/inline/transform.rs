@@ -5,7 +5,7 @@ use smallvec::smallvec;
 use crate::egraph::enode::ENode;
 use crate::ir::effectful::{EffOperand, EffectfulOp, TermArgs};
 use crate::ir::function::{BasicBlock, Function};
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PureOp};
 
 use super::remap::RemapContext;
 
@@ -154,7 +154,7 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
         let canonical = caller_egraph.find(ext_id);
         let ty = caller_egraph.classes[canonical.0 as usize].ty.clone();
         let bp_enode = ENode {
-            op: Op::BlockParam(cont_id, param_idx, ty),
+            op: Op::Pure(PureOp::BlockParam(cont_id, param_idx, ty)),
             children: smallvec![],
         };
         let bp_class = caller_egraph.add(bp_enode);
@@ -204,7 +204,7 @@ pub fn inline_call_site(caller: &mut Function, block_idx: usize, op_idx: usize, 
     if ret_tys.len() == 1 {
         let caller_egraph = caller.egraph.as_mut().expect("caller must have egraph");
         let block_param_enode = ENode {
-            op: Op::BlockParam(cont_id, 0, ret_tys[0].clone()),
+            op: Op::Pure(PureOp::BlockParam(cont_id, 0, ret_tys[0].clone())),
             children: smallvec![],
         };
         let block_param_class = caller_egraph.add(block_param_enode);

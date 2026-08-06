@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::egraph::extract::VReg;
 use crate::ir::condcode::CondCode;
 use crate::ir::function::Function;
-use crate::ir::op::Op;
+use crate::ir::op::{MachOp, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 use crate::regalloc::allocator::RegAllocResult;
 use crate::regalloc::spill::{
@@ -186,7 +186,7 @@ fn lower_op(
 ) -> Result<Vec<MachInst>, String> {
     let _ = dst_vreg; // used for context in errors
     match op {
-        Op::Iconst(val, ty) => {
+        Op::Pure(PureOp::Iconst(val, ty)) => {
             let dst = dst_reg.ok_or_else(|| "Iconst: no register for dst".to_string())?;
             Ok(vec![MachInst::MovRI {
                 size: OpSize::from_int_type(ty),
@@ -199,43 +199,53 @@ fn lower_op(
         // the ABI argument register (via pre-coloring), so no instruction is needed.
         // The lower_insts_with_ret function skips these VRegs, but as a safety net,
         // emit nothing here too.
-        Op::Param(_, _) => Ok(vec![]),
+        Op::Pure(PureOp::Param(_, _)) => Ok(vec![]),
 
         // BlockParam nodes represent block parameters (SSA phi inputs).
         // Their value arrives from predecessor blocks; no instruction is needed here.
-        Op::BlockParam(_, _, _) => Ok(vec![]),
+        Op::Pure(PureOp::BlockParam(_, _, _)) => Ok(vec![]),
 
         // X86Add produces a Pair (result + flags); Proj0 extracts the value.
         // We emit: mov dst, src_a; add dst, src_b
-        Op::X86Add => lower_binary_alu("X86Add", size, dst_reg, operand_regs, |dst, src| {
-            MachInst::AddRR { size, dst, src }
-        }),
-        Op::X86Sub => lower_binary_alu("X86Sub", size, dst_reg, operand_regs, |dst, src| {
-            MachInst::SubRR { size, dst, src }
-        }),
-        Op::X86And => lower_binary_alu("X86And", size, dst_reg, operand_regs, |dst, src| {
-            MachInst::AndRR { size, dst, src }
-        }),
-        Op::X86Or => lower_binary_alu("X86Or", size, dst_reg, operand_regs, |dst, src| {
-            MachInst::OrRR { size, dst, src }
-        }),
-        Op::X86Xor => lower_binary_alu("X86Xor", size, dst_reg, operand_regs, |dst, src| {
-            MachInst::XorRR { size, dst, src }
-        }),
+        Op::Mach(MachOp::X86Add) => {
+            lower_binary_alu("X86Add", size, dst_reg, operand_regs, |dst, src| {
+                MachInst::AddRR { size, dst, src }
+            })
+        }
+        Op::Mach(MachOp::X86Sub) => {
+            lower_binary_alu("X86Sub", size, dst_reg, operand_regs, |dst, src| {
+                MachInst::SubRR { size, dst, src }
+            })
+        }
+        Op::Mach(MachOp::X86And) => {
+            lower_binary_alu("X86And", size, dst_reg, operand_regs, |dst, src| {
+                MachInst::AndRR { size, dst, src }
+            })
+        }
+        Op::Mach(MachOp::X86Or) => {
+            lower_binary_alu("X86Or", size, dst_reg, operand_regs, |dst, src| {
+                MachInst::OrRR { size, dst, src }
+            })
+        }
+        Op::Mach(MachOp::X86Xor) => {
+            lower_binary_alu("X86Xor", size, dst_reg, operand_regs, |dst, src| {
+                MachInst::XorRR { size, dst, src }
+            })
+        }
         // Variable shifts use CL (RCX). The shift count VReg is pre-colored to RCX
         // before register allocation, so src_b is guaranteed to be RCX here.
-        Op::X86Shl => lower_shift_cl("X86Shl", size, dst_reg, operand_regs, |dst| {
+        Op::Mach(MachOp::X86Shl) => lower_shift_cl("X86Shl", size, dst_reg, operand_regs, |dst| {
             MachInst::ShlRCL { size, dst }
         }),
-        Op::X86Shr => lower_shift_cl("X86Shr", size, dst_reg, operand_regs, |dst| {
+        Op::Mach(MachOp::X86Shr) => lower_shift_cl("X86Shr", size, dst_reg, operand_regs, |dst| {
             MachInst::ShrRCL { size, dst }
         }),
-        Op::X86Sar => lower_shift_cl("X86Sar", size, dst_reg, operand_regs, |dst| {
+        Op::Mach(MachOp::X86Sar) => lower_shift_cl("X86Sar", size, dst_reg, operand_regs, |dst| {
             MachInst::SarRCL { size, dst }
         }),
 
         // Immediate-form shifts: no CL constraint, emit mov+shift directly.
-        Op::X86ShlImm(imm) => lower_shift_imm(
+        Op::Mach(MachOp::X86ShlImm(imm)) => lower_shift_imm(
             "X86ShlImm",
             size,
             dst_reg,
@@ -243,7 +253,7 @@ fn lower_op(
             *imm,
             |dst, imm| MachInst::ShlRI { size, dst, imm },
         ),
-        Op::X86ShrImm(imm) => lower_shift_imm(
+        Op::Mach(MachOp::X86ShrImm(imm)) => lower_shift_imm(
             "X86ShrImm",
             size,
             dst_reg,
@@ -251,7 +261,7 @@ fn lower_op(
             *imm,
             |dst, imm| MachInst::ShrRI { size, dst, imm },
         ),
-        Op::X86SarImm(imm) => lower_shift_imm(
+        Op::Mach(MachOp::X86SarImm(imm)) => lower_shift_imm(
             "X86SarImm",
             size,
             dst_reg,
@@ -262,9 +272,9 @@ fn lower_op(
 
         // X86CmpI is handled in the caller (where vreg_types is available) so
         // the OpSize is derived from the operand width, not the Flags dst.
-        Op::X86CmpI { .. } => unreachable!("X86CmpI handled in lower_block_pure_ops"),
+        Op::Mach(MachOp::X86CmpI { .. }) => unreachable!("X86CmpI handled in lower_block_pure_ops"),
 
-        Op::X86Idiv(ty) => {
+        Op::Mach(MachOp::X86Idiv(ty)) => {
             // The width comes from the op, not from `vreg_types`: that map is
             // built before the splitter runs, so a reload or a re-emitted copy has
             // no entry and `result_size` falls back to 64 bits. A 64-bit idiv whose
@@ -314,7 +324,7 @@ fn lower_op(
             Ok(insts)
         }
 
-        Op::X86Div(ty) => {
+        Op::Mach(MachOp::X86Div(ty)) => {
             // Width from the op, for the reason given on `X86Idiv`.
             let size = OpSize::from_int_type(ty);
             // Pre-coloring ensures dividend is in RAX.
@@ -367,7 +377,7 @@ fn lower_op(
             Ok(insts)
         }
 
-        Op::X86Imul3 => {
+        Op::Mach(MachOp::X86Imul3) => {
             let dst = dst_reg.ok_or_else(|| "X86Imul3: no register for dst".to_string())?;
             let src_a = operand_regs
                 .first()
@@ -401,7 +411,7 @@ fn lower_op(
             Ok(insts)
         }
 
-        Op::X86Cmov(cc) => {
+        Op::Mach(MachOp::X86Cmov(cc)) => {
             let dst = dst_reg.ok_or_else(|| "X86Cmov: no register for dst".to_string())?;
             // operands: [flags_vreg, true_vreg, false_vreg]
             // flags come from a comparison; Cmov selects between true and false.
@@ -484,7 +494,7 @@ fn lower_op(
             Ok(insts)
         }
 
-        Op::X86Setcc(cc) => {
+        Op::Mach(MachOp::X86Setcc(cc)) => {
             let dst = dst_reg.ok_or_else(|| "X86Setcc: no register for dst".to_string())?;
             match cc {
                 CondCode::OrdEq => {
@@ -531,7 +541,7 @@ fn lower_op(
             }
         }
 
-        Op::X86Lea2 => {
+        Op::Mach(MachOp::X86Lea2) => {
             let dst = dst_reg.ok_or_else(|| "X86Lea2: no register for dst".to_string())?;
             let base = operand_regs
                 .first()
@@ -553,7 +563,7 @@ fn lower_op(
             }])
         }
 
-        Op::X86Lea3 { scale } => {
+        Op::Mach(MachOp::X86Lea3 { scale }) => {
             let dst = dst_reg.ok_or_else(|| "X86Lea3: no register for dst".to_string())?;
             let base = operand_regs
                 .first()
@@ -575,7 +585,7 @@ fn lower_op(
             }])
         }
 
-        Op::X86Lea4 { scale, disp } => {
+        Op::Mach(MachOp::X86Lea4 { scale, disp }) => {
             let dst = dst_reg.ok_or_else(|| "X86Lea4: no register for dst".to_string())?;
             let base = operand_regs
                 .first()
@@ -594,7 +604,7 @@ fn lower_op(
             }])
         }
 
-        Op::Addr { scale, disp } => {
+        Op::Pure(PureOp::Addr { scale, disp }) => {
             // Addr nodes are "free" in the cost model and get folded into loads/stores.
             // When extracted standalone (e.g., as a root), emit a LEA.
             let dst = dst_reg.ok_or_else(|| "Addr: no register for dst".to_string())?;
@@ -616,7 +626,7 @@ fn lower_op(
         }
 
         // Projections: Proj0 and Proj1 extract values from Pairs.
-        Op::Proj0 => {
+        Op::Pure(PureOp::Proj0) => {
             let is_div_proj0 = operand_vregs
                 .first()
                 .map(|v| div_dst_vregs.contains(v))
@@ -654,7 +664,7 @@ fn lower_op(
             }
         }
 
-        Op::Proj1 => {
+        Op::Pure(PureOp::Proj1) => {
             // For Proj1-of-flags (X86Sub/X86Add etc.): flags live in the CPU flags
             // register, not in a GPR. No MachInst needed.
             //
@@ -705,46 +715,46 @@ fn lower_op(
 
         // LoadResult nodes are skipped by lower_block_pure_ops; if reached here,
         // that's a bug in the pipeline.
-        Op::LoadResult(_, _) => unreachable!(
+        Op::Pseudo(PseudoOp::LoadResult(_, _)) => unreachable!(
             "LoadResult must be skipped by lower_block_pure_ops, not passed to lower_op"
         ),
 
         // CallResult nodes are skipped by lower_block_pure_ops; if reached here,
         // that's a bug in the pipeline.
-        Op::CallResult(_, _) => unreachable!(
+        Op::Pseudo(PseudoOp::CallResult(_, _)) => unreachable!(
             "CallResult must be skipped by lower_block_pure_ops, not passed to lower_op"
         ),
 
         // ── x86 FP machine ops ────────────────────────────────────────────────
-        Op::X86Addsd => lower_fp_binary(
+        Op::Mach(MachOp::X86Addsd) => lower_fp_binary(
             "X86Addsd",
             dst_reg,
             operand_regs,
             |dst, src| MachInst::AddsdRR { dst, src },
             FpWidth::F64,
         ),
-        Op::X86Subsd => lower_fp_binary(
+        Op::Mach(MachOp::X86Subsd) => lower_fp_binary(
             "X86Subsd",
             dst_reg,
             operand_regs,
             |dst, src| MachInst::SubsdRR { dst, src },
             FpWidth::F64,
         ),
-        Op::X86Mulsd => lower_fp_binary(
+        Op::Mach(MachOp::X86Mulsd) => lower_fp_binary(
             "X86Mulsd",
             dst_reg,
             operand_regs,
             |dst, src| MachInst::MulsdRR { dst, src },
             FpWidth::F64,
         ),
-        Op::X86Divsd => lower_fp_binary(
+        Op::Mach(MachOp::X86Divsd) => lower_fp_binary(
             "X86Divsd",
             dst_reg,
             operand_regs,
             |dst, src| MachInst::DivsdRR { dst, src },
             FpWidth::F64,
         ),
-        Op::X86Sqrtsd => {
+        Op::Mach(MachOp::X86Sqrtsd) => {
             let dst = get_dst("X86Sqrtsd", dst_reg)?;
             let src = get_op("X86Sqrtsd", operand_regs, 0)?;
             Ok(vec![MachInst::SqrtsdRR {
@@ -754,35 +764,35 @@ fn lower_op(
         }
 
         // ── x86 F32 machine ops ───────────────────────────────────────────────
-        Op::X86Addss => lower_fp_binary(
+        Op::Mach(MachOp::X86Addss) => lower_fp_binary(
             "X86Addss",
             dst_reg,
             operand_regs,
             |dst, src| MachInst::AddssRR { dst, src },
             FpWidth::F32,
         ),
-        Op::X86Subss => lower_fp_binary(
+        Op::Mach(MachOp::X86Subss) => lower_fp_binary(
             "X86Subss",
             dst_reg,
             operand_regs,
             |dst, src| MachInst::SubssRR { dst, src },
             FpWidth::F32,
         ),
-        Op::X86Mulss => lower_fp_binary(
+        Op::Mach(MachOp::X86Mulss) => lower_fp_binary(
             "X86Mulss",
             dst_reg,
             operand_regs,
             |dst, src| MachInst::MulssRR { dst, src },
             FpWidth::F32,
         ),
-        Op::X86Divss => lower_fp_binary(
+        Op::Mach(MachOp::X86Divss) => lower_fp_binary(
             "X86Divss",
             dst_reg,
             operand_regs,
             |dst, src| MachInst::DivssRR { dst, src },
             FpWidth::F32,
         ),
-        Op::X86Sqrtss => {
+        Op::Mach(MachOp::X86Sqrtss) => {
             let dst = get_dst("X86Sqrtss", dst_reg)?;
             let src = get_op("X86Sqrtss", operand_regs, 0)?;
             Ok(vec![MachInst::SqrtssRR {
@@ -793,7 +803,7 @@ fn lower_op(
 
         // Fconst: load FP constant bits into a scratch GPR (R11), then move to XMM.
         // R11 is caller-saved and not used by regalloc for any persistent value.
-        Op::Fconst(bits, _ty) => {
+        Op::Pure(PureOp::Fconst(bits, _ty)) => {
             let dst = dst_reg.ok_or_else(|| "Fconst: no register for dst".to_string())?;
             Ok(vec![
                 MachInst::MovRI {
@@ -808,40 +818,16 @@ fn lower_op(
             ])
         }
 
-        // Generic ops that should have been lowered by the e-graph phases.
-        // These should not appear after isel.
-        Op::Add
-        | Op::Sub
-        | Op::Mul
-        | Op::UDiv
-        | Op::SDiv
-        | Op::URem
-        | Op::SRem
-        | Op::And
-        | Op::Or
-        | Op::Xor
-        | Op::Shl
-        | Op::Shr
-        | Op::Sar
-        | Op::Sext(_)
-        | Op::Zext(_)
-        | Op::Trunc(_)
-        | Op::Bitcast(_)
-        | Op::Icmp(_)
-        | Op::Fadd
-        | Op::Fsub
-        | Op::Fmul
-        | Op::Fdiv
-        | Op::Fsqrt
-        | Op::Select
-        | Op::Fcmp(_)
-        | Op::IntToFloat(_)
-        | Op::FloatToInt(_)
-        | Op::FloatExt
-        | Op::FloatTrunc => Err(format!(
+        // Generic IR must have been lowered by the e-graph's isel phases. One
+        // arm for the whole type: this and `cost.rs`'s infinite price used to be
+        // two hand-written lists of the same 30 variants, which had already
+        // drifted over `Fcmp`. `Fcmp(OrdEq)` and `Fcmp(UnordNe)` never arrive
+        // here -- `lower_block_pure_ops` lowers them directly to ucomisd/ucomiss
+        // before this match runs.
+        Op::Pure(_) => Err(format!(
             "unlowered op {op:?}: generic IR must be lowered by isel phases before lowering"
         )),
-        Op::X86Movsx { from, to: _ } => {
+        Op::Mach(MachOp::X86Movsx { from, to: _ }) => {
             let dst = dst_reg.ok_or_else(|| "X86Movsx: no register for dst".to_string())?;
             let src = operand_regs
                 .first()
@@ -867,7 +853,7 @@ fn lower_op(
             Ok(vec![inst])
         }
 
-        Op::X86Movzx { from, to: _ } => {
+        Op::Mach(MachOp::X86Movzx { from, to: _ }) => {
             let dst = dst_reg.ok_or_else(|| "X86Movzx: no register for dst".to_string())?;
             let src = operand_regs
                 .first()
@@ -900,7 +886,7 @@ fn lower_op(
             Ok(vec![inst])
         }
 
-        Op::X86Trunc { .. } => {
+        Op::Mach(MachOp::X86Trunc { .. }) => {
             // Truncation is free on x86-64: upper bits are simply ignored.
             // Use S64 for the register copy since it's always valid and
             // truncation doesn't need to clear upper bits.
@@ -920,7 +906,7 @@ fn lower_op(
             }
         }
 
-        Op::X86Bitcast { from, to } => {
+        Op::Mach(MachOp::X86Bitcast { from, to }) => {
             let dst = dst_reg.ok_or_else(|| "X86Bitcast: no register for dst".to_string())?;
             let src = operand_regs
                 .first()
@@ -959,7 +945,7 @@ fn lower_op(
             }
         }
 
-        Op::GlobalAddr(name) => {
+        Op::Pseudo(PseudoOp::GlobalAddr(name)) => {
             let dst = dst_reg.ok_or_else(|| "GlobalAddr: no register for dst".to_string())?;
             Ok(vec![MachInst::LeaRipRelative {
                 dst: Operand::Reg(dst),
@@ -968,7 +954,7 @@ fn lower_op(
         }
 
         // x86 FP conversion ops
-        Op::X86Cvtsi2sd(src_ty) => {
+        Op::Mach(MachOp::X86Cvtsi2sd(src_ty)) => {
             let dst = get_dst("X86Cvtsi2sd", dst_reg)?;
             let src = get_op("X86Cvtsi2sd", operand_regs, 0)?;
             Ok(vec![MachInst::Cvtsi2sdRR {
@@ -977,7 +963,7 @@ fn lower_op(
                 src: Operand::Reg(src),
             }])
         }
-        Op::X86Cvtsi2ss(src_ty) => {
+        Op::Mach(MachOp::X86Cvtsi2ss(src_ty)) => {
             let dst = get_dst("X86Cvtsi2ss", dst_reg)?;
             let src = get_op("X86Cvtsi2ss", operand_regs, 0)?;
             Ok(vec![MachInst::Cvtsi2ssRR {
@@ -986,7 +972,7 @@ fn lower_op(
                 src: Operand::Reg(src),
             }])
         }
-        Op::X86Cvttsd2si(_) => {
+        Op::Mach(MachOp::X86Cvttsd2si(_)) => {
             let dst = get_dst("X86Cvttsd2si", dst_reg)?;
             let src = get_op("X86Cvttsd2si", operand_regs, 0)?;
             Ok(vec![MachInst::Cvttsd2siRR {
@@ -994,7 +980,7 @@ fn lower_op(
                 src: Operand::Reg(src),
             }])
         }
-        Op::X86Cvttss2si(_) => {
+        Op::Mach(MachOp::X86Cvttss2si(_)) => {
             let dst = get_dst("X86Cvttss2si", dst_reg)?;
             let src = get_op("X86Cvttss2si", operand_regs, 0)?;
             Ok(vec![MachInst::Cvttss2siRR {
@@ -1002,7 +988,7 @@ fn lower_op(
                 src: Operand::Reg(src),
             }])
         }
-        Op::X86Cvtsd2ss => {
+        Op::Mach(MachOp::X86Cvtsd2ss) => {
             let dst = get_dst("X86Cvtsd2ss", dst_reg)?;
             let src = get_op("X86Cvtsd2ss", operand_regs, 0)?;
             Ok(vec![MachInst::Cvtsd2ssRR {
@@ -1010,7 +996,7 @@ fn lower_op(
                 src: Operand::Reg(src),
             }])
         }
-        Op::X86Cvtss2sd => {
+        Op::Mach(MachOp::X86Cvtss2sd) => {
             let dst = get_dst("X86Cvtss2sd", dst_reg)?;
             let src = get_op("X86Cvtss2sd", operand_regs, 0)?;
             Ok(vec![MachInst::Cvtss2sdRR {
@@ -1020,7 +1006,7 @@ fn lower_op(
         }
 
         // x86 FP comparison ops
-        Op::X86Ucomisd => {
+        Op::Mach(MachOp::X86Ucomisd) => {
             let src1 = get_op("X86Ucomisd", operand_regs, 0)?;
             let src2 = get_op("X86Ucomisd", operand_regs, 1)?;
             Ok(vec![MachInst::UcomisdRR {
@@ -1028,7 +1014,7 @@ fn lower_op(
                 src2: Operand::Reg(src2),
             }])
         }
-        Op::X86Ucomiss => {
+        Op::Mach(MachOp::X86Ucomiss) => {
             let src1 = get_op("X86Ucomiss", operand_regs, 0)?;
             let src2 = get_op("X86Ucomiss", operand_regs, 1)?;
             Ok(vec![MachInst::UcomissRR {
@@ -1041,15 +1027,20 @@ fn lower_op(
         // not through lower_inst. They should never reach here.
         // StackAddr is lowered to an LEA from the frame pointer; handled by
         // the frame layout pass, not lower_inst.
-        Op::StackAddr(_) => {
+        Op::Pseudo(PseudoOp::StackAddr(_)) => {
             unreachable!("StackAddr is lowered during frame layout, not lower_inst")
         }
 
-        Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
+        Op::Pseudo(PseudoOp::SpillStore(_))
+        | Op::Pseudo(PseudoOp::SpillLoad(_))
+        | Op::Pseudo(PseudoOp::XmmSpillStore(_))
+        | Op::Pseudo(PseudoOp::XmmSpillLoad(_)) => {
             unreachable!("spill pseudo-ops are handled before lower_inst")
         }
 
-        Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_) => {
+        Op::Pseudo(PseudoOp::StoreBarrier)
+        | Op::Pseudo(PseudoOp::VoidCallBarrier)
+        | Op::Pseudo(PseudoOp::TerminatorArgs(_)) => {
             unreachable!("barrier pseudo-ops are skipped by lower_block_pure_ops")
         }
     }
@@ -1071,12 +1062,17 @@ fn lower_op(
 pub(super) fn division_and_proj0_sets(insts: &[ScheduledInst]) -> (BTreeSet<VReg>, BTreeSet<VReg>) {
     let div_dst_vregs = insts
         .iter()
-        .filter(|i| matches!(i.op, Op::X86Idiv(..) | Op::X86Div(..)))
+        .filter(|i| {
+            matches!(
+                i.op,
+                Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..))
+            )
+        })
         .map(|i| i.dst)
         .collect();
     let has_proj0_consumer = insts
         .iter()
-        .filter(|i| matches!(i.op, Op::Proj0))
+        .filter(|i| matches!(i.op, Op::Pure(PureOp::Proj0)))
         .filter_map(|i| i.operands.first().copied())
         .collect();
     (div_dst_vregs, has_proj0_consumer)
@@ -1104,18 +1100,23 @@ pub(super) fn lower_block_pure_ops(
     // exists for exactly this and breaks the cycle through the scratch register.
     let mut handled_with_division: BTreeSet<VReg> = BTreeSet::new();
     for (idx, inst) in insts.iter().enumerate() {
-        if matches!(inst.op, Op::X86Idiv(..) | Op::X86Div(..)) {
+        if matches!(
+            inst.op,
+            Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..))
+        ) {
             // The scheduler emits a division and its projections adjacently, so
             // that nothing can be allocated a register the division still owns.
             let projs: Vec<&ScheduledInst> = insts[idx + 1..]
                 .iter()
                 .take_while(|p| {
-                    matches!(p.op, Op::Proj0 | Op::Proj1) && p.operands.first() == Some(&inst.dst)
+                    matches!(p.op, Op::Pure(PureOp::Proj0) | Op::Pure(PureOp::Proj1))
+                        && p.operands.first() == Some(&inst.dst)
                 })
                 .collect();
             debug_assert!(
                 !insts[idx + 1 + projs.len()..].iter().any(|p| {
-                    matches!(p.op, Op::Proj0 | Op::Proj1) && p.operands.first() == Some(&inst.dst)
+                    matches!(p.op, Op::Pure(PureOp::Proj0) | Op::Pure(PureOp::Proj1))
+                        && p.operands.first() == Some(&inst.dst)
                 }),
                 "a division's projections must follow it directly, or the register                  holding a result can be reallocated before the projection reads it"
             );
@@ -1131,7 +1132,7 @@ pub(super) fn lower_block_pure_ops(
         }
 
         // Handle stack-passed function parameters (7th+ args in SysV ABI).
-        if let Op::Param(param_idx, ty) = &inst.op {
+        if let Op::Pure(PureOp::Param(param_idx, ty)) = &inst.op {
             if !param_vreg_set.contains(&inst.dst)
                 && let Some(dst_reg) = get_reg(inst.dst)
             {
@@ -1175,32 +1176,34 @@ pub(super) fn lower_block_pure_ops(
         // when the op itself is Param — after coalescing, a later inst (e.g.
         // Proj0 or a phi-related copy) may legitimately write to the same
         // VReg and still needs lowering.
-        if matches!(inst.op, Op::Param(_, _)) {
+        if matches!(inst.op, Op::Pure(PureOp::Param(_, _))) {
             continue;
         }
         // Skip block param VRegs: their values arrive from predecessor phi copies.
-        if matches!(inst.op, Op::BlockParam(_, _, _)) {
+        if matches!(inst.op, Op::Pure(PureOp::BlockParam(_, _, _))) {
             continue;
         }
         // Skip LoadResult VRegs: their values are produced by lower_effectful_op.
-        if matches!(inst.op, Op::LoadResult(_, _)) {
+        if matches!(inst.op, Op::Pseudo(PseudoOp::LoadResult(_, _))) {
             continue;
         }
         // Skip CallResult VRegs: their values are captured after CallDirect in lower_effectful_op.
-        if matches!(inst.op, Op::CallResult(_, _)) {
+        if matches!(inst.op, Op::Pseudo(PseudoOp::CallResult(_, _))) {
             continue;
         }
         // Skip barrier pseudo-ops: they exist only for regalloc liveness.
         if matches!(
             inst.op,
-            Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_)
+            Op::Pseudo(PseudoOp::StoreBarrier)
+                | Op::Pseudo(PseudoOp::VoidCallBarrier)
+                | Op::Pseudo(PseudoOp::TerminatorArgs(_))
         ) {
             continue;
         }
 
         // StackAddr: compute the address of a user stack slot as LEA dst, [spill_base + offset].
         // User stack slots are placed after regalloc spill slots in the frame.
-        if let Op::StackAddr(slot_idx) = inst.op {
+        if let Op::Pseudo(PseudoOp::StackAddr(slot_idx)) = inst.op {
             if let Some(dst) = get_reg(inst.dst) {
                 // Compute the 8-byte-unit offset for this stack slot by summing
                 // the sizes of all preceding user slots.
@@ -1293,7 +1296,7 @@ pub(super) fn lower_block_pure_ops(
         // X86CmpI: flag-only compare with a baked-in immediate. The OpSize
         // comes from the op itself (operand vreg may be a spill reload whose
         // type isn't in vreg_types).
-        if let Op::X86CmpI { imm, ty } = &inst.op {
+        if let Op::Mach(MachOp::X86CmpI { imm, ty }) = &inst.op {
             let operand_reg = op_regs.first().copied().flatten();
             if let Some(reg) = operand_reg {
                 let size = OpSize::from_int_type(ty);
@@ -1322,10 +1325,10 @@ pub(super) fn lower_block_pure_ops(
         // dst of a flags-only sub names a value nobody materialises -- when its
         // type was missing the 64-bit fallback compared a zero-extended negative
         // operand against a small positive one and inverted the branch.
-        // `Op::X86Sub::result_type` requires both operands to share a type, so
+        // `Op::Mach(MachOp::X86Sub)::result_type` requires both operands to share a type, so
         // either one answers, and asking them is not a second derivation of the
         // same fact but the only place it is stated about the comparison itself.
-        if matches!(inst.op, Op::X86Sub) && !has_proj0_consumer.contains(&inst.dst) {
+        if matches!(inst.op, Op::Mach(MachOp::X86Sub)) && !has_proj0_consumer.contains(&inst.dst) {
             let src_a = op_regs.first().copied().flatten();
             let src_b = op_regs.get(1).copied().flatten();
             if let (Some(a), Some(b)) = (src_a, src_b) {
@@ -1345,7 +1348,7 @@ pub(super) fn lower_block_pure_ops(
         }
 
         // Fcmp(OrdEq/UnordNe) skipped isel -- lower directly to ucomisd/ucomiss.
-        if let Op::Fcmp(cc @ (CondCode::OrdEq | CondCode::UnordNe)) = &inst.op {
+        if let Op::Pure(PureOp::Fcmp(cc @ (CondCode::OrdEq | CondCode::UnordNe))) = &inst.op {
             let src1 = op_regs.first().copied().flatten();
             let src2 = op_regs.get(1).copied().flatten();
             if let (Some(s1), Some(s2)) = (src1, src2) {
@@ -1393,13 +1396,14 @@ pub(super) fn lower_block_pure_ops(
         // Take both results out of RAX and RDX as one parallel copy, immediately
         // after the division. A projection whose destination is the register the
         // other result still occupies would otherwise destroy it.
-        if let Op::X86Idiv(ty) | Op::X86Div(ty) = &inst.op {
+        if let Op::Mach(MachOp::X86Idiv(ty)) | Op::Mach(MachOp::X86Div(ty)) = &inst.op {
             let size = OpSize::from_int_type(ty);
             let mut copies: Vec<(Reg, Reg)> = Vec::new();
             for p in insts[idx + 1..].iter().take_while(|p| {
-                matches!(p.op, Op::Proj0 | Op::Proj1) && p.operands.first() == Some(&inst.dst)
+                matches!(p.op, Op::Pure(PureOp::Proj0) | Op::Pure(PureOp::Proj1))
+                    && p.operands.first() == Some(&inst.dst)
             }) {
-                let src = if matches!(p.op, Op::Proj0) {
+                let src = if matches!(p.op, Op::Pure(PureOp::Proj0)) {
                     Reg::RAX
                 } else {
                     Reg::RDX

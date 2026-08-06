@@ -8,14 +8,14 @@ use crate::egraph::enode::ENode;
 use crate::ir::condcode::CondCode;
 use crate::ir::effectful::BlockId;
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PureOp};
 use crate::ir::types::Type;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn make_iconst(egraph: &mut EGraph, val: i64, ty: Type) -> ClassId {
     egraph.add(ENode {
-        op: Op::Iconst(val, ty),
+        op: Op::Pure(PureOp::Iconst(val, ty)),
         children: smallvec![],
     })
 }
@@ -76,7 +76,7 @@ pub fn apply_algebraic_rules(egraph: &mut EGraph) -> bool {
 /// when overflow occurs. Equality is immune: `(a - b) == 0` iff `a == b` in
 /// wrapping arithmetic.
 fn apply_sub_zero_eq_ne_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
-    apply_icmp_zero_rules(egraph, snaps, Op::Sub, |_, a, b| Some((a, b)))
+    apply_icmp_zero_rules(egraph, snaps, Op::Pure(PureOp::Sub), |_, a, b| Some((a, b)))
 }
 
 /// `Icmp(Eq/Ne, <inner_op>(x, y), 0)` → `Icmp(Eq/Ne, ..)` over whatever
@@ -97,7 +97,9 @@ fn apply_icmp_zero_rules(
 
     for snap in snaps {
         let class_id = snap.class_id;
-        let Op::Icmp(cc) = &snap.op else { continue };
+        let Op::Pure(PureOp::Icmp(cc)) = &snap.op else {
+            continue;
+        };
         if !matches!(cc, CondCode::Eq | CondCode::Ne) {
             continue;
         }
@@ -125,7 +127,7 @@ fn apply_icmp_zero_rules(
                 continue;
             };
             let new_icmp = egraph.add(ENode {
-                op: Op::Icmp(*cc),
+                op: Op::Pure(PureOp::Icmp(*cc)),
                 children: smallvec![a, b],
             });
             let canon = egraph.unionfind.find_immutable(class_id);
@@ -153,7 +155,7 @@ fn apply_icmp_zero_rules(
 /// isel rule fires and the compare lowers to `cmp r, imm` with no separate
 /// materialized iconst.
 fn apply_add_const_zero_eq_ne_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
-    apply_icmp_zero_rules(egraph, snaps, Op::Add, |egraph, x, y| {
+    apply_icmp_zero_rules(egraph, snaps, Op::Pure(PureOp::Add), |egraph, x, y| {
         let (var, k_class) = match (egraph.get_constant(x), egraph.get_constant(y)) {
             (Some(_), None) => (y, x),
             (None, Some(_)) => (x, y),
@@ -163,7 +165,7 @@ fn apply_add_const_zero_eq_ne_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> 
 
         // `-k` with two's-complement wraparound keeps the identity correct.
         let neg_k = egraph.add(ENode {
-            op: Op::Iconst(k.wrapping_neg(), k_ty),
+            op: Op::Pure(PureOp::Iconst(k.wrapping_neg(), k_ty)),
             children: smallvec![],
         });
         Some((var, neg_k))
@@ -179,7 +181,7 @@ fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     for snap in snaps {
         let class_id = snap.class_id;
         match &snap.op {
-            Op::Add | Op::Or if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Add) | Op::Pure(PureOp::Or) if snap.children.len() == 2 => {
                 let [lhs, rhs] = [snap.children[0], snap.children[1]];
                 // Add/Or(a, 0) = a
                 if let Some((0, _)) = egraph.get_constant(rhs) {
@@ -199,7 +201,7 @@ fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                     }
                 }
             }
-            Op::Mul if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Mul) if snap.children.len() == 2 => {
                 let [lhs, rhs] = [snap.children[0], snap.children[1]];
                 // Mul(a, 1) = a
                 if let Some((1, _)) = egraph.get_constant(rhs) {
@@ -219,7 +221,7 @@ fn apply_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                     }
                 }
             }
-            Op::And if snap.children.len() == 2 => {
+            Op::Pure(PureOp::And) if snap.children.len() == 2 => {
                 let [lhs, rhs] = [snap.children[0], snap.children[1]];
                 // And(a, all_ones) = a — check for -1 (all ones in two's complement)
                 if let Some((-1, _)) = egraph.get_constant(rhs) {
@@ -254,7 +256,7 @@ fn apply_annihilation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     for snap in snaps {
         let class_id = snap.class_id;
         match &snap.op {
-            Op::Mul | Op::And if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Mul) | Op::Pure(PureOp::And) if snap.children.len() == 2 => {
                 let [lhs, rhs] = [snap.children[0], snap.children[1]];
                 let zero_side = if let Some((0, ref ty)) = egraph.get_constant(rhs) {
                     Some((0i64, ty.clone()))
@@ -274,7 +276,7 @@ fn apply_annihilation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                 }
             }
             // Or(a, -1) = -1
-            Op::Or if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Or) if snap.children.len() == 2 => {
                 let [lhs, rhs] = [snap.children[0], snap.children[1]];
                 let all_ones = if let Some((-1, ref ty)) = egraph.get_constant(rhs) {
                     Some(ty.clone())
@@ -308,7 +310,7 @@ fn apply_idempotence_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     for snap in snaps {
         let class_id = snap.class_id;
         match &snap.op {
-            Op::And | Op::Or if snap.children.len() == 2 => {
+            Op::Pure(PureOp::And) | Op::Pure(PureOp::Or) if snap.children.len() == 2 => {
                 let lhs_canon = egraph.unionfind.find_immutable(snap.children[0]);
                 let rhs_canon = egraph.unionfind.find_immutable(snap.children[1]);
                 if lhs_canon == rhs_canon {
@@ -334,7 +336,7 @@ fn apply_inverse_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     for snap in snaps {
         let class_id = snap.class_id;
         match &snap.op {
-            Op::Sub | Op::Xor if snap.children.len() == 2 => {
+            Op::Pure(PureOp::Sub) | Op::Pure(PureOp::Xor) if snap.children.len() == 2 => {
                 let lhs_canon = egraph.unionfind.find_immutable(snap.children[0]);
                 let rhs_canon = egraph.unionfind.find_immutable(snap.children[1]);
                 if lhs_canon == rhs_canon {
@@ -367,7 +369,7 @@ fn apply_double_negation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool 
     for snap in snaps {
         let class_id = snap.class_id;
         // Outer Sub(0, ?)
-        if snap.op != Op::Sub || snap.children.len() != 2 {
+        if snap.op != Op::Pure(PureOp::Sub) || snap.children.len() != 2 {
             continue;
         }
         if egraph.get_constant(snap.children[0]).map(|(v, _)| v) != Some(0) {
@@ -377,7 +379,7 @@ fn apply_double_negation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool 
         let inner_canon = egraph.unionfind.find_immutable(snap.children[1]);
         let inner_class = egraph.class(inner_canon);
         for inner_node in inner_class.nodes.clone() {
-            if inner_node.op != Op::Sub || inner_node.children.len() != 2 {
+            if inner_node.op != Op::Pure(PureOp::Sub) || inner_node.children.len() != 2 {
                 continue;
             }
             if egraph.get_constant(inner_node.children[0]).map(|(v, _)| v) != Some(0) {
@@ -416,19 +418,21 @@ fn apply_constant_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         };
 
         let result: Option<i64> = match &snap.op {
-            Op::Add => Some(lv.wrapping_add(rv)),
-            Op::Sub => Some(lv.wrapping_sub(rv)),
-            Op::Mul => Some(lv.wrapping_mul(rv)),
-            Op::UDiv if rv != 0 => Some(((lv as u64).wrapping_div(rv as u64)) as i64),
-            Op::SDiv if rv != 0 => Some(lv.wrapping_div(rv)),
-            Op::URem if rv != 0 => Some(((lv as u64).wrapping_rem(rv as u64)) as i64),
-            Op::SRem if rv != 0 => Some(lv.wrapping_rem(rv)),
-            Op::And => Some(lv & rv),
-            Op::Or => Some(lv | rv),
-            Op::Xor => Some(lv ^ rv),
-            Op::Shl if (0..64).contains(&rv) => Some(lv.wrapping_shl(rv as u32)),
-            Op::Shr if (0..64).contains(&rv) => Some(((lv as u64).wrapping_shr(rv as u32)) as i64),
-            Op::Sar if (0..64).contains(&rv) => Some(lv.wrapping_shr(rv as u32)),
+            Op::Pure(PureOp::Add) => Some(lv.wrapping_add(rv)),
+            Op::Pure(PureOp::Sub) => Some(lv.wrapping_sub(rv)),
+            Op::Pure(PureOp::Mul) => Some(lv.wrapping_mul(rv)),
+            Op::Pure(PureOp::UDiv) if rv != 0 => Some(((lv as u64).wrapping_div(rv as u64)) as i64),
+            Op::Pure(PureOp::SDiv) if rv != 0 => Some(lv.wrapping_div(rv)),
+            Op::Pure(PureOp::URem) if rv != 0 => Some(((lv as u64).wrapping_rem(rv as u64)) as i64),
+            Op::Pure(PureOp::SRem) if rv != 0 => Some(lv.wrapping_rem(rv)),
+            Op::Pure(PureOp::And) => Some(lv & rv),
+            Op::Pure(PureOp::Or) => Some(lv | rv),
+            Op::Pure(PureOp::Xor) => Some(lv ^ rv),
+            Op::Pure(PureOp::Shl) if (0..64).contains(&rv) => Some(lv.wrapping_shl(rv as u32)),
+            Op::Pure(PureOp::Shr) if (0..64).contains(&rv) => {
+                Some(((lv as u64).wrapping_shr(rv as u32)) as i64)
+            }
+            Op::Pure(PureOp::Sar) if (0..64).contains(&rv) => Some(lv.wrapping_shr(rv as u32)),
             _ => None,
         };
 
@@ -462,7 +466,14 @@ fn apply_commutativity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         if snap.children.len() != 2 {
             continue;
         }
-        let commutative = matches!(&snap.op, Op::Add | Op::Mul | Op::And | Op::Or | Op::Xor);
+        let commutative = matches!(
+            &snap.op,
+            Op::Pure(PureOp::Add)
+                | Op::Pure(PureOp::Mul)
+                | Op::Pure(PureOp::And)
+                | Op::Pure(PureOp::Or)
+                | Op::Pure(PureOp::Xor)
+        );
         if !commutative {
             continue;
         }
@@ -496,8 +507,8 @@ fn apply_reassociation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
     for snap in snaps {
         let class_id = snap.class_id;
-        let is_add = snap.op == Op::Add;
-        let is_mul = snap.op == Op::Mul;
+        let is_add = snap.op == Op::Pure(PureOp::Add);
+        let is_mul = snap.op == Op::Pure(PureOp::Mul);
         if (!is_add && !is_mul) || snap.children.len() != 2 {
             continue;
         }
@@ -515,9 +526,9 @@ fn apply_reassociation_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
         for inner_node in inner_nodes {
             let inner_matches = if is_add {
-                inner_node.op == Op::Add
+                inner_node.op == Op::Pure(PureOp::Add)
             } else {
-                inner_node.op == Op::Mul
+                inner_node.op == Op::Pure(PureOp::Mul)
             };
             if !inner_matches || inner_node.children.len() != 2 {
                 continue;
@@ -581,7 +592,10 @@ fn apply_shift_combining_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool 
 
     for snap in snaps {
         let class_id = snap.class_id;
-        let is_shift = matches!(snap.op, Op::Shl | Op::Shr | Op::Sar);
+        let is_shift = matches!(
+            snap.op,
+            Op::Pure(PureOp::Shl) | Op::Pure(PureOp::Shr) | Op::Pure(PureOp::Sar)
+        );
         if !is_shift || snap.children.len() != 2 {
             continue;
         }
@@ -655,15 +669,19 @@ fn apply_absorption_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
     for snap in snaps {
         let class_id = snap.class_id;
-        let is_and = snap.op == Op::And;
-        let is_or = snap.op == Op::Or;
+        let is_and = snap.op == Op::Pure(PureOp::And);
+        let is_or = snap.op == Op::Pure(PureOp::Or);
         if (!is_and && !is_or) || snap.children.len() != 2 {
             continue;
         }
 
         // For And(a, b): look for Or(a, _) inside b's class or Or(b, _) inside a's class.
         // For Or(a, b): look for And(a, _) inside b's class or And(b, _) inside a's class.
-        let inner_op = if is_and { Op::Or } else { Op::And };
+        let inner_op = if is_and {
+            Op::Pure(PureOp::Or)
+        } else {
+            Op::Pure(PureOp::And)
+        };
 
         let children = [snap.children[0], snap.children[1]];
 
@@ -709,7 +727,7 @@ fn apply_div_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let b = snap.children[1];
 
         match &snap.op {
-            Op::SDiv | Op::UDiv => {
+            Op::Pure(PureOp::SDiv) | Op::Pure(PureOp::UDiv) => {
                 if let Some((1, _)) = egraph.get_constant(b) {
                     // Div(a, 1) = a
                     let canon = egraph.unionfind.find_immutable(class_id);
@@ -718,7 +736,7 @@ fn apply_div_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                         egraph.merge(class_id, a);
                         changed = true;
                     }
-                } else if snap.op == Op::SDiv
+                } else if snap.op == Op::Pure(PureOp::SDiv)
                     && let Some((-1, _)) = egraph.get_constant(b)
                 {
                     // SDiv(a, -1) = Sub(0, a)
@@ -728,7 +746,7 @@ fn apply_div_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                         .clone();
                     let zero = make_iconst(egraph, 0, ty);
                     let neg = egraph.add(ENode {
-                        op: Op::Sub,
+                        op: Op::Pure(PureOp::Sub),
                         children: smallvec![zero, a],
                     });
                     let canon = egraph.unionfind.find_immutable(class_id);
@@ -739,7 +757,7 @@ fn apply_div_identity_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                     }
                 }
             }
-            Op::SRem | Op::URem => {
+            Op::Pure(PureOp::SRem) | Op::Pure(PureOp::URem) => {
                 if let Some((1, _)) = egraph.get_constant(b) {
                     // Rem(a, 1) = 0
                     let ty = egraph
@@ -770,7 +788,7 @@ fn apply_select_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
     for snap in snaps {
         let class_id = snap.class_id;
-        if snap.op != Op::Select || snap.children.len() != 3 {
+        if snap.op != Op::Pure(PureOp::Select) || snap.children.len() != 3 {
             continue;
         }
         let t = snap.children[1];
@@ -817,7 +835,7 @@ fn apply_comparison_select_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> b
 
     for snap in snaps {
         let class_id = snap.class_id;
-        if snap.op != Op::Select || snap.children.len() != 3 {
+        if snap.op != Op::Pure(PureOp::Select) || snap.children.len() != 3 {
             continue;
         }
         let cond_class_id = snap.children[0];
@@ -829,7 +847,7 @@ fn apply_comparison_select_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> b
 
         for icmp_node in &cond_nodes {
             let cc = match &icmp_node.op {
-                Op::Icmp(cc) => cc,
+                Op::Pure(PureOp::Icmp(cc)) => cc,
                 _ => continue,
             };
             if icmp_node.children.len() != 2 {
@@ -902,7 +920,9 @@ fn apply_extension_folding_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> boo
         let child = snap.children[0];
 
         let outer_ty = match &snap.op {
-            Op::Sext(ty) | Op::Zext(ty) | Op::Trunc(ty) => ty.clone(),
+            Op::Pure(PureOp::Sext(ty))
+            | Op::Pure(PureOp::Zext(ty))
+            | Op::Pure(PureOp::Trunc(ty)) => ty.clone(),
             _ => continue,
         };
 
@@ -915,9 +935,9 @@ fn apply_extension_folding_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> boo
                 continue;
             }
             let same_kind = match (&snap.op, &inner_node.op) {
-                (Op::Sext(_), Op::Sext(_)) => true,
-                (Op::Zext(_), Op::Zext(_)) => true,
-                (Op::Trunc(_), Op::Trunc(_)) => true,
+                (Op::Pure(PureOp::Sext(_)), Op::Pure(PureOp::Sext(_))) => true,
+                (Op::Pure(PureOp::Zext(_)), Op::Pure(PureOp::Zext(_))) => true,
+                (Op::Pure(PureOp::Trunc(_)), Op::Pure(PureOp::Trunc(_))) => true,
                 _ => false,
             };
             if !same_kind {
@@ -927,9 +947,9 @@ fn apply_extension_folding_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> boo
             // Ext_outer(Ext_inner(a)) = Ext_outer(a) -- skip the intermediate
             let a = inner_node.children[0];
             let folded_op = match &snap.op {
-                Op::Sext(_) => Op::Sext(outer_ty.clone()),
-                Op::Zext(_) => Op::Zext(outer_ty.clone()),
-                Op::Trunc(_) => Op::Trunc(outer_ty.clone()),
+                Op::Pure(PureOp::Sext(_)) => Op::Pure(PureOp::Sext(outer_ty.clone())),
+                Op::Pure(PureOp::Zext(_)) => Op::Pure(PureOp::Zext(outer_ty.clone())),
+                Op::Pure(PureOp::Trunc(_)) => Op::Pure(PureOp::Trunc(outer_ty.clone())),
                 _ => unreachable!(),
             };
             let folded = egraph.add(ENode {
@@ -956,8 +976,8 @@ fn apply_complement_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
     for snap in snaps {
         let class_id = snap.class_id;
-        let is_and = snap.op == Op::And;
-        let is_or = snap.op == Op::Or;
+        let is_and = snap.op == Op::Pure(PureOp::And);
+        let is_or = snap.op == Op::Pure(PureOp::Or);
         if (!is_and && !is_or) || snap.children.len() != 2 {
             continue;
         }
@@ -971,7 +991,7 @@ fn apply_complement_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             let b_nodes = egraph.class(b_canon).nodes.clone();
 
             for b_node in b_nodes {
-                if b_node.op != Op::Xor || b_node.children.len() != 2 {
+                if b_node.op != Op::Pure(PureOp::Xor) || b_node.children.len() != 2 {
                     continue;
                 }
                 // Check if Xor(a, -1) or Xor(-1, a)
@@ -1015,7 +1035,7 @@ fn apply_demorgan_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     for snap in snaps {
         let class_id = snap.class_id;
         // Match Xor(inner, -1) where inner is And or Or
-        if snap.op != Op::Xor || snap.children.len() != 2 {
+        if snap.op != Op::Pure(PureOp::Xor) || snap.children.len() != 2 {
             continue;
         }
 
@@ -1040,9 +1060,9 @@ fn apply_demorgan_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
                 continue;
             }
             let (target_op, inner_is_and_or_or) = match &inner_node.op {
-                Op::And => (Op::Or, true),
-                Op::Or => (Op::And, true),
-                _ => (Op::And, false), // placeholder
+                Op::Pure(PureOp::And) => (Op::Pure(PureOp::Or), true),
+                Op::Pure(PureOp::Or) => (Op::Pure(PureOp::And), true),
+                _ => (Op::Pure(PureOp::And), false), // placeholder
             };
             if !inner_is_and_or_or {
                 continue;
@@ -1053,11 +1073,11 @@ fn apply_demorgan_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
             // Build Not(a) = Xor(a, -1), Not(b) = Xor(b, -1)
             let not_a = egraph.add(ENode {
-                op: Op::Xor,
+                op: Op::Pure(PureOp::Xor),
                 children: smallvec![a, neg_child],
             });
             let not_b = egraph.add(ENode {
-                op: Op::Xor,
+                op: Op::Pure(PureOp::Xor),
                 children: smallvec![b, neg_child],
             });
             // Build target_op(Not(a), Not(b))
@@ -1086,7 +1106,7 @@ fn apply_negation_distribution_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) ->
     for snap in snaps {
         let class_id = snap.class_id;
         // Match Sub(0, inner) where inner is Add
-        if snap.op != Op::Sub || snap.children.len() != 2 {
+        if snap.op != Op::Pure(PureOp::Sub) || snap.children.len() != 2 {
             continue;
         }
         if egraph.get_constant(snap.children[0]).map(|(v, _)| v) != Some(0) {
@@ -1099,7 +1119,7 @@ fn apply_negation_distribution_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) ->
         let inner_nodes = egraph.class(inner_canon).nodes.clone();
 
         for inner_node in inner_nodes {
-            if inner_node.op != Op::Add || inner_node.children.len() != 2 {
+            if inner_node.op != Op::Pure(PureOp::Add) || inner_node.children.len() != 2 {
                 continue;
             }
             let a = inner_node.children[0];
@@ -1107,15 +1127,15 @@ fn apply_negation_distribution_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) ->
 
             // Build Sub(0, a), Sub(0, b), Add(Sub(0,a), Sub(0,b))
             let neg_a = egraph.add(ENode {
-                op: Op::Sub,
+                op: Op::Pure(PureOp::Sub),
                 children: smallvec![zero, a],
             });
             let neg_b = egraph.add(ENode {
-                op: Op::Sub,
+                op: Op::Pure(PureOp::Sub),
                 children: smallvec![zero, b],
             });
             let result = egraph.add(ENode {
-                op: Op::Add,
+                op: Op::Pure(PureOp::Add),
                 children: smallvec![neg_a, neg_b],
             });
 
@@ -1202,28 +1222,28 @@ mod tests {
 
     fn iconst(g: &mut EGraph, v: i64, ty: Type) -> ClassId {
         g.add(ENode {
-            op: Op::Iconst(v, ty),
+            op: Op::Pure(PureOp::Iconst(v, ty)),
             children: smallvec![],
         })
     }
 
     fn add(g: &mut EGraph, a: ClassId, b: ClassId) -> ClassId {
         g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, b],
         })
     }
 
     fn mul(g: &mut EGraph, a: ClassId, b: ClassId) -> ClassId {
         g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, b],
         })
     }
 
     fn xor(g: &mut EGraph, a: ClassId, b: ClassId) -> ClassId {
         g.add(ENode {
-            op: Op::Xor,
+            op: Op::Pure(PureOp::Xor),
             children: smallvec![a, b],
         })
     }
@@ -1284,17 +1304,17 @@ mod tests {
     fn commutativity_spike_depth10() {
         let mut g = EGraph::new();
         let base = g.add(ENode {
-            op: Op::Iconst(1, Type::I64),
+            op: Op::Pure(PureOp::Iconst(1, Type::I64)),
             children: smallvec![],
         });
         let mut cur = base;
         for i in 2..=11i64 {
             let c = g.add(ENode {
-                op: Op::Iconst(i, Type::I64),
+                op: Op::Pure(PureOp::Iconst(i, Type::I64)),
                 children: smallvec![],
             });
             cur = g.add(ENode {
-                op: Op::Add,
+                op: Op::Pure(PureOp::Add),
                 children: smallvec![cur, c],
             });
         }
@@ -1314,7 +1334,7 @@ mod tests {
         use crate::egraph::phases::{CompileOptions, run_phases};
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let c3 = iconst(&mut g, 3, Type::I64);
@@ -1336,18 +1356,18 @@ mod tests {
         let c2 = iconst(&mut g, 2, Type::I64);
         let c3 = iconst(&mut g, 3, Type::I64);
         let inner = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![a, c2],
         });
         let outer = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![inner, c3],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
         let c5 = iconst(&mut g, 5, Type::I64);
         let combined = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![a, c5],
         });
         assert_eq!(g.find(outer), g.find(combined));
@@ -1360,18 +1380,18 @@ mod tests {
         let a = iconst(&mut g, 1, Type::I64);
         let c32 = iconst(&mut g, 32, Type::I64);
         let inner = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![a, c32],
         });
         let outer = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![inner, c32],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
         let c64 = iconst(&mut g, 64, Type::I64);
         let bad_combined = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![a, c64],
         });
         // Should NOT be merged (64 > 63)
@@ -1385,11 +1405,11 @@ mod tests {
         let a = iconst(&mut g, 0xFF, Type::I64);
         let b = iconst(&mut g, 0x0F, Type::I64);
         let or_ab = g.add(ENode {
-            op: Op::Or,
+            op: Op::Pure(PureOp::Or),
             children: smallvec![a, b],
         });
         let and_result = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![a, or_ab],
         });
         apply_algebraic_rules(&mut g);
@@ -1404,11 +1424,11 @@ mod tests {
         let a = iconst(&mut g, 0xFF, Type::I64);
         let b = iconst(&mut g, 0x0F, Type::I64);
         let and_ab = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![a, b],
         });
         let or_result = g.add(ENode {
-            op: Op::Or,
+            op: Op::Pure(PureOp::Or),
             children: smallvec![a, and_ab],
         });
         apply_algebraic_rules(&mut g);
@@ -1424,7 +1444,7 @@ mod tests {
         let a = iconst(&mut g, 42, Type::I64);
         let one = iconst(&mut g, 1, Type::I64);
         let div = g.add(ENode {
-            op: Op::SDiv,
+            op: Op::Pure(PureOp::SDiv),
             children: smallvec![a, one],
         });
         apply_algebraic_rules(&mut g);
@@ -1438,7 +1458,7 @@ mod tests {
         let a = iconst(&mut g, 42, Type::I64);
         let one = iconst(&mut g, 1, Type::I64);
         let div = g.add(ENode {
-            op: Op::UDiv,
+            op: Op::Pure(PureOp::UDiv),
             children: smallvec![a, one],
         });
         apply_algebraic_rules(&mut g);
@@ -1452,7 +1472,7 @@ mod tests {
         let a = iconst(&mut g, 42, Type::I64);
         let one = iconst(&mut g, 1, Type::I64);
         let rem = g.add(ENode {
-            op: Op::SRem,
+            op: Op::Pure(PureOp::SRem),
             children: smallvec![a, one],
         });
         apply_algebraic_rules(&mut g);
@@ -1467,7 +1487,7 @@ mod tests {
         let a = iconst(&mut g, 42, Type::I64);
         let one = iconst(&mut g, 1, Type::I64);
         let rem = g.add(ENode {
-            op: Op::URem,
+            op: Op::Pure(PureOp::URem),
             children: smallvec![a, one],
         });
         apply_algebraic_rules(&mut g);
@@ -1482,7 +1502,7 @@ mod tests {
         let a = iconst(&mut g, 42, Type::I64);
         let neg1 = iconst(&mut g, -1, Type::I64);
         let div = g.add(ENode {
-            op: Op::SDiv,
+            op: Op::Pure(PureOp::SDiv),
             children: smallvec![a, neg1],
         });
         apply_algebraic_rules(&mut g);
@@ -1490,7 +1510,7 @@ mod tests {
         // SDiv(a, -1) = Sub(0, a) = -42
         let zero = iconst(&mut g, 0, Type::I64);
         let neg = g.add(ENode {
-            op: Op::Sub,
+            op: Op::Pure(PureOp::Sub),
             children: smallvec![zero, a],
         });
         assert_eq!(g.find(div), g.find(neg));
@@ -1504,12 +1524,12 @@ mod tests {
         let c1 = iconst(&mut g, 1, Type::I64);
         let c2 = iconst(&mut g, 2, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(crate::ir::condcode::CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(crate::ir::condcode::CondCode::Eq)),
             children: smallvec![c1, c2],
         });
         let val = iconst(&mut g, 99, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, val, val],
         });
         apply_algebraic_rules(&mut g);
@@ -1524,13 +1544,13 @@ mod tests {
         let mut g = EGraph::new();
         let a = iconst(&mut g, 7, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![a, a],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1544,13 +1564,13 @@ mod tests {
         let mut g = EGraph::new();
         let a = iconst(&mut g, 7, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Ne),
+            op: Op::Pure(PureOp::Icmp(CondCode::Ne)),
             children: smallvec![a, a],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1564,13 +1584,13 @@ mod tests {
         let mut g = EGraph::new();
         let a = iconst(&mut g, 7, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Slt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Slt)),
             children: smallvec![a, a],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1585,13 +1605,13 @@ mod tests {
         let a = iconst(&mut g, 3, Type::I64);
         let b = iconst(&mut g, 5, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Slt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Slt)),
             children: smallvec![a, b],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1606,13 +1626,13 @@ mod tests {
         let a = iconst(&mut g, 5, Type::I64);
         let b = iconst(&mut g, 3, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Slt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Slt)),
             children: smallvec![a, b],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1627,13 +1647,13 @@ mod tests {
         let a = iconst(&mut g, -1, Type::I64);
         let b = iconst(&mut g, 1, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Ult),
+            op: Op::Pure(PureOp::Icmp(CondCode::Ult)),
             children: smallvec![a, b],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1648,13 +1668,13 @@ mod tests {
         let a = iconst(&mut g, 42, Type::I64);
         let b = iconst(&mut g, 42, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![a, b],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1668,13 +1688,13 @@ mod tests {
         let mut g = EGraph::new();
         let a = iconst(&mut g, 7, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Sle),
+            op: Op::Pure(PureOp::Icmp(CondCode::Sle)),
             children: smallvec![a, a],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1688,13 +1708,13 @@ mod tests {
         let mut g = EGraph::new();
         let a = iconst(&mut g, 7, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Uge),
+            op: Op::Pure(PureOp::Icmp(CondCode::Uge)),
             children: smallvec![a, a],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1708,13 +1728,13 @@ mod tests {
         let mut g = EGraph::new();
         let a = iconst(&mut g, 7, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Ugt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Ugt)),
             children: smallvec![a, a],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1729,13 +1749,13 @@ mod tests {
         let a = iconst(&mut g, 5, Type::I64);
         let b = iconst(&mut g, 3, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Sge),
+            op: Op::Pure(PureOp::Icmp(CondCode::Sge)),
             children: smallvec![a, b],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1750,13 +1770,13 @@ mod tests {
         let a = iconst(&mut g, 7, Type::I64);
         let b = iconst(&mut g, 7, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Ne),
+            op: Op::Pure(PureOp::Icmp(CondCode::Ne)),
             children: smallvec![a, b],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1771,13 +1791,13 @@ mod tests {
         let a = iconst(&mut g, 3, Type::I64);
         let b = iconst(&mut g, 3, Type::I64);
         let cond = g.add(ENode {
-            op: Op::Icmp(CondCode::Ule),
+            op: Op::Pure(PureOp::Icmp(CondCode::Ule)),
             children: smallvec![a, b],
         });
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Select,
+            op: Op::Pure(PureOp::Select),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1793,18 +1813,18 @@ mod tests {
         let mut g = EGraph::new();
         let a = iconst(&mut g, 5, Type::I8);
         let inner = g.add(ENode {
-            op: Op::Sext(Type::I32),
+            op: Op::Pure(PureOp::Sext(Type::I32)),
             children: smallvec![a],
         });
         let outer = g.add(ENode {
-            op: Op::Sext(Type::I64),
+            op: Op::Pure(PureOp::Sext(Type::I64)),
             children: smallvec![inner],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
         // Sext(I64, Sext(I32, a)) = Sext(I64, a)
         let direct = g.add(ENode {
-            op: Op::Sext(Type::I64),
+            op: Op::Pure(PureOp::Sext(Type::I64)),
             children: smallvec![a],
         });
         assert_eq!(g.find(outer), g.find(direct));
@@ -1815,17 +1835,17 @@ mod tests {
         let mut g = EGraph::new();
         let a = iconst(&mut g, 5, Type::I8);
         let inner = g.add(ENode {
-            op: Op::Zext(Type::I32),
+            op: Op::Pure(PureOp::Zext(Type::I32)),
             children: smallvec![a],
         });
         let outer = g.add(ENode {
-            op: Op::Zext(Type::I64),
+            op: Op::Pure(PureOp::Zext(Type::I64)),
             children: smallvec![inner],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
         let direct = g.add(ENode {
-            op: Op::Zext(Type::I64),
+            op: Op::Pure(PureOp::Zext(Type::I64)),
             children: smallvec![a],
         });
         assert_eq!(g.find(outer), g.find(direct));
@@ -1836,17 +1856,17 @@ mod tests {
         let mut g = EGraph::new();
         let a = iconst(&mut g, 1000, Type::I64);
         let inner = g.add(ENode {
-            op: Op::Trunc(Type::I32),
+            op: Op::Pure(PureOp::Trunc(Type::I32)),
             children: smallvec![a],
         });
         let outer = g.add(ENode {
-            op: Op::Trunc(Type::I8),
+            op: Op::Pure(PureOp::Trunc(Type::I8)),
             children: smallvec![inner],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
         let direct = g.add(ENode {
-            op: Op::Trunc(Type::I8),
+            op: Op::Pure(PureOp::Trunc(Type::I8)),
             children: smallvec![a],
         });
         assert_eq!(g.find(outer), g.find(direct));
@@ -1860,11 +1880,11 @@ mod tests {
         let a = iconst(&mut g, 0xFF, Type::I64);
         let neg1 = iconst(&mut g, -1, Type::I64);
         let not_a = g.add(ENode {
-            op: Op::Xor,
+            op: Op::Pure(PureOp::Xor),
             children: smallvec![a, neg1],
         });
         let result = g.add(ENode {
-            op: Op::Or,
+            op: Op::Pure(PureOp::Or),
             children: smallvec![a, not_a],
         });
         apply_algebraic_rules(&mut g);
@@ -1878,11 +1898,11 @@ mod tests {
         let a = iconst(&mut g, 0xFF, Type::I64);
         let neg1 = iconst(&mut g, -1, Type::I64);
         let not_a = g.add(ENode {
-            op: Op::Xor,
+            op: Op::Pure(PureOp::Xor),
             children: smallvec![a, neg1],
         });
         let result = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![a, not_a],
         });
         apply_algebraic_rules(&mut g);
@@ -1899,7 +1919,7 @@ mod tests {
         let a = iconst(&mut g, 42, Type::I64);
         let neg1 = iconst(&mut g, -1, Type::I64);
         let result = g.add(ENode {
-            op: Op::Or,
+            op: Op::Pure(PureOp::Or),
             children: smallvec![a, neg1],
         });
         apply_algebraic_rules(&mut g);
@@ -1916,27 +1936,27 @@ mod tests {
         let b = iconst(&mut g, 0x0F, Type::I64);
         let neg1 = iconst(&mut g, -1, Type::I64);
         let and_ab = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![a, b],
         });
         // Not(And(a, b)) = Xor(And(a, b), -1)
         let not_and = g.add(ENode {
-            op: Op::Xor,
+            op: Op::Pure(PureOp::Xor),
             children: smallvec![and_ab, neg1],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
         // Should equal Or(Xor(a, -1), Xor(b, -1))
         let not_a = g.add(ENode {
-            op: Op::Xor,
+            op: Op::Pure(PureOp::Xor),
             children: smallvec![a, neg1],
         });
         let not_b = g.add(ENode {
-            op: Op::Xor,
+            op: Op::Pure(PureOp::Xor),
             children: smallvec![b, neg1],
         });
         let or_not = g.add(ENode {
-            op: Op::Or,
+            op: Op::Pure(PureOp::Or),
             children: smallvec![not_a, not_b],
         });
         assert_eq!(g.find(not_and), g.find(or_not));
@@ -1949,25 +1969,25 @@ mod tests {
         let b = iconst(&mut g, 0x0F, Type::I64);
         let neg1 = iconst(&mut g, -1, Type::I64);
         let or_ab = g.add(ENode {
-            op: Op::Or,
+            op: Op::Pure(PureOp::Or),
             children: smallvec![a, b],
         });
         let not_or = g.add(ENode {
-            op: Op::Xor,
+            op: Op::Pure(PureOp::Xor),
             children: smallvec![or_ab, neg1],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
         let not_a = g.add(ENode {
-            op: Op::Xor,
+            op: Op::Pure(PureOp::Xor),
             children: smallvec![a, neg1],
         });
         let not_b = g.add(ENode {
-            op: Op::Xor,
+            op: Op::Pure(PureOp::Xor),
             children: smallvec![b, neg1],
         });
         let and_not = g.add(ENode {
-            op: Op::And,
+            op: Op::Pure(PureOp::And),
             children: smallvec![not_a, not_b],
         });
         assert_eq!(g.find(not_or), g.find(and_not));
@@ -1980,27 +2000,27 @@ mod tests {
         use crate::ir::condcode::CondCode;
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let b = g.add(ENode {
-            op: Op::Param(1, Type::I64),
+            op: Op::Pure(PureOp::Param(1, Type::I64)),
             children: smallvec![],
         });
         let zero = iconst(&mut g, 0, Type::I64);
         let diff = g.add(ENode {
-            op: Op::Sub,
+            op: Op::Pure(PureOp::Sub),
             children: smallvec![a, b],
         });
         let eq = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![diff, zero],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
 
         let direct = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![a, b],
         });
         assert_eq!(g.find(eq), g.find(direct));
@@ -2011,28 +2031,28 @@ mod tests {
         use crate::ir::condcode::CondCode;
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I32),
+            op: Op::Pure(PureOp::Param(0, Type::I32)),
             children: smallvec![],
         });
         let b = g.add(ENode {
-            op: Op::Param(1, Type::I32),
+            op: Op::Pure(PureOp::Param(1, Type::I32)),
             children: smallvec![],
         });
         let zero = iconst(&mut g, 0, Type::I32);
         let diff = g.add(ENode {
-            op: Op::Sub,
+            op: Op::Pure(PureOp::Sub),
             children: smallvec![a, b],
         });
         // RHS-first form: Icmp(Ne, 0, Sub(a, b))
         let ne = g.add(ENode {
-            op: Op::Icmp(CondCode::Ne),
+            op: Op::Pure(PureOp::Icmp(CondCode::Ne)),
             children: smallvec![zero, diff],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
 
         let direct = g.add(ENode {
-            op: Op::Icmp(CondCode::Ne),
+            op: Op::Pure(PureOp::Icmp(CondCode::Ne)),
             children: smallvec![a, b],
         });
         assert_eq!(g.find(ne), g.find(direct));
@@ -2045,17 +2065,17 @@ mod tests {
         use crate::ir::condcode::CondCode;
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let k = iconst(&mut g, 5, Type::I64);
         let zero = iconst(&mut g, 0, Type::I64);
         let sum = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, k],
         });
         let eq = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![sum, zero],
         });
         apply_algebraic_rules(&mut g);
@@ -2063,7 +2083,7 @@ mod tests {
 
         let neg5 = iconst(&mut g, -5, Type::I64);
         let direct = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![a, neg5],
         });
         assert_eq!(g.find(eq), g.find(direct));
@@ -2075,17 +2095,17 @@ mod tests {
         use crate::ir::condcode::CondCode;
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I32),
+            op: Op::Pure(PureOp::Param(0, Type::I32)),
             children: smallvec![],
         });
         let k = iconst(&mut g, 7, Type::I32);
         let zero = iconst(&mut g, 0, Type::I32);
         let sum = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![k, a], // commuted: k on left
         });
         let ne = g.add(ENode {
-            op: Op::Icmp(CondCode::Ne),
+            op: Op::Pure(PureOp::Icmp(CondCode::Ne)),
             children: smallvec![zero, sum],
         });
         apply_algebraic_rules(&mut g);
@@ -2093,7 +2113,7 @@ mod tests {
 
         let neg7 = iconst(&mut g, -7, Type::I32);
         let direct = g.add(ENode {
-            op: Op::Icmp(CondCode::Ne),
+            op: Op::Pure(PureOp::Icmp(CondCode::Ne)),
             children: smallvec![a, neg7],
         });
         assert_eq!(g.find(ne), g.find(direct));
@@ -2106,17 +2126,17 @@ mod tests {
         use crate::ir::condcode::CondCode;
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let k = iconst(&mut g, i64::MIN, Type::I64);
         let zero = iconst(&mut g, 0, Type::I64);
         let sum = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, k],
         });
         let eq = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![sum, zero],
         });
         apply_algebraic_rules(&mut g);
@@ -2124,7 +2144,7 @@ mod tests {
 
         // -i64::MIN == i64::MIN under wrapping — the rewrite targets the same class.
         let direct = g.add(ENode {
-            op: Op::Icmp(CondCode::Eq),
+            op: Op::Pure(PureOp::Icmp(CondCode::Eq)),
             children: smallvec![a, k],
         });
         assert_eq!(g.find(eq), g.find(direct));
@@ -2137,17 +2157,17 @@ mod tests {
         use crate::ir::condcode::CondCode;
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let k = iconst(&mut g, 5, Type::I64);
         let zero = iconst(&mut g, 0, Type::I64);
         let sum = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, k],
         });
         let sgt = g.add(ENode {
-            op: Op::Icmp(CondCode::Sgt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Sgt)),
             children: smallvec![sum, zero],
         });
         apply_algebraic_rules(&mut g);
@@ -2155,7 +2175,7 @@ mod tests {
 
         let neg5 = iconst(&mut g, -5, Type::I64);
         let direct = g.add(ENode {
-            op: Op::Icmp(CondCode::Sgt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Sgt)),
             children: smallvec![a, neg5],
         });
         assert_ne!(g.find(sgt), g.find(direct));
@@ -2167,27 +2187,27 @@ mod tests {
         use crate::ir::condcode::CondCode;
         let mut g = EGraph::new();
         let a = g.add(ENode {
-            op: Op::Param(0, Type::I64),
+            op: Op::Pure(PureOp::Param(0, Type::I64)),
             children: smallvec![],
         });
         let b = g.add(ENode {
-            op: Op::Param(1, Type::I64),
+            op: Op::Pure(PureOp::Param(1, Type::I64)),
             children: smallvec![],
         });
         let zero = iconst(&mut g, 0, Type::I64);
         let diff = g.add(ENode {
-            op: Op::Sub,
+            op: Op::Pure(PureOp::Sub),
             children: smallvec![a, b],
         });
         let sgt = g.add(ENode {
-            op: Op::Icmp(CondCode::Sgt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Sgt)),
             children: smallvec![diff, zero],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
 
         let direct = g.add(ENode {
-            op: Op::Icmp(CondCode::Sgt),
+            op: Op::Pure(PureOp::Icmp(CondCode::Sgt)),
             children: smallvec![a, b],
         });
         // Must NOT be merged.
@@ -2204,18 +2224,18 @@ mod tests {
         let zero = iconst(&mut g, 0, Type::I64);
         let sum = add(&mut g, a, b);
         let neg_sum = g.add(ENode {
-            op: Op::Sub,
+            op: Op::Pure(PureOp::Sub),
             children: smallvec![zero, sum],
         });
         apply_algebraic_rules(&mut g);
         g.rebuild();
         // Sub(0, Add(a, b)) = Add(Sub(0, a), Sub(0, b))
         let neg_a = g.add(ENode {
-            op: Op::Sub,
+            op: Op::Pure(PureOp::Sub),
             children: smallvec![zero, a],
         });
         let neg_b = g.add(ENode {
-            op: Op::Sub,
+            op: Op::Pure(PureOp::Sub),
             children: smallvec![zero, b],
         });
         let distributed = add(&mut g, neg_a, neg_b);

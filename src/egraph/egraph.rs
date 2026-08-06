@@ -7,7 +7,7 @@ use crate::egraph::enode::ENode;
 use crate::egraph::known_bits::KnownBits;
 use crate::egraph::unionfind::UnionFind;
 use crate::ir::effectful::BlockId;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 
 /// Snapshot of an e-node for safe iteration during mutation.
@@ -106,12 +106,12 @@ impl EGraph {
             self.classes.len(),
             "ClassId must match classes index"
         );
-        let constant_value = if let Op::Iconst(v, ref iconst_ty) = enode.op {
+        let constant_value = if let Op::Pure(PureOp::Iconst(v, ref iconst_ty)) = enode.op {
             Some((v, iconst_ty.clone()))
         } else {
             None
         };
-        let known_bits = if let Op::Iconst(v, ref iconst_ty) = enode.op {
+        let known_bits = if let Op::Pure(PureOp::Iconst(v, ref iconst_ty)) = enode.op {
             KnownBits::from_constant(v, iconst_ty)
         } else {
             KnownBits::unknown()
@@ -195,7 +195,10 @@ impl EGraph {
     /// unique UIDs, so removing one can't break congruences.
     pub fn remove_result_placeholder(&mut self, op: &Op) {
         debug_assert!(
-            matches!(op, Op::LoadResult(_, _) | Op::CallResult(_, _)),
+            matches!(
+                op,
+                Op::Pseudo(PseudoOp::LoadResult(_, _)) | Op::Pseudo(PseudoOp::CallResult(_, _))
+            ),
             "remove_result_placeholder only accepts LoadResult/CallResult"
         );
         let key = ENode {
@@ -276,7 +279,7 @@ impl EGraph {
                 continue;
             }
             for node in &self.class(cid).nodes {
-                if let Op::BlockParam(bid, pidx, _) = node.op {
+                if let Op::Pure(PureOp::BlockParam(bid, pidx, _)) = node.op {
                     map.insert((bid, pidx), cid);
                 }
             }
@@ -312,7 +315,7 @@ impl EGraph {
             class.nodes.clear();
         }
         for (mut node, owner) in old_memo {
-            if let Op::BlockParam(bid, idx, _) = &mut node.op {
+            if let Op::Pure(PureOp::BlockParam(bid, idx, _)) = &mut node.op {
                 match keep.get(bid) {
                     // A block this pass did not touch keeps its numbering.
                     None => {}
@@ -409,14 +412,14 @@ mod tests {
 
     fn make_iconst(g: &mut EGraph, val: i64, ty: Type) -> ClassId {
         g.add(ENode {
-            op: Op::Iconst(val, ty),
+            op: Op::Pure(PureOp::Iconst(val, ty)),
             children: smallvec![],
         })
     }
 
     fn make_add(g: &mut EGraph, a: ClassId, b: ClassId) -> ClassId {
         g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, b],
         })
     }

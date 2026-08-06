@@ -18,6 +18,7 @@ pub use vregset::VRegSet;
 use std::collections::BTreeMap;
 
 use crate::egraph::extract::VReg;
+use crate::ir::op::PseudoOp;
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::reg::{Reg, RegClass};
 
@@ -102,9 +103,9 @@ pub fn build_vreg_classes_from_insts(insts: &[ScheduledInst]) -> BTreeMap<VReg, 
         // their operand list says nothing about register class.
         if matches!(
             &inst.op,
-            crate::ir::op::Op::CallResult(_, _)
-                | crate::ir::op::Op::VoidCallBarrier
-                | crate::ir::op::Op::StoreBarrier
+            crate::ir::op::Op::Pseudo(PseudoOp::CallResult(_, _))
+                | crate::ir::op::Op::Pseudo(PseudoOp::VoidCallBarrier)
+                | crate::ir::op::Op::Pseudo(PseudoOp::StoreBarrier)
         ) {
             continue;
         }

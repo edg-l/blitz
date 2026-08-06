@@ -13,7 +13,7 @@ use crate::egraph::cost::CostModel;
 use crate::egraph::extract::{ClassVRegMap, ExtractionResult, extract_at_with_memo};
 use crate::ir::effectful::BlockId;
 use crate::ir::function::{BasicBlock, Function};
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 use crate::regalloc::global_liveness::GlobalLiveness;
 use crate::regalloc::spill::LOOP_DEPTH_PENALTY_BASE;
@@ -184,12 +184,12 @@ fn compute_local_liveness(
     // had never been asked to free.
     let shadow_end = schedule
         .iter()
-        .rposition(|inst| matches!(inst.op, Op::BlockParam(..)))
+        .rposition(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
         .map_or(0, |i| i + 1);
     if shadow_end > 0 {
         let params: VRegSet = schedule[..shadow_end]
             .iter()
-            .filter(|inst| matches!(inst.op, Op::BlockParam(..)))
+            .filter(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
             .map(|inst| inst.dst)
             .collect();
         for live in result[..shadow_end].iter_mut() {
@@ -349,7 +349,10 @@ fn choose_split_kind(
 fn collect_call_arg_vregs_set(schedule: &[ScheduledInst]) -> BTreeSet<VReg> {
     let mut set = BTreeSet::new();
     for inst in schedule {
-        if matches!(inst.op, Op::CallResult(..) | Op::VoidCallBarrier) {
+        if matches!(
+            inst.op,
+            Op::Pseudo(PseudoOp::CallResult(..)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
+        ) {
             for &op in &inst.operands {
                 set.insert(op);
             }
@@ -376,7 +379,10 @@ fn find_call_crossing_overshoot(
 ) -> Option<(usize, u32)> {
     let mut worst: Option<(usize, u32)> = None;
     for (inst_idx, inst) in schedule.iter().enumerate() {
-        if !matches!(inst.op, Op::CallResult(..) | Op::VoidCallBarrier) {
+        if !matches!(
+            inst.op,
+            Op::Pseudo(PseudoOp::CallResult(..)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
+        ) {
             continue;
         }
         // Count values of `class` live before this call instruction.
@@ -522,10 +528,10 @@ fn apply_splits_for_overshoot(
                 // Skip spill pseudo-ops (no result_type) and Flags-typed defs.
                 if matches!(
                     op,
-                    Op::SpillStore(_)
-                        | Op::SpillLoad(_)
-                        | Op::XmmSpillStore(_)
-                        | Op::XmmSpillLoad(_)
+                    Op::Pseudo(PseudoOp::SpillStore(_))
+                        | Op::Pseudo(PseudoOp::SpillLoad(_))
+                        | Op::Pseudo(PseudoOp::XmmSpillStore(_))
+                        | Op::Pseudo(PseudoOp::XmmSpillLoad(_))
                 ) {
                     return false;
                 }
@@ -1183,9 +1189,12 @@ fn detect_blockparam_slot_routing(
     // Build a set of blocks that contain calls.
     let call_blocks: BTreeSet<usize> = (0..n_blocks)
         .filter(|&bi| {
-            block_schedules[bi]
-                .iter()
-                .any(|i| matches!(i.op, Op::CallResult(..) | Op::VoidCallBarrier))
+            block_schedules[bi].iter().any(|i| {
+                matches!(
+                    i.op,
+                    Op::Pseudo(PseudoOp::CallResult(..)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
+                )
+            })
         })
         .collect();
 
@@ -1219,7 +1228,9 @@ fn detect_blockparam_slot_routing(
         .iter()
         .enumerate()
         .flat_map(|(bi, sched)| sched.iter().map(move |inst| (bi, inst)))
-        .filter(|(_, inst)| !matches!(inst.op, Op::BlockParam(..)) && !inst.op.has_no_result())
+        .filter(|(_, inst)| {
+            !matches!(inst.op, Op::Pure(PureOp::BlockParam(..))) && !inst.op.has_no_result()
+        })
         .map(|(bi, inst)| (inst.dst, bi))
         .collect();
 
@@ -1329,13 +1340,14 @@ fn detect_blockparam_slot_routing(
         }
         let shadow_end = block_schedules[block_idx]
             .iter()
-            .rposition(|inst| matches!(inst.op, Op::BlockParam(..)))
+            .rposition(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
             .map_or(0, |i| i + 1);
         let shadow_others: BTreeSet<VReg> = block_schedules[block_idx][..shadow_end]
             .iter()
             .flat_map(|inst| {
-                let dst = (!inst.op.has_no_result() && !matches!(inst.op, Op::BlockParam(..)))
-                    .then_some(inst.dst);
+                let dst = (!inst.op.has_no_result()
+                    && !matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
+                .then_some(inst.dst);
                 dst.into_iter().chain(inst.operands.iter().copied())
             })
             .filter(|v| !params.contains(v))
@@ -1599,8 +1611,8 @@ fn detect_blockparam_slot_routing(
 
                 let load_inst = ScheduledInst {
                     op: match group.reg_class {
-                        RegClass::XMM => Op::XmmSpillLoad(slot),
-                        RegClass::GPR => Op::SpillLoad(slot),
+                        RegClass::XMM => Op::Pseudo(PseudoOp::XmmSpillLoad(slot)),
+                        RegClass::GPR => Op::Pseudo(PseudoOp::SpillLoad(slot)),
                     },
                     dst: reload_vreg,
                     operands: vec![],
@@ -1670,14 +1682,14 @@ fn apply_cross_block_slot_spill(
     let slot = slots.alloc(SlotOwner::Splitter) as i64;
 
     let load_op = if reg_class == RegClass::XMM {
-        Op::XmmSpillLoad(slot)
+        Op::Pseudo(PseudoOp::XmmSpillLoad(slot))
     } else {
-        Op::SpillLoad(slot)
+        Op::Pseudo(PseudoOp::SpillLoad(slot))
     };
     let store_op = if reg_class == RegClass::XMM {
-        Op::XmmSpillStore(slot)
+        Op::Pseudo(PseudoOp::XmmSpillStore(slot))
     } else {
-        Op::SpillStore(slot)
+        Op::Pseudo(PseudoOp::SpillStore(slot))
     };
 
     // Find the def block and insert the SpillStore after the def.
@@ -1689,10 +1701,9 @@ fn apply_cross_block_slot_spill(
             // it, since a projection takes its value out of a register its
             // producer still owns and nothing may come between them.
             let mut store_at = def_pos + 1;
-            while block_sched
-                .get(store_at)
-                .is_some_and(|inst| matches!(inst.op, Op::Proj0 | Op::Proj1))
-            {
+            while block_sched.get(store_at).is_some_and(|inst| {
+                matches!(inst.op, Op::Pure(PureOp::Proj0) | Op::Pure(PureOp::Proj1))
+            }) {
                 store_at += 1;
             }
             let store_vreg = VReg(*next_vreg);
@@ -1844,9 +1855,9 @@ fn apply_split_planned(
 
             // Insert SpillStore after the def (or at beginning of block if no def here).
             let store_inst_op = if reg_class == RegClass::XMM {
-                Op::XmmSpillStore(slot)
+                Op::Pseudo(PseudoOp::XmmSpillStore(slot))
             } else {
-                Op::SpillStore(slot)
+                Op::Pseudo(PseudoOp::SpillStore(slot))
             };
 
             let store_pos = def_pos.map(|p| p + 1).unwrap_or(0);
@@ -1865,9 +1876,9 @@ fn apply_split_planned(
                 *next_vreg += 1;
 
                 let load_op = if reg_class == RegClass::XMM {
-                    Op::XmmSpillLoad(slot)
+                    Op::Pseudo(PseudoOp::XmmSpillLoad(slot))
                 } else {
-                    Op::SpillLoad(slot)
+                    Op::Pseudo(PseudoOp::SpillLoad(slot))
                 };
                 let load_inst = ScheduledInst {
                     op: load_op,
@@ -1943,7 +1954,10 @@ pub fn apply_plan_to(
         insertions.sort_by(|a, b| {
             b.0.cmp(&a.0).then_with(|| {
                 let is_load = |inst: &ScheduledInst| {
-                    matches!(inst.op, Op::SpillLoad(_) | Op::XmmSpillLoad(_))
+                    matches!(
+                        inst.op,
+                        Op::Pseudo(PseudoOp::SpillLoad(_)) | Op::Pseudo(PseudoOp::XmmSpillLoad(_))
+                    )
                 };
                 is_load(&b.1).cmp(&is_load(&a.1))
             })
@@ -2083,7 +2097,7 @@ mod tests {
 
     fn fconst_inst(dst: u32, val: f64) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Fconst(val.to_bits(), Type::F64),
+            op: Op::Pure(PureOp::Fconst(val.to_bits(), Type::F64)),
             dst: VReg(dst),
             operands: vec![],
         }
@@ -2091,7 +2105,7 @@ mod tests {
 
     fn addsd_inst(dst: u32, a: u32, b: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::X86Addsd,
+            op: Op::Mach(MachOp::X86Addsd),
             dst: VReg(dst),
             operands: vec![VReg(a), VReg(b)],
         }
@@ -2099,7 +2113,7 @@ mod tests {
 
     fn call_result_inst(dst: u32, args: Vec<u32>) -> ScheduledInst {
         ScheduledInst {
-            op: Op::CallResult(0, Type::F64),
+            op: Op::Pseudo(PseudoOp::CallResult(0, Type::F64)),
             dst: VReg(dst),
             operands: args.into_iter().map(VReg).collect(),
         }
@@ -2229,7 +2243,7 @@ mod tests {
 
         let mut egraph = EGraph::new();
         let fconst_cid = egraph.add(ENode {
-            op: Op::Fconst(2.5f64.to_bits(), Type::F64),
+            op: Op::Pure(PureOp::Fconst(2.5f64.to_bits(), Type::F64)),
             children: smallvec::smallvec![],
         });
         let cost_model = CostModel::new(OptGoal::Balanced);
@@ -2246,7 +2260,7 @@ mod tests {
             &extraction,
         );
         assert!(
-            matches!(kind, SplitKind::Remat(Op::Fconst(..))),
+            matches!(kind, SplitKind::Remat(Op::Pure(PureOp::Fconst(..)))),
             "expected Remat for Fconst, got {kind:?}"
         );
     }
@@ -2287,7 +2301,7 @@ mod tests {
 
         let mut egraph = EGraph::new();
         let fconst_cid = egraph.add(ENode {
-            op: Op::Fconst(1.0f64.to_bits(), Type::F64),
+            op: Op::Pure(PureOp::Fconst(1.0f64.to_bits(), Type::F64)),
             children: smallvec::smallvec![],
         });
         let cost_model = CostModel::new(OptGoal::Balanced);
@@ -2350,7 +2364,7 @@ mod tests {
         // Build EGraph: ClassId(0) = BlockParam(b1_id, 0, F64).
         let mut egraph = crate::egraph::EGraph::new();
         let param_cid = egraph.add(ENode {
-            op: Op::BlockParam(b1_id, 0, Type::F64),
+            op: Op::Pure(PureOp::BlockParam(b1_id, 0, Type::F64)),
             children: smallvec::smallvec![],
         });
 
@@ -2564,7 +2578,7 @@ mod tests {
         );
         for (_, inst) in insertions_in_block1 {
             assert!(
-                matches!(inst.op, Op::XmmSpillLoad(0)),
+                matches!(inst.op, Op::Pseudo(PseudoOp::XmmSpillLoad(0))),
                 "inserted inst must be XmmSpillLoad(0), got {:?}",
                 inst.op
             );
@@ -2616,7 +2630,7 @@ mod tests {
 
         let mut egraph = crate::egraph::EGraph::new();
         let param_cid = egraph.add(ENode {
-            op: Op::BlockParam(b2_id, 0, Type::F64),
+            op: Op::Pure(PureOp::BlockParam(b2_id, 0, Type::F64)),
             children: smallvec::smallvec![],
         });
 
@@ -2684,7 +2698,7 @@ mod tests {
 
     fn iconst_inst_gpr(dst: u32, val: i64) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Iconst(val, Type::I64),
+            op: Op::Pure(PureOp::Iconst(val, Type::I64)),
             dst: VReg(dst),
             operands: vec![],
         }
@@ -2692,7 +2706,7 @@ mod tests {
 
     fn proj0_inst(dst: u32, src: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             dst: VReg(dst),
             operands: vec![VReg(src)],
         }
@@ -2700,7 +2714,7 @@ mod tests {
 
     fn x86add_inst(dst: u32, a: u32, b: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::X86Add,
+            op: Op::Mach(MachOp::X86Add),
             dst: VReg(dst),
             operands: vec![VReg(a), VReg(b)],
         }
@@ -2708,7 +2722,7 @@ mod tests {
 
     fn void_call_barrier_inst(dst: u32, args: Vec<u32>) -> ScheduledInst {
         ScheduledInst {
-            op: Op::VoidCallBarrier,
+            op: Op::Pseudo(PseudoOp::VoidCallBarrier),
             dst: VReg(dst),
             operands: args.into_iter().map(VReg).collect(),
         }
@@ -2744,7 +2758,7 @@ mod tests {
         apply_split_planned(
             block_idx,
             VReg(0),
-            SplitKind::Remat(Op::Iconst(99, Type::I64)),
+            SplitKind::Remat(Op::Pure(PureOp::Iconst(99, Type::I64))),
             &schedule,
             RegClass::GPR,
             &mut next_vreg,
@@ -2761,7 +2775,7 @@ mod tests {
         // Two uses -> two fresh-copy insertions.
         let remat_copies: Vec<_> = insertions
             .iter()
-            .filter(|(_, i)| matches!(i.op, Op::Iconst(99, _)))
+            .filter(|(_, i)| matches!(i.op, Op::Pure(PureOp::Iconst(99, _))))
             .collect();
         assert_eq!(
             remat_copies.len(),
@@ -2796,7 +2810,7 @@ mod tests {
         use crate::regalloc::spill::is_rematerializable;
 
         let stack_addr_inst = ScheduledInst {
-            op: Op::StackAddr(5),
+            op: Op::Pseudo(PseudoOp::StackAddr(5)),
             dst: VReg(0),
             operands: vec![],
         };
@@ -2807,7 +2821,7 @@ mod tests {
 
         let mut egraph = EGraph::new();
         let cid = egraph.add(ENode {
-            op: Op::StackAddr(5),
+            op: Op::Pseudo(PseudoOp::StackAddr(5)),
             children: smallvec::smallvec![],
         });
         let cost_model = CostModel::new(OptGoal::Balanced);
@@ -2824,7 +2838,7 @@ mod tests {
             &extraction,
         );
         assert!(
-            matches!(kind, SplitKind::Remat(Op::StackAddr(5))),
+            matches!(kind, SplitKind::Remat(Op::Pseudo(PseudoOp::StackAddr(5)))),
             "choose_split_kind must select Remat for StackAddr, got {kind:?}"
         );
     }
@@ -2837,7 +2851,7 @@ mod tests {
 
         let mut egraph = EGraph::new();
         let iconst_cid = egraph.add(ENode {
-            op: Op::Iconst(42, Type::I64),
+            op: Op::Pure(PureOp::Iconst(42, Type::I64)),
             children: smallvec::smallvec![],
         });
         let cost_model = CostModel::new(OptGoal::Balanced);
@@ -2905,12 +2919,12 @@ mod tests {
         // No remat Iconst copies after the call.
         let call_pos = schedule
             .iter()
-            .position(|i| matches!(i.op, Op::VoidCallBarrier))
+            .position(|i| matches!(i.op, Op::Pseudo(PseudoOp::VoidCallBarrier)))
             .unwrap_or(usize::MAX);
         let remat_after_call = insertions
             .iter()
             .filter(|(pos, _)| *pos > call_pos)
-            .any(|(_, i)| matches!(i.op, Op::Iconst(42, _)));
+            .any(|(_, i)| matches!(i.op, Op::Pure(PureOp::Iconst(42, _))));
         assert!(
             !remat_after_call,
             "no remat Iconst copy may appear after the call for a call-arg VReg"
@@ -3203,7 +3217,7 @@ mod tests {
         // Build an EGraph with a classid for the Iconst.
         let mut egraph = EGraph::new();
         let iconst_cid = egraph.add(ENode {
-            op: Op::Iconst(42, Type::I64),
+            op: Op::Pure(PureOp::Iconst(42, Type::I64)),
             children: smallvec::smallvec![],
         });
         let cost_model = CostModel::new(OptGoal::Balanced);
@@ -3221,7 +3235,7 @@ mod tests {
             &extraction,
         );
         assert!(
-            matches!(kind, SplitKind::Remat(Op::Iconst(42, _))),
+            matches!(kind, SplitKind::Remat(Op::Pure(PureOp::Iconst(42, _)))),
             "Iconst cross-block value must use Remat, got {kind:?}"
         );
 
@@ -3259,7 +3273,7 @@ mod tests {
         // A fresh Iconst copy must be present.
         let fresh_iconst = insertions
             .iter()
-            .any(|(_, i)| matches!(i.op, Op::Iconst(42, _)));
+            .any(|(_, i)| matches!(i.op, Op::Pure(PureOp::Iconst(42, _))));
         assert!(
             fresh_iconst,
             "cross-block remat must emit a fresh Iconst in the use block"

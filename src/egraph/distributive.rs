@@ -2,7 +2,7 @@ use smallvec::smallvec;
 
 use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PureOp};
 
 /// Apply distributive factoring rules:
 /// - Add(Mul(a,b), Mul(a,c)) = Mul(a, Add(b,c))  (shared factor)
@@ -28,7 +28,11 @@ pub fn apply_distributive_rules(egraph: &mut EGraph, max_classes: usize) -> bool
 /// When `is_add` is false: Sub(Mul(a,b), Mul(a,c)) = Mul(a, Sub(b,c))
 fn apply_factoring(egraph: &mut EGraph, snaps: &[NodeSnap], is_add: bool) -> bool {
     let mut changed = false;
-    let target_op = if is_add { Op::Add } else { Op::Sub };
+    let target_op = if is_add {
+        Op::Pure(PureOp::Add)
+    } else {
+        Op::Pure(PureOp::Sub)
+    };
 
     for snap in snaps {
         if snap.op != target_op || snap.children.len() != 2 {
@@ -62,7 +66,7 @@ fn apply_factoring(egraph: &mut EGraph, snaps: &[NodeSnap], is_add: bool) -> boo
                         children: smallvec![other_lhs, other_rhs],
                     });
                     let factored = egraph.add(ENode {
-                        op: Op::Mul,
+                        op: Op::Pure(PureOp::Mul),
                         children: smallvec![factor, inner],
                     });
                     let factored_canon = egraph.unionfind.find_immutable(factored);
@@ -88,7 +92,7 @@ fn collect_mul_pairs(egraph: &EGraph, class_id: ClassId) -> Vec<(ClassId, ClassI
     let nodes = egraph.class(class_id).nodes.clone();
     let mut pairs = Vec::new();
     for node in &nodes {
-        if node.op == Op::Mul && node.children.len() == 2 {
+        if node.op == Op::Pure(PureOp::Mul) && node.children.len() == 2 {
             let a = egraph.unionfind.find_immutable(node.children[0]);
             let b = egraph.unionfind.find_immutable(node.children[1]);
             pairs.push((a, b));
@@ -137,14 +141,14 @@ mod tests {
 
     fn iconst(g: &mut EGraph, v: i64) -> ClassId {
         g.add(ENode {
-            op: Op::Iconst(v, Type::I64),
+            op: Op::Pure(PureOp::Iconst(v, Type::I64)),
             children: smallvec![],
         })
     }
 
     fn param(g: &mut EGraph, idx: u32) -> ClassId {
         g.add(ENode {
-            op: Op::Param(idx, Type::I64),
+            op: Op::Pure(PureOp::Param(idx, Type::I64)),
             children: smallvec![],
         })
     }
@@ -158,15 +162,15 @@ mod tests {
         let c = param(&mut g, 2);
 
         let mul_ab = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, b],
         });
         let mul_ac = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, c],
         });
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![mul_ab, mul_ac],
         });
 
@@ -177,11 +181,11 @@ mod tests {
 
         // Verify Add(Mul(a,b), Mul(a,c)) equals Mul(a, Add(b,c))
         let inner = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![b, c],
         });
         let factored = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, inner],
         });
         assert_eq!(
@@ -200,15 +204,15 @@ mod tests {
         let c = param(&mut g, 2);
 
         let mul_ba = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![b, a],
         });
         let mul_ca = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![c, a],
         });
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![mul_ba, mul_ca],
         });
 
@@ -219,11 +223,11 @@ mod tests {
 
         // Verify equivalence: the Add class contains Mul(a, Add(b, c))
         let inner = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![b, c],
         });
         let factored = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, inner],
         });
         assert_eq!(
@@ -242,15 +246,15 @@ mod tests {
         let c = param(&mut g, 2);
 
         let mul_ab = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, b],
         });
         let mul_ac = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, c],
         });
         let sub = g.add(ENode {
-            op: Op::Sub,
+            op: Op::Pure(PureOp::Sub),
             children: smallvec![mul_ab, mul_ac],
         });
 
@@ -260,11 +264,11 @@ mod tests {
         assert!(changed, "factoring should have fired for Sub");
 
         let inner = g.add(ENode {
-            op: Op::Sub,
+            op: Op::Pure(PureOp::Sub),
             children: smallvec![b, c],
         });
         let factored = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, inner],
         });
         assert_eq!(
@@ -284,15 +288,15 @@ mod tests {
         let d = param(&mut g, 3);
 
         let mul_ab = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, b],
         });
         let mul_cd = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![c, d],
         });
         let _add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![mul_ab, mul_cd],
         });
 
@@ -312,15 +316,15 @@ mod tests {
         let c = param(&mut g, 2);
 
         let mul_ab = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, b],
         });
         let mul_ca = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![c, a],
         });
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![mul_ab, mul_ca],
         });
 
@@ -330,11 +334,11 @@ mod tests {
         assert!(changed, "factoring should fire for cross-pairing");
 
         let inner = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![b, c],
         });
         let factored = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, inner],
         });
         assert_eq!(
@@ -352,15 +356,15 @@ mod tests {
         let b = param(&mut g, 1);
 
         let mul_aa = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, a],
         });
         let mul_ab = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, b],
         });
         let add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![mul_aa, mul_ab],
         });
 
@@ -371,11 +375,11 @@ mod tests {
 
         // a*a + a*b = a*(a+b)
         let inner = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, b],
         });
         let factored = g.add(ENode {
-            op: Op::Mul,
+            op: Op::Pure(PureOp::Mul),
             children: smallvec![a, inner],
         });
         assert_eq!(

@@ -59,12 +59,12 @@ pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &BTreeSet<VReg>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::op::Op;
+    use crate::ir::op::{MachOp, Op, PureOp};
     use crate::ir::types::Type;
 
     fn iconst_inst(dst: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Iconst(dst as i64, Type::I64),
+            op: Op::Pure(PureOp::Iconst(dst as i64, Type::I64)),
             dst: VReg(dst),
             operands: vec![],
         }
@@ -72,7 +72,7 @@ mod tests {
 
     fn add_inst(dst: u32, a: u32, b: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::X86Add,
+            op: Op::Mach(MachOp::X86Add),
             dst: VReg(dst),
             operands: vec![VReg(a), VReg(b)],
         }
@@ -80,7 +80,7 @@ mod tests {
 
     fn use_inst(dst: u32, src: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             dst: VReg(dst),
             operands: vec![VReg(src)],
         }

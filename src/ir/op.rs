@@ -12,12 +12,18 @@ impl ClassId {
     pub const NONE: ClassId = ClassId(u32::MAX);
 }
 
-/// Pure (side-effect-free) IR operations.
+/// Generic, target-independent IR operations.
 ///
-/// Every `Op` node has a fixed arity and a well-defined result type derivable
-/// from `result_type(&self, child_types)`.
+/// Every one of these **must be lowered by the e-graph's isel phases before
+/// extraction**: `cost.rs` prices the whole type at infinity and `lower.rs`
+/// rejects it, each with one arm rather than a list of variants that can drift
+/// apart. That drift is why this type exists -- the two lists were enumerated
+/// separately and had already disagreed about `Fcmp`.
+///
+/// Arity is fixed per variant and the result type is derivable from
+/// `Op::result_type`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Op {
+pub enum PureOp {
     // ── Arithmetic ───────────────────────────────────────────────────────────
     Add,
     Sub,
@@ -97,6 +103,18 @@ pub enum Op {
     /// Extract second element of a Pair.
     Proj1,
 
+    /// Addressing-mode node: `[base + index * scale + disp]`.
+    /// `scale` must be 1, 2, 4, or 8. Use `ClassId::NONE` for absent index.
+    Addr {
+        scale: u8,
+        disp: i32,
+    },
+}
+
+/// x86-64 machine operations: what instruction selection produces and what
+/// `lower.rs` turns into `MachInst`. One per instruction form the backend emits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MachOp {
     // ── x86-64 machine ops ───────────────────────────────────────────────────
     /// ALU ops that set flags — produce `Pair(childtype, Flags)`.
     X86Add,
@@ -172,13 +190,6 @@ pub enum Op {
     /// Set byte from flags — `setcc` → I8.
     X86Setcc(CondCode),
 
-    /// Addressing-mode node: `[base + index * scale + disp]`.
-    /// `scale` must be 1, 2, 4, or 8. Use `ClassId::NONE` for absent index.
-    Addr {
-        scale: u8,
-        disp: i32,
-    },
-
     // ── x86-64 FP machine ops ─────────────────────────────────────────────────
     /// `addsd dst, src` — f64 + f64 → f64.
     X86Addsd,
@@ -229,30 +240,6 @@ pub enum Op {
     /// `ucomiss` — compare two f32 values, sets flags; 2 children, result Flags.
     X86Ucomiss,
 
-    // ── Stack slot address ─────────────────────────────────────────────────────
-    /// Address of stack slot N. Zero children, returns I64.
-    /// Lowered to an LEA from the frame pointer.
-    StackAddr(u32),
-
-    // ── Global variable address ───────────────────────────────────────────────
-    /// Address of a global variable by name. Zero children, returns I64.
-    /// Lowered to LEA [RIP + symbol].
-    GlobalAddr(String),
-
-    // ── Load result placeholder ───────────────────────────────────────────────
-    /// Placeholder node representing the result of a Load effectful op.
-    /// The `u32` is a globally unique ID (from `FunctionBuilder::next_uid`) to
-    /// ensure each load gets a distinct e-class. Has no children.
-    LoadResult(u32, Type),
-
-    // ── Call result placeholder ───────────────────────────────────────────────
-    /// Placeholder node representing a return value of a Call effectful op.
-    /// The `u32` is a globally unique ID (from `FunctionBuilder::next_uid`);
-    /// the `Type` is the type of this return value.
-    ///
-    /// Has no children. Cost is zero (instruction emitted by effectful lowering).
-    CallResult(u32, Type),
-
     // ── x86-64 conversion ops ─────────────────────────────────────────────────
     /// `movsx` — sign-extend from `from` type to `to` type; 1 child.
     X86Movsx {
@@ -276,6 +263,39 @@ pub enum Op {
         from: Type,
         to: Type,
     },
+}
+
+/// Schedule-level pseudo operations.
+///
+/// These are neither IR nor machine instructions: they carry spill traffic,
+/// barrier liveness and terminator arguments through scheduling and allocation.
+/// Several define no value at all (`Op::has_no_result`), and a structure that
+/// assumes an op defines one is where every bug in this area has come from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PseudoOp {
+    // ── Stack slot address ─────────────────────────────────────────────────────
+    /// Address of stack slot N. Zero children, returns I64.
+    /// Lowered to an LEA from the frame pointer.
+    StackAddr(u32),
+
+    // ── Global variable address ───────────────────────────────────────────────
+    /// Address of a global variable by name. Zero children, returns I64.
+    /// Lowered to LEA [RIP + symbol].
+    GlobalAddr(String),
+
+    // ── Load result placeholder ───────────────────────────────────────────────
+    /// Placeholder node representing the result of a Load effectful op.
+    /// The `u32` is a globally unique ID (from `FunctionBuilder::next_uid`) to
+    /// ensure each load gets a distinct e-class. Has no children.
+    LoadResult(u32, Type),
+
+    // ── Call result placeholder ───────────────────────────────────────────────
+    /// Placeholder node representing a return value of a Call effectful op.
+    /// The `u32` is a globally unique ID (from `FunctionBuilder::next_uid`);
+    /// the `Type` is the type of this return value.
+    ///
+    /// Has no children. Cost is zero (instruction emitted by effectful lowering).
+    CallResult(u32, Type),
 
     // ── Spill/reload pseudo-ops ──────────────────────────────────────────────
     /// GPR spill store: operand[0] is the VReg to spill, i64 is the slot index.
@@ -325,6 +345,18 @@ pub enum Op {
     TerminatorArgs(Vec<u32>),
 }
 
+/// An operation, in whichever of the three worlds it belongs to.
+///
+/// The split is the point: a pure IR op cannot appear where a machine op is
+/// required, and a pseudo that defines no value cannot reach a structure that
+/// assumes one, without the type saying so.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Op {
+    Pure(PureOp),
+    Mach(MachOp),
+    Pseudo(PseudoOp),
+}
+
 impl Op {
     /// Derive the result type of this node given the types of its children.
     ///
@@ -332,7 +364,13 @@ impl Op {
     pub fn result_type(&self, child_types: &[Type]) -> Type {
         match self {
             // ── Arithmetic (binary, same integer type) ────────────────────────
-            Op::Add | Op::Sub | Op::Mul | Op::UDiv | Op::SDiv | Op::URem | Op::SRem => {
+            Op::Pure(PureOp::Add)
+            | Op::Pure(PureOp::Sub)
+            | Op::Pure(PureOp::Mul)
+            | Op::Pure(PureOp::UDiv)
+            | Op::Pure(PureOp::SDiv)
+            | Op::Pure(PureOp::URem)
+            | Op::Pure(PureOp::SRem) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 let t = &child_types[0];
                 assert!(
@@ -348,7 +386,7 @@ impl Op {
             }
 
             // ── Bitwise (binary, same integer type) ──────────────────────────
-            Op::And | Op::Or | Op::Xor => {
+            Op::Pure(PureOp::And) | Op::Pure(PureOp::Or) | Op::Pure(PureOp::Xor) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 let t = &child_types[0];
                 assert!(
@@ -364,7 +402,7 @@ impl Op {
             }
 
             // ── Shifts (two integer operands, may differ; result = first) ────
-            Op::Shl | Op::Shr | Op::Sar => {
+            Op::Pure(PureOp::Shl) | Op::Pure(PureOp::Shr) | Op::Pure(PureOp::Sar) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 assert!(
                     child_types[0].is_integer(),
@@ -380,7 +418,7 @@ impl Op {
             }
 
             // ── Conversion (1 child, target type embedded) ───────────────────
-            Op::Sext(target) => {
+            Op::Pure(PureOp::Sext(target)) => {
                 assert_eq!(child_types.len(), 1, "Sext requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
@@ -389,7 +427,7 @@ impl Op {
                 );
                 target.clone()
             }
-            Op::Zext(target) => {
+            Op::Pure(PureOp::Zext(target)) => {
                 assert_eq!(child_types.len(), 1, "Zext requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
@@ -398,7 +436,7 @@ impl Op {
                 );
                 target.clone()
             }
-            Op::Trunc(target) => {
+            Op::Pure(PureOp::Trunc(target)) => {
                 assert_eq!(child_types.len(), 1, "Trunc requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
@@ -407,47 +445,47 @@ impl Op {
                 );
                 target.clone()
             }
-            Op::Bitcast(target) => {
+            Op::Pure(PureOp::Bitcast(target)) => {
                 assert_eq!(child_types.len(), 1, "Bitcast requires 1 child");
                 target.clone()
             }
 
             // ── Constants (0 children) ────────────────────────────────────────
-            Op::Iconst(_val, ty) => {
+            Op::Pure(PureOp::Iconst(_val, ty)) => {
                 assert_eq!(child_types.len(), 0, "Iconst requires 0 children");
                 ty.clone()
             }
-            Op::Fconst(_, ty) => {
+            Op::Pure(PureOp::Fconst(_, ty)) => {
                 assert_eq!(child_types.len(), 0, "Fconst requires 0 children");
                 ty.clone()
             }
-            Op::Param(_idx, ty) => {
+            Op::Pure(PureOp::Param(_idx, ty)) => {
                 assert_eq!(child_types.len(), 0, "Param requires 0 children");
                 ty.clone()
             }
-            Op::BlockParam(_block_id, _param_idx, ty) => {
+            Op::Pure(PureOp::BlockParam(_block_id, _param_idx, ty)) => {
                 assert_eq!(child_types.len(), 0, "BlockParam requires 0 children");
                 ty.clone()
             }
-            Op::LoadResult(_uid, ty) => {
+            Op::Pseudo(PseudoOp::LoadResult(_uid, ty)) => {
                 assert_eq!(child_types.len(), 0, "LoadResult requires 0 children");
                 ty.clone()
             }
-            Op::CallResult(_idx, ty) => {
+            Op::Pseudo(PseudoOp::CallResult(_idx, ty)) => {
                 assert_eq!(child_types.len(), 0, "CallResult requires 0 children");
                 ty.clone()
             }
-            Op::StackAddr(_) => {
+            Op::Pseudo(PseudoOp::StackAddr(_)) => {
                 assert_eq!(child_types.len(), 0, "StackAddr requires 0 children");
                 Type::I64
             }
-            Op::GlobalAddr(_) => {
+            Op::Pseudo(PseudoOp::GlobalAddr(_)) => {
                 assert_eq!(child_types.len(), 0, "GlobalAddr requires 0 children");
                 Type::I64
             }
 
             // ── Comparison ────────────────────────────────────────────────────
-            Op::Icmp(_cc) => {
+            Op::Pure(PureOp::Icmp(_cc)) => {
                 assert_eq!(child_types.len(), 2, "Icmp requires 2 children");
                 let t = &child_types[0];
                 assert!(t.is_integer(), "Icmp requires integer operands, got {t:?}");
@@ -458,7 +496,7 @@ impl Op {
                 );
                 Type::Flags
             }
-            Op::Fcmp(_cc) => {
+            Op::Pure(PureOp::Fcmp(_cc)) => {
                 assert_eq!(child_types.len(), 2, "Fcmp requires 2 children");
                 let t = &child_types[0];
                 assert!(t.is_float(), "Fcmp requires float operands, got {t:?}");
@@ -471,7 +509,7 @@ impl Op {
             }
 
             // ── Float/int conversions ────────────────────────────────────────
-            Op::IntToFloat(target) => {
+            Op::Pure(PureOp::IntToFloat(target)) => {
                 assert_eq!(child_types.len(), 1, "IntToFloat requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
@@ -480,7 +518,7 @@ impl Op {
                 );
                 target.clone()
             }
-            Op::FloatToInt(target) => {
+            Op::Pure(PureOp::FloatToInt(target)) => {
                 assert_eq!(child_types.len(), 1, "FloatToInt requires 1 child");
                 assert!(
                     child_types[0].is_float(),
@@ -489,7 +527,7 @@ impl Op {
                 );
                 target.clone()
             }
-            Op::FloatExt => {
+            Op::Pure(PureOp::FloatExt) => {
                 assert_eq!(child_types.len(), 1, "FloatExt requires 1 child");
                 assert_eq!(
                     child_types[0],
@@ -499,7 +537,7 @@ impl Op {
                 );
                 Type::F64
             }
-            Op::FloatTrunc => {
+            Op::Pure(PureOp::FloatTrunc) => {
                 assert_eq!(child_types.len(), 1, "FloatTrunc requires 1 child");
                 assert_eq!(
                     child_types[0],
@@ -511,7 +549,10 @@ impl Op {
             }
 
             // ── FP binary ops ─────────────────────────────────────────────────
-            Op::Fadd | Op::Fsub | Op::Fmul | Op::Fdiv => {
+            Op::Pure(PureOp::Fadd)
+            | Op::Pure(PureOp::Fsub)
+            | Op::Pure(PureOp::Fmul)
+            | Op::Pure(PureOp::Fdiv) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 assert!(
                     child_types[0].is_float(),
@@ -525,7 +566,7 @@ impl Op {
                 );
                 child_types[0].clone()
             }
-            Op::Fsqrt => {
+            Op::Pure(PureOp::Fsqrt) => {
                 assert_eq!(child_types.len(), 1, "Fsqrt requires 1 child");
                 assert!(
                     child_types[0].is_float(),
@@ -536,7 +577,7 @@ impl Op {
             }
 
             // ── Select ────────────────────────────────────────────────────────
-            Op::Select => {
+            Op::Pure(PureOp::Select) => {
                 assert_eq!(
                     child_types.len(),
                     3,
@@ -556,14 +597,14 @@ impl Op {
             }
 
             // ── Projections ───────────────────────────────────────────────────
-            Op::Proj0 => {
+            Op::Pure(PureOp::Proj0) => {
                 assert_eq!(child_types.len(), 1, "Proj0 requires 1 child");
                 match &child_types[0] {
                     Type::Pair(a, _b) => *a.clone(),
                     other => panic!("Proj0 requires Pair child, got {other:?}"),
                 }
             }
-            Op::Proj1 => {
+            Op::Pure(PureOp::Proj1) => {
                 assert_eq!(child_types.len(), 1, "Proj1 requires 1 child");
                 match &child_types[0] {
                     Type::Pair(_a, b) => *b.clone(),
@@ -572,7 +613,11 @@ impl Op {
             }
 
             // ── x86 ALU (binary integer → Pair(childtype, Flags)) ────────────
-            Op::X86Add | Op::X86Sub | Op::X86And | Op::X86Or | Op::X86Xor => {
+            Op::Mach(MachOp::X86Add)
+            | Op::Mach(MachOp::X86Sub)
+            | Op::Mach(MachOp::X86And)
+            | Op::Mach(MachOp::X86Or)
+            | Op::Mach(MachOp::X86Xor) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 let t = &child_types[0];
                 assert!(
@@ -586,7 +631,7 @@ impl Op {
                 );
                 Type::Pair(Box::new(t.clone()), Box::new(Type::Flags))
             }
-            Op::X86Shl | Op::X86Sar | Op::X86Shr => {
+            Op::Mach(MachOp::X86Shl) | Op::Mach(MachOp::X86Sar) | Op::Mach(MachOp::X86Shr) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 assert!(
                     child_types[0].is_integer(),
@@ -602,7 +647,9 @@ impl Op {
             }
 
             // ── x86 immediate-form shifts (1 child → Pair(childtype, Flags)) ────
-            Op::X86ShlImm(_) | Op::X86ShrImm(_) | Op::X86SarImm(_) => {
+            Op::Mach(MachOp::X86ShlImm(_))
+            | Op::Mach(MachOp::X86ShrImm(_))
+            | Op::Mach(MachOp::X86SarImm(_)) => {
                 assert_eq!(child_types.len(), 1, "{self:?} requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
@@ -613,7 +660,7 @@ impl Op {
             }
 
             // ── x86 flag-only compare with immediate (1 child → Flags) ───────────
-            Op::X86CmpI { .. } => {
+            Op::Mach(MachOp::X86CmpI { .. }) => {
                 assert_eq!(child_types.len(), 1, "X86CmpI requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
@@ -624,7 +671,7 @@ impl Op {
             }
 
             // ── x86 LEA variants (I64, I64 → I64) ───────────────────────────
-            Op::X86Lea2 | Op::X86Lea3 { .. } => {
+            Op::Mach(MachOp::X86Lea2) | Op::Mach(MachOp::X86Lea3 { .. }) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 assert!(
                     matches!(child_types[0], Type::I32 | Type::I64),
@@ -637,7 +684,7 @@ impl Op {
                 );
                 child_types[0].clone()
             }
-            Op::X86Lea4 { .. } => {
+            Op::Mach(MachOp::X86Lea4 { .. }) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 assert!(
                     matches!(child_types[0], Type::I32 | Type::I64),
@@ -650,7 +697,7 @@ impl Op {
 
             // ── X86Idiv / X86Div (2 integer children → Pair(I64, I64)) ────────
             // Proj0 = quotient (RAX), Proj1 = remainder (RDX).
-            Op::X86Idiv(ty) | Op::X86Div(ty) => {
+            Op::Mach(MachOp::X86Idiv(ty)) | Op::Mach(MachOp::X86Div(ty)) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 let t = &child_types[0];
                 assert_eq!(
@@ -670,7 +717,7 @@ impl Op {
             }
 
             // ── X86Imul3 (2 children → Pair(childtype, Flags)) ──────────────
-            Op::X86Imul3 => {
+            Op::Mach(MachOp::X86Imul3) => {
                 assert_eq!(child_types.len(), 2, "X86Imul3 requires 2 children");
                 let t = &child_types[0];
                 assert!(
@@ -687,7 +734,7 @@ impl Op {
             }
 
             // ── X86Cmov (flags, t, f → t's type) ────────────────────────────
-            Op::X86Cmov(_cc) => {
+            Op::Mach(MachOp::X86Cmov(_cc)) => {
                 assert_eq!(
                     child_types.len(),
                     3,
@@ -707,14 +754,17 @@ impl Op {
             }
 
             // ── X86Setcc (flags → I8) ─────────────────────────────────────────
-            Op::X86Setcc(_cc) => {
+            Op::Mach(MachOp::X86Setcc(_cc)) => {
                 assert_eq!(child_types.len(), 1, "X86Setcc requires 1 child");
                 assert_eq!(child_types[0], Type::Flags, "X86Setcc child must be Flags");
                 Type::I8
             }
 
             // ── x86 FP binary ops (F64, F64 → F64) ──────────────────────────
-            Op::X86Addsd | Op::X86Subsd | Op::X86Mulsd | Op::X86Divsd => {
+            Op::Mach(MachOp::X86Addsd)
+            | Op::Mach(MachOp::X86Subsd)
+            | Op::Mach(MachOp::X86Mulsd)
+            | Op::Mach(MachOp::X86Divsd) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 assert_eq!(
                     child_types[0],
@@ -730,7 +780,7 @@ impl Op {
                 );
                 Type::F64
             }
-            Op::X86Sqrtsd => {
+            Op::Mach(MachOp::X86Sqrtsd) => {
                 assert_eq!(child_types.len(), 1, "X86Sqrtsd requires 1 child");
                 assert_eq!(
                     child_types[0],
@@ -742,7 +792,10 @@ impl Op {
             }
 
             // ── x86 FP binary ops (F32, F32 → F32) ──────────────────────────
-            Op::X86Addss | Op::X86Subss | Op::X86Mulss | Op::X86Divss => {
+            Op::Mach(MachOp::X86Addss)
+            | Op::Mach(MachOp::X86Subss)
+            | Op::Mach(MachOp::X86Mulss)
+            | Op::Mach(MachOp::X86Divss) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 assert_eq!(
                     child_types[0],
@@ -758,7 +811,7 @@ impl Op {
                 );
                 Type::F32
             }
-            Op::X86Sqrtss => {
+            Op::Mach(MachOp::X86Sqrtss) => {
                 assert_eq!(child_types.len(), 1, "X86Sqrtss requires 1 child");
                 assert_eq!(
                     child_types[0],
@@ -770,7 +823,7 @@ impl Op {
             }
 
             // ── x86 FP conversion ops ────────────────────────────────────────
-            Op::X86Cvtsi2sd(src_ty) => {
+            Op::Mach(MachOp::X86Cvtsi2sd(src_ty)) => {
                 assert_eq!(child_types.len(), 1, "X86Cvtsi2sd requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
@@ -783,7 +836,7 @@ impl Op {
                 );
                 Type::F64
             }
-            Op::X86Cvtsi2ss(src_ty) => {
+            Op::Mach(MachOp::X86Cvtsi2ss(src_ty)) => {
                 assert_eq!(child_types.len(), 1, "X86Cvtsi2ss requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
@@ -796,7 +849,7 @@ impl Op {
                 );
                 Type::F32
             }
-            Op::X86Cvttsd2si(target) => {
+            Op::Mach(MachOp::X86Cvttsd2si(target)) => {
                 assert_eq!(child_types.len(), 1, "X86Cvttsd2si requires 1 child");
                 assert_eq!(
                     child_types[0],
@@ -806,7 +859,7 @@ impl Op {
                 );
                 target.clone()
             }
-            Op::X86Cvttss2si(target) => {
+            Op::Mach(MachOp::X86Cvttss2si(target)) => {
                 assert_eq!(child_types.len(), 1, "X86Cvttss2si requires 1 child");
                 assert_eq!(
                     child_types[0],
@@ -816,7 +869,7 @@ impl Op {
                 );
                 target.clone()
             }
-            Op::X86Cvtsd2ss => {
+            Op::Mach(MachOp::X86Cvtsd2ss) => {
                 assert_eq!(child_types.len(), 1, "X86Cvtsd2ss requires 1 child");
                 assert_eq!(
                     child_types[0],
@@ -826,7 +879,7 @@ impl Op {
                 );
                 Type::F32
             }
-            Op::X86Cvtss2sd => {
+            Op::Mach(MachOp::X86Cvtss2sd) => {
                 assert_eq!(child_types.len(), 1, "X86Cvtss2sd requires 1 child");
                 assert_eq!(
                     child_types[0],
@@ -838,7 +891,7 @@ impl Op {
             }
 
             // ── x86 FP comparison ops ────────────────────────────────────────
-            Op::X86Ucomisd => {
+            Op::Mach(MachOp::X86Ucomisd) => {
                 assert_eq!(child_types.len(), 2, "X86Ucomisd requires 2 children");
                 assert_eq!(
                     child_types[0],
@@ -854,7 +907,7 @@ impl Op {
                 );
                 Type::Flags
             }
-            Op::X86Ucomiss => {
+            Op::Mach(MachOp::X86Ucomiss) => {
                 assert_eq!(child_types.len(), 2, "X86Ucomiss requires 2 children");
                 assert_eq!(
                     child_types[0],
@@ -872,7 +925,7 @@ impl Op {
             }
 
             // ── Addr (base I64, index I64 → I64) ─────────────────────────────
-            Op::Addr { .. } => {
+            Op::Pure(PureOp::Addr { .. }) => {
                 assert_eq!(
                     child_types.len(),
                     2,
@@ -884,7 +937,7 @@ impl Op {
             }
 
             // ── x86-64 conversion ops (1 child → to type) ────────────────────
-            Op::X86Movsx { from, to } => {
+            Op::Mach(MachOp::X86Movsx { from, to }) => {
                 assert_eq!(child_types.len(), 1, "X86Movsx requires 1 child");
                 assert_eq!(
                     &child_types[0], from,
@@ -893,7 +946,7 @@ impl Op {
                 );
                 to.clone()
             }
-            Op::X86Movzx { from, to } => {
+            Op::Mach(MachOp::X86Movzx { from, to }) => {
                 assert_eq!(child_types.len(), 1, "X86Movzx requires 1 child");
                 assert_eq!(
                     &child_types[0], from,
@@ -902,7 +955,7 @@ impl Op {
                 );
                 to.clone()
             }
-            Op::X86Trunc { from, to } => {
+            Op::Mach(MachOp::X86Trunc { from, to }) => {
                 assert_eq!(child_types.len(), 1, "X86Trunc requires 1 child");
                 assert_eq!(
                     &child_types[0], from,
@@ -911,7 +964,7 @@ impl Op {
                 );
                 to.clone()
             }
-            Op::X86Bitcast { from, to } => {
+            Op::Mach(MachOp::X86Bitcast { from, to }) => {
                 assert_eq!(child_types.len(), 1, "X86Bitcast requires 1 child");
                 assert_eq!(
                     &child_types[0], from,
@@ -923,11 +976,16 @@ impl Op {
 
             // Spill pseudo-ops are never type-checked via result_type; they are
             // internal markers consumed by the lowering pass.
-            Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
+            Op::Pseudo(PseudoOp::SpillStore(_))
+            | Op::Pseudo(PseudoOp::SpillLoad(_))
+            | Op::Pseudo(PseudoOp::XmmSpillStore(_))
+            | Op::Pseudo(PseudoOp::XmmSpillLoad(_)) => {
                 unreachable!("spill pseudo-ops have no result_type")
             }
 
-            Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_) => Type::I64,
+            Op::Pseudo(PseudoOp::StoreBarrier)
+            | Op::Pseudo(PseudoOp::VoidCallBarrier)
+            | Op::Pseudo(PseudoOp::TerminatorArgs(_)) => Type::I64,
         }
     }
 
@@ -943,13 +1001,13 @@ impl Op {
     pub fn has_no_result(&self) -> bool {
         matches!(
             self,
-            Op::StoreBarrier
-                | Op::VoidCallBarrier
-                | Op::TerminatorArgs(_)
+            Op::Pseudo(PseudoOp::StoreBarrier)
+                | Op::Pseudo(PseudoOp::VoidCallBarrier)
+                | Op::Pseudo(PseudoOp::TerminatorArgs(_))
                 // A spill store writes memory. Its consumers read the slot back
                 // through a `SpillLoad`, never its `dst`.
-                | Op::SpillStore(_)
-                | Op::XmmSpillStore(_)
+                | Op::Pseudo(PseudoOp::SpillStore(_))
+                | Op::Pseudo(PseudoOp::XmmSpillStore(_))
         )
     }
 
@@ -957,35 +1015,35 @@ impl Op {
     pub fn is_fp_op(&self) -> bool {
         match self {
             // F64 arithmetic
-            Op::X86Addsd
-            | Op::X86Subsd
-            | Op::X86Mulsd
-            | Op::X86Divsd
-            | Op::X86Sqrtsd
+            Op::Mach(MachOp::X86Addsd)
+            | Op::Mach(MachOp::X86Subsd)
+            | Op::Mach(MachOp::X86Mulsd)
+            | Op::Mach(MachOp::X86Divsd)
+            | Op::Mach(MachOp::X86Sqrtsd)
             // F32 arithmetic
-            | Op::X86Addss
-            | Op::X86Subss
-            | Op::X86Mulss
-            | Op::X86Divss
-            | Op::X86Sqrtss
+            | Op::Mach(MachOp::X86Addss)
+            | Op::Mach(MachOp::X86Subss)
+            | Op::Mach(MachOp::X86Mulss)
+            | Op::Mach(MachOp::X86Divss)
+            | Op::Mach(MachOp::X86Sqrtss)
             // Conversions that produce XMM results
-            | Op::X86Cvtsi2sd(_)
-            | Op::X86Cvtsi2ss(_)
-            | Op::X86Cvtsd2ss
-            | Op::X86Cvtss2sd
+            | Op::Mach(MachOp::X86Cvtsi2sd(_))
+            | Op::Mach(MachOp::X86Cvtsi2ss(_))
+            | Op::Mach(MachOp::X86Cvtsd2ss)
+            | Op::Mach(MachOp::X86Cvtss2sd)
             // FP constants
-            | Op::Fconst(_, _)
+            | Op::Pure(PureOp::Fconst(_, _))
             // XMM spill reloads produce XMM values
-            | Op::XmmSpillLoad(_) => true,
+            | Op::Pseudo(PseudoOp::XmmSpillLoad(_)) => true,
             // Block parameters (phi destinations) with float types
-            Op::BlockParam(_, _, ty) => ty.is_float(),
+            Op::Pure(PureOp::BlockParam(_, _, ty)) => ty.is_float(),
             // Call results with float return types
-            Op::CallResult(_, ty) => ty.is_float(),
+            Op::Pseudo(PseudoOp::CallResult(_, ty)) => ty.is_float(),
             // Load results with float types
-            Op::LoadResult(_, ty) => ty.is_float(),
+            Op::Pseudo(PseudoOp::LoadResult(_, ty)) => ty.is_float(),
             // Function parameters with float types
-            Op::Param(_, ty) => ty.is_float(),
-            Op::X86Bitcast { to, .. } => matches!(to, Type::F32 | Type::F64),
+            Op::Pure(PureOp::Param(_, ty)) => ty.is_float(),
+            Op::Mach(MachOp::X86Bitcast { to, .. }) => matches!(to, Type::F32 | Type::F64),
             // X86Cvttsd2si / X86Cvttss2si produce GPR (not XMM)
             // X86Ucomisd / X86Ucomiss produce flags (not XMM)
             _ => false,
@@ -1006,13 +1064,13 @@ impl Op {
     pub fn has_cross_class_operands(&self) -> bool {
         matches!(
             self,
-            Op::X86Cvtsi2sd(_)
-                | Op::X86Cvtsi2ss(_)
-                | Op::X86Cvttsd2si(_)
-                | Op::X86Cvttss2si(_)
-                | Op::X86Ucomisd
-                | Op::X86Ucomiss
-                | Op::X86Bitcast { .. }
+            Op::Mach(MachOp::X86Cvtsi2sd(_))
+                | Op::Mach(MachOp::X86Cvtsi2ss(_))
+                | Op::Mach(MachOp::X86Cvttsd2si(_))
+                | Op::Mach(MachOp::X86Cvttss2si(_))
+                | Op::Mach(MachOp::X86Ucomisd)
+                | Op::Mach(MachOp::X86Ucomiss)
+                | Op::Mach(MachOp::X86Bitcast { .. })
         )
     }
 
@@ -1023,13 +1081,14 @@ impl Op {
     pub fn operand_reg_class(&self) -> RegClass {
         match self {
             // XMM result, GPR source.
-            Op::X86Cvtsi2sd(_) | Op::X86Cvtsi2ss(_) => RegClass::GPR,
+            Op::Mach(MachOp::X86Cvtsi2sd(_)) | Op::Mach(MachOp::X86Cvtsi2ss(_)) => RegClass::GPR,
             // GPR or flags result, XMM source.
-            Op::X86Cvttsd2si(_) | Op::X86Cvttss2si(_) | Op::X86Ucomisd | Op::X86Ucomiss => {
-                RegClass::XMM
-            }
+            Op::Mach(MachOp::X86Cvttsd2si(_))
+            | Op::Mach(MachOp::X86Cvttss2si(_))
+            | Op::Mach(MachOp::X86Ucomisd)
+            | Op::Mach(MachOp::X86Ucomiss) => RegClass::XMM,
             // movq between the classes: the source is whichever side `from` is.
-            Op::X86Bitcast { from, .. } => {
+            Op::Mach(MachOp::X86Bitcast { from, .. }) => {
                 if from.is_float() {
                     RegClass::XMM
                 } else {
@@ -1040,7 +1099,7 @@ impl Op {
             // base and index the barrier repeats for liveness -- so they are
             // GPR however the loaded value is classed. This is the one op whose
             // result is FP while no operand of it is.
-            Op::LoadResult(_, _) => RegClass::GPR,
+            Op::Pseudo(PseudoOp::LoadResult(_, _)) => RegClass::GPR,
             _ if self.is_fp_op() => RegClass::XMM,
             _ => RegClass::GPR,
         }
@@ -1062,7 +1121,10 @@ impl Op {
     pub fn is_rematerializable(&self) -> bool {
         matches!(
             self,
-            Op::Iconst(_, _) | Op::Fconst(_, _) | Op::StackAddr(_) | Op::GlobalAddr(_)
+            Op::Pure(PureOp::Iconst(_, _))
+                | Op::Pure(PureOp::Fconst(_, _))
+                | Op::Pseudo(PseudoOp::StackAddr(_))
+                | Op::Pseudo(PseudoOp::GlobalAddr(_))
         )
     }
 }
@@ -1077,114 +1139,159 @@ mod tests {
 
     #[test]
     fn add_i32() {
-        let ty = Op::Add.result_type(&[Type::I32, Type::I32]);
+        let ty = Op::Pure(PureOp::Add).result_type(&[Type::I32, Type::I32]);
         assert_eq!(ty, Type::I32);
     }
 
     #[test]
     fn add_i64() {
-        let ty = Op::Add.result_type(&[Type::I64, Type::I64]);
+        let ty = Op::Pure(PureOp::Add).result_type(&[Type::I64, Type::I64]);
         assert_eq!(ty, Type::I64);
     }
 
     #[test]
     #[should_panic]
     fn add_type_mismatch() {
-        Op::Add.result_type(&[Type::I32, Type::I64]);
+        Op::Pure(PureOp::Add).result_type(&[Type::I32, Type::I64]);
     }
 
     #[test]
     #[should_panic]
     fn add_float_rejected() {
-        Op::Add.result_type(&[Type::F64, Type::F64]);
+        Op::Pure(PureOp::Add).result_type(&[Type::F64, Type::F64]);
     }
 
     #[test]
     fn sub_i64() {
-        assert_eq!(Op::Sub.result_type(&[Type::I64, Type::I64]), Type::I64);
+        assert_eq!(
+            Op::Pure(PureOp::Sub).result_type(&[Type::I64, Type::I64]),
+            Type::I64
+        );
     }
 
     #[test]
     fn mul_i16() {
-        assert_eq!(Op::Mul.result_type(&[Type::I16, Type::I16]), Type::I16);
+        assert_eq!(
+            Op::Pure(PureOp::Mul).result_type(&[Type::I16, Type::I16]),
+            Type::I16
+        );
     }
 
     #[test]
     fn udiv_i32() {
-        assert_eq!(Op::UDiv.result_type(&[Type::I32, Type::I32]), Type::I32);
+        assert_eq!(
+            Op::Pure(PureOp::UDiv).result_type(&[Type::I32, Type::I32]),
+            Type::I32
+        );
     }
 
     #[test]
     fn urem_i8() {
-        assert_eq!(Op::URem.result_type(&[Type::I8, Type::I8]), Type::I8);
+        assert_eq!(
+            Op::Pure(PureOp::URem).result_type(&[Type::I8, Type::I8]),
+            Type::I8
+        );
     }
 
     // ── Bitwise ───────────────────────────────────────────────────────────────
 
     #[test]
     fn and_i64() {
-        assert_eq!(Op::And.result_type(&[Type::I64, Type::I64]), Type::I64);
+        assert_eq!(
+            Op::Pure(PureOp::And).result_type(&[Type::I64, Type::I64]),
+            Type::I64
+        );
     }
 
     #[test]
     fn xor_i32() {
-        assert_eq!(Op::Xor.result_type(&[Type::I32, Type::I32]), Type::I32);
+        assert_eq!(
+            Op::Pure(PureOp::Xor).result_type(&[Type::I32, Type::I32]),
+            Type::I32
+        );
     }
 
     #[test]
     fn shl_different_widths() {
         // shift amount can differ from value type
-        let ty = Op::Shl.result_type(&[Type::I64, Type::I8]);
+        let ty = Op::Pure(PureOp::Shl).result_type(&[Type::I64, Type::I8]);
         assert_eq!(ty, Type::I64);
     }
 
     #[test]
     fn sar_i32() {
-        assert_eq!(Op::Sar.result_type(&[Type::I32, Type::I32]), Type::I32);
+        assert_eq!(
+            Op::Pure(PureOp::Sar).result_type(&[Type::I32, Type::I32]),
+            Type::I32
+        );
     }
 
     // ── Conversion ────────────────────────────────────────────────────────────
 
     #[test]
     fn sext_i32_to_i64() {
-        assert_eq!(Op::Sext(Type::I64).result_type(&[Type::I32]), Type::I64);
+        assert_eq!(
+            Op::Pure(PureOp::Sext(Type::I64)).result_type(&[Type::I32]),
+            Type::I64
+        );
     }
 
     #[test]
     fn zext_i8_to_i64() {
-        assert_eq!(Op::Zext(Type::I64).result_type(&[Type::I8]), Type::I64);
+        assert_eq!(
+            Op::Pure(PureOp::Zext(Type::I64)).result_type(&[Type::I8]),
+            Type::I64
+        );
     }
 
     #[test]
     fn trunc_i64_to_i32() {
-        assert_eq!(Op::Trunc(Type::I32).result_type(&[Type::I64]), Type::I32);
+        assert_eq!(
+            Op::Pure(PureOp::Trunc(Type::I32)).result_type(&[Type::I64]),
+            Type::I32
+        );
     }
 
     #[test]
     fn bitcast_i64_to_f64() {
-        assert_eq!(Op::Bitcast(Type::F64).result_type(&[Type::I64]), Type::F64);
+        assert_eq!(
+            Op::Pure(PureOp::Bitcast(Type::F64)).result_type(&[Type::I64]),
+            Type::F64
+        );
     }
 
     // ── Constants ─────────────────────────────────────────────────────────────
 
     #[test]
     fn iconst_i64() {
-        assert_eq!(Op::Iconst(42, Type::I64).result_type(&[]), Type::I64);
+        assert_eq!(
+            Op::Pure(PureOp::Iconst(42, Type::I64)).result_type(&[]),
+            Type::I64
+        );
     }
 
     #[test]
     fn iconst_i32() {
-        assert_eq!(Op::Iconst(0, Type::I32).result_type(&[]), Type::I32);
+        assert_eq!(
+            Op::Pure(PureOp::Iconst(0, Type::I32)).result_type(&[]),
+            Type::I32
+        );
     }
 
     #[test]
     fn fconst_is_f64() {
-        assert_eq!(Op::Fconst(0u64, Type::F64).result_type(&[]), Type::F64);
+        assert_eq!(
+            Op::Pure(PureOp::Fconst(0u64, Type::F64)).result_type(&[]),
+            Type::F64
+        );
     }
 
     #[test]
     fn fconst_is_f32() {
-        assert_eq!(Op::Fconst(0u64, Type::F32).result_type(&[]), Type::F32);
+        assert_eq!(
+            Op::Pure(PureOp::Fconst(0u64, Type::F32)).result_type(&[]),
+            Type::F32
+        );
     }
 
     // ── Comparison ────────────────────────────────────────────────────────────
@@ -1192,7 +1299,7 @@ mod tests {
     #[test]
     fn icmp_produces_flags() {
         assert_eq!(
-            Op::Icmp(CondCode::Slt).result_type(&[Type::I64, Type::I64]),
+            Op::Pure(PureOp::Icmp(CondCode::Slt)).result_type(&[Type::I64, Type::I64]),
             Type::Flags
         );
     }
@@ -1200,7 +1307,7 @@ mod tests {
     #[test]
     fn icmp_eq_i32() {
         assert_eq!(
-            Op::Icmp(CondCode::Eq).result_type(&[Type::I32, Type::I32]),
+            Op::Pure(PureOp::Icmp(CondCode::Eq)).result_type(&[Type::I32, Type::I32]),
             Type::Flags
         );
     }
@@ -1208,39 +1315,42 @@ mod tests {
     #[test]
     #[should_panic]
     fn icmp_type_mismatch() {
-        Op::Icmp(CondCode::Eq).result_type(&[Type::I32, Type::I64]);
+        Op::Pure(PureOp::Icmp(CondCode::Eq)).result_type(&[Type::I32, Type::I64]);
     }
 
     // ── FP ops ────────────────────────────────────────────────────────────────
 
     #[test]
     fn fadd_f64() {
-        assert_eq!(Op::Fadd.result_type(&[Type::F64, Type::F64]), Type::F64);
+        assert_eq!(
+            Op::Pure(PureOp::Fadd).result_type(&[Type::F64, Type::F64]),
+            Type::F64
+        );
     }
 
     #[test]
     fn fsqrt_f64() {
-        assert_eq!(Op::Fsqrt.result_type(&[Type::F64]), Type::F64);
+        assert_eq!(Op::Pure(PureOp::Fsqrt).result_type(&[Type::F64]), Type::F64);
     }
 
     #[test]
     #[should_panic]
     fn fadd_wrong_type() {
-        Op::Fadd.result_type(&[Type::I64, Type::I64]);
+        Op::Pure(PureOp::Fadd).result_type(&[Type::I64, Type::I64]);
     }
 
     // ── Select ────────────────────────────────────────────────────────────────
 
     #[test]
     fn select_i64() {
-        let ty = Op::Select.result_type(&[Type::Flags, Type::I64, Type::I64]);
+        let ty = Op::Pure(PureOp::Select).result_type(&[Type::Flags, Type::I64, Type::I64]);
         assert_eq!(ty, Type::I64);
     }
 
     #[test]
     #[should_panic]
     fn select_branch_mismatch() {
-        Op::Select.result_type(&[Type::Flags, Type::I32, Type::I64]);
+        Op::Pure(PureOp::Select).result_type(&[Type::Flags, Type::I32, Type::I64]);
     }
 
     // ── Projections ───────────────────────────────────────────────────────────
@@ -1248,56 +1358,59 @@ mod tests {
     #[test]
     fn proj0_pair() {
         let pair = Type::Pair(Box::new(Type::I64), Box::new(Type::Flags));
-        assert_eq!(Op::Proj0.result_type(&[pair]), Type::I64);
+        assert_eq!(Op::Pure(PureOp::Proj0).result_type(&[pair]), Type::I64);
     }
 
     #[test]
     fn proj1_pair() {
         let pair = Type::Pair(Box::new(Type::I64), Box::new(Type::Flags));
-        assert_eq!(Op::Proj1.result_type(&[pair]), Type::Flags);
+        assert_eq!(Op::Pure(PureOp::Proj1).result_type(&[pair]), Type::Flags);
     }
 
     #[test]
     #[should_panic]
     fn proj0_non_pair() {
-        Op::Proj0.result_type(&[Type::I64]);
+        Op::Pure(PureOp::Proj0).result_type(&[Type::I64]);
     }
 
     // ── x86-64 machine ops ────────────────────────────────────────────────────
 
     #[test]
     fn x86add_produces_pair() {
-        let ty = Op::X86Add.result_type(&[Type::I64, Type::I64]);
+        let ty = Op::Mach(MachOp::X86Add).result_type(&[Type::I64, Type::I64]);
         assert_eq!(ty, Type::Pair(Box::new(Type::I64), Box::new(Type::Flags)));
     }
 
     #[test]
     fn x86sub_produces_pair() {
-        let ty = Op::X86Sub.result_type(&[Type::I64, Type::I64]);
+        let ty = Op::Mach(MachOp::X86Sub).result_type(&[Type::I64, Type::I64]);
         assert_eq!(ty, Type::Pair(Box::new(Type::I64), Box::new(Type::Flags)));
     }
 
     #[test]
     fn x86and_i32() {
-        let ty = Op::X86And.result_type(&[Type::I32, Type::I32]);
+        let ty = Op::Mach(MachOp::X86And).result_type(&[Type::I32, Type::I32]);
         assert_eq!(ty, Type::Pair(Box::new(Type::I32), Box::new(Type::Flags)));
     }
 
     #[test]
     fn x86shl_produces_pair() {
-        let ty = Op::X86Shl.result_type(&[Type::I64, Type::I8]);
+        let ty = Op::Mach(MachOp::X86Shl).result_type(&[Type::I64, Type::I8]);
         assert_eq!(ty, Type::Pair(Box::new(Type::I64), Box::new(Type::Flags)));
     }
 
     #[test]
     fn x86lea2_i64() {
-        assert_eq!(Op::X86Lea2.result_type(&[Type::I64, Type::I64]), Type::I64);
+        assert_eq!(
+            Op::Mach(MachOp::X86Lea2).result_type(&[Type::I64, Type::I64]),
+            Type::I64
+        );
     }
 
     #[test]
     fn x86lea3_i64() {
         assert_eq!(
-            Op::X86Lea3 { scale: 2 }.result_type(&[Type::I64, Type::I64]),
+            Op::Mach(MachOp::X86Lea3 { scale: 2 }).result_type(&[Type::I64, Type::I64]),
             Type::I64
         );
     }
@@ -1305,27 +1418,31 @@ mod tests {
     #[test]
     fn x86lea4_i64() {
         assert_eq!(
-            Op::X86Lea4 { scale: 4, disp: 16 }.result_type(&[Type::I64, Type::I64]),
+            Op::Mach(MachOp::X86Lea4 { scale: 4, disp: 16 }).result_type(&[Type::I64, Type::I64]),
             Type::I64
         );
     }
 
     #[test]
     fn x86imul3_pair() {
-        let ty = Op::X86Imul3.result_type(&[Type::I64, Type::I64]);
+        let ty = Op::Mach(MachOp::X86Imul3).result_type(&[Type::I64, Type::I64]);
         assert_eq!(ty, Type::Pair(Box::new(Type::I64), Box::new(Type::Flags)));
     }
 
     #[test]
     fn x86cmov_i64() {
-        let ty = Op::X86Cmov(CondCode::Ne).result_type(&[Type::Flags, Type::I64, Type::I64]);
+        let ty = Op::Mach(MachOp::X86Cmov(CondCode::Ne)).result_type(&[
+            Type::Flags,
+            Type::I64,
+            Type::I64,
+        ]);
         assert_eq!(ty, Type::I64);
     }
 
     #[test]
     fn x86setcc_i8() {
         assert_eq!(
-            Op::X86Setcc(CondCode::Eq).result_type(&[Type::Flags]),
+            Op::Mach(MachOp::X86Setcc(CondCode::Eq)).result_type(&[Type::Flags]),
             Type::I8
         );
     }
@@ -1333,7 +1450,7 @@ mod tests {
     #[test]
     fn addr_i64() {
         assert_eq!(
-            Op::Addr { scale: 4, disp: 8 }.result_type(&[Type::I64, Type::I64]),
+            Op::Pure(PureOp::Addr { scale: 4, disp: 8 }).result_type(&[Type::I64, Type::I64]),
             Type::I64
         );
     }
@@ -1341,13 +1458,13 @@ mod tests {
     #[test]
     #[should_panic]
     fn x86add_flags_rejected() {
-        Op::X86Add.result_type(&[Type::Flags, Type::Flags]);
+        Op::Mach(MachOp::X86Add).result_type(&[Type::Flags, Type::Flags]);
     }
 
     #[test]
     #[should_panic]
     fn x86cmov_wrong_flags() {
-        Op::X86Cmov(CondCode::Eq).result_type(&[Type::I64, Type::I64, Type::I64]);
+        Op::Mach(MachOp::X86Cmov(CondCode::Eq)).result_type(&[Type::I64, Type::I64, Type::I64]);
     }
 
     // ── ClassId sentinel ──────────────────────────────────────────────────────

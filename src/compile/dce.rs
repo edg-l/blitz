@@ -5,7 +5,7 @@ use crate::egraph::egraph::EGraph;
 use crate::egraph::extract::ExtractionResult;
 use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp};
 use crate::ir::function::Function;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, Op, PureOp};
 
 /// Remove blocks not reachable from the entry block via CFG edges.
 ///
@@ -140,7 +140,7 @@ fn try_eval_branch_cond(
 ) -> Option<bool> {
     let class = &egraph.classes[cond_class.0 as usize];
     for node in &class.nodes {
-        if let Op::Icmp(_) = &node.op
+        if let Op::Pure(PureOp::Icmp(_)) = &node.op
             && node.children.len() == 2
         {
             let lhs = egraph.unionfind.find_immutable(node.children[0]);

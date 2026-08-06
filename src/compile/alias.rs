@@ -7,15 +7,15 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::egraph::egraph::EGraph;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 
 /// Categorized base of a memory address.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AddrBase {
-    /// Address derived from stack slot N (`Op::StackAddr(n)`).
+    /// Address derived from stack slot N (`Op::Pseudo(PseudoOp::StackAddr(n))`).
     StackSlot(u32),
-    /// Address derived from a global symbol (`Op::GlobalAddr(sym)`).
+    /// Address derived from a global symbol (`Op::Pseudo(PseudoOp::GlobalAddr(sym))`).
     Global(String),
     /// Unknown or un-categorizable base (conservative).
     Unknown,
@@ -88,10 +88,10 @@ impl AliasInfo {
     fn classify_op(&self, op: &Op, children: &[ClassId], egraph: &EGraph, depth: u32) -> AddrBase {
         match op {
             // ── Address-producing ops: propagate base ─────────────────────────
-            Op::StackAddr(n) => AddrBase::StackSlot(*n),
-            Op::GlobalAddr(sym) => AddrBase::Global(sym.clone()),
+            Op::Pseudo(PseudoOp::StackAddr(n)) => AddrBase::StackSlot(*n),
+            Op::Pseudo(PseudoOp::GlobalAddr(sym)) => AddrBase::Global(sym.clone()),
 
-            Op::Add => {
+            Op::Pure(PureOp::Add) => {
                 // Propagate if exactly one side has a known base.
                 let [lhs, rhs] = match children {
                     [a, b] => [*a, *b],
@@ -104,7 +104,9 @@ impl AliasInfo {
                 merge_add_bases(lb, rb)
             }
 
-            Op::X86Lea2 | Op::X86Lea3 { .. } | Op::X86Lea4 { .. } => {
+            Op::Mach(MachOp::X86Lea2)
+            | Op::Mach(MachOp::X86Lea3 { .. })
+            | Op::Mach(MachOp::X86Lea4 { .. }) => {
                 // Base is the first operand.
                 let base_child = match children.first() {
                     Some(&c) => c,
@@ -133,7 +135,7 @@ impl AliasInfo {
                 merge_add_bases(lb, rb)
             }
 
-            Op::Addr { .. } => {
+            Op::Pure(PureOp::Addr { .. }) => {
                 // Same as X86Lea: base is first operand.
                 let base_child = match children.first() {
                     Some(&c) => c,
@@ -162,98 +164,127 @@ impl AliasInfo {
 
             // ── All other ops → Unknown ───────────────────────────────────────
             // Arithmetic (non-Add)
-            Op::Sub | Op::Mul | Op::UDiv | Op::SDiv | Op::URem | Op::SRem => AddrBase::Unknown,
+            Op::Pure(PureOp::Sub)
+            | Op::Pure(PureOp::Mul)
+            | Op::Pure(PureOp::UDiv)
+            | Op::Pure(PureOp::SDiv)
+            | Op::Pure(PureOp::URem)
+            | Op::Pure(PureOp::SRem) => AddrBase::Unknown,
 
             // Bitwise
-            Op::And | Op::Or | Op::Xor | Op::Shl | Op::Shr | Op::Sar => AddrBase::Unknown,
+            Op::Pure(PureOp::And)
+            | Op::Pure(PureOp::Or)
+            | Op::Pure(PureOp::Xor)
+            | Op::Pure(PureOp::Shl)
+            | Op::Pure(PureOp::Shr)
+            | Op::Pure(PureOp::Sar) => AddrBase::Unknown,
 
             // Conversion
-            Op::Sext(_) | Op::Zext(_) | Op::Trunc(_) | Op::Bitcast(_) => AddrBase::Unknown,
+            Op::Pure(PureOp::Sext(_))
+            | Op::Pure(PureOp::Zext(_))
+            | Op::Pure(PureOp::Trunc(_))
+            | Op::Pure(PureOp::Bitcast(_)) => AddrBase::Unknown,
 
             // Constants
-            Op::Iconst(_, _) | Op::Fconst(_, _) => AddrBase::Unknown,
+            Op::Pure(PureOp::Iconst(_, _)) | Op::Pure(PureOp::Fconst(_, _)) => AddrBase::Unknown,
 
             // Parameters / block parameters
-            Op::Param(_, _) | Op::BlockParam(_, _, _) => AddrBase::Unknown,
+            Op::Pure(PureOp::Param(_, _)) | Op::Pure(PureOp::BlockParam(_, _, _)) => {
+                AddrBase::Unknown
+            }
 
             // Comparison
-            Op::Icmp(_) | Op::Fcmp(_) => AddrBase::Unknown,
+            Op::Pure(PureOp::Icmp(_)) | Op::Pure(PureOp::Fcmp(_)) => AddrBase::Unknown,
 
             // Float/int conversion
-            Op::IntToFloat(_) | Op::FloatToInt(_) | Op::FloatExt | Op::FloatTrunc => {
-                AddrBase::Unknown
-            }
+            Op::Pure(PureOp::IntToFloat(_))
+            | Op::Pure(PureOp::FloatToInt(_))
+            | Op::Pure(PureOp::FloatExt)
+            | Op::Pure(PureOp::FloatTrunc) => AddrBase::Unknown,
 
             // FP arithmetic
-            Op::Fadd | Op::Fsub | Op::Fmul | Op::Fdiv | Op::Fsqrt => AddrBase::Unknown,
+            Op::Pure(PureOp::Fadd)
+            | Op::Pure(PureOp::Fsub)
+            | Op::Pure(PureOp::Fmul)
+            | Op::Pure(PureOp::Fdiv)
+            | Op::Pure(PureOp::Fsqrt) => AddrBase::Unknown,
 
             // Conditional select
-            Op::Select => AddrBase::Unknown,
+            Op::Pure(PureOp::Select) => AddrBase::Unknown,
 
             // Projections
-            Op::Proj0 | Op::Proj1 => AddrBase::Unknown,
+            Op::Pure(PureOp::Proj0) | Op::Pure(PureOp::Proj1) => AddrBase::Unknown,
 
             // x86 ALU (flag-producing)
-            Op::X86Add
-            | Op::X86Sub
-            | Op::X86And
-            | Op::X86Or
-            | Op::X86Xor
-            | Op::X86Shl
-            | Op::X86Sar
-            | Op::X86Shr => AddrBase::Unknown,
+            Op::Mach(MachOp::X86Add)
+            | Op::Mach(MachOp::X86Sub)
+            | Op::Mach(MachOp::X86And)
+            | Op::Mach(MachOp::X86Or)
+            | Op::Mach(MachOp::X86Xor)
+            | Op::Mach(MachOp::X86Shl)
+            | Op::Mach(MachOp::X86Sar)
+            | Op::Mach(MachOp::X86Shr) => AddrBase::Unknown,
 
             // x86 immediate shifts
-            Op::X86ShlImm(_) | Op::X86ShrImm(_) | Op::X86SarImm(_) => AddrBase::Unknown,
+            Op::Mach(MachOp::X86ShlImm(_))
+            | Op::Mach(MachOp::X86ShrImm(_))
+            | Op::Mach(MachOp::X86SarImm(_)) => AddrBase::Unknown,
 
             // x86 flag-only compare with immediate: produces Flags, not an address.
-            Op::X86CmpI { .. } => AddrBase::Unknown,
+            Op::Mach(MachOp::X86CmpI { .. }) => AddrBase::Unknown,
 
             // x86 multiply/divide
-            Op::X86Imul3 | Op::X86Idiv(..) | Op::X86Div(..) => AddrBase::Unknown,
+            Op::Mach(MachOp::X86Imul3)
+            | Op::Mach(MachOp::X86Idiv(..))
+            | Op::Mach(MachOp::X86Div(..)) => AddrBase::Unknown,
 
             // x86 conditional move / setcc
-            Op::X86Cmov(_) | Op::X86Setcc(_) => AddrBase::Unknown,
+            Op::Mach(MachOp::X86Cmov(_)) | Op::Mach(MachOp::X86Setcc(_)) => AddrBase::Unknown,
 
             // x86 FP arithmetic
-            Op::X86Addsd
-            | Op::X86Subsd
-            | Op::X86Mulsd
-            | Op::X86Divsd
-            | Op::X86Sqrtsd
-            | Op::X86Addss
-            | Op::X86Subss
-            | Op::X86Mulss
-            | Op::X86Divss
-            | Op::X86Sqrtss => AddrBase::Unknown,
+            Op::Mach(MachOp::X86Addsd)
+            | Op::Mach(MachOp::X86Subsd)
+            | Op::Mach(MachOp::X86Mulsd)
+            | Op::Mach(MachOp::X86Divsd)
+            | Op::Mach(MachOp::X86Sqrtsd)
+            | Op::Mach(MachOp::X86Addss)
+            | Op::Mach(MachOp::X86Subss)
+            | Op::Mach(MachOp::X86Mulss)
+            | Op::Mach(MachOp::X86Divss)
+            | Op::Mach(MachOp::X86Sqrtss) => AddrBase::Unknown,
 
             // x86 FP conversion
-            Op::X86Cvtsi2sd(_)
-            | Op::X86Cvtsi2ss(_)
-            | Op::X86Cvttsd2si(_)
-            | Op::X86Cvttss2si(_)
-            | Op::X86Cvtsd2ss
-            | Op::X86Cvtss2sd => AddrBase::Unknown,
+            Op::Mach(MachOp::X86Cvtsi2sd(_))
+            | Op::Mach(MachOp::X86Cvtsi2ss(_))
+            | Op::Mach(MachOp::X86Cvttsd2si(_))
+            | Op::Mach(MachOp::X86Cvttss2si(_))
+            | Op::Mach(MachOp::X86Cvtsd2ss)
+            | Op::Mach(MachOp::X86Cvtss2sd) => AddrBase::Unknown,
 
             // x86 FP comparison
-            Op::X86Ucomisd | Op::X86Ucomiss => AddrBase::Unknown,
+            Op::Mach(MachOp::X86Ucomisd) | Op::Mach(MachOp::X86Ucomiss) => AddrBase::Unknown,
 
             // x86 integer conversion
-            Op::X86Movsx { .. }
-            | Op::X86Movzx { .. }
-            | Op::X86Trunc { .. }
-            | Op::X86Bitcast { .. } => AddrBase::Unknown,
+            Op::Mach(MachOp::X86Movsx { .. })
+            | Op::Mach(MachOp::X86Movzx { .. })
+            | Op::Mach(MachOp::X86Trunc { .. })
+            | Op::Mach(MachOp::X86Bitcast { .. }) => AddrBase::Unknown,
 
             // Result placeholders
-            Op::LoadResult(_, _) | Op::CallResult(_, _) => AddrBase::Unknown,
-
-            // Spill pseudo-ops
-            Op::SpillStore(_) | Op::SpillLoad(_) | Op::XmmSpillStore(_) | Op::XmmSpillLoad(_) => {
+            Op::Pseudo(PseudoOp::LoadResult(_, _)) | Op::Pseudo(PseudoOp::CallResult(_, _)) => {
                 AddrBase::Unknown
             }
 
+            // Spill pseudo-ops
+            Op::Pseudo(PseudoOp::SpillStore(_))
+            | Op::Pseudo(PseudoOp::SpillLoad(_))
+            | Op::Pseudo(PseudoOp::XmmSpillStore(_))
+            | Op::Pseudo(PseudoOp::XmmSpillLoad(_)) => AddrBase::Unknown,
+
             // Barrier pseudo-ops
-            Op::StoreBarrier | Op::VoidCallBarrier | Op::TerminatorArgs(_) => AddrBase::Unknown,
+            Op::Pseudo(PseudoOp::StoreBarrier)
+            | Op::Pseudo(PseudoOp::VoidCallBarrier)
+            | Op::Pseudo(PseudoOp::TerminatorArgs(_)) => AddrBase::Unknown,
         }
     }
 
@@ -362,19 +393,19 @@ mod tests {
     }
 
     fn stack_addr(eg: &mut EGraph, n: u32) -> ClassId {
-        add_node(eg, Op::StackAddr(n), &[])
+        add_node(eg, Op::Pseudo(PseudoOp::StackAddr(n)), &[])
     }
 
     fn global_addr(eg: &mut EGraph, name: &str) -> ClassId {
-        add_node(eg, Op::GlobalAddr(name.to_string()), &[])
+        add_node(eg, Op::Pseudo(PseudoOp::GlobalAddr(name.to_string())), &[])
     }
 
     fn iconst(eg: &mut EGraph, v: i64) -> ClassId {
-        add_node(eg, Op::Iconst(v, Type::I64), &[])
+        add_node(eg, Op::Pure(PureOp::Iconst(v, Type::I64)), &[])
     }
 
     fn param(eg: &mut EGraph, idx: u32) -> ClassId {
-        add_node(eg, Op::Param(idx, Type::I64), &[])
+        add_node(eg, Op::Pure(PureOp::Param(idx, Type::I64)), &[])
     }
 
     #[test]
@@ -436,7 +467,7 @@ mod tests {
         let mut eg = EGraph::new();
         let s2 = stack_addr(&mut eg, 2);
         let c8 = iconst(&mut eg, 8);
-        let s2_plus_8 = add_node(&mut eg, Op::Add, &[s2, c8]);
+        let s2_plus_8 = add_node(&mut eg, Op::Pure(PureOp::Add), &[s2, c8]);
         let s0 = stack_addr(&mut eg, 0);
         let ai = AliasInfo::new();
         assert!(!ai.may_alias(s2_plus_8, s0, &eg));
@@ -449,7 +480,7 @@ mod tests {
         let mut eg = EGraph::new();
         let p0 = param(&mut eg, 0);
         let c8 = iconst(&mut eg, 8);
-        let p0_plus_8 = add_node(&mut eg, Op::Add, &[p0, c8]);
+        let p0_plus_8 = add_node(&mut eg, Op::Pure(PureOp::Add), &[p0, c8]);
         let s0 = stack_addr(&mut eg, 0);
         let ai = AliasInfo::new();
         assert!(ai.may_alias(p0_plus_8, s0, &eg));
@@ -461,7 +492,7 @@ mod tests {
         let mut eg = EGraph::new();
         let s2 = stack_addr(&mut eg, 2);
         let c8 = iconst(&mut eg, 8);
-        let s2_plus_8 = add_node(&mut eg, Op::Add, &[s2, c8]);
+        let s2_plus_8 = add_node(&mut eg, Op::Pure(PureOp::Add), &[s2, c8]);
         let s2b = stack_addr(&mut eg, 2);
         let ai = AliasInfo::new();
         assert!(ai.may_alias(s2_plus_8, s2b, &eg));
@@ -497,8 +528,8 @@ mod tests {
         let s0 = stack_addr(&mut eg, 0);
         let c0 = iconst(&mut eg, 0);
         let c8 = iconst(&mut eg, 8);
-        let a0 = add_node(&mut eg, Op::Add, &[s0, c0]);
-        let a8 = add_node(&mut eg, Op::Add, &[s0, c8]);
+        let a0 = add_node(&mut eg, Op::Pure(PureOp::Add), &[s0, c0]);
+        let a8 = add_node(&mut eg, Op::Pure(PureOp::Add), &[s0, c8]);
         let ai = AliasInfo::new();
         assert!(ai.may_alias(a0, a8, &eg));
         assert!(!ai.must_alias(a0, a8, &eg));
@@ -513,14 +544,18 @@ mod tests {
         assert!(!ai.store_clobbers_load(s0, Type::I64, s1, Type::I64, &eg));
     }
 
-    /// `Op::Addr { .. }` propagates base from its first operand, same as
+    /// `Op::Pure(PureOp::Addr { .. })` propagates base from its first operand, same as
     /// `X86Lea*` and `Add`.
     #[test]
     fn addr_op_propagates_stack_base() {
         let mut eg = EGraph::new();
         let s2 = stack_addr(&mut eg, 2);
         let c4 = iconst(&mut eg, 4);
-        let addr_node = add_node(&mut eg, Op::Addr { scale: 1, disp: 0 }, &[s2, c4]);
+        let addr_node = add_node(
+            &mut eg,
+            Op::Pure(PureOp::Addr { scale: 1, disp: 0 }),
+            &[s2, c4],
+        );
         let s2b = stack_addr(&mut eg, 2);
         let s3 = stack_addr(&mut eg, 3);
         let ai = AliasInfo::new();
@@ -537,7 +572,7 @@ mod tests {
         let mut eg = EGraph::new();
         let s = stack_addr(&mut eg, 0);
         let g = global_addr(&mut eg, "g");
-        let sum = add_node(&mut eg, Op::Add, &[s, g]);
+        let sum = add_node(&mut eg, Op::Pure(PureOp::Add), &[s, g]);
         let ai = AliasInfo::new();
         assert_eq!(ai.classify(sum, &eg), AddrBase::Unknown);
     }
@@ -550,7 +585,7 @@ mod tests {
         let mut cur = stack_addr(&mut eg, 0);
         for _ in 0..32 {
             let c = iconst(&mut eg, 1);
-            cur = add_node(&mut eg, Op::Add, &[cur, c]);
+            cur = add_node(&mut eg, Op::Pure(PureOp::Add), &[cur, c]);
         }
         let ai = AliasInfo::new();
         // Depth cap kicks in; conservative Unknown is acceptable (and the
@@ -567,7 +602,7 @@ mod tests {
         let mut eg = EGraph::new();
         let s = stack_addr(&mut eg, 7);
         let c = iconst(&mut eg, 16);
-        let add = add_node(&mut eg, Op::Add, &[s, c]);
+        let add = add_node(&mut eg, Op::Pure(PureOp::Add), &[s, c]);
         let ai = AliasInfo::new();
         assert_eq!(ai.classify(add, &eg), AddrBase::StackSlot(7));
         // Second call should hit the memo cache — just verify same answer.

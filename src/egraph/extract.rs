@@ -5,7 +5,7 @@ use smallvec::SmallVec;
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::cost::CostModel;
 use crate::egraph::egraph::EGraph;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 
 // ── ClassVRegMap ──────────────────────────────────────────────────────────────
@@ -476,8 +476,8 @@ pub fn extract(
                     // ensures the right block gets BlockParam VRegInsts.
                     Some(prev)
                         if total == prev.cost
-                            && matches!(prev.op, Op::BlockParam(..))
-                            && !matches!(candidate.op, Op::BlockParam(..)) =>
+                            && matches!(prev.op, Op::Pure(PureOp::BlockParam(..)))
+                            && !matches!(candidate.op, Op::Pure(PureOp::BlockParam(..))) =>
                     {
                         true
                     }
@@ -532,12 +532,12 @@ pub fn extract(
 fn is_free_remat(op: &Op) -> bool {
     matches!(
         op,
-        Op::Iconst(..)
-            | Op::Fconst(..)
-            | Op::StackAddr(..)
-            | Op::GlobalAddr(..)
-            | Op::Param(..)
-            | Op::BlockParam(..)
+        Op::Pure(PureOp::Iconst(..))
+            | Op::Pure(PureOp::Fconst(..))
+            | Op::Pseudo(PseudoOp::StackAddr(..))
+            | Op::Pseudo(PseudoOp::GlobalAddr(..))
+            | Op::Pure(PureOp::Param(..))
+            | Op::Pure(PureOp::BlockParam(..))
     )
 }
 
@@ -932,21 +932,21 @@ mod tests {
 
     fn iconst(g: &mut EGraph, v: i64) -> ClassId {
         g.add(ENode {
-            op: Op::Iconst(v, Type::I64),
+            op: Op::Pure(PureOp::Iconst(v, Type::I64)),
             children: smallvec![],
         })
     }
 
     fn x86add(g: &mut EGraph, a: ClassId, b: ClassId) -> ClassId {
         g.add(ENode {
-            op: Op::X86Add,
+            op: Op::Mach(MachOp::X86Add),
             children: smallvec![a, b],
         })
     }
 
     fn proj0(g: &mut EGraph, pair: ClassId) -> ClassId {
         g.add(ENode {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             children: smallvec![pair],
         })
     }
@@ -978,7 +978,7 @@ mod tests {
 
         // IR-level Add
         let ir_add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, b],
         });
 
@@ -996,7 +996,11 @@ mod tests {
 
         let extracted = &result.choices[&canon];
         // The chosen op must not be the generic Add (which has infinite cost)
-        assert_ne!(extracted.op, Op::Add, "should not pick generic Add");
+        assert_ne!(
+            extracted.op,
+            Op::Pure(PureOp::Add),
+            "should not pick generic Add"
+        );
     }
 
     // 5.4: E-class with only generic nodes fails with diagnostic.
@@ -1006,14 +1010,14 @@ mod tests {
         let a = iconst(&mut g, 1);
         let b = iconst(&mut g, 2);
         let ir_add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, b],
         });
 
         let cm = CostModel::new(OptGoal::Balanced);
         let err = extract(&g, &[ir_add], &cm).expect_err("should fail");
         assert!(err.message.contains("no legal x86-64 lowering"));
-        assert!(err.ops.contains(&Op::Add));
+        assert!(err.ops.contains(&Op::Pure(PureOp::Add)));
     }
 
     // 5.6: VReg linearization produces instructions in def-before-use order.
@@ -1059,13 +1063,13 @@ mod tests {
 
         // idx << 2  (= idx * 4)
         let shl = g.add(ENode {
-            op: Op::Shl,
+            op: Op::Pure(PureOp::Shl),
             children: smallvec![idx, two],
         });
 
         // base + (idx << 2)
         let addr = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![base, shl],
         });
 
@@ -1091,7 +1095,7 @@ mod tests {
         let has_addr_node = result
             .choices
             .values()
-            .any(|ext| matches!(ext.op, Op::Addr { .. }));
+            .any(|ext| matches!(ext.op, Op::Pure(PureOp::Addr { .. })));
         assert!(
             has_addr_node,
             "extraction should include an Addr node for scale=4"
@@ -1157,7 +1161,7 @@ mod tests {
             let a = iconst(&mut g, 10);
             let b = iconst(&mut g, 5);
             let flags = g.add(ENode {
-                op: Op::Icmp(CondCode::Slt),
+                op: Op::Pure(PureOp::Icmp(CondCode::Slt)),
                 children: smallvec![a, b],
             });
             apply_isel_rules(&mut g);
@@ -1281,7 +1285,10 @@ mod tests {
             "Iconst must be selectable even with empty live set"
         );
         let ext = result.unwrap();
-        assert!(matches!(ext.op, Op::Iconst(42, _)), "must pick Iconst");
+        assert!(
+            matches!(ext.op, Op::Pure(PureOp::Iconst(42, _))),
+            "must pick Iconst"
+        );
     }
 
     // 3.2b: X86Add where both children are live: picks X86Add.
@@ -1379,7 +1386,7 @@ mod tests {
         let b = iconst(&mut g, 2);
         // Only a generic Add — no machine node.
         let ir_add = g.add(ENode {
-            op: Op::Add,
+            op: Op::Pure(PureOp::Add),
             children: smallvec![a, b],
         });
 

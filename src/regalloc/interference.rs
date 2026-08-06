@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
-use crate::ir::op::Op;
+use crate::ir::op::{MachOp, Op, PseudoOp, PureOp};
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::reg::RegClass;
 
@@ -95,8 +95,12 @@ pub fn dying_clobber_operands(
     live_after: &BTreeSet<VReg>,
 ) -> BTreeSet<usize> {
     let operands: &[VReg] = match inst.op {
-        Op::CallResult(_, _) | Op::VoidCallBarrier => &inst.operands,
-        Op::X86Idiv(..) | Op::X86Div(..) => &inst.operands[..inst.operands.len().min(1)],
+        Op::Pseudo(PseudoOp::CallResult(_, _)) | Op::Pseudo(PseudoOp::VoidCallBarrier) => {
+            &inst.operands
+        }
+        Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..)) => {
+            &inst.operands[..inst.operands.len().min(1)]
+        }
         _ => &[],
     };
     operands
@@ -258,7 +262,7 @@ mod tests {
 
     fn iconst_inst(dst: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Iconst(dst as i64, Type::I64),
+            op: Op::Pure(PureOp::Iconst(dst as i64, Type::I64)),
             dst: VReg(dst),
             operands: vec![],
         }
@@ -266,7 +270,7 @@ mod tests {
 
     fn add_inst(dst: u32, a: u32, b: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::X86Add,
+            op: Op::Mach(MachOp::X86Add),
             dst: VReg(dst),
             operands: vec![VReg(a), VReg(b)],
         }
@@ -312,13 +316,13 @@ mod tests {
         let insts = vec![
             iconst_inst(0),
             ScheduledInst {
-                op: Op::Proj0,
+                op: Op::Pure(PureOp::Proj0),
                 dst: VReg(1),
                 operands: vec![VReg(0)],
             },
             iconst_inst(2),
             ScheduledInst {
-                op: Op::Proj0,
+                op: Op::Pure(PureOp::Proj0),
                 dst: VReg(3),
                 operands: vec![VReg(2)],
             },

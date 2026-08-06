@@ -43,12 +43,12 @@ pub fn apply_coalescing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::op::Op;
+    use crate::ir::op::{Op, PureOp};
     use crate::ir::types::Type;
 
     fn iconst_inst(dst: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Iconst(dst as i64, Type::I64),
+            op: Op::Pure(PureOp::Iconst(dst as i64, Type::I64)),
             dst: VReg(dst),
             operands: vec![],
         }
@@ -56,7 +56,7 @@ mod tests {
 
     fn use_inst(dst: u32, src: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             dst: VReg(dst),
             operands: vec![VReg(src)],
         }

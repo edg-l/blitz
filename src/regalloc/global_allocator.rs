@@ -56,7 +56,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
-use crate::ir::op::Op;
+use crate::ir::op::{MachOp, Op, PseudoOp, PureOp};
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::abi::{CALLER_SAVED_GPR, CALLER_SAVED_XMM};
 use crate::x86::reg::{Reg, RegClass};
@@ -199,13 +199,13 @@ fn add_block_param_interferences(
         };
         let Some(last_marker) = sched
             .iter()
-            .rposition(|inst| matches!(inst.op, Op::BlockParam(..)))
+            .rposition(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
         else {
             continue;
         };
         let mut in_shadow: BTreeSet<VReg> = BTreeSet::new();
         for inst in &sched[..=last_marker] {
-            if !matches!(inst.op, Op::BlockParam(..)) && !inst.op.has_no_result() {
+            if !matches!(inst.op, Op::Pure(PureOp::BlockParam(..))) && !inst.op.has_no_result() {
                 in_shadow.insert(resolve(inst.dst));
             }
             in_shadow.extend(inst.operands.iter().map(|&v| resolve(v)));
@@ -362,7 +362,11 @@ fn add_boundary_interferences(graph: &mut InterferenceGraph, boundary_set: &BTre
 /// Mirrors `add_shift_precolors` from `compile/precolor.rs`.
 fn add_shift_precolors_global(insts: &[ScheduledInst], precolors: &mut Vec<(VReg, Reg)>) {
     for inst in insts {
-        if matches!(inst.op, Op::X86Shl | Op::X86Shr | Op::X86Sar) && inst.operands.len() >= 2 {
+        if matches!(
+            inst.op,
+            Op::Mach(MachOp::X86Shl) | Op::Mach(MachOp::X86Shr) | Op::Mach(MachOp::X86Sar)
+        ) && inst.operands.len() >= 2
+        {
             let count_vreg = inst.operands[1];
             if !precolors.iter().any(|&(v, _)| v == count_vreg) {
                 precolors.push((count_vreg, Reg::RCX));
@@ -487,10 +491,16 @@ fn collect_call_div_points(
 
     for (b, sched) in block_schedules.iter().enumerate() {
         for (i, inst) in sched.iter().enumerate() {
-            if matches!(inst.op, Op::CallResult(_, _) | Op::VoidCallBarrier) {
+            if matches!(
+                inst.op,
+                Op::Pseudo(PseudoOp::CallResult(_, _)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
+            ) {
                 call_points.push((b, i));
             }
-            if matches!(inst.op, Op::X86Idiv(..) | Op::X86Div(..)) {
+            if matches!(
+                inst.op,
+                Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..))
+            ) {
                 div_points.push((b, i));
             }
         }
@@ -1910,7 +1920,7 @@ mod tests {
 
     fn iconst_inst(dst: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Iconst(dst as i64, Type::I64),
+            op: Op::Pure(PureOp::Iconst(dst as i64, Type::I64)),
             dst: VReg(dst),
             operands: vec![],
         }
@@ -1918,7 +1928,7 @@ mod tests {
 
     fn use_inst(dst: u32, src: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::Proj0,
+            op: Op::Pure(PureOp::Proj0),
             dst: VReg(dst),
             operands: vec![VReg(src)],
         }
@@ -1926,7 +1936,7 @@ mod tests {
 
     fn add_inst(dst: u32, a: u32, b: u32) -> ScheduledInst {
         ScheduledInst {
-            op: Op::X86Add,
+            op: Op::Mach(MachOp::X86Add),
             dst: VReg(dst),
             operands: vec![VReg(a), VReg(b)],
         }
@@ -2166,7 +2176,7 @@ mod tests {
 
         // Block 0: v0 = iconst (param), v1 = VoidCallBarrier (uses v0 as arg)
         //
-        // We model the call as Op::VoidCallBarrier with v0 as an operand.
+        // We model the call as Op::Pseudo(PseudoOp::VoidCallBarrier) with v0 as an operand.
         // v0 is live at the call point (it is an operand of VoidCallBarrier
         // but the exclude_call_args logic only excludes args NOT live after
         // the call; here v0 is a call arg that is NOT live after, so it IS
@@ -2188,7 +2198,7 @@ mod tests {
 
         // Build schedule: [v0=iconst, v1=VoidCallBarrier, v2=use(v0)]
         let void_call = ScheduledInst {
-            op: Op::VoidCallBarrier,
+            op: Op::Pseudo(PseudoOp::VoidCallBarrier),
             dst: VReg(1),
             operands: vec![], // no call args
         };
@@ -2253,7 +2263,7 @@ mod tests {
         // has no phantoms; Phase 3 graph does.
 
         let void_call = ScheduledInst {
-            op: Op::VoidCallBarrier,
+            op: Op::Pseudo(PseudoOp::VoidCallBarrier),
             dst: VReg(1),
             operands: vec![],
         };
@@ -2497,7 +2507,7 @@ mod tests {
         let mut sched: Vec<ScheduledInst> = (0..n).map(iconst_inst).collect();
         // Add an instruction that uses all n values (forces all to be live simultaneously).
         sched.push(ScheduledInst {
-            op: Op::X86Add,
+            op: Op::Mach(MachOp::X86Add),
             dst: VReg(n),
             operands: (0..n).map(VReg).collect(),
         });
@@ -2554,7 +2564,7 @@ mod tests {
         let mut sched: Vec<ScheduledInst> = (0u32..9).map(iconst_inst).collect();
         // v9 = add(v0..v8): all 9 iconconsts are live here.
         sched.push(ScheduledInst {
-            op: Op::X86Add,
+            op: Op::Mach(MachOp::X86Add),
             dst: VReg(9),
             operands: (0u32..9).map(VReg).collect(),
         });
@@ -2691,7 +2701,7 @@ mod tests {
     fn xmm_cross_block_phi_allocates() {
         // Simulate an XMM VReg flowing across blocks via a phi.
         //
-        // We use Op::X86Addsd as an FP op (classified as XMM by build_vreg_classes).
+        // We use Op::Mach(MachOp::X86Addsd) as an FP op (classified as XMM by build_vreg_classes).
         // Block 0: xmm_val = x86addsd(dummy1, dummy2)  [XMM def]
         // Block 1: pass-through block (no instructions, just live-in/out)
         // Block 2: xmm_use = x86addsd(xmm_val, xmm_val)
@@ -2705,12 +2715,12 @@ mod tests {
         //   v1 = x86addsd(v0, v0) in block 0  -> XMM class
         //   v2 = x86addsd(v1, v1) in block 2  -> XMM class, uses v1
         let xmm_def = ScheduledInst {
-            op: Op::X86Addsd,
+            op: Op::Mach(MachOp::X86Addsd),
             dst: VReg(1),
             operands: vec![VReg(0), VReg(0)],
         };
         let xmm_use = ScheduledInst {
-            op: Op::X86Addsd,
+            op: Op::Mach(MachOp::X86Addsd),
             dst: VReg(2),
             operands: vec![VReg(1), VReg(1)],
         };
@@ -2780,7 +2790,7 @@ mod tests {
 
         let mut sched: Vec<ScheduledInst> = (0u32..8).map(iconst_inst).collect();
         sched.push(ScheduledInst {
-            op: Op::VoidCallBarrier,
+            op: Op::Pseudo(PseudoOp::VoidCallBarrier),
             dst: VReg(8),
             operands: (0u32..8).map(VReg).collect(),
         });
@@ -2883,14 +2893,14 @@ mod tests {
 
         fn iconst(dst: u32, val: i64) -> ScheduledInst {
             ScheduledInst {
-                op: Op::Iconst(val, Type::I64),
+                op: Op::Pure(PureOp::Iconst(val, Type::I64)),
                 dst: VReg(dst),
                 operands: vec![],
             }
         }
         fn block_param(dst: u32, bid: u32, idx: u32) -> ScheduledInst {
             ScheduledInst {
-                op: Op::BlockParam(bid, idx, Type::I64),
+                op: Op::Pure(PureOp::BlockParam(bid, idx, Type::I64)),
                 dst: VReg(dst),
                 operands: vec![],
             }
@@ -2905,7 +2915,7 @@ mod tests {
                 block_param(4, 1, 1),
                 block_param(5, 1, 2),
                 ScheduledInst {
-                    op: Op::X86Sub,
+                    op: Op::Mach(MachOp::X86Sub),
                     dst: VReg(6),
                     operands: vec![VReg(3), VReg(4)],
                 },
@@ -2914,7 +2924,7 @@ mod tests {
             vec![
                 block_param(7, 2, 0),
                 ScheduledInst {
-                    op: Op::X86Sub,
+                    op: Op::Mach(MachOp::X86Sub),
                     dst: VReg(8),
                     operands: vec![VReg(7), VReg(7)],
                 },

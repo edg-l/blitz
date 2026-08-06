@@ -4,7 +4,7 @@ use crate::egraph::EGraph;
 use crate::egraph::extract::{ClassVRegMap, VReg};
 use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp, TermArgs};
 use crate::ir::function::BasicBlock;
-use crate::ir::op::{ClassId, Op};
+use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 use crate::regalloc::{SlotAllocator, SlotOwner};
 use crate::schedule::scheduler::ScheduledInst;
@@ -165,11 +165,16 @@ pub(super) fn assign_barrier_groups(
     // call left in RAX.
     let div_dsts: BTreeSet<VReg> = sched
         .iter()
-        .filter(|i| matches!(i.op, Op::X86Idiv(..) | Op::X86Div(..)))
+        .filter(|i| {
+            matches!(
+                i.op,
+                Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..))
+            )
+        })
         .map(|i| i.dst)
         .collect();
     let div_proj_source = |inst: &ScheduledInst| -> Option<VReg> {
-        if !matches!(inst.op, Op::Proj0 | Op::Proj1) {
+        if !matches!(inst.op, Op::Pure(PureOp::Proj0) | Op::Pure(PureOp::Proj1)) {
             return None;
         }
         inst.operands
@@ -346,14 +351,14 @@ pub(super) fn insert_early_barrier_spills(
         // consumer in `consumer_group` (so the reload is guaranteed to execute
         // before the use even without a post-pass barrier re-sort).
         let store_inst = ScheduledInst {
-            op: Op::SpillStore(slot as i64),
+            op: Op::Pseudo(PseudoOp::SpillStore(slot as i64)),
             dst: store_vreg,
             operands: vec![*v],
         };
         vreg_group.insert(store_vreg, *def_group);
 
         let load_inst = ScheduledInst {
-            op: Op::SpillLoad(slot as i64),
+            op: Op::Pseudo(PseudoOp::SpillLoad(slot as i64)),
             dst: reload_vreg,
             operands: vec![],
         };
@@ -464,7 +469,7 @@ pub(super) fn populate_effectful_operands(
     // record its operand children.
     let addr_children: BTreeMap<VReg, Vec<VReg>> = schedule
         .iter()
-        .filter(|inst| matches!(inst.op, Op::Addr { .. }))
+        .filter(|inst| matches!(inst.op, Op::Pure(PureOp::Addr { .. })))
         .map(|inst| {
             let children: Vec<VReg> = inst
                 .operands
@@ -574,7 +579,7 @@ pub(super) fn populate_effectful_operands(
                     markers.push((
                         barrier_k,
                         ScheduledInst {
-                            op: Op::VoidCallBarrier,
+                            op: Op::Pseudo(PseudoOp::VoidCallBarrier),
                             dst,
                             operands: vregs,
                         },
@@ -591,7 +596,7 @@ pub(super) fn populate_effectful_operands(
                 markers.push((
                     barrier_k,
                     ScheduledInst {
-                        op: Op::StoreBarrier,
+                        op: Op::Pseudo(PseudoOp::StoreBarrier),
                         dst,
                         operands: vregs,
                     },
@@ -747,7 +752,7 @@ pub(super) fn append_terminator_args(
     let dst = VReg(*next_vreg);
     *next_vreg += 1;
     schedule.push(ScheduledInst {
-        op: Op::TerminatorArgs(arg_indices),
+        op: Op::Pseudo(PseudoOp::TerminatorArgs(arg_indices)),
         dst,
         operands,
     });
@@ -781,7 +786,7 @@ pub(crate) fn remove_terminator_arg_operands(
     arg_indices_to_drop: &BTreeSet<u32>,
 ) {
     for inst in schedule.iter_mut() {
-        let Op::TerminatorArgs(arg_indices) = &mut inst.op else {
+        let Op::Pseudo(PseudoOp::TerminatorArgs(arg_indices)) = &mut inst.op else {
             continue;
         };
         let keep: Vec<bool> = arg_indices
@@ -808,7 +813,7 @@ pub(crate) fn terminator_arg_operands(schedule: &[ScheduledInst]) -> Vec<(u32, V
     schedule
         .iter()
         .find_map(|inst| match &inst.op {
-            Op::TerminatorArgs(arg_indices) => Some(
+            Op::Pseudo(PseudoOp::TerminatorArgs(arg_indices)) => Some(
                 arg_indices
                     .iter()
                     .copied()
