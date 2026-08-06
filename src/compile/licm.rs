@@ -530,10 +530,9 @@ pub fn run_licm(func: &mut Function, egraph: &mut EGraph) -> ExtraRoots {
     let mut total_hoisted = 0usize;
 
     for loop_info in &loops {
-        let preheader_idx = insert_preheader(func, egraph, loop_info);
-
-        // Entry block as header: preheader was not inserted, skip hoisting.
-        if preheader_idx == loop_info.header_idx {
+        // The entry block has no predecessors outside the loop, so there is
+        // nowhere to put a preheader.
+        if loop_info.header_idx == 0 {
             if trace {
                 eprintln!(
                     "[licm]   loop header={} (entry block): skipped hoisting",
@@ -557,10 +556,20 @@ pub fn run_licm(func: &mut Function, egraph: &mut EGraph) -> ExtraRoots {
             );
         }
 
-        if !invariant_classes.is_empty() {
-            total_hoisted += invariant_classes.len();
-            extra_roots.insert(preheader_idx, invariant_classes);
+        // The preheader is the hoist's destination, and it is not free: it
+        // duplicates every one of the header's parameters, so an empty one adds
+        // a block, a parallel copy as wide as the header, and that many more
+        // values live at once. The budget above refuses to hoist onto a loop
+        // that has no registers to spare, which is exactly the loop where those
+        // costs land hardest. Build it only once there is something to put in
+        // it.
+        if invariant_classes.is_empty() {
+            continue;
         }
+
+        total_hoisted += invariant_classes.len();
+        let preheader_idx = insert_preheader(func, egraph, loop_info);
+        extra_roots.insert(preheader_idx, invariant_classes);
     }
 
     if trace {
