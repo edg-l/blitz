@@ -1686,9 +1686,26 @@ pub fn allocate_global(
     // 12, 15, 18, 21, 23, and then flat for the remaining rounds, having
     // committed 207 slots to buy nothing.
     let mut prev_overshoot: Option<u32> = None;
+    // Everything the loop has already spilled. A spilled value is live only
+    // from its definition to the store, so spilling it a second time moves
+    // nothing and costs another slot; without this the loop can keep picking
+    // the cheapest value in the function forever.
+    let mut already_spilled: BTreeSet<VReg> = BTreeSet::new();
     // Every coalescing decision made for this function, which the first round
     // makes all of.
     let mut coalesce_aliases: BTreeMap<u32, u32> = BTreeMap::new();
+    // Which VRegs are block parameters, in the names the round's schedules use.
+    //
+    // The schedules a round colours are the previous round's post-coalesce
+    // lists, and this set is the one input that cannot be read back off them --
+    // a parameter is written by a phi copy on the edge, not by any instruction
+    // in the block. So it is renamed as the aliases are made instead. Left in
+    // its pre-coalesce names it would name VRegs the schedules no longer
+    // mention, `add_block_param_interferences` would draw no edge between two
+    // parameters of one block, and the colouring would be free to give them the
+    // same register -- which the phi copies then detect as a parallel copy with
+    // a repeated destination, one value short.
+    let mut block_params_now: Vec<BTreeSet<VReg>> = block_param_vregs_per_block.to_vec();
 
     for round in 0..=MAX_GLOBAL_SPILL_ROUNDS {
         let block_schedules: &[Vec<ScheduledInst>] = &schedules;
@@ -1716,7 +1733,7 @@ pub fn allocate_global(
                 block_schedules,
                 cfg_succs,
                 phi_uses,
-                block_param_vregs_per_block,
+                &block_params_now,
             );
         // Also augment the global liveness that run_phase3 will recompute
         // internally: it uses plain `compute_global_liveness` which doesn't know
@@ -1740,7 +1757,7 @@ pub fn allocate_global(
                     cfg_succs[bi],
                     fmt(&global_liveness.live_in[bi]),
                     fmt(&global_liveness.live_out[bi]),
-                    fmt(&block_param_vregs_per_block[bi]),
+                    fmt(&block_params_now[bi]),
                     crate::trace::format_liveness(
                         sched,
                         &crate::regalloc::liveness::compute_liveness(
@@ -1761,7 +1778,7 @@ pub fn allocate_global(
         // alias resolution needed.
         add_block_param_interferences(
             &mut phase2.graph,
-            block_param_vregs_per_block,
+            &block_params_now,
             block_schedules,
             &BTreeMap::new(),
         );
@@ -1784,7 +1801,7 @@ pub fn allocate_global(
             call_arg_precolors.clone(),
             copy_pairs,
             cfg_succs,
-            block_param_vregs_per_block,
+            &block_params_now,
             uses_frame_pointer,
             next_vreg,
             round == 0,
@@ -1805,11 +1822,29 @@ pub fn allocate_global(
         coalesce_aliases.extend(phase4.alias_map.iter().map(|(&k, &v)| (k, v)));
         let alias_map = coalesce_aliases.clone();
 
+        // The schedules from here on are the post-coalesce ones, so the block
+        // parameters have to be named the same way.
+        if !phase4.alias_map.is_empty() {
+            let resolve = |v: VReg| -> VReg {
+                let mut idx = v.0;
+                while let Some(&target) = phase4.alias_map.get(&idx) {
+                    if target == idx {
+                        break;
+                    }
+                    idx = target;
+                }
+                VReg(idx)
+            };
+            for set in block_params_now.iter_mut() {
+                *set = set.iter().map(|&v| resolve(v)).collect();
+            }
+        }
+
         // Phase 5: global spilling.
         let ctx = Phase5Context {
             cfg_succs: cfg_succs.to_vec(),
             phi_uses: phi_uses.to_vec(),
-            block_param_vregs_per_block: block_param_vregs_per_block.to_vec(),
+            block_param_vregs_per_block: block_params_now.clone(),
             param_vregs: param_vregs.to_vec(),
             call_arg_precolors: call_arg_precolors.clone(),
             copy_pairs: copy_pairs.to_vec(),
@@ -1828,11 +1863,7 @@ pub fn allocate_global(
         // would store whatever the register held before the copy. Routing one
         // through a slot is the splitter's `slot_spilled_params`, which decides
         // it before the schedules are built.
-        let block_params: BTreeSet<VReg> = block_param_vregs_per_block
-            .iter()
-            .flatten()
-            .copied()
-            .collect();
+        let block_params: BTreeSet<VReg> = block_params_now.iter().flatten().copied().collect();
         // Nor is a division's pair, for the reason `Op::result_in_fixed_regs`
         // gives: the store would save a register that never held it.
         let fixed_reg_results: BTreeSet<VReg> = phase4
@@ -1842,34 +1873,52 @@ pub fn allocate_global(
             .filter(|inst| inst.op.result_in_fixed_regs())
             .map(|inst| inst.dst)
             .collect();
-        let candidates: BTreeSet<usize> = phase4
-            .over_budget
-            .iter()
-            .filter(|v| !block_params.contains(v) && !fixed_reg_results.contains(v))
-            .map(|v| v.0 as usize)
-            .collect();
-
+        let class = if phase4.gpr_overshoot > 0 {
+            RegClass::GPR
+        } else {
+            RegClass::XMM
+        };
         let overshoot = phase4.gpr_overshoot + phase4.xmm_overshoot;
-        let no_progress = prev_overshoot.is_some_and(|prev| overshoot >= prev);
+        let ineligible: BTreeSet<VReg> = block_params
+            .iter()
+            .chain(fixed_reg_results.iter())
+            .chain(already_spilled.iter())
+            .copied()
+            .collect();
+        let candidates = choose_spill_candidates(
+            &phase4.per_block_insts,
+            cfg_succs,
+            &block_params,
+            &ineligible,
+            class,
+            loop_depths,
+            &phase4.over_budget,
+            func_name,
+        );
+
+        // A round that leaves the overshoot where it was has still moved: the
+        // choice covers every point that overflowed and never repeats a value,
+        // so the next round faces a strictly smaller problem. What cannot make
+        // progress is a round that raises the overshoot.
+        let no_progress = prev_overshoot.is_some_and(|prev| overshoot > prev);
         if round == MAX_GLOBAL_SPILL_ROUNDS || candidates.is_empty() || no_progress {
             let why = if no_progress {
-                "spilling did not reduce it, so the pressure point is one instruction \
-                 whose own operands are what is live there"
+                "spilling did not reduce it, so every value live at the pressure \
+                 point is one the instruction there reads or one no store can move"
             } else if candidates.is_empty() {
-                "every over-budget VReg is a block parameter, which only the splitter \
-                 can route through a slot"
+                "nothing live at the pressure point can be spilled: every value \
+                 there is read by the instruction, a block parameter, or a result \
+                 the hardware pins to a register. A phi seam wider than the \
+                 register file has this shape, and only the splitter can relieve \
+                 it, by routing a parameter through a slot before the schedules \
+                 are built"
             } else {
                 "the round limit ran out"
-            };
-            let class = if phase4.gpr_overshoot > 0 {
-                RegClass::GPR
-            } else {
-                RegClass::XMM
             };
             let peak = pressure_peak(
                 &phase4.per_block_insts,
                 &global_liveness,
-                &vreg_class_map(&phase4.per_block_insts, block_param_vregs_per_block),
+                &vreg_class_map(&phase4.per_block_insts),
                 class,
             )
             .unwrap_or_else(|| "no instructions".to_string());
@@ -1911,6 +1960,7 @@ pub fn allocate_global(
             ));
         }
         prev_overshoot = Some(overshoot);
+        already_spilled.extend(candidates.iter().map(|&v| VReg(v as u32)));
 
         // What is about to be spilled, read off the list the coloring ran on --
         // not off the result, where a rematerialized VReg's defining
@@ -1949,7 +1999,7 @@ pub fn allocate_global(
             .unwrap_or(0)
             .max(spill_next_vreg);
         let mut next_schedules = phase4.per_block_insts;
-        let vreg_classes = vreg_class_map(&next_schedules, block_param_vregs_per_block);
+        let vreg_classes = vreg_class_map(&next_schedules);
         crate::regalloc::spill::insert_spills_global(
             &mut next_schedules,
             &candidates,
@@ -1977,6 +2027,169 @@ pub fn allocate_global(
     }
 
     unreachable!("the spill loop returns before exhausting its rounds")
+}
+
+/// Which VRegs to spill when the colouring did not fit.
+///
+/// Spilling relieves a value that is live *across* a point. It cannot relieve
+/// one the instruction at that point reads: the reload lands immediately before
+/// that instruction and is live there too, so the pressure is unchanged and a
+/// slot has been spent for nothing. The VRegs the colouring failed on are
+/// typically exactly those values -- the ones being computed where the pressure
+/// is -- which is why choosing the spill set from `over_budget` itself could
+/// leave the loop spilling the same useless value every round and then report
+/// that the program does not fit.
+///
+/// So `over_budget` names the *trouble*, not the cure. Every instruction where
+/// one of those VRegs is live is a point the colouring could not satisfy, and
+/// the values live there that the instruction does not itself read or write are
+/// what spilling can actually remove. Taking the points from the colouring
+/// rather than from a live-count threshold is what makes this hold for an
+/// instruction that pins registers of its own: `idiv` keeps the dividend in RAX
+/// and clobbers RDX, so it overflows with two live values fewer than the budget
+/// and no count of what is live can see it, but the VReg left uncoloured is
+/// still live exactly there.
+///
+/// Among the candidates, cheapest first: Chaitin's ratio, the loop-weighted
+/// count of references divided by how many such points the value crosses, so a
+/// value that relieves many points for few reloads goes first.
+#[allow(clippy::too_many_arguments)]
+fn choose_spill_candidates(
+    block_schedules: &[Vec<ScheduledInst>],
+    cfg_succs: &[Vec<usize>],
+    block_params: &BTreeSet<VReg>,
+    ineligible: &BTreeSet<VReg>,
+    class: RegClass,
+    loop_depths: &BTreeMap<VReg, u32>,
+    over_budget: &[VReg],
+    func_name: &str,
+) -> BTreeSet<usize> {
+    let classes = vreg_class_map(block_schedules);
+    let of_class = |v: &VReg| classes.get(v).copied() == Some(class);
+    let uncolored: BTreeSet<VReg> = over_budget.iter().copied().collect();
+
+    let phi_uses = crate::compile::barrier::terminator_uses(block_schedules);
+    let block_param_sets: Vec<BTreeSet<VReg>> = block_schedules
+        .iter()
+        .map(|sched| {
+            sched
+                .iter()
+                .map(|inst| inst.dst)
+                .filter(|v| block_params.contains(v))
+                .collect()
+        })
+        .collect();
+    let liveness = crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
+        block_schedules,
+        cfg_succs,
+        &phi_uses,
+        &block_param_sets,
+    );
+
+    // The points the colouring could not satisfy, and which candidates cross
+    // each one without being read there -- the values a spill can remove from it.
+    let mut relief: BTreeMap<(usize, usize), BTreeSet<VReg>> = BTreeMap::new();
+    for (block_idx, sched) in block_schedules.iter().enumerate() {
+        let live_out = liveness
+            .live_out
+            .get(block_idx)
+            .cloned()
+            .unwrap_or_default();
+        let per_inst = crate::regalloc::liveness::compute_liveness(sched, &live_out);
+        for (i, inst) in sched.iter().enumerate() {
+            if !per_inst.live_at[i].iter().any(|v| uncolored.contains(v)) {
+                continue;
+            }
+            let touched: BTreeSet<VReg> = inst
+                .operands
+                .iter()
+                .copied()
+                .chain(std::iter::once(inst.dst))
+                .collect();
+            let here: BTreeSet<VReg> = per_inst.live_at[i]
+                .iter()
+                .copied()
+                .filter(of_class)
+                .filter(|v| !touched.contains(v) && !ineligible.contains(v))
+                .collect();
+            relief.insert((block_idx, i), here);
+        }
+    }
+
+    // Loop-weighted references per candidate: what the spill costs to execute.
+    let candidates: BTreeSet<VReg> = relief.values().flatten().copied().collect();
+    let mut refs: BTreeMap<VReg, u64> = BTreeMap::new();
+    for inst in block_schedules.iter().flatten() {
+        for v in inst
+            .operands
+            .iter()
+            .copied()
+            .chain(std::iter::once(inst.dst))
+        {
+            if !candidates.contains(&v) {
+                continue;
+            }
+            let depth = loop_depths.get(&v).copied().unwrap_or(0).min(16);
+            *refs.entry(v).or_insert(0) += 1u64 << depth;
+        }
+    }
+
+    let mut uncovered: BTreeSet<(usize, usize)> = relief
+        .iter()
+        .filter(|(_, here)| !here.is_empty())
+        .map(|(&point, _)| point)
+        .collect();
+    // A point with nothing to take is the shape that ends the loop, so name a
+    // few: it is the difference between a program too wide to compile and a
+    // choice this pass could have made and did not.
+    if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+        let barren: Vec<String> = relief
+            .iter()
+            .filter(|(_, here)| here.is_empty())
+            .take(8)
+            .map(|(&(b, i), _)| format!("b{b}[{i}]={:?}", block_schedules[b][i].op))
+            .collect();
+        tracing::debug!(
+            target: "blitz::regalloc",
+            "[{func_name}] spill choice: {} uncolourable point(s), {} relievable, \
+             {} candidate(s); nothing to take at [{}]",
+            relief.len(),
+            uncovered.len(),
+            candidates.len(),
+            barren.join(", "),
+        );
+    }
+    // One value taken out of one point is not enough: several points can be
+    // uncolourable at once and a value only relieves the ones it crosses. So
+    // cover them, cheapest-per-point first -- Chaitin's ratio, the loop-weighted
+    // cost of the spill over the number of still-uncovered points it relieves.
+    // A round then lowers the pressure at *every* point that overflowed, which
+    // is what makes the next round's overshoot a verdict on the program rather
+    // than on which value this one happened to pick.
+    let mut chosen: BTreeSet<usize> = BTreeSet::new();
+    while !uncovered.is_empty() {
+        let best = candidates
+            .iter()
+            .filter(|v| !chosen.contains(&(v.0 as usize)))
+            .filter_map(|&v| {
+                let covers = uncovered
+                    .iter()
+                    .filter(|point| relief[point].contains(&v))
+                    .count() as u64;
+                if covers == 0 {
+                    return None;
+                }
+                let cost = refs.get(&v).copied().unwrap_or(1);
+                // Scaled so the division keeps its ordering in integers, and the
+                // VReg index breaks ties so the choice does not move with hash order.
+                Some((cost * 1024 / covers, v.0, v))
+            })
+            .min();
+        let Some((_, _, v)) = best else { break };
+        chosen.insert(v.0 as usize);
+        uncovered.retain(|point| !relief[point].contains(&v));
+    }
+    chosen
 }
 
 /// Where the most values of one class are live at once, and what instruction is
@@ -2032,10 +2245,7 @@ const MAX_GLOBAL_SPILL_ROUNDS: usize = 10;
 ///
 /// Read off the defining instruction's own result type, with block parameters
 /// taking the class their `Op::BlockParam` declares.
-fn vreg_class_map(
-    block_schedules: &[Vec<ScheduledInst>],
-    block_param_vregs_per_block: &[BTreeSet<VReg>],
-) -> BTreeMap<VReg, RegClass> {
+fn vreg_class_map(block_schedules: &[Vec<ScheduledInst>]) -> BTreeMap<VReg, RegClass> {
     let mut classes: BTreeMap<VReg, RegClass> = BTreeMap::new();
     for inst in block_schedules.iter().flatten() {
         let class = if inst.op.is_fp_op() {
@@ -2045,7 +2255,6 @@ fn vreg_class_map(
         };
         classes.insert(inst.dst, class);
     }
-    let _ = block_param_vregs_per_block;
     classes
 }
 
