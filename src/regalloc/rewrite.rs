@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use crate::egraph::extract::VReg;
 use crate::schedule::scheduler::ScheduledInst;
 
@@ -11,33 +9,69 @@ pub fn apply_coalescing(
     insts: &[ScheduledInst],
     coalesced: &[(usize, usize)], // (merged_into, merged_from)
 ) -> Vec<ScheduledInst> {
-    if coalesced.is_empty() {
-        return insts.to_vec();
-    }
+    CoalesceAliases::new(coalesced).apply(insts)
+}
 
-    // Build alias map: merged_from -> merged_into.
-    let mut alias: BTreeMap<u32, u32> = BTreeMap::new();
-    for &(into, from) in coalesced {
-        alias.insert(from as u32, into as u32);
-    }
+/// Where each coalesced VReg ends up, resolved once for the whole function.
+///
+/// The chain a merged VReg leads along is followed at construction and the
+/// answer stored flat, so renaming an operand is one index rather than a walk of
+/// map lookups -- and the table is built once rather than once per block, which
+/// is what a per-block `apply_coalescing` was doing with the same input.
+pub struct CoalesceAliases {
+    /// `target[i]` is what VReg `i` becomes, or `i` itself.
+    target: Vec<u32>,
+}
 
-    let resolve = |v: VReg| -> VReg {
-        let mut idx = v.0;
-        // Follow alias chain.
-        while let Some(&target) = alias.get(&idx) {
-            idx = target;
+impl CoalesceAliases {
+    pub fn new(coalesced: &[(usize, usize)]) -> Self {
+        let max = coalesced
+            .iter()
+            .map(|&(into, from)| into.max(from))
+            .max()
+            .map_or(0, |m| m + 1);
+        let mut target: Vec<u32> = (0..max as u32).collect();
+        for &(into, from) in coalesced {
+            target[from] = into as u32;
         }
-        VReg(idx)
-    };
+        // Collapse the chains. Every step moves to a VReg that is itself
+        // resolved next, so one forward pass would not finish the job; each
+        // entry is walked to its end and the whole path pointed there.
+        let mut path: Vec<u32> = Vec::new();
+        for i in 0..max {
+            let mut cur = i as u32;
+            path.clear();
+            while target[cur as usize] != cur {
+                path.push(cur);
+                cur = target[cur as usize];
+            }
+            for &node in &path {
+                target[node as usize] = cur;
+            }
+        }
+        CoalesceAliases { target }
+    }
 
-    insts
-        .iter()
-        .map(|inst| ScheduledInst {
-            op: inst.op.clone(),
-            dst: resolve(inst.dst),
-            operands: inst.operands.iter().map(|&op| resolve(op)).collect(),
-        })
-        .collect()
+    pub fn resolve(&self, v: VReg) -> VReg {
+        match self.target.get(v.0 as usize) {
+            Some(&t) => VReg(t),
+            None => v,
+        }
+    }
+
+    pub fn apply(&self, insts: &[ScheduledInst]) -> Vec<ScheduledInst> {
+        if self.target.is_empty() {
+            return insts.to_vec();
+        }
+        insts
+            .iter()
+            .map(|inst| ScheduledInst {
+                op: inst.op.clone(),
+                dst: self.resolve(inst.dst),
+                operands: inst.operands.iter().map(|&op| self.resolve(op)).collect(),
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

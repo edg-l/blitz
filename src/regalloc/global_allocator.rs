@@ -70,7 +70,7 @@ use super::interference::{
     resolve_precoloring_conflicts,
 };
 use super::liveness::{LivenessInfo, compute_liveness};
-use super::rewrite::apply_coalescing;
+use super::rewrite::CoalesceAliases;
 use super::slots::SlotAllocator;
 
 /// Result of Phase 2: function-wide interference graph + per-block liveness.
@@ -850,11 +850,14 @@ fn run_phase3(
         Default::default()
     };
 
-    // Apply coalescing aliases to each block's schedule
-    // individually, preserving block boundaries.
+    // Apply coalescing aliases to each block's schedule individually,
+    // preserving block boundaries. The alias table is built once for the
+    // function: every block resolves against the same merges, and rebuilding it
+    // per block was a quarter of the compile on a 3763-block function.
+    let coalesce_aliases_table = CoalesceAliases::new(&coalesced);
     let post_coalesce_schedules: Vec<Vec<ScheduledInst>> = block_schedules
         .iter()
-        .map(|sched| apply_coalescing(sched, &coalesced))
+        .map(|sched| coalesce_aliases_table.apply(sched))
         .collect();
 
     // Build the coalescing alias map early so it can be used to resolve
@@ -2498,9 +2501,10 @@ mod tests {
         );
 
         // Apply coalescing to each block's schedule.
+        let coalesce_aliases_table = CoalesceAliases::new(&coalesced);
         let post_coalesce: Vec<Vec<ScheduledInst>> = block_schedules
             .iter()
-            .map(|sched| apply_coalescing(sched, &coalesced))
+            .map(|sched| coalesce_aliases_table.apply(sched))
             .collect();
 
         // After coalescing, v1's dst should be renamed to v0 (the canonical).
