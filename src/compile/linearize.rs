@@ -421,3 +421,241 @@ pub(super) fn linearize(
         idom,
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::egraph::enode::ENode;
+    use crate::egraph::extract::{ExtractedNode, VRegInst};
+    use crate::ir::CondCode;
+    use crate::ir::effectful::{EffOperand, EffectfulOp, TermArgs};
+    use crate::ir::function::BasicBlock;
+
+    /// An e-graph of `n` distinct I64 constants, class `i` holding `iconst(i)`.
+    fn constants(n: u32) -> EGraph {
+        let mut egraph = EGraph::new();
+        for i in 0..n {
+            let cid = egraph.add(ENode {
+                op: Op::Pure(PureOp::Iconst(i as i64, Type::I64)),
+                children: Default::default(),
+            });
+            assert_eq!(cid, ClassId(i));
+        }
+        egraph
+    }
+
+    /// The only extraction an e-graph of constants has: each class's one node.
+    fn extraction_of(egraph: &EGraph) -> ExtractionResult {
+        ExtractionResult {
+            choices: (0..egraph.arena_len() as u32)
+                .map(|i| {
+                    let class = egraph.class(ClassId(i));
+                    (
+                        ClassId(i),
+                        ExtractedNode {
+                            op: class.nodes[0].op.clone(),
+                            children: vec![],
+                            cost: 0.0,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Blocks 0..n, block `i` carrying `ops[i]`, ids equal to indices.
+    fn func_with(ops: Vec<Vec<EffectfulOp>>, param_class_ids: Vec<ClassId>) -> Function {
+        let blocks = ops
+            .into_iter()
+            .enumerate()
+            .map(|(i, ops)| BasicBlock {
+                id: i as BlockId,
+                param_types: vec![],
+                param_vregs: vec![],
+                ops,
+            })
+            .collect::<Vec<_>>();
+        Function {
+            name: "f".to_string(),
+            param_types: vec![Type::I64; param_class_ids.len()],
+            return_types: vec![],
+            next_block_id: blocks.len() as BlockId,
+            blocks,
+            param_class_ids,
+            egraph: None,
+            stack_slots: vec![],
+            noinline: false,
+        }
+    }
+
+    /// A store naming `class` as both its address and its value, so a block
+    /// carrying one names exactly that class and nothing else.
+    fn store(class: ClassId) -> EffectfulOp {
+        EffectfulOp::Store {
+            addr: EffOperand::Class(class),
+            ty: Type::I64,
+            val: EffOperand::Class(class),
+        }
+    }
+
+    fn branch(cond: ClassId, bb_true: BlockId, bb_false: BlockId) -> EffectfulOp {
+        EffectfulOp::Branch {
+            cond: EffOperand::Class(cond),
+            cc: CondCode::Ne,
+            bb_true,
+            bb_false,
+            true_args: TermArgs::classes([]),
+            false_args: TermArgs::classes([]),
+        }
+    }
+
+    fn jump(target: BlockId) -> EffectfulOp {
+        EffectfulOp::Jump {
+            target,
+            args: TermArgs::classes([]),
+        }
+    }
+
+    fn ret() -> EffectfulOp {
+        EffectfulOp::Ret { val: None }
+    }
+
+    fn run(func: &Function, egraph: &EGraph) -> Linearized {
+        linearize(
+            func,
+            egraph,
+            &extraction_of(egraph),
+            &BTreeMap::new(),
+            &ExtraRoots::new(),
+        )
+    }
+
+    /// Whether `block` emitted an instruction for `class`, asked of the block's
+    /// own snapshot rather than the function-wide map.
+    fn emits(lin: &Linearized, block_idx: usize, class: ClassId) -> bool {
+        let Some(vreg) = lin.block_snapshots[block_idx].lookup_any(class) else {
+            return false;
+        };
+        lin.block_vreg_insts[block_idx]
+            .iter()
+            .any(|i: &VRegInst| i.dst == vreg)
+    }
+
+    /// 0 branches to 1 and 2, both of which name class 1, and both jump to 3.
+    fn diamond_naming_class_one() -> (Function, EGraph) {
+        let func = func_with(
+            vec![
+                vec![branch(ClassId(0), 1, 2)],
+                vec![store(ClassId(1)), jump(3)],
+                vec![store(ClassId(1)), jump(3)],
+                vec![ret()],
+            ],
+            vec![],
+        );
+        (func, constants(2))
+    }
+
+    /// 0 names class 1 and jumps to 1, which names it again.
+    fn chain_naming_class_one() -> (Function, EGraph) {
+        let func = func_with(
+            vec![
+                vec![store(ClassId(1)), jump(1)],
+                vec![store(ClassId(1)), ret()],
+            ],
+            vec![],
+        );
+        (func, constants(2))
+    }
+
+    /// The rule the whole pass exists to apply: neither arm of a diamond
+    /// dominates the other, so the second one to be reached emits its own VReg
+    /// for a class the first already has.
+    #[test]
+    fn a_class_named_by_both_arms_is_re_emitted_in_the_second() {
+        let (func, egraph) = diamond_naming_class_one();
+        let lin = run(&func, &egraph);
+
+        let first_arm = lin.rpo_order.iter().find(|&&b| b == 1 || b == 2).copied();
+        assert_eq!(
+            Some(lin.class_emitted_in[&ClassId(1)]),
+            first_arm,
+            "the class belongs to the first arm the RPO reaches",
+        );
+        assert!(emits(&lin, 1, ClassId(1)));
+        assert!(emits(&lin, 2, ClassId(1)));
+        assert_ne!(
+            lin.block_snapshots[1].lookup_any(ClassId(1)),
+            lin.block_snapshots[2].lookup_any(ClassId(1)),
+            "each arm must carry the class in its own VReg",
+        );
+    }
+
+    /// The other half of the same rule: a dominating emitter is reused, so the
+    /// later block emits nothing and both snapshots name one VReg.
+    #[test]
+    fn a_dominating_emitter_is_not_re_emitted() {
+        let (func, egraph) = chain_naming_class_one();
+        let lin = run(&func, &egraph);
+
+        assert_eq!(lin.class_emitted_in[&ClassId(1)], 0);
+        assert!(emits(&lin, 0, ClassId(1)));
+        assert!(!emits(&lin, 1, ClassId(1)));
+        assert_eq!(
+            lin.block_snapshots[0].lookup_any(ClassId(1)),
+            lin.block_snapshots[1].lookup_any(ClassId(1)),
+        );
+    }
+
+    /// A re-emission's VReg is replaced in the function-wide map by the one its
+    /// class had before, so only its own block's snapshot still names it. Its
+    /// type is recorded as it is minted for that reason, and a VReg absent from
+    /// `vreg_types` makes lowering fall back to 64 bits -- a miscompile on a
+    /// narrower value, not a pessimism.
+    #[test]
+    fn every_minted_vreg_has_a_type() {
+        for (func, egraph) in [diamond_naming_class_one(), chain_naming_class_one()] {
+            let lin = run(&func, &egraph);
+            for (block_idx, insts) in lin.block_vreg_insts.iter().enumerate() {
+                for inst in insts {
+                    assert!(
+                        lin.vreg_types.contains_key(&inst.dst),
+                        "block {block_idx} minted v{} with no type",
+                        inst.dst.0,
+                    );
+                }
+            }
+        }
+    }
+
+    /// A parameter is a root of the entry block whether or not the entry block
+    /// uses it. Emitted lazily instead, a parameter two sibling branches both
+    /// read is re-emitted in each -- and only one of the two VRegs carries the
+    /// ABI precolor, so the other names a register that never held the value.
+    #[test]
+    fn a_parameter_is_emitted_once_at_entry_even_when_the_entry_does_not_use_it() {
+        let func = func_with(
+            vec![
+                vec![branch(ClassId(0), 1, 2)],
+                vec![store(ClassId(1)), jump(3)],
+                vec![store(ClassId(1)), jump(3)],
+                vec![ret()],
+            ],
+            vec![ClassId(1)],
+        );
+        let lin = run(&func, &constants(2));
+
+        assert_eq!(lin.class_emitted_in[&ClassId(1)], 0);
+        assert!(emits(&lin, 0, ClassId(1)));
+        let entry = lin.block_snapshots[0].lookup_any(ClassId(1));
+        assert!(entry.is_some());
+        for arm in [1, 2] {
+            assert!(
+                !emits(&lin, arm, ClassId(1)),
+                "block {arm} re-emitted a parameter"
+            );
+            assert_eq!(lin.block_snapshots[arm].lookup_any(ClassId(1)), entry);
+        }
+    }
+}

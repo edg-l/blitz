@@ -845,3 +845,165 @@ pub(crate) fn terminator_uses(schedules: &[Vec<ScheduledInst>]) -> Vec<BTreeSet<
         })
         .collect()
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::effectful::Symbol;
+
+    fn committed(vreg: u32) -> EffOperand {
+        EffOperand::Committed {
+            class: ClassId(vreg),
+            vreg: VReg(vreg),
+        }
+    }
+
+    fn inst(op: Op, dst: u32, operands: &[u32]) -> ScheduledInst {
+        ScheduledInst {
+            op,
+            dst: VReg(dst),
+            operands: operands.iter().map(|&v| VReg(v)).collect(),
+        }
+    }
+
+    /// `populate_effectful_operands` over one block's ops, returning the schedule
+    /// it produced. VReg numbering continues past the highest one the schedule
+    /// already names.
+    fn populate(mut schedule: Vec<ScheduledInst>, ops: &[EffectfulOp]) -> Vec<ScheduledInst> {
+        let mut vreg_group: BTreeMap<VReg, usize> = BTreeMap::new();
+        let mut next_vreg = schedule.iter().map(|i| i.dst.0 + 1).max().unwrap_or(0);
+        populate_effectful_operands(&mut schedule, ops, &mut vreg_group, &mut next_vreg);
+        schedule
+    }
+
+    fn operands_of(schedule: &[ScheduledInst], op: PseudoOp) -> Vec<VReg> {
+        schedule
+            .iter()
+            .find(|i| i.op == Op::Pseudo(op.clone()))
+            .unwrap_or_else(|| panic!("no {op:?} in the schedule"))
+            .operands
+            .clone()
+    }
+
+    /// The layout `populate_effectful_operands` writes is what
+    /// `role_operand_count` names, so the two must agree op by op.
+    #[test]
+    fn role_operand_count_matches_the_layout() {
+        assert_eq!(
+            role_operand_count(&EffectfulOp::Load {
+                addr: committed(0),
+                ty: Type::I64,
+                result: committed(1),
+            }),
+            1,
+        );
+        assert_eq!(
+            role_operand_count(&EffectfulOp::Store {
+                addr: committed(0),
+                ty: Type::I64,
+                val: committed(1),
+            }),
+            2,
+        );
+        assert_eq!(
+            role_operand_count(&EffectfulOp::Call {
+                func: Symbol::from("g"),
+                args: vec![committed(0), committed(1), committed(2)],
+                arg_tys: vec![Type::I64; 3],
+                ret_tys: vec![],
+                results: vec![],
+            }),
+            3,
+        );
+        assert_eq!(
+            role_operand_count(&EffectfulOp::Ret { val: None }),
+            0,
+            "a terminator has no role operands",
+        );
+    }
+
+    /// `*p = p`: one VReg fills both roles, and the second occurrence must keep
+    /// its slot. Deduping it makes the value's operand the address's, which is
+    /// the shape every reconstruction heuristic got wrong.
+    #[test]
+    fn a_role_operand_keeps_its_slot_when_one_vreg_fills_two_roles() {
+        let schedule = populate(
+            vec![inst(Op::Pure(PureOp::Iconst(7, Type::I64)), 0, &[])],
+            &[EffectfulOp::Store {
+                addr: committed(0),
+                ty: Type::I64,
+                val: committed(0),
+            }],
+        );
+        assert_eq!(
+            operands_of(&schedule, PseudoOp::StoreBarrier),
+            vec![VReg(0), VReg(0)],
+        );
+    }
+
+    /// Roles come first and in order; a folded `Addr`'s children follow them,
+    /// deduped, and are there only to keep liveness honest.
+    #[test]
+    fn addr_children_follow_the_roles_and_are_deduped() {
+        let schedule = populate(
+            vec![
+                inst(Op::Pure(PureOp::Iconst(1, Type::I64)), 0, &[]),
+                inst(Op::Pure(PureOp::Addr { scale: 1, disp: 0 }), 1, &[0, 0]),
+                inst(Op::Pure(PureOp::Iconst(2, Type::I64)), 2, &[]),
+            ],
+            &[EffectfulOp::Store {
+                addr: committed(1),
+                ty: Type::I64,
+                val: committed(2),
+            }],
+        );
+        assert_eq!(
+            operands_of(&schedule, PseudoOp::StoreBarrier),
+            vec![VReg(1), VReg(2), VReg(0)],
+            "address, value, then the address's one distinct child",
+        );
+    }
+
+    /// A void call gets a barrier even with no arguments: it is the marker that
+    /// tells the allocator a call clobbers here.
+    #[test]
+    fn a_void_call_with_no_arguments_still_gets_a_barrier() {
+        let schedule = populate(
+            vec![],
+            &[EffectfulOp::Call {
+                func: Symbol::from("g"),
+                args: vec![],
+                arg_tys: vec![],
+                ret_tys: vec![],
+                results: vec![],
+            }],
+        );
+        assert!(operands_of(&schedule, PseudoOp::VoidCallBarrier).is_empty());
+    }
+
+    /// A call's arguments land on the existing `CallResult` in ABI order, ahead
+    /// of whatever the instruction already carried.
+    #[test]
+    fn call_arguments_lead_the_result_instruction_in_abi_order() {
+        let schedule = populate(
+            vec![
+                inst(Op::Pure(PureOp::Iconst(1, Type::I64)), 0, &[]),
+                inst(Op::Pure(PureOp::Iconst(2, Type::I64)), 1, &[]),
+                inst(Op::Pseudo(PseudoOp::CallResult(0, Type::I64)), 2, &[1]),
+            ],
+            &[EffectfulOp::Call {
+                func: Symbol::from("g"),
+                args: vec![committed(1), committed(0)],
+                arg_tys: vec![Type::I64; 2],
+                ret_tys: vec![Type::I64],
+                results: vec![committed(2)],
+            }],
+        );
+        assert_eq!(
+            operands_of(&schedule, PseudoOp::CallResult(0, Type::I64)),
+            vec![VReg(1), VReg(0)],
+        );
+    }
+}
