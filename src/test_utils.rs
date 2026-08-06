@@ -63,11 +63,13 @@ pub fn objdump_disasm(bytes: &[u8]) -> Option<String> {
     // disassembly of one program depend on which process disassembled it. Two
     // runs of the same compiler over the same source must produce the same text:
     // that equality is what says a change to the compiler changed no output.
+    // Every line keeps its terminator: a caller printing one function's
+    // disassembly after another's must not run the two together.
     let text = String::from_utf8_lossy(&output.stdout);
     Some(
         text.lines()
             .filter(|line| !line.contains("file format binary"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+            .map(|line| format!("{line}\n"))
+            .collect(),
     )
 }
