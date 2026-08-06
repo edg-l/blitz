@@ -76,6 +76,11 @@ pub fn fmt_op(op: &Op) -> String {
         Op::Mach(MachOp::X86Shr) => "x86_shr".into(),
 
         // x86 immediate shifts
+        Op::Mach(MachOp::X86AddI(n)) => format!("x86_add_imm({n})"),
+        Op::Mach(MachOp::X86SubI(n)) => format!("x86_sub_imm({n})"),
+        Op::Mach(MachOp::X86AndI(n)) => format!("x86_and_imm({n})"),
+        Op::Mach(MachOp::X86OrI(n)) => format!("x86_or_imm({n})"),
+        Op::Mach(MachOp::X86XorI(n)) => format!("x86_xor_imm({n})"),
         Op::Mach(MachOp::X86ShlImm(n)) => format!("x86_shl_imm({n})"),
         Op::Mach(MachOp::X86ShrImm(n)) => format!("x86_shr_imm({n})"),
         Op::Mach(MachOp::X86SarImm(n)) => format!("x86_sar_imm({n})"),

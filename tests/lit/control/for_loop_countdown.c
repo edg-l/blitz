@@ -1,9 +1,10 @@
 // EXIT: 10
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// counting down from 10 to 0
+// counting down from 10 to 0, decrement as `dec` -- the constant is in the
+// instruction rather than a register of its own
 // CHECK: mov    {{[a-z0-9]+}},0xa
-// CHECK: sub
+// CHECK: dec
 // backward jump
 // CHECK: jmp
 

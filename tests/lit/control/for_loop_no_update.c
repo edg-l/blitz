@@ -4,8 +4,8 @@
 // loop bound fused into cmp via X86CmpI
 // CHECK: cmp    {{[a-z0-9]+}},0xa
 // CHECK: jl
-// increment inside body
-// CHECK: add
+// increment inside body, as `inc`
+// CHECK: inc
 // CHECK: jmp
 
 int main() {

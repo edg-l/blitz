@@ -1,8 +1,8 @@
 // EXIT: 10
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// field assign in update clause
-// CHECK: add
+// field assign in update clause, incremented in place
+// CHECK: inc
 // CHECK: jmp
 
 struct Counter {

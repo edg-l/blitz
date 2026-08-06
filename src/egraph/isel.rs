@@ -12,6 +12,7 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_alu_isel(egraph, &snaps);
     changed |= apply_shift_isel(egraph, &snaps);
     changed |= apply_shift_imm_isel(egraph, &snaps);
+    changed |= apply_alu_imm_isel(egraph, &snaps);
     changed |= apply_select_isel(egraph, &snaps);
     changed |= apply_icmp_isel(egraph, &snaps);
     changed |= apply_fcmp_isel(egraph, &snaps);
@@ -165,6 +166,106 @@ fn apply_shift_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let proj0_canon = egraph.unionfind.find_immutable(proj0);
         if canon != proj0_canon {
             egraph.merge(class_id, proj0);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// `X86Add(a, Iconst(n))` -> add `X86AddI(n)(a)` as an alternative in the same
+/// class, and the same for Sub/And/Or/Xor.
+///
+/// Both forms are one instruction, so what the immediate form saves is the
+/// other operand: an `Iconst` selected as a register operand costs a register
+/// and the `mov` that fills it, for the whole of its live range. The cost model
+/// prices only the node, so it carries a small discount to break the tie; the
+/// real win shows up as one fewer value live.
+///
+/// `Sub` takes the constant on the right only. `c - x` has no immediate form --
+/// the immediate is the subtrahend -- and the algebraic rules do not turn one
+/// into the other, so matching either side here would emit `sub x, c` for
+/// `c - x`.
+fn apply_alu_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    /// The immediate form of an ALU op, and whether its operands commute.
+    fn imm_form(op: &Op) -> Option<(fn(i32) -> Op, bool)> {
+        match op {
+            Op::Mach(MachOp::X86Add) => {
+                Some(((|n| Op::Mach(MachOp::X86AddI(n))) as fn(i32) -> Op, true))
+            }
+            Op::Mach(MachOp::X86Sub) => {
+                Some(((|n| Op::Mach(MachOp::X86SubI(n))) as fn(i32) -> Op, false))
+            }
+            Op::Mach(MachOp::X86And) => {
+                Some(((|n| Op::Mach(MachOp::X86AndI(n))) as fn(i32) -> Op, true))
+            }
+            Op::Mach(MachOp::X86Or) => {
+                Some(((|n| Op::Mach(MachOp::X86OrI(n))) as fn(i32) -> Op, true))
+            }
+            Op::Mach(MachOp::X86Xor) => {
+                Some(((|n| Op::Mach(MachOp::X86XorI(n))) as fn(i32) -> Op, true))
+            }
+            _ => None,
+        }
+    }
+
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+
+        // The pair itself is not the value; `Proj0` of it is, and that is the
+        // class an alternative has to join.
+        if snap.op != Op::Pure(PureOp::Proj0) || snap.children.len() != 1 {
+            continue;
+        }
+        let alu_canon = egraph.unionfind.find_immutable(snap.children[0]);
+        if alu_canon == ClassId::NONE {
+            continue;
+        }
+
+        // Take the operands and the form out of the class before touching the
+        // e-graph: `egraph.add` below invalidates this borrow.
+        let found = egraph.class(alu_canon).nodes.iter().find_map(|n| {
+            let (mk, commutes) = imm_form(&n.op)?;
+            if n.children.len() != 2 {
+                return None;
+            }
+            Some((mk, commutes, n.children[0], n.children[1]))
+        });
+        let Some((mk, commutes, a, b)) = found else {
+            continue;
+        };
+
+        // The register operand and the constant, whichever side the constant is
+        // on. A node with two constants is left alone: folding it is the
+        // algebraic rules' job, and selecting one operand as an immediate would
+        // keep the other in a register for nothing.
+        let rhs_const = egraph.get_constant(b).map(|(v, _)| v);
+        let lhs_const = commutes
+            .then(|| egraph.get_constant(a).map(|(v, _)| v))
+            .flatten();
+        let (reg_operand, konst) = match (lhs_const, rhs_const) {
+            (_, Some(v)) => (a, v),
+            (Some(v), None) => (b, v),
+            (None, None) => continue,
+        };
+        let Ok(imm) = i32::try_from(konst) else {
+            continue;
+        };
+
+        let imm_node = egraph.add(ENode {
+            op: mk(imm),
+            children: smallvec![reg_operand],
+        });
+        let proj0_imm = egraph.add(ENode {
+            op: Op::Pure(PureOp::Proj0),
+            children: smallvec![imm_node],
+        });
+
+        let canon = egraph.unionfind.find_immutable(class_id);
+        let proj0_imm_canon = egraph.unionfind.find_immutable(proj0_imm);
+        if canon != proj0_imm_canon {
+            egraph.merge(class_id, proj0_imm);
             changed = true;
         }
     }

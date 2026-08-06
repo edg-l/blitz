@@ -84,6 +84,34 @@ impl CostModel {
             }
             .weighted(self.goal),
 
+            // ── x86-64 immediate-form ALU ────────────────────────────────────────
+            //
+            // Priced against the register form it replaces, not on its own: the
+            // node that form needs in addition is an `Iconst`, which costs 0.0
+            // here, so the `mov r, imm32` materializing it is invisible. The
+            // real comparison is against `mov` + the register op, seven bytes.
+            //
+            // An `imm8` form is three bytes against those seven, so it wins by a
+            // margin no tie-break has to be invented for. An `imm32` form is six
+            // against seven -- one byte -- and pricing it to win costs
+            // `tests/lit/control/main_falls_off_end.c` its compile: it changes
+            // the schedule at a point the allocator already cannot colour.
+            // Measured, the wide case is worth -1.4pp of instructions on `lit`
+            // and `fuzz` and 0.13pp on `bench`, which is not a capacity failure's
+            // worth. It comes back when the credit can be made honest -- it is
+            // only owed where the constant has a single use, and the e-graph has
+            // no parents map to ask.
+            Op::Mach(MachOp::X86AddI(imm))
+            | Op::Mach(MachOp::X86SubI(imm))
+            | Op::Mach(MachOp::X86AndI(imm))
+            | Op::Mach(MachOp::X86OrI(imm))
+            | Op::Mach(MachOp::X86XorI(imm)) => CostTuple {
+                latency: 1.0,
+                throughput: 0.25,
+                size: if (-128..=127).contains(imm) { 1.0 } else { 4.0 },
+            }
+            .weighted(self.goal),
+
             // ── x86-64 shifts (variable count via CL): latency=1, throughput=0.5, size=3 ──
             Op::Mach(MachOp::X86Shl) | Op::Mach(MachOp::X86Sar) | Op::Mach(MachOp::X86Shr) => {
                 CostTuple {

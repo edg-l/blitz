@@ -139,6 +139,24 @@ pub enum MachOp {
         ty: Type,
     },
 
+    /// ALU op with a baked-in immediate — `add dst, imm` and friends; 1 child;
+    /// produces `Pair(childtype, Flags)` exactly as the register form does, so
+    /// `Proj1` of one is the same flags a register form would set.
+    ///
+    /// Emitted by isel when a `Proj0` of an ALU pair has an `Iconst` operand
+    /// that fits in `i32`, which saves both the register the constant would
+    /// occupy and the `mov` that materializes it. On 64-bit operands the
+    /// immediate is sign-extended from 32 bits, which is what `i32::try_from`
+    /// on the constant already guarantees.
+    ///
+    /// No width field, unlike `X86CmpI`: the result is a pair whose first
+    /// element is the operand type, so the dst class carries the width.
+    X86AddI(i32),
+    X86SubI(i32),
+    X86AndI(i32),
+    X86OrI(i32),
+    X86XorI(i32),
+
     /// Shift left by immediate count — `shl dst, imm`; 1 child. Free of RCX pressure.
     X86ShlImm(u8),
     /// Logical shift right by immediate count — `shr dst, imm`; 1 child.
@@ -678,8 +696,13 @@ impl Op {
                 Type::Pair(Box::new(child_types[0].clone()), Box::new(Type::Flags))
             }
 
-            // ── x86 immediate-form shifts (1 child → Pair(childtype, Flags)) ────
-            Op::Mach(MachOp::X86ShlImm(_))
+            // ── x86 immediate-form ALU and shifts (1 child → Pair(childtype, Flags)) ──
+            Op::Mach(MachOp::X86AddI(_))
+            | Op::Mach(MachOp::X86SubI(_))
+            | Op::Mach(MachOp::X86AndI(_))
+            | Op::Mach(MachOp::X86OrI(_))
+            | Op::Mach(MachOp::X86XorI(_))
+            | Op::Mach(MachOp::X86ShlImm(_))
             | Op::Mach(MachOp::X86ShrImm(_))
             | Op::Mach(MachOp::X86SarImm(_)) => {
                 assert_eq!(child_types.len(), 1, "{self:?} requires 1 child");

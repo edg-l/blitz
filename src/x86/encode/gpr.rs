@@ -186,12 +186,24 @@ impl Encoder {
         self.encode_alu_rr(size, 0x21, dst, src);
     }
 
+    pub fn encode_and_ri(&mut self, size: OpSize, dst: Reg, imm: i32) {
+        self.encode_alu_ri(size, 4, 0x25, dst, imm);
+    }
+
     pub fn encode_or_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
         self.encode_alu_rr(size, 0x09, dst, src);
     }
 
+    pub fn encode_or_ri(&mut self, size: OpSize, dst: Reg, imm: i32) {
+        self.encode_alu_ri(size, 1, 0x0D, dst, imm);
+    }
+
     pub fn encode_xor_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
         self.encode_alu_rr(size, 0x31, dst, src);
+    }
+
+    pub fn encode_xor_ri(&mut self, size: OpSize, dst: Reg, imm: i32) {
+        self.encode_alu_ri(size, 6, 0x35, dst, imm);
     }
 
     pub fn encode_cmp_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {

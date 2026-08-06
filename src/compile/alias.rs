@@ -225,6 +225,13 @@ impl AliasInfo {
             | Op::Mach(MachOp::X86Sar)
             | Op::Mach(MachOp::X86Shr) => AddrBase::Unknown,
 
+            // x86 immediate-form ALU
+            Op::Mach(MachOp::X86AddI(_))
+            | Op::Mach(MachOp::X86SubI(_))
+            | Op::Mach(MachOp::X86AndI(_))
+            | Op::Mach(MachOp::X86OrI(_))
+            | Op::Mach(MachOp::X86XorI(_)) => AddrBase::Unknown,
+
             // x86 immediate shifts
             Op::Mach(MachOp::X86ShlImm(_))
             | Op::Mach(MachOp::X86ShrImm(_))

@@ -110,15 +110,30 @@ pub enum MachInst {
         dst: Operand,
         src: Operand,
     },
+    AndRI {
+        size: OpSize,
+        dst: Operand,
+        imm: i32,
+    },
     OrRR {
         size: OpSize,
         dst: Operand,
         src: Operand,
     },
+    OrRI {
+        size: OpSize,
+        dst: Operand,
+        imm: i32,
+    },
     XorRR {
         size: OpSize,
         dst: Operand,
         src: Operand,
+    },
+    XorRI {
+        size: OpSize,
+        dst: Operand,
+        imm: i32,
     },
 
     // ── Shifts ────────────────────────────────────────────────────────────────
@@ -536,6 +551,9 @@ impl MachInst {
             MachInst::UcomissRR { src1: _, src2: _ } => Vec::new(),
             MachInst::AddRI { dst, .. } => collect(&[dst]),
             MachInst::SubRI { dst, .. } => collect(&[dst]),
+            MachInst::AndRI { dst, .. } => collect(&[dst]),
+            MachInst::OrRI { dst, .. } => collect(&[dst]),
+            MachInst::XorRI { dst, .. } => collect(&[dst]),
             MachInst::ShlRI { dst, .. } => collect(&[dst]),
             MachInst::ShrRI { dst, .. } => collect(&[dst]),
             MachInst::SarRI { dst, .. } => collect(&[dst]),
@@ -631,6 +649,9 @@ impl MachInst {
             MachInst::UcomissRR { src1, src2 } => collect(&[src1, src2]),
             MachInst::AddRI { dst, .. } => collect(&[dst]),
             MachInst::SubRI { dst, .. } => collect(&[dst]),
+            MachInst::AndRI { dst, .. } => collect(&[dst]),
+            MachInst::OrRI { dst, .. } => collect(&[dst]),
+            MachInst::XorRI { dst, .. } => collect(&[dst]),
             MachInst::ShlRI { dst, .. } => collect(&[dst]),
             MachInst::ShrRI { dst, .. } => collect(&[dst]),
             MachInst::SarRI { dst, .. } => collect(&[dst]),

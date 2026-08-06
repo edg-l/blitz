@@ -430,11 +430,20 @@ impl Encoder {
             MachInst::AndRR { size, dst, src } => {
                 self.encode_and_rr(*size, Self::expect_reg(dst), Self::expect_reg(src));
             }
+            MachInst::AndRI { size, dst, imm } => {
+                self.encode_and_ri(*size, Self::expect_reg(dst), *imm);
+            }
             MachInst::OrRR { size, dst, src } => {
                 self.encode_or_rr(*size, Self::expect_reg(dst), Self::expect_reg(src));
             }
+            MachInst::OrRI { size, dst, imm } => {
+                self.encode_or_ri(*size, Self::expect_reg(dst), *imm);
+            }
             MachInst::XorRR { size, dst, src } => {
                 self.encode_xor_rr(*size, Self::expect_reg(dst), Self::expect_reg(src));
+            }
+            MachInst::XorRI { size, dst, imm } => {
+                self.encode_xor_ri(*size, Self::expect_reg(dst), *imm);
             }
             MachInst::ShlRI { size, dst, imm } => {
                 self.encode_shl_ri(*size, Self::expect_reg(dst), *imm);

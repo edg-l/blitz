@@ -119,13 +119,17 @@ enum FpWidth {
     F64,
 }
 
-fn lower_shift_imm(
+/// The destructive two-operand form with a baked-in immediate: `op dst, imm`,
+/// preceded by a `mov` when the allocator did not give the result the operand's
+/// register. Shared by the immediate-form shifts and ALU ops, which differ only
+/// in the width of the immediate they carry.
+fn lower_dst_imm<I>(
     name: &str,
     size: OpSize,
     dst_reg: Option<Reg>,
     operand_regs: &[Option<Reg>],
-    imm: u8,
-    make_inst: impl FnOnce(Operand, u8) -> MachInst,
+    imm: I,
+    make_inst: impl FnOnce(Operand, I) -> MachInst,
 ) -> Result<Vec<MachInst>, String> {
     let dst = get_dst(name, dst_reg)?;
     let src = get_op(name, operand_regs, 0)?;
@@ -244,8 +248,36 @@ fn lower_op(
             MachInst::SarRCL { size, dst }
         }),
 
+        // Immediate-form ALU: the constant is in the instruction, so neither a
+        // register nor the `mov` that would fill it is needed.
+        Op::Mach(MachOp::X86AddI(imm)) => {
+            lower_dst_imm("X86AddI", size, dst_reg, operand_regs, *imm, |dst, imm| {
+                MachInst::AddRI { size, dst, imm }
+            })
+        }
+        Op::Mach(MachOp::X86SubI(imm)) => {
+            lower_dst_imm("X86SubI", size, dst_reg, operand_regs, *imm, |dst, imm| {
+                MachInst::SubRI { size, dst, imm }
+            })
+        }
+        Op::Mach(MachOp::X86AndI(imm)) => {
+            lower_dst_imm("X86AndI", size, dst_reg, operand_regs, *imm, |dst, imm| {
+                MachInst::AndRI { size, dst, imm }
+            })
+        }
+        Op::Mach(MachOp::X86OrI(imm)) => {
+            lower_dst_imm("X86OrI", size, dst_reg, operand_regs, *imm, |dst, imm| {
+                MachInst::OrRI { size, dst, imm }
+            })
+        }
+        Op::Mach(MachOp::X86XorI(imm)) => {
+            lower_dst_imm("X86XorI", size, dst_reg, operand_regs, *imm, |dst, imm| {
+                MachInst::XorRI { size, dst, imm }
+            })
+        }
+
         // Immediate-form shifts: no CL constraint, emit mov+shift directly.
-        Op::Mach(MachOp::X86ShlImm(imm)) => lower_shift_imm(
+        Op::Mach(MachOp::X86ShlImm(imm)) => lower_dst_imm(
             "X86ShlImm",
             size,
             dst_reg,
@@ -253,7 +285,7 @@ fn lower_op(
             *imm,
             |dst, imm| MachInst::ShlRI { size, dst, imm },
         ),
-        Op::Mach(MachOp::X86ShrImm(imm)) => lower_shift_imm(
+        Op::Mach(MachOp::X86ShrImm(imm)) => lower_dst_imm(
             "X86ShrImm",
             size,
             dst_reg,
@@ -261,7 +293,7 @@ fn lower_op(
             *imm,
             |dst, imm| MachInst::ShrRI { size, dst, imm },
         ),
-        Op::Mach(MachOp::X86SarImm(imm)) => lower_shift_imm(
+        Op::Mach(MachOp::X86SarImm(imm)) => lower_dst_imm(
             "X86SarImm",
             size,
             dst_reg,

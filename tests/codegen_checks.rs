@@ -240,7 +240,7 @@ fn ir_dce_removes_unused() {
     );
 }
 
-/// urem(x, 8) -> and(x, 7) in the IR
+/// urem(x, 8) -> and with the mask in the instruction, in the IR
 #[test]
 fn ir_urem_pow2_to_and() {
     let mut b = FunctionBuilder::new("urem8", &[Type::I64], &[Type::I64]);
@@ -254,12 +254,11 @@ fn ir_urem_pow2_to_and() {
         "
         // CHECK-LABEL: function urem8
         // CHECK: v0 = param(0, I64)
-        // CHECK-NEXT: v1 = iconst(7, I64)
-        // CHECK-NEXT: v2 = x86_and(v0, v1)
-        // CHECK-NEXT: v3 = proj0(v2)
+        // CHECK-NEXT: v1 = x86_and_imm(7)(v0)
+        // CHECK-NEXT: v2 = proj0(v1)
         // CHECK-NOT: urem
         // CHECK-NOT: div
-        // CHECK: ret v3
+        // CHECK: ret v2
         ",
     );
 }
@@ -695,9 +694,8 @@ fn asm_urem_pow2_to_and() {
     check_asm(
         b.finalize().unwrap(),
         "
-        // CHECK: mov    rax,0x7
-        // CHECK-NEXT: mov    rcx,rdi
-        // CHECK-NEXT: and    rcx,rax
+        // CHECK: mov    rcx,rdi
+        // CHECK-NEXT: and    rcx,0x7
         // CHECK-NEXT: mov    rax,rcx
         // CHECK-NOT: div
         // CHECK: ret

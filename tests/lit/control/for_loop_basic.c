@@ -8,8 +8,8 @@
 // CHECK: jle
 // loop body: add
 // CHECK: add
-// loop increment: i + 1
-// CHECK: add
+// loop increment: i + 1, as `inc` -- the constant is in the instruction
+// CHECK: inc
 // backward jump to loop header
 // CHECK: jmp
 

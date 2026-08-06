@@ -13,9 +13,9 @@ is fair game here.
 The measure of success is code quality against `gcc -O2` / `clang -O2` on the
 same input: fewer instructions, fewer bytes, fewer spills, better loops.
 
-**Where that stands: `x1.39` against `gcc -O2` and `x1.11` against `clang -O2`**,
+**Where that stands: `x1.34` against `gcc -O2` and `x1.07` against `clang -O2`**,
 geometric mean of the per-program instruction ratio over the 15 `bench` kernels,
-from `bash tests/run_codesize.sh --gap`. Worst is `queens` at `x2.82`. Five
+from `bash tests/run_codesize.sh --gap`. Worst is `queens` at `x2.70`. Five
 kernels are already *below* 1.0, which is not a win and is the first thing to
 misread: this counts static instructions, and a compiler that inlines or unrolls
 emits more of them and runs faster. `gcc` turns `fib_memo` into 436 instructions
@@ -44,24 +44,25 @@ rather than overhead against it.
 Ordered. Each says what it is, why it is placed there, and what would tell you it
 is done.
 
-1. **Twenty-two capacity failures are what is left.** No generated program
+1. **Twenty-four capacity failures are what is left.** No generated program
    computes a wrong value any more: 600 at 200 seeds a shape are `mixed`
-   198/200, `args` 186/200, `pressure` 194/200, and **every one of those
+   198/200, `args` 184/200, `pressure` 194/200, and **every one of those
    failures is the allocator refusing to colour, not a wrong answer.**
    Reproducers in `tests/fuzz/corpus/open/`; `run_corpus.sh` checks them in
    seconds.
 
-   **A program that does not compile is a program no oracle can judge**: 28 of
+   **A program that does not compile is a program no oracle can judge**: 30 of
    the 1200 (program, level) pairs are unjudged for that reason, so "no wrong
-   value remains" is a statement about the 1172 that ran, not about all 1200.
-   That is the second reason to close these.
+   value remains" is a statement about the 1170 that ran, not about all 1200.
+   That is the second reason to close these, and the count grows whenever a
+   pass shifts the schedule: immediate-form ALU alone moved `args` 186 -> 184.
 
    The allocator names the shape itself: *"spilling did not reduce it, so the
    pressure point is one instruction whose own operands are what is live
    there"*. Spilling cannot relieve a value that is live at a point *because
    the instruction there reads it*, which is why the spill loop stops -- see
    the four measured attempts at the end of `docs/refactor-roadmap.md` before
-   trying a fifth. `args` is where it concentrates, 14 of the 22. Done when a
+   trying a fifth. `args` is where it concentrates, 16 of the 24. Done when a
    200-seed run of each shape is clean.
 2. ~~**Make the gate able to see them.**~~ Done: `tests/fuzz/corpus/` plus
    `run_corpus.sh`, and `oracles.sh` so the saved programs and the generated ones
@@ -80,8 +81,8 @@ is done.
    forwarding and DSE passes already shipped.
 
 After those, the P1 list below is ordered by measured impact. **`P2` is where the
-single-target thesis is supposed to pay off and none of it is started** --
-immediate-form ALU ops are shovel-ready and mirror the shipped `X86CmpI`.
+single-target thesis pays off**, and its first item is now in: immediate-form ALU
+took the `gcc -O2` gap x1.39 -> x1.34 on its own. The rest of P2 is untouched.
 
 **Do not start in the register allocator, the splitter, or the block-parameter
 machinery without reading `docs/refactor-roadmap.md` first.** It is finished as
@@ -103,13 +104,13 @@ gated on pressure because it runs before global liveness exists, and
 - Generated programs at 30 seeds a shape -- the width every gate runs -- are
   `mixed` 30/30, `args` 30/30, `pressure` 30/30. **That width measures nothing**,
   and it is what `run_corpus.sh` exists to compensate for. At 200 seeds it is
-  `mixed` 198/200, `args` 186/200, `pressure` 194/200: **no wrong-value programs
-  and 22 capacity failures.**
+  `mixed` 198/200, `args` 184/200, `pressure` 194/200: **no wrong-value programs
+  and 24 capacity failures.**
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, 894 rows
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
 - Code quality also has an *absolute* number now, which is the one the Goal is
-  written against: `--gap`, `x1.39` vs `gcc -O2` and `x1.11` vs `clang -O2` on
+  written against: `--gap`, `x1.34` vs `gcc -O2` and `x1.07` vs `clang -O2` on
   `bench`. **`bench` is the only corpus that can produce it.** `lit` and `fuzz`
   compute a fixed answer from no runtime input, so `gcc -O2` evaluates the whole
   program and emits the constant -- a generated program becomes
@@ -296,9 +297,20 @@ so the holes stay visible.
 This is where single-target focus is supposed to pay off. LLVM has ~10x the
 isel patterns; we should beat it on the ones we implement.
 
-- [ ] **Immediate-form ALU**: `X86AddI`/`X86SubI`/`X86AndI`/`X86OrI`/`X86XorI`
-      for Iconst RHS, mirroring the shipped `X86CmpI`. Shrinks every `x + 1`,
-      `x & 0xff`, `x | 8`. Shovel-ready; named as next step by the 04-23 session.
+- [x] **Immediate-form ALU.** `X86AddI`/`X86SubI`/`X86AndI`/`X86OrI`/`X86XorI`,
+      one child producing `Pair(childtype, Flags)` exactly as the register form
+      does. `gcc -O2` gap x1.39 -> x1.34, `clang -O2` x1.11 -> x1.07, worst
+      kernel x2.82 -> x2.70; over the rows that changed, `bench` -3.8% insts and
+      -5.1% bytes, `lit` -2.3%/-2.7%, `fuzz` -1.7%/-2.2%.
+      **Only the `imm8` form is selected.** `Iconst` costs 0.0, so the `mov r,
+      imm32` the register form needs is invisible to extraction and the
+      immediate form has to carry the credit itself; an `imm8` form is 3 bytes
+      against that form's 7 and wins outright, while an `imm32` form is 6
+      against 7 and pricing it to win costs
+      `tests/lit/control/main_falls_off_end.c` its compile. Measured, the wide
+      case is worth a further -1.4pp on `lit` and `fuzz` and -0.13pp on `bench`.
+      It comes back when the credit can be made honest -- it is owed only where
+      the constant has a single use, and the e-graph has no parents map to ask.
 - [ ] **Bit instructions**: `bt`/`bts`/`btr`/`btc`, `popcnt`, `bsr`/`bsf`,
       `tzcnt`/`lzcnt`, `bswap`.
 - [ ] **BMI/BMI2 when available**: `andn`, `bextr`, `blsi`/`blsr`/`blsmsk`,
@@ -358,7 +370,7 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**No wrong-value programs are open. Twenty-two capacity failures are**, found
+**No wrong-value programs are open. Twenty-four capacity failures are**, found
 by running the generator at 200 seeds a shape instead of the 30 every gate is
 pinned at. The ones worth keeping are checked in under `tests/fuzz/corpus/open/`,
 where `run_corpus.sh` re-checks them in seconds; the files are the durable
@@ -368,7 +380,7 @@ regenerates a program until the generator changes.
 | shape | passing | wrong value | capacity |
 | --- | --- | --- | --- |
 | `mixed` at 200 | 198/200 | -- | 57, 123 |
-| `args` at 200 | 186/200 | -- | 14 seeds |
+| `args` at 200 | 184/200 | -- | 16 seeds |
 | `pressure` at 200 | 194/200 | -- | 6 seeds |
 
 **Re-measure rather than trust the list.** Entries have left it without anyone

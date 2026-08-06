@@ -4,8 +4,8 @@
 // comparison against bound 10 (immediate fused into cmp via X86CmpI)
 // CHECK: cmp    {{[a-z0-9]+}},0xa
 // CHECK: jl
-// loop body: add 1
-// CHECK: add
+// loop body: add 1, as `inc`
+// CHECK: inc
 
 int main() {
     int i = 0;
