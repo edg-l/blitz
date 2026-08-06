@@ -76,10 +76,16 @@ is done.
    pressure in exactly the same way -- `BLITZ_PASSES=-inlining` takes `bench`
    instructions 2637 to 2422 and reloads 377 to 247. The fix has the same shape
    as `licm::within_budget`. Done when `-O1` beats `-O0` on all 15 kernels.
-4. **Offset-aware alias analysis.** ~50 LOC in `alias.rs`, and the cheapest
-   quality win available: today any write to a base invalidates every cached load
-   at that base, so `s->a` and `s->b` kill each other, which throttles the
-   forwarding and DSE passes already shipped.
+4. ~~**Offset-aware alias analysis.**~~ Done: `alias.rs` splits an address into
+   a base expression plus a constant displacement, and two accesses off one base
+   whose `[offset, offset + width)` ranges do not meet cannot clobber each
+   other. **Its measured effect is close to nothing, and that is the finding**:
+   one `lit` row moves (-13.4% instructions, -24.5% bytes) and `struct_walk`
+   goes the other way by 2.7% because better forwarding keeps more values live.
+   Nothing else in `lit`, `bench` or `fuzz` changes, because almost nothing in
+   them accesses two fields of a struct -- `gen_c.py` does not generate structs
+   at all. The capability is real and `tests/lit/alias/forward_across_struct_field.c`
+   covers it; the corpus cannot price it. That is item 1 of P1 restated.
 
 After those, the P1 list below is ordered by measured impact. **`P2` is where the
 single-target thesis pays off**, and its first item is now in: immediate-form ALU
@@ -270,10 +276,11 @@ so the holes stay visible.
       -12.3% on `bench` and -21.3% on `fuzz`, spills -91.1% and -47.3%, no row
       worse on any corpus, `gcc -O2` gap x1.42 -> x1.39. **The same defect is
       still open in the inliner** -- see item 3 of Start here.
-- [ ] **Offset-aware alias analysis.** Today any write to a base invalidates
-      every cached load at that base, so `s->a` and `s->b` kill each other.
-      Byte-offset + width disjointness in `src/compile/alias.rs` is ~50 LOC and
-      directly unlocks the forwarding and DSE passes already shipped.
+- [x] **Offset-aware alias analysis.** `alias.rs::split_offset` takes an address
+      apart into a base expression and a constant displacement; two accesses off
+      one base are disjoint when their byte ranges do not meet. `s->a` and
+      `s->b` stop killing each other. The corpora barely exercise it -- see item
+      4 of Start here, and the corpus item at the top of this list.
 - [x] **The def no longer interferes with the operand it overwrites.** x86
       arithmetic is two-address, and `build_interference_into` gave every result
       an edge to `live_at[i]` -- the set live *before* the instruction, which

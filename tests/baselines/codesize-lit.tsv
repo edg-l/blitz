@@ -10,6 +10,8 @@ alias/dse_overwritten_store.c	O0	12	47	0	0
 alias/dse_overwritten_store.c	O1	6	17	0	0
 alias/forward_across_disjoint_slots.c	O0	14	47	0	0
 alias/forward_across_disjoint_slots.c	O1	8	27	0	0
+alias/forward_across_struct_field.c	O0	16	56	0	0
+alias/forward_across_struct_field.c	O1	10	39	0	0
 alias/forward_three_loads.c	O0	18	56	1	1
 alias/forward_three_loads.c	O1	11	27	0	0
 alias/load_to_load_forward.c	O0	11	36	0	0
@@ -147,7 +149,7 @@ control/cmp_negative_values.c	O1	42	138	0	0
 control/compound_assign.c	O0	91	289	0	0
 control/compound_assign.c	O1	31	81	0	0
 control/compound_assign_complex.c	O0	84	316	0	0
-control/compound_assign_complex.c	O1	82	326	0	0
+control/compound_assign_complex.c	O1	71	246	0	0
 control/constant_index_stores_then_call.c	O0	20	87	0	0
 control/constant_index_stores_then_call.c	O1	20	87	0	0
 control/continue_basic.c	O0	40	95	0	0

@@ -320,6 +320,13 @@ impl AliasInfo {
 
     /// Returns `true` if a store at `store_addr` with type `store_ty` may clobber
     /// a load at `load_addr` with type `load_ty`.
+    ///
+    /// Sharing a base is not enough to clobber. Two accesses off one base at
+    /// constant displacements touch disjoint bytes whenever their
+    /// `[offset, offset + width)` ranges do not overlap, which is what makes
+    /// `s->a` and `s->b` independent -- without it every write to a base
+    /// invalidates every cached load at that base, and the forwarding and dead-
+    /// store passes give up on any struct.
     pub fn store_clobbers_load(
         &self,
         store_addr: ClassId,
@@ -328,7 +335,79 @@ impl AliasInfo {
         load_ty: Type,
         egraph: &EGraph,
     ) -> bool {
-        self.may_alias(store_addr, load_addr, egraph) && types_overlap(store_ty, load_ty)
+        if !self.may_alias(store_addr, load_addr, egraph) {
+            return false;
+        }
+        if ranges_disjoint(store_addr, &store_ty, load_addr, &load_ty, egraph) {
+            return false;
+        }
+        types_overlap(store_ty, load_ty)
+    }
+}
+
+/// Whether two accesses provably touch no byte in common.
+///
+/// True only when both addresses split into the *same* base expression plus a
+/// constant displacement, and both widths are known. Base identity is e-class
+/// identity rather than [`AddrBase`] kind: two `StackSlot(0)` addresses can be
+/// reached through different expressions, and only the same expression makes
+/// the displacements comparable.
+fn ranges_disjoint(a: ClassId, a_ty: &Type, b: ClassId, b_ty: &Type, egraph: &EGraph) -> bool {
+    let (Some(aw), Some(bw)) = (a_ty.byte_size(), b_ty.byte_size()) else {
+        return false;
+    };
+    let (Some((a_base, a_off)), Some((b_base, b_off))) =
+        (split_offset(a, egraph, 0), split_offset(b, egraph, 0))
+    else {
+        return false;
+    };
+    if a_base != b_base {
+        return false;
+    }
+    a_off + aw as i64 <= b_off || b_off + bw as i64 <= a_off
+}
+
+/// An address as one opaque base expression plus a constant byte displacement.
+///
+/// `None` where any term other than the base is not a constant: an unknown
+/// index makes the displacement unknown, and guessing it would be a miscompile
+/// rather than a missed optimization. A class with no constant terms at all
+/// splits as itself at offset 0, which is what lets two displacements off one
+/// base be compared.
+fn split_offset(class: ClassId, egraph: &EGraph, depth: u32) -> Option<(ClassId, i64)> {
+    if depth >= 16 {
+        return None;
+    }
+    let canon = egraph.unionfind.find_immutable(class);
+    let opaque = Some((canon, 0));
+    // Only a single-node class can be taken apart: two nodes in one class are
+    // two spellings of the address, and the split has to describe both.
+    let eclass = egraph.class(canon);
+    let [node] = &eclass.nodes[..] else {
+        return opaque;
+    };
+    match &node.op {
+        Op::Pure(PureOp::Add) | Op::Mach(MachOp::X86Add) => {
+            let [a, b] = node.children[..] else {
+                return opaque;
+            };
+            // Exactly one side may be the base; the other has to be constant.
+            if let Some((k, _)) = egraph.get_constant(b) {
+                let (base, off) = split_offset(a, egraph, depth + 1)?;
+                Some((base, off.checked_add(k)?))
+            } else if let Some((k, _)) = egraph.get_constant(a) {
+                let (base, off) = split_offset(b, egraph, depth + 1)?;
+                Some((base, off.checked_add(k)?))
+            } else {
+                opaque
+            }
+        }
+        // `Proj0` of an ALU pair is the value the pair computes.
+        Op::Pure(PureOp::Proj0) => match node.children[..] {
+            [inner] => split_offset(inner, egraph, depth + 1).or(opaque),
+            _ => opaque,
+        },
+        _ => opaque,
     }
 }
 

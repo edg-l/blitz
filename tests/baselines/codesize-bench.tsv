@@ -29,4 +29,4 @@ sort_quick.c	O1	173	582	0	0
 strops.c	O0	184	622	0	0
 strops.c	O1	234	837	2	31
 struct_walk.c	O0	115	451	0	0
-struct_walk.c	O1	113	441	0	0
+struct_walk.c	O1	116	458	2	2
