@@ -63,6 +63,14 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
                     }
                 }
 
+                if let Some(alt) = decompose_const_mul(egraph, class_id, non_const, val) {
+                    let canon = egraph.unionfind.find_immutable(class_id);
+                    if egraph.unionfind.find_immutable(alt) != canon {
+                        egraph.merge(class_id, alt);
+                        changed = true;
+                    }
+                }
+
                 // Mul(a, 3/5/9) = Add(a, Shl(a, 1/2/3))
                 let shift_for_mul: Option<i64> = match val {
                     3 => Some(1),
@@ -207,6 +215,95 @@ pub fn apply_strength_reduction(egraph: &mut EGraph) -> bool {
         }
     }
     changed
+}
+
+/// A shift-and-add form of `x * k`, or `None` where there is no short one.
+///
+/// This is the one rule in the set whose result is not unambiguously better:
+/// `imul` is a single instruction, and the decomposition is two, so which wins
+/// is a question about their relative cost rather than about the shape of the
+/// expression. It is added as an alternative and extraction decides, which is
+/// what an e-graph is for. Every other rule here would be sound to apply
+/// destructively.
+///
+/// Three forms, all of them two instructions:
+///
+/// - `k = m << n` for `m` in 3, 5, 9 -- `(x * m) << n`, where the inner
+///   multiply is the `lea` form the rule below produces. `x * 12` is
+///   `lea (x + x*2)` then `shl 2`, which is what gcc emits.
+/// - `k = 2^n - 1` -- `(x << n) - x`.
+/// - `k = 2^n + 1` -- `(x << n) + x`.
+///
+/// Deliberately not covered: an arbitrary two-bit `k` as `(x << a) + (x << b)`.
+/// That is three instructions against `imul`'s one, and at this cost model it
+/// loses, so adding it would widen every such class to no purpose. The bound on
+/// this rule is that it fires only on a constant multiplier and emits a fixed
+/// shape, so no chain of it can compound -- unlike reassociation, whose
+/// associations of an n-term chain are Catalan-many.
+fn decompose_const_mul(
+    egraph: &mut EGraph,
+    class_id: ClassId,
+    x: ClassId,
+    k: i64,
+) -> Option<ClassId> {
+    let ty = egraph
+        .class(egraph.unionfind.find_immutable(class_id))
+        .ty
+        .clone();
+    if !ty.is_integer() {
+        return None;
+    }
+    let width = i64::from(ty.bit_width());
+    if k <= 0 {
+        return None;
+    }
+
+    // A shift by the type's own width or more is undefined, and a decomposition
+    // is only worth having while it stays shorter than the multiply.
+    let shift_ok = |n: i64| n > 0 && n < width;
+
+    let shl = |egraph: &mut EGraph, val: ClassId, n: i64| {
+        let n_class = egraph.add(ENode {
+            op: Op::Pure(PureOp::Iconst(n, ty.clone())),
+            children: smallvec![],
+        });
+        egraph.add(ENode {
+            op: Op::Pure(PureOp::Shl),
+            children: smallvec![val, n_class],
+        })
+    };
+
+    // k = m << n, m in {3,5,9}: the inner multiply becomes a `lea` on its own.
+    let n = k.trailing_zeros() as i64;
+    let odd = k >> n;
+    if shift_ok(n) && matches!(odd, 3 | 5 | 9) {
+        let m = egraph.add(ENode {
+            op: Op::Pure(PureOp::Iconst(odd, ty.clone())),
+            children: smallvec![],
+        });
+        let inner = egraph.add(ENode {
+            op: Op::Pure(PureOp::Mul),
+            children: smallvec![x, m],
+        });
+        return Some(shl(egraph, inner, n));
+    }
+
+    // k = 2^n - 1, and k = 2^n + 1 beyond the 3/5/9 the `lea` rule already has.
+    for (delta, op) in [(1, PureOp::Sub), (-1, PureOp::Add)] {
+        let pow = k + delta;
+        if pow > 0 && pow.count_ones() == 1 {
+            let n = pow.trailing_zeros() as i64;
+            if shift_ok(n) {
+                let shifted = shl(egraph, x, n);
+                return Some(egraph.add(ENode {
+                    op: Op::Pure(op),
+                    children: smallvec![shifted, x],
+                }));
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

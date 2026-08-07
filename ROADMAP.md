@@ -8,22 +8,39 @@ multi-output instructions, and uarch behavior instead of laundering everything
 through a target-neutral IR. Anything a portable backend has to generalize away
 is fair game here.
 
-The measure of success is code quality against `gcc -O2` / `clang -O2` on the
-same input: fewer instructions, fewer bytes, fewer spills, better loops.
+The measure of success is how fast the emitted code runs against `gcc -O2` /
+`clang -O2` on the same input, in CPU cycles.
 
-**Where that stands: `x1.29` against `gcc -O2`**, geometric mean of the
-per-program instruction ratio over the 21 `live` kernels, from
-`bash tests/run_codesize.sh --gap`. Worst is `call_hot` at `x2.29`.
+**Where that stands: `x3.07` against `gcc -O2` and `x3.80` against `clang -O2`**,
+geometric mean of the per-program cycle ratio over the 21 `live` kernels, from
+`bash tests/run_perf.sh`. Worst is `byte_copy` at `x17.6`.
 
-Read `live`, not `bench`. Both are reported, but `bench`'s kernels resist
-folding only by being large enough that `gcc` gives up, so that ratio is against
-whatever `gcc` happened to leave behind. Every `live` kernel seeds its data from
-`argc`, which no reference compiler can evaluate.
+Read `live`, not `bench`. Both exist, but `bench`'s kernels resist folding only
+by being large enough that `gcc` gives up. Every `live` kernel seeds its data
+from `argc`, which no reference compiler can evaluate, and takes its repeat
+count from `argc` too, so the harness scales the work by passing arguments.
 
-**The `clang` column is not a ranking.** It reads `x0.78` on `live`, meaning
-blitz emits fewer instructions than `clang -O2` -- because `clang` vectorizes
-and unrolls these loops. This counts static instructions, so a ratio under 1.0
-is a program to go and read, not a win.
+**Instruction counts are diagnostics, not the ranking, and this was measured
+rather than assumed.** `run_codesize.sh --gap` reads `x1.29` on the same corpus,
+which is 2.4x better than the truth. Two independent reasons, and both matter:
+
+- **A static count is unweighted by execution frequency.** A loop body run a
+  million times counts once, so a corpus of loop kernels -- which is what `live`
+  is -- reports mostly the quality of its own straight-line setup code.
+- **Instruction counts invert on latency-for-instruction trades**, which are
+  trades worth making. `x * 7` as `shl; sub` retires one *more* instruction than
+  `imul` and costs `1.1%` fewer cycles; gcc makes that trade routinely. A metric
+  that scores it as a regression cannot rank a compiler against gcc.
+
+The second is why the `clang` column used to need a disclaimer: static counting
+had blitz *ahead* of `clang` at `x0.78`, because `clang` unrolls and vectorizes
+into more instructions that run faster. It is 3.8x faster, and the number now
+says so instead of needing a paragraph explaining when it means the opposite.
+
+**IPC is not a goal either.** `run_perf.sh` prints it because it says *why* a
+kernel is slow -- high IPC with high cycles is too much work, low IPC with high
+cycles is stalls -- not because more is better. A compiler emitting more, cheaper
+instructions raises IPC while doing more work.
 
 Correctness is a precondition, not a tradeoff against that. An aggressive
 single-target optimizer has more room to be subtly wrong than a conservative
@@ -188,12 +205,16 @@ allocator enforces. It was under-relieving here rather than over-relieving.
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, over `lit`,
   `bench`, `live` and `fuzz`, fed by `BLITZ_DEBUG=stats`.
 - Code quality also has an *absolute* number, which is the one the Goal is
-  written against: `--gap`, `x1.29` vs `gcc -O2` over the 21 `live` kernels.
-  `lit` and `fuzz` compute a fixed answer from no runtime input, so `gcc -O2`
-  evaluates the whole program and emits the constant. `--gap` detects that where
-  it is total but not where it is partial, and partial is the common case.
-  `live` seeds every kernel from `argc` and cannot be folded at all. Widening it
-  further has no natural ceiling and is always a valid use of leftover time.
+  written against: `bash tests/run_perf.sh`, `x3.07` cycles vs `gcc -O2` over
+  the 21 `live` kernels, median of 5 `perf stat` samples each. Cycle counts vary
+  ~1% run to run here; instructions retired vary 0.00%, and are the wrong metric
+  for the reason the Goal gives. Widening `live` has no natural ceiling and is
+  always a valid use of leftover time.
+- `--gap` still prints the static instruction and byte ratios and is still
+  worth reading -- it is how a folded program is *detected*, since `lit` and
+  `fuzz` compute a fixed answer from no runtime input and `gcc -O2` emits the
+  constant. It is a diagnostic. It is not the ranking, and it read `x1.29` where
+  the truth was `x3.07`.
 - **Compile time is superlinear in blocks x classes**: `secs ~ (B*C)^0.86`,
   R2=0.92, and **both levels sit on one line**. `-O1` is not intrinsically
   cheaper, it hands the same pipeline a smaller IR. On a 6048-line input the two
@@ -348,10 +369,18 @@ Instruction count, `.text` bytes, spill stores and reloads per (program, level);
 a generated program that does not compile is a `-` row rather than an omission,
 so the holes stay visible.
 
-- [ ] Wall-clock via hyperfine, and the same table for `gcc -O2` / `clang -O2`
-      beside blitz's own numbers. Deferred deliberately: blitz-against-itself is
-      what refereed the decisions so far, and an external column moves when the
-      system compiler updates.
+- [x] **Measure how fast the code actually runs.** `bash tests/run_perf.sh`:
+      `perf stat` cycles for blitz and each reference on the `live` kernels,
+      median of 5, ranked by cycle ratio. This was deferred on the grounds that
+      blitz-against-itself had refereed every decision so far -- and that is
+      exactly what went wrong, since blitz-against-itself cannot see that its own
+      yardstick is 2.4x optimistic.
+      **Wall clock was the wrong instrument, not the wrong question**: it reads
+      0.9-45% run to run here against cycles' ~1%, because it measures the
+      scheduler as much as the code. Counters were free and already installed.
+      The kernels each take their repeat count from `argc`, so an ordinary run
+      does a hundredth of the work and the lit and differential harnesses stay
+      quick.
 
 ### P1 -- Optimizer gaps with the largest measured impact
 
@@ -417,8 +446,25 @@ so the holes stay visible.
       matches -- which is why saturation converges in two rounds and is worth
       0.39% (see Decisions). An e-graph earns its keep on *exploration* rules,
       where which form wins depends on context that is not visible when the rule
-      fires: reassociation, commutativity feeding an addressing mode,
-      distribute-versus-factor.
+      fires: reassociation, distribute-versus-factor.
+
+      **Commutativity is already one of these and already pays.**
+      `apply_commutativity_rules` puts both operand orders in the class, and
+      `addr_mode.rs` matches positionally -- it reads `children[0]` and
+      `children[1]` and never tries the other way round -- so the commuted node
+      is the only reason an addressing mode can be recognised when the source
+      wrote `i*4 + base`. That is the 109-class `Add | Addr{scale:1} |
+      Addr{scale:4} | X86Lea2 | X86Lea3{scale:4}` shape. So the winnings of the
+      one exploration rule blitz has were already counted, and counted as
+      instruction selection.
+
+      **Constant-multiply decomposition was the second, and it landed.**
+      `x * 12` as `lea; shl` and `x * 7` as `shl; sub`, matching gcc
+      instruction-for-instruction, with `x * 100` correctly left as `imul`
+      because three instructions lose to one. Worth `-1.1%` cycles on
+      `array_stride`. **It reads as a `+1.8%` regression on every
+      instruction-counting column**, which is what forced the Goal onto cycles;
+      see there. The rule is the reason that argument has a number attached.
 
       **Blitz is in a regime the published data does not cover.** Cranelift
       measured the multi-alternative machinery at ~0.1% and attributed it partly
@@ -426,11 +472,11 @@ so the holes stay visible.
       unoptimized C from tinyc, and its classes are 2.009 nodes against their
       1.13. Whether that extra material is reachable by exploration rules is an
       open question, and blitz is unusually well set up to answer it: one
-      target, `--gap` on the `live` corpus for the number, and the differential
-      harness to catch a rule that is wrong.
+      target, `run_perf.sh` on the `live` corpus for the number, and the
+      differential harness to catch a rule that is wrong.
 
       **Run it as an experiment with a number, not as an assumption.** Write a
-      handful of exploration rules, measure `--gap` on `live` before and after,
+      handful of exploration rules, measure `run_perf.sh` on `live` before and after,
       and record the result here either way. A negative result is worth as much
       as a positive one and stops a third attempt.
 

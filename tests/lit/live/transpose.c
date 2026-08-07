@@ -7,7 +7,7 @@
 // arithmetic from collapsing to a single induction variable, so this is where
 // LICM's hoisting of `j * 32` and the addressing-mode scale have to pay.
 
-// OUTPUT: 20480
+// OUTPUT: 471040
 // EXIT: 0
 
 extern int printf(char* fmt, int x);
@@ -15,27 +15,32 @@ extern int printf(char* fmt, int x);
 int main(int argc, char** argv) {
     int a[1024];
     int b[1024];
-    int seed = (argc * 7) & 15;
+    int chk0 = 0;
+    int reps = 136 * argc;
+    for (int r = 0; r < reps; r = r + 1) {
+        int seed = ((argc + r) * 7) & 15;
 
-    for (int i = 0; i < 32; i = i + 1) {
-        for (int j = 0; j < 32; j = j + 1) {
-            a[i * 32 + j] = ((i * 13 + j * 7 + seed) & 255) - 128;
-            b[i * 32 + j] = 0;
-        }
-    }
-
-    for (int pass = 0; pass < 4; pass = pass + 1) {
         for (int i = 0; i < 32; i = i + 1) {
             for (int j = 0; j < 32; j = j + 1) {
-                b[j * 32 + i] = b[j * 32 + i] + a[i * 32 + j];
+                a[i * 32 + j] = ((i * 13 + j * 7 + seed) & 255) - 128;
+                b[i * 32 + j] = 0;
             }
         }
-    }
 
-    int sum = 0;
-    for (int i = 0; i < 1024; i = i + 1) {
-        sum = sum + b[i] * ((i & 3) + 1);
+        for (int pass = 0; pass < 4; pass = pass + 1) {
+            for (int i = 0; i < 32; i = i + 1) {
+                for (int j = 0; j < 32; j = j + 1) {
+                    b[j * 32 + i] = b[j * 32 + i] + a[i * 32 + j];
+                }
+            }
+        }
+
+        int sum = 0;
+        for (int i = 0; i < 1024; i = i + 1) {
+            sum = sum + b[i] * ((i & 3) + 1);
+        }
+        chk0 = (chk0 + (sum)) & 1048575;
     }
-    printf("%d\n", sum);
+    printf("%d\n", chk0);
     return 0;
 }

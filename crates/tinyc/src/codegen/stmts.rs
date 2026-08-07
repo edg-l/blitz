@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use blitz::ir::builder::FunctionBuilder;
-use blitz::ir::function::Function;
+use blitz::ir::builder::{FunctionBuilder, Variable};
+use blitz::ir::function::{Function, StackSlot};
 use blitz::ir::types::Type;
 
 use crate::addr_analysis::find_addressed_vars;
@@ -109,6 +109,59 @@ pub(super) fn compile_stmts(ctx: &mut FnCtx, stmts: &[Stmt]) -> Result<(), TinyE
         compile_stmt(ctx, stmt)?;
     }
     Ok(())
+}
+
+/// What a block's own declarations displaced, so leaving the block can put it
+/// back.
+type Shadowed = Vec<(
+    String,
+    Option<Variable>,
+    Option<CType>,
+    Option<(StackSlot, CType)>,
+)>;
+
+/// Compile a nested block, restoring the bindings its declarations shadowed.
+///
+/// The name maps are flat and keyed by name, so without this a declaration
+/// inside a body would displace an outer one of the same name for the rest of
+/// the function rather than for the block. C scopes it to the block, and the
+/// difference is not subtle: `for (int r = ...) { int r = 100; }` re-entered
+/// the loop counter's binding every iteration and the loop never terminated.
+///
+/// Only the block's own declarations need saving. A nested block restores its
+/// own on the way out, so nothing below this one can leak past it.
+pub(super) fn compile_block(ctx: &mut FnCtx, stmts: &[Stmt]) -> Result<(), TinyErr> {
+    let mut shadowed: Shadowed = Vec::new();
+    for stmt in stmts {
+        if let Stmt::VarDecl { name, .. } = stmt {
+            shadowed.push((
+                name.clone(),
+                ctx.locals.get(name).copied(),
+                ctx.local_types.get(name).cloned(),
+                ctx.stack_slots.get(name).cloned(),
+            ));
+        }
+    }
+
+    let result = compile_stmts(ctx, stmts);
+
+    // Restored even when the body failed, so an error leaves the maps as it
+    // found them rather than as the failing statement left them.
+    for (name, var, ty, slot) in shadowed.into_iter().rev() {
+        match var {
+            Some(v) => ctx.locals.insert(name.clone(), v),
+            None => ctx.locals.remove(&name),
+        };
+        match ty {
+            Some(t) => ctx.local_types.insert(name.clone(), t),
+            None => ctx.local_types.remove(&name),
+        };
+        match slot {
+            Some(s) => ctx.stack_slots.insert(name.clone(), s),
+            None => ctx.stack_slots.remove(&name),
+        };
+    }
+    result
 }
 
 fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
@@ -367,14 +420,14 @@ fn compile_if(
 
     ctx.builder.set_block(then_block);
     ctx.builder.seal_block(then_block);
-    compile_stmts(ctx, then_body)?;
+    compile_block(ctx, then_body)?;
     let then_terminated = ctx.is_terminated();
     let then_exit = ctx.builder.current_block();
 
     ctx.builder.set_block(else_block);
     ctx.builder.seal_block(else_block);
     if let Some(else_stmts) = else_body {
-        compile_stmts(ctx, else_stmts)?;
+        compile_block(ctx, else_stmts)?;
     }
     let else_terminated = ctx.is_terminated();
     let else_exit = ctx.builder.current_block();
@@ -413,7 +466,7 @@ fn compile_while(ctx: &mut FnCtx, cond: &SpannedExpr, body: &[Stmt]) -> Result<(
         header_block,
         exit_block,
     });
-    let body_result = compile_stmts(ctx, body);
+    let body_result = compile_block(ctx, body);
     ctx.loop_stack.pop();
     body_result?;
     if !ctx.is_terminated() {
@@ -448,7 +501,7 @@ fn compile_for(
         header_block: latch_block,
         exit_block,
     });
-    let body_result = compile_stmts(ctx, body);
+    let body_result = compile_block(ctx, body);
     ctx.loop_stack.pop();
     body_result?;
     if !ctx.is_terminated() {
@@ -488,7 +541,7 @@ fn compile_do_while(ctx: &mut FnCtx, body: &[Stmt], cond: &SpannedExpr) -> Resul
         header_block,
         exit_block,
     });
-    let body_result = compile_stmts(ctx, body);
+    let body_result = compile_block(ctx, body);
     ctx.loop_stack.pop();
     body_result?;
     if !ctx.is_terminated() {
