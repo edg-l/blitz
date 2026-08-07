@@ -944,7 +944,7 @@ mod tests {
 
     /// `remove_fallthrough_jumps` over blocks in index order, returning the
     /// instruction count of each block.
-    fn fallthrough(items: &mut Vec<Vec<BlockItem>>) -> Vec<usize> {
+    fn fallthrough(items: &mut [Vec<BlockItem>]) -> Vec<usize> {
         let func = func_of(items.len());
         let rpo: Vec<usize> = (0..items.len()).collect();
         remove_fallthrough_jumps(items, &func, &rpo);
@@ -962,7 +962,7 @@ mod tests {
     /// A jump to the block that comes next emits no bytes and moves nothing.
     #[test]
     fn a_jump_to_the_following_block_is_deleted() {
-        let counts = fallthrough(&mut vec![vec![mov(), jmp(1)], vec![mov()]]);
+        let counts = fallthrough(&mut [vec![mov(), jmp(1)], vec![mov()]]);
         assert_eq!(counts, vec![1, 1]);
     }
 
@@ -970,14 +970,14 @@ mod tests {
     /// separating them, so the jump is still a fallthrough.
     #[test]
     fn empty_blocks_between_a_jump_and_its_target_do_not_save_it() {
-        let counts = fallthrough(&mut vec![vec![jmp(3)], vec![], vec![], vec![mov()]]);
+        let counts = fallthrough(&mut [vec![jmp(3)], vec![], vec![], vec![mov()]]);
         assert_eq!(counts, vec![0, 0, 0, 1]);
     }
 
     /// A jump over a block that emits an instruction goes somewhere.
     #[test]
     fn a_jump_over_real_work_is_kept() {
-        let counts = fallthrough(&mut vec![vec![jmp(2)], vec![mov()], vec![mov()]]);
+        let counts = fallthrough(&mut [vec![jmp(2)], vec![mov()], vec![mov()]]);
         assert_eq!(counts, vec![1, 1, 1]);
     }
 
@@ -985,7 +985,7 @@ mod tests {
     /// or not, so one that names that instruction is deleted too.
     #[test]
     fn a_conditional_jump_to_the_next_instruction_is_deleted() {
-        let counts = fallthrough(&mut vec![
+        let counts = fallthrough(&mut [
             vec![BlockItem::Inst(MachInst::Jcc {
                 cc: CondCode::Ne,
                 target: 1,
@@ -999,7 +999,7 @@ mod tests {
     /// that follows it, exactly as a block label does.
     #[test]
     fn a_jump_to_a_trampoline_label_just_ahead_is_deleted() {
-        let counts = fallthrough(&mut vec![vec![jmp(7), BlockItem::BindLabel(7), mov()]]);
+        let counts = fallthrough(&mut [vec![jmp(7), BlockItem::BindLabel(7), mov()]]);
         assert_eq!(counts, vec![1]);
     }
 
@@ -1007,7 +1007,7 @@ mod tests {
     /// The backward pass sees that in the same run.
     #[test]
     fn a_jump_made_redundant_by_a_deletion_is_deleted_too() {
-        let counts = fallthrough(&mut vec![vec![jmp(1), jmp(1)], vec![mov()]]);
+        let counts = fallthrough(&mut [vec![jmp(1), jmp(1)], vec![mov()]]);
         assert_eq!(counts, vec![0, 1]);
     }
 
@@ -1015,7 +1015,7 @@ mod tests {
     /// not the next instruction.
     #[test]
     fn a_jump_out_of_the_last_block_is_kept() {
-        let counts = fallthrough(&mut vec![vec![mov()], vec![jmp(0)]]);
+        let counts = fallthrough(&mut [vec![mov()], vec![jmp(0)]]);
         assert_eq!(counts, vec![1, 1]);
     }
 
