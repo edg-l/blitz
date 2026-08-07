@@ -248,6 +248,78 @@ fn compute_pressure_for_class(
         .collect()
 }
 
+/// Per-point pressure for one block and several register classes, without
+/// keeping the live sets.
+///
+/// The answer is exactly `compute_local_liveness` followed by
+/// `compute_pressure_for_class` for each mask. The difference is what it costs:
+/// the live set at a point is a bitset as wide as the function's highest live
+/// VReg, and cloning one per program point per block per split round is most of
+/// what a block pays -- while a block with no over-budget point reads none of
+/// them. So the pressure comes out of a single backward walk and the sets are
+/// materialized only where a caller has something to decide.
+fn compute_pressures_only(
+    schedule: &[ScheduledInst],
+    live_out_seed: &BTreeSet<VReg>,
+    masks: &[&VRegSet],
+) -> Vec<Vec<u32>> {
+    let n = schedule.len();
+    let mut out: Vec<Vec<u32>> = masks.iter().map(|_| vec![0u32; n + 1]).collect();
+
+    // The block's parameters are resident before its first instruction runs;
+    // `compute_local_liveness` documents why, and unions them into every point
+    // up to the last `BlockParam` marker.
+    let shadow_end = schedule
+        .iter()
+        .rposition(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
+        .map_or(0, |i| i + 1);
+    let params: VRegSet = schedule[..shadow_end]
+        .iter()
+        .filter(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
+        .map(|inst| inst.dst)
+        .collect();
+    // Per class, the parameters of that class: a point in the shadow holds all
+    // of them plus whatever is live and is not one of them.
+    let params_in_class: Vec<VRegSet> = masks
+        .iter()
+        .map(|mask| params.iter().filter(|v| mask.contains(*v)).collect())
+        .collect();
+
+    let mut live = VRegSet::default();
+    live.extend(live_out_seed.iter().copied());
+
+    let record = |i: usize, live: &VRegSet, out: &mut Vec<Vec<u32>>| {
+        for (c, mask) in masks.iter().enumerate() {
+            let mut count = live.count_in(mask);
+            if i < shadow_end {
+                count += params_in_class[c].len() - live.count_in(&params_in_class[c]);
+            }
+            // The definition counts too, for the reason `compute_pressure_for_class`
+            // states: the allocator's clique at a point is `live_before ∪ {dst}`.
+            if let Some(inst) = schedule.get(i)
+                && !inst.op.has_no_result()
+                && mask.contains(inst.dst)
+                && !live.contains(inst.dst)
+                && !(i < shadow_end && params.contains(inst.dst))
+            {
+                count += 1;
+            }
+            out[c][i] = count;
+        }
+    };
+
+    record(n, &live, &mut out);
+    for i in (0..n).rev() {
+        let inst = &schedule[i];
+        live.remove(inst.dst);
+        for &use_vreg in &inst.operands {
+            live.insert(use_vreg);
+        }
+        record(i, &live, &mut out);
+    }
+    out
+}
+
 /// The function's VRegs of one register class, as a mask for `VRegSet::count_in`.
 fn class_mask(
     vreg_classes: &BTreeMap<VReg, RegClass>,
@@ -1596,6 +1668,7 @@ fn detect_blockparam_slot_routing(
             class_mask(vreg_classes, RegClass::XMM, vreg_count),
         ),
     ];
+    let masks: Vec<&VRegSet> = class_masks.iter().map(|(_, _, mask)| mask).collect();
     for (block_idx, schedule) in block_schedules.iter().enumerate() {
         let Some(live_out) = global_liveness.live_out.get(block_idx) else {
             continue;
@@ -1603,10 +1676,19 @@ fn detect_blockparam_slot_routing(
         if schedule.is_empty() {
             continue;
         }
+        let pressures = compute_pressures_only(schedule, live_out, &masks);
+        // Nothing over budget anywhere in the block: no parameter here can be
+        // the value that does not fit, and the live sets go unread.
+        if !pressures
+            .iter()
+            .zip(&class_masks)
+            .any(|(p, (_, budget, _))| p.iter().any(|&at| at > *budget))
+        {
+            continue;
+        }
         let live_sets = compute_local_liveness(block_idx, schedule, live_out, vreg_count);
-        for (class, budget, mask) in &class_masks {
+        for ((class, budget, _), pressure) in class_masks.iter().zip(&pressures) {
             let (class, budget) = (*class, *budget);
-            let pressure = compute_pressure_for_class(&live_sets, schedule, mask);
             for (point, &at_point) in pressure.iter().enumerate() {
                 if at_point <= budget {
                     continue;
