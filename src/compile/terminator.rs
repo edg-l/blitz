@@ -662,18 +662,26 @@ fn build_phi_copies(
         {
             Some(r) => r,
             None => {
-                // XMM values that flow through cross-block spill slots
-                // are not assigned registers. Skip the phi copy; the
-                // successor will load from the spill slot at block entry.
-                if trace {
-                    tracing::debug!(
-                        target: "blitz::phi",
-                        "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
-                         {arg_vreg:?} has no register -- SKIPPED",
-                        func.name,
-                    );
-                }
-                continue;
+                // The argument side has no equivalent of the destination's
+                // "it is the parameter's own class" case: whatever the classes
+                // are, a copy needs a source to read. An argument the allocator
+                // placed nowhere means the copy would read a register nothing
+                // wrote, and on a back edge a dropped copy is a loop that does
+                // not terminate.
+                //
+                // The comment this replaces claimed XMM values flowing through
+                // cross-block spill slots reach here. Nothing does: with this as
+                // a hard error, lit, the differential harness, the saved corpus
+                // and 600 generated programs are all green.
+                return Err(CompileError {
+                    phase: "phi-elim".into(),
+                    message: format!(
+                        "b{src_block_idx} -> {target} p{param_idx}: argument \
+                         {arg_vreg:?} (class {canon_arg:?}{arg_const}) has neither a \
+                         register nor a slot, so the phi copy has no source"
+                    ),
+                    location: None,
+                });
             }
         };
 
@@ -777,17 +785,47 @@ fn build_phi_copies(
                 copies.push(PhiCopy::Reg(src_reg, dst_reg, size));
                 params_copied.insert(canon_param, param_idx);
             }
-            None => {
-                // Legacy path: param flows through cross-block spill slot.
-                // Skip; the successor reloads at block entry.
+            None if canon_arg == canon_param => {
+                // The parameter and the argument are one e-class, so the
+                // parameter carries the expression the argument already names
+                // rather than storage of its own. The target block resolves that
+                // class itself -- a constant is re-emitted in every block that
+                // needs it, which is why this one never got a register -- so
+                // there is nothing to copy and nowhere to copy it to.
+                //
+                // This is the same identity the slot-routed path tests above,
+                // and it is the whole of what the old blanket "no register, skip
+                // it" covered: measured over lit, the differential harness, the
+                // saved corpus and 180 generated programs, every parameter that
+                // reached here had its argument's class. `pressure-seed128.c`
+                // (b9 -> 130 p0, class 673) and `pressure-seed35.c`
+                // (b69 -> 149 p0, class 1111) are the two that do.
                 if trace {
                     tracing::debug!(
                         target: "blitz::phi",
                         "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
-                         {arg_vreg:?} src={src_reg:?} -> param {param_cid:?} {param_vreg:?} has no register -- SKIPPED",
+                         {arg_vreg:?} src={src_reg:?} -> param {param_cid:?} {param_vreg:?} \
+                         is the argument's own class -- no copy needed",
                         func.name,
                     );
                 }
+            }
+            None => {
+                // A parameter of a class the argument does not name, placed
+                // nowhere: no register, and no slot, since a slot-routed
+                // parameter took the branch above. Writing nothing to it leaves
+                // the block reading whatever the register last held, and on a
+                // back edge that is a loop that does not terminate.
+                return Err(CompileError {
+                    phase: "phi-elim".into(),
+                    message: format!(
+                        "b{src_block_idx} -> {target} p{param_idx}: parameter \
+                         {param_vreg:?} (class {param_cid:?}) has neither a register \
+                         nor a slot, and its class is not the argument's \
+                         ({canon_arg:?}), so the phi copy has no destination"
+                    ),
+                    location: None,
+                });
             }
         }
     }
