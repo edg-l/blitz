@@ -862,6 +862,49 @@ pub fn verify_register_sharing(
     // over a range of points and would otherwise be reported at each of them.
     let mut seen: BTreeSet<(Reg, VReg, VReg)> = BTreeSet::new();
 
+    // Where each of the two values actually is, on the failure path only.
+    //
+    // A clash is either the assignment's fault or this check's own liveness
+    // reaching too far, and the report cannot say which -- but the two look
+    // nothing alike once the value's definition and uses are beside it. A range
+    // that ends well before the reported point, with the value live out of the
+    // block anyway, is liveness carrying something the emitted code does not:
+    // `def b2[148], uses b2[149], live out of b2` under a clash reported at
+    // `[167]`. **Both times this check has fired, that was the answer**, and both
+    // times it was read as an allocator bug first.
+    let evidence = |v: VReg| -> String {
+        let mut defs = Vec::new();
+        let mut uses = Vec::new();
+        for (b, sched) in schedules_canon.iter().enumerate() {
+            for (i, inst) in sched.iter().enumerate() {
+                if inst.dst == v {
+                    defs.push(format!("b{b}[{i}] {:?}", inst.op));
+                }
+                if inst.operands.contains(&v) {
+                    uses.push(format!("b{b}[{i}]"));
+                }
+            }
+        }
+        let carried: Vec<String> = (0..schedules_canon.len())
+            .filter(|&b| liveness.live_out[b].contains(v.0 as usize))
+            .map(|b| format!("b{b}"))
+            .collect();
+        let or_nowhere = |parts: Vec<String>| {
+            if parts.is_empty() {
+                "nowhere".to_string()
+            } else {
+                parts.join(" ")
+            }
+        };
+        format!(
+            "v{}: def {}, uses {}, live out of {}",
+            v.0,
+            or_nowhere(defs),
+            or_nowhere(uses),
+            or_nowhere(carried),
+        )
+    };
+
     let check = |live: &crate::regalloc::interference::VRegSet,
                  where_: &str,
                  errors: &mut Vec<String>,
@@ -887,8 +930,13 @@ pub fn verify_register_sharing(
                     }
                     if seen.insert(key) {
                         errors.push(format!(
-                            "{where_}: VReg {} and VReg {} are both live and both hold {:?}",
-                            key.1.0, key.2.0, reg,
+                            "{where_}: VReg {} and VReg {} are both live and both hold {:?}\n      \
+                             {}\n      {}",
+                            key.1.0,
+                            key.2.0,
+                            reg,
+                            evidence(key.1),
+                            evidence(key.2),
                         ));
                     }
                 }
