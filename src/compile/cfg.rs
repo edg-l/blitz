@@ -728,7 +728,39 @@ pub(super) fn compute_loop_depths(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::CondCode;
+    use crate::egraph::enode::ENode;
+    use crate::ir::{CondCode, Type};
+
+    /// An e-graph of `n` distinct I64 constants, class `i` holding `iconst(i)`,
+    /// so a `ClassId` in a test is its own canonical representative.
+    fn constants(n: u32) -> EGraph {
+        let mut egraph = EGraph::new();
+        for i in 0..n {
+            let cid = egraph.add(ENode {
+                op: Op::Pure(PureOp::Iconst(i as i64, Type::I64)),
+                children: Default::default(),
+            });
+            assert_eq!(cid, ClassId(i));
+        }
+        egraph
+    }
+
+    /// A class map whose every entry covers the whole function.
+    fn map_of(entries: impl IntoIterator<Item = (u32, u32)>) -> ClassVRegMap {
+        let mut map = ClassVRegMap::new();
+        for (class, vreg) in entries {
+            map.insert_full_range(ClassId(class), VReg(vreg));
+        }
+        map
+    }
+
+    fn rpo_positions(func: &Function) -> Vec<usize> {
+        let mut pos = vec![0usize; func.blocks.len()];
+        for (i, &idx) in compute_rpo(func).iter().enumerate() {
+            pos[idx] = i;
+        }
+        pos
+    }
 
     /// A function whose blocks are wired by the terminators given, block `i`
     /// carrying `terms[i]`. Ids equal indices, so a `BlockId` and an index are
@@ -905,5 +937,239 @@ mod tests {
             from_preds.sort_unstable();
             assert_eq!(from_succs, from_preds, "{}", func.name);
         }
+    }
+
+    // ── The phi seam: which VReg carries a parameter, and which an argument ──
+
+    /// A block with `n` parameters, whose recorded VRegs are `vregs`.
+    fn block_with_params(id: BlockId, vregs: Vec<Option<VReg>>, term: EffectfulOp) -> BasicBlock {
+        BasicBlock {
+            id,
+            param_types: vec![Type::I64; vregs.len()],
+            param_vregs: vregs,
+            ops: vec![term],
+        }
+    }
+
+    fn block_param_inst(target: BlockId, pidx: u32, dst: u32) -> ScheduledInst {
+        ScheduledInst {
+            op: Op::Pure(PureOp::BlockParam(target, pidx, Type::I64)),
+            dst: VReg(dst),
+            operands: vec![],
+        }
+    }
+
+    /// The three sources answer in order, and each takes over exactly where the
+    /// one before it has nothing to say.
+    #[test]
+    fn a_block_parameters_vreg_comes_from_the_schedule_then_the_map_then_the_cfg() {
+        let egraph = constants(1);
+        let param_map = BTreeMap::from([((0 as BlockId, 0u32), ClassId(0))]);
+        let schedule = vec![block_param_inst(0, 0, 10)];
+        let map = map_of([(0, 20)]);
+        let block = block_with_params(0, vec![Some(VReg(30))], ret());
+
+        let resolve = |block: &BasicBlock, schedule: &[ScheduledInst], map: &ClassVRegMap| {
+            resolve_block_param_vreg(block, 0, 0, schedule, &egraph, map, &param_map)
+        };
+
+        assert_eq!(
+            resolve(&block, &schedule, &map),
+            Some(VReg(10)),
+            "the block's own BlockParam is the VReg its schedule reads"
+        );
+        assert_eq!(
+            resolve(&block, &[], &map),
+            Some(VReg(20)),
+            "with no BlockParam, the class map at block entry answers"
+        );
+        assert_eq!(
+            resolve(&block, &[], &ClassVRegMap::new()),
+            Some(VReg(30)),
+            "with neither, the VReg the CFG states answers"
+        );
+        let unnamed = block_with_params(0, vec![None], ret());
+        assert_eq!(resolve(&unnamed, &[], &ClassVRegMap::new()), None);
+    }
+
+    /// A `BlockParam` for another block, or another parameter of this one, is not
+    /// this parameter's answer -- the schedule holds one per parameter.
+    #[test]
+    fn only_this_blocks_own_block_param_answers_for_it() {
+        let egraph = constants(1);
+        let param_map = BTreeMap::new();
+        let schedule = vec![block_param_inst(1, 0, 10), block_param_inst(0, 1, 11)];
+        let block = block_with_params(0, vec![None, None], ret());
+        assert_eq!(
+            resolve_block_param_vreg(
+                &block,
+                0,
+                0,
+                &schedule,
+                &egraph,
+                &ClassVRegMap::new(),
+                &param_map,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn committing_block_param_vregs_states_what_linearization_chose() {
+        let mut func = func_with(vec![jump(1), ret()]);
+        func.blocks[1].param_types = vec![Type::I64; 2];
+        commit_block_param_vregs(
+            &mut func,
+            &BTreeMap::from([((1 as BlockId, 1u32), VReg(7))]),
+        );
+        assert_eq!(func.blocks[0].param_vregs, Vec::<Option<VReg>>::new());
+        assert_eq!(func.blocks[1].param_vregs, vec![None, Some(VReg(7))]);
+    }
+
+    /// Two blocks passing the same class to the same parameter commit their own
+    /// block's VReg, not whichever the function-wide map holds.
+    #[test]
+    fn a_terminator_argument_commits_the_vreg_of_its_own_block() {
+        let egraph = constants(1);
+        let mut func = func_with(vec![branch(1, 2), jump(3), jump(3), ret()]);
+        for idx in [1, 2] {
+            let EffectfulOp::Jump { args, .. } = func.blocks[idx].ops.last_mut().unwrap() else {
+                unreachable!()
+            };
+            *args = TermArgs::classes([ClassId(0)]);
+        }
+        func.blocks[3].param_types = vec![Type::I64];
+
+        let snapshots = vec![
+            ClassVRegMap::new(),
+            map_of([(0, 7)]),
+            map_of([(0, 8)]),
+            ClassVRegMap::new(),
+        ];
+        let rpo_pos = rpo_positions(&func);
+        commit_terminator_arg_vregs(
+            &mut func,
+            &egraph,
+            &map_of([(0, 99)]),
+            &snapshots,
+            &BTreeMap::from([((3 as BlockId, 0u32), ClassId(0))]),
+            &rpo_pos,
+        )
+        .unwrap();
+
+        for (idx, vreg) in [(1, VReg(7)), (2, VReg(8))] {
+            let EffectfulOp::Jump { args, .. } = func.blocks[idx].ops.last().unwrap() else {
+                unreachable!()
+            };
+            assert_eq!(
+                args.as_committed(),
+                Some(
+                    [TermArg {
+                        class: ClassId(0),
+                        vreg
+                    }]
+                    .as_slice()
+                ),
+                "block {idx}",
+            );
+        }
+    }
+
+    /// A back edge whose argument *is* the target's parameter emits a self-copy:
+    /// the parameter is the value's storage for the whole loop, so the latch
+    /// commits the parameter's VReg rather than one of its own.
+    #[test]
+    fn a_back_edge_argument_that_is_the_parameter_commits_the_parameters_vreg() {
+        let egraph = constants(1);
+        let mut func = func_with(vec![jump(1), branch(2, 3), jump(1), ret()]);
+        func.blocks[1] = block_with_params(1, vec![Some(VReg(5))], branch(2, 3));
+        let EffectfulOp::Jump { args, .. } = func.blocks[2].ops.last_mut().unwrap() else {
+            unreachable!()
+        };
+        *args = TermArgs::classes([ClassId(0)]);
+
+        let snapshots = vec![
+            ClassVRegMap::new(),
+            ClassVRegMap::new(),
+            map_of([(0, 42)]),
+            ClassVRegMap::new(),
+        ];
+        let rpo_pos = rpo_positions(&func);
+        commit_terminator_arg_vregs(
+            &mut func,
+            &egraph,
+            &ClassVRegMap::new(),
+            &snapshots,
+            &BTreeMap::from([((1 as BlockId, 0u32), ClassId(0))]),
+            &rpo_pos,
+        )
+        .unwrap();
+
+        let EffectfulOp::Jump { args, .. } = func.blocks[2].ops.last().unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(
+            args.as_committed().unwrap()[0].vreg,
+            VReg(5),
+            "the latch must write the parameter the header reads, not its own VReg",
+        );
+    }
+
+    /// An argument with no VReg at the block exit is an error naming it. Skipping
+    /// it silently is how the old derivations came to disagree about which
+    /// argument was which.
+    #[test]
+    fn an_argument_with_no_vreg_is_an_error_naming_the_argument() {
+        let egraph = constants(2);
+        let mut func = func_with(vec![jump(1), ret()]);
+        let EffectfulOp::Jump { args, .. } = func.blocks[0].ops.last_mut().unwrap() else {
+            unreachable!()
+        };
+        *args = TermArgs::classes([ClassId(0), ClassId(1)]);
+        func.blocks[1].param_types = vec![Type::I64; 2];
+
+        let snapshots = vec![map_of([(0, 7)]), ClassVRegMap::new()];
+        let rpo_pos = rpo_positions(&func);
+        let err = commit_terminator_arg_vregs(
+            &mut func,
+            &egraph,
+            &ClassVRegMap::new(),
+            &snapshots,
+            &BTreeMap::new(),
+            &rpo_pos,
+        )
+        .unwrap_err();
+        assert!(err.contains("argument 1"), "{err}");
+        assert!(err.contains("ClassId(1)"), "{err}");
+    }
+
+    /// A `Ret`'s value is not a block argument, but the same commit resolves it
+    /// through the same snapshot.
+    #[test]
+    fn a_ret_value_is_committed_through_the_returning_blocks_snapshot() {
+        let egraph = constants(1);
+        let mut func = func_with(vec![EffectfulOp::Ret {
+            val: Some(EffOperand::Class(ClassId(0))),
+        }]);
+        let rpo_pos = rpo_positions(&func);
+        commit_terminator_arg_vregs(
+            &mut func,
+            &egraph,
+            &ClassVRegMap::new(),
+            &[map_of([(0, 4)])],
+            &BTreeMap::new(),
+            &rpo_pos,
+        )
+        .unwrap();
+        let EffectfulOp::Ret { val: Some(val) } = func.blocks[0].ops.last().unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(
+            *val,
+            EffOperand::Committed {
+                class: ClassId(0),
+                vreg: VReg(4),
+            }
+        );
     }
 }
