@@ -707,15 +707,34 @@ fn build_phi_copies(
         // Unless the parameter names the value it carries rather than storage of
         // its own: then that equality is the signature of the edge that feeds the
         // value in, and it is the one edge that must store.
-        if let Some(info) = slot_spilled_params.get(&(target, param_idx as u32)) {
-            let store = canon_arg != canon_param || info.value_alias;
+        // Two things can put a parameter in a slot, and both answer here. The
+        // splitter's routing decides it before the schedules are built and
+        // records `value_alias` with it; an allocator that keeps values in slots
+        // decides it during allocation and says so in `assignment`. The second
+        // has no `value_alias` to offer -- it is not routing a parameter around
+        // pressure, it puts every value in a slot -- so the back-edge identity
+        // below is the whole of the question for it.
+        let routed = slot_spilled_params.get(&(target, param_idx as u32));
+        let param_slot = routed.map(|i| (i.slot, i.value_alias)).or_else(|| {
+            // The block's own `param_vregs` names the parameter without going
+            // through the class map, which a slot-routed parameter's truncated
+            // segment would fail. `cfg::resolve_block_param_vreg` asks the same
+            // source first, and for the same reason.
+            target_block
+                .param_vreg(param_idx as u32)
+                .and_then(|v| regalloc.assignment.get(&v).copied())
+                .and_then(crate::regalloc::Assignment::slot)
+                .map(|slot| (slot as i64, false))
+        });
+        if let Some((slot, value_alias)) = param_slot {
+            let store = canon_arg != canon_param || value_alias;
             if trace {
                 tracing::debug!(
                     target: "blitz::phi",
                     "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
                      {arg_vreg:?} src={src_reg:?} -> slot {} {}",
                     func.name,
-                    info.slot,
+                    slot,
                     if store { "" } else { "(skipped: back-edge identity)" },
                 );
             }
@@ -723,7 +742,7 @@ fn build_phi_copies(
                 // Arg differs from param: emit slot store with current src_reg.
                 copies.push(PhiCopy::Slot {
                     src_reg,
-                    slot: info.slot,
+                    slot,
                     size,
                 });
                 params_copied.insert(canon_param, param_idx);
