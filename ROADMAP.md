@@ -72,7 +72,12 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Copies are still a third of what blitz emits** -- `P1`, and its first entry.
+- **Loop headers are aligned by accident** -- `P1`. `align_loop_headers` is
+  written and never called, and it is worth up to 20% on one kernel: removing 4
+  dead instructions from `matmul_rt` cost `+20.7%` cycles, and three unrelated
+  instructions before the loop took the same comparison to `-1.0%`. Until it is
+  wired, every `run_perf.sh` number carries a layout term nobody controls.
+- **Copies are still a third of what blitz emits** -- `P1`.
   697 register-to-register moves in 2407 instructions over `bench` against
   `gcc -O2`'s 351 in 2322, and **585 of the 697 are parallel copies** -- phi
   copies on edges, entry parameter moves, argument setup -- which on their own
@@ -607,7 +612,62 @@ so the holes stay visible.
       `lit/functions/tail_self_call.c` pins it, with `n * f(n - 1)` as the control
       that must keep its call.
 
+- [ ] **Loop headers are aligned by accident, and it is worth up to 20%.**
+      `emit::align_loop_headers` is written, exported from `emit/mod.rs`, and
+      **never called**; `enable_nop_alignment` is `false` at both levels and is
+      never read. So where a hot loop falls relative to a fetch boundary is
+      whatever the instruction stream happens to produce.
+
+      **Measured, and the measurement is the point.** Removing 4 dead `lea`s from
+      `live/matmul_rt.c` -- a strict reduction, `-107M` dynamic instructions --
+      cost `+94M` cycles, `+20.7%`. Not the frontend (idle went 0.29% to 0.67%, a
+      rounding error against 20%), not branches (218.3M and 0.10% missed in both),
+      and IPC fell 5.99 to 4.77. Then adding three unrelated instructions before
+      the loop, changing nothing but where the code sits, took the same comparison
+      from `x1.2069` to `x0.9901`.
+
+      **This puts a layout term in every number the perf harness prints**, and
+      nobody controls it. Two consequences: a pass that changes code size can be
+      credited or blamed for up to 20% that has nothing to do with it, and
+      `run_perf.sh` results are not comparable across changes that move code. Wire
+      the pass up, then re-measure anything the layout could have decided.
 - [ ] **Loop unrolling.** Compounds with LSR; do it after.
+- [x] **Dead instructions in the final stream.** `emit::dead_inst` deletes
+      instructions that compute a value nothing reads, over backward register
+      liveness on the CFG `verify` already recovers from labels and branches.
+
+      **Why it has to be here.** Lowering folds an address into the addressing
+      mode of the load that uses it and decides that per consumer, at the last
+      possible moment; when every consumer folds, the `lea` is left with nothing
+      reading it. No earlier pass can see that -- DCE runs on the CFG before
+      scheduling and the e-graph never sees an effectful op. Measured before the
+      pass: 122 of 7801 instructions over `bench` and `live` were a `lea`
+      immediately followed by an instruction naming the same address in its own
+      mode, in every one of the 34 kernels, and they sit in loop bodies.
+
+      ```
+      bench   insts -2.69%   copies -1.80%    over 14 changed rows
+      live    insts -1.33%   copies -2.67%    over 19
+      fuzz    insts -0.40%   copies -1.13%    over 54
+      lit     insts -0.98%   copies -1.35%    over 44
+      ```
+
+      **Zero regressed rows in any of the four corpora.** Cycles over `live`:
+      `-0.85%` geometric mean, or `-1.69%` excluding `matmul_rt`, whose `+20.7%`
+      is the layout artifact the item above is about. Six kernels gain more than
+      1%: `histogram` `-11.8%`, `nested_carried` `-9.1%`, `pointer_chase` `-5.4%`,
+      `branchy_filter` `-4.4%`, `byte_copy` `-3.7%`, `state_machine` `-1.9%`.
+
+      What it will delete is deliberately short: register-to-register moves,
+      immediate loads and `lea`, and nothing else. Not arithmetic, because EFLAGS
+      is not a register this liveness models; not anything touching memory; not a
+      write to RSP or RBP. `BLITZ_PASSES=-dead-insts` turns it off.
+
+      **The bug worth remembering**: `MachInst::CallDirect` carries a symbol and no
+      operands, so `uses()` says a call reads nothing -- and the `mov`s putting
+      arguments in their ABI registers were dead. That deleted the argument setup
+      of every call in the corpus, 248 of 576 lit tests, and is why `call_reads`
+      exists.
 - [ ] **Narrowing / type-width analysis.** `(uint8_t)x + 1` should not promote
       to i32. Domain: `(min_bits, signed)` per e-class.
 - [x] **Dead call elimination** for provably pure functions.

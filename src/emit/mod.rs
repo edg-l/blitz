@@ -1,4 +1,5 @@
 pub mod align;
+pub mod dead_inst;
 pub mod elf;
 pub mod object;
 pub mod peephole;

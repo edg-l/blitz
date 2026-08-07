@@ -1111,7 +1111,7 @@ fn verify_spill_slots(
 
 /// Instruction indices that begin a basic block: the entry, every label, and
 /// whatever follows a branch or return.
-fn block_leaders(insts: &[MachInst], labels: &BTreeMap<u32, usize>) -> Vec<usize> {
+pub(crate) fn block_leaders(insts: &[MachInst], labels: &BTreeMap<u32, usize>) -> Vec<usize> {
     let mut set: BTreeSet<usize> = BTreeSet::new();
     if !insts.is_empty() {
         set.insert(0);
@@ -1124,7 +1124,10 @@ fn block_leaders(insts: &[MachInst], labels: &BTreeMap<u32, usize>) -> Vec<usize
     for (i, inst) in insts.iter().enumerate() {
         if matches!(
             inst,
-            MachInst::Jmp { .. } | MachInst::Jcc { .. } | MachInst::Ret
+            MachInst::Jmp { .. }
+                | MachInst::Jcc { .. }
+                | MachInst::Ret
+                | MachInst::TailCallDirect { .. }
         ) && i + 1 < insts.len()
         {
             set.insert(i + 1);
@@ -1133,10 +1136,14 @@ fn block_leaders(insts: &[MachInst], labels: &BTreeMap<u32, usize>) -> Vec<usize
     set.into_iter().collect()
 }
 
-type Cfg = (Vec<std::ops::Range<usize>>, Vec<Vec<usize>>);
+pub(crate) type Cfg = (Vec<std::ops::Range<usize>>, Vec<Vec<usize>>);
 
 /// Basic block ranges and their successor lists.
-fn build_cfg(insts: &[MachInst], labels: &BTreeMap<u32, usize>, leaders: &[usize]) -> Cfg {
+pub(crate) fn build_cfg(
+    insts: &[MachInst],
+    labels: &BTreeMap<u32, usize>,
+    leaders: &[usize],
+) -> Cfg {
     let mut blocks: Vec<std::ops::Range<usize>> = Vec::new();
     for (n, &start) in leaders.iter().enumerate() {
         let end = leaders.get(n + 1).copied().unwrap_or(insts.len());
@@ -1162,7 +1169,8 @@ fn build_cfg(insts: &[MachInst], labels: &BTreeMap<u32, usize>, leaders: &[usize
                     succs[b].push(b + 1);
                 }
             }
-            MachInst::Ret => {}
+            // Control does not come back from either, so neither falls through.
+            MachInst::Ret | MachInst::TailCallDirect { .. } => {}
             _ => {
                 if b + 1 < blocks.len() {
                     succs[b].push(b + 1);

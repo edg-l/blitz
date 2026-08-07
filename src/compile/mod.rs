@@ -131,6 +131,9 @@ pub struct CompileOptions {
     /// Turn a tail call to this same function into a jump to the top of its own
     /// body. Off at `-O0`: the recursion's frames are what a debugger walks.
     pub enable_tail_calls: bool,
+    /// Drop instructions from the final stream whose result nothing reads.
+    /// Off at `-O0`, where a value nobody reads is still one somebody may inspect.
+    pub enable_dead_insts: bool,
     /// Maximum inlining rescan iterations per caller function. Each rescan inlines one level
     /// of calls; a depth-3 chain A->B->C->D needs 3 rescans. Note: this limits rescans,
     /// not true nesting depth; a function with many independent leaf calls also consumes
@@ -199,13 +202,14 @@ impl CompileOptions {
                 "phi-removal" => self.enable_phi_removal = on,
                 "inlining" => self.enable_inlining = on,
                 "tail-calls" => self.enable_tail_calls = on,
+                "dead-insts" => self.enable_dead_insts = on,
                 "peephole" => self.enable_peephole = on,
                 "fast-regalloc" => self.enable_fast_regalloc = on,
                 other => {
                     return Err(format!(
                         "BLITZ_PASSES: unknown pass `{other}`; known: licm, dce, \
                          store-forwarding, dse, phi-removal, inlining, peephole, \
-                         fast-regalloc, tail-calls"
+                         fast-regalloc, tail-calls, dead-insts"
                     ));
                 }
             }
@@ -230,6 +234,7 @@ impl CompileOptions {
             enable_phi_removal: true,
             enable_inlining: false,
             enable_tail_calls: false,
+            enable_dead_insts: false,
             max_inline_depth: 3,
             max_inline_nodes: 50,
             inline_cost_threshold: 0,
@@ -253,6 +258,7 @@ impl CompileOptions {
             enable_phi_removal: true,
             enable_inlining: true,
             enable_tail_calls: true,
+            enable_dead_insts: true,
             max_inline_depth: 3,
             max_inline_nodes: 50,
             inline_cost_threshold: 100,
@@ -1994,6 +2000,51 @@ pub fn compile(
     // flat_labels: for each instruction index, any labels bound just before it.
     // label_positions: label -> instruction index (for relax_branches).
     // Block labels use block.id (not block_idx) so Jump targets resolve correctly.
+    // Instructions whose result nothing reads, dropped before the flat list is
+    // built so that labels are never renumbered: the items are what carries them,
+    // and removing an `Inst` item leaves every `BindLabel` where it was.
+    //
+    // Address folding is what makes this pay. Lowering puts `[base + idx*4]` in
+    // the addressing mode of the load that uses it and decides that per consumer;
+    // when every consumer folds, the `lea` is left behind with nothing reading it.
+    // No earlier pass can see that -- DCE runs on the CFG before scheduling and
+    // the e-graph never sees an effectful op.
+    if opts.enable_dead_insts {
+        let mut scratch: Vec<MachInst> = Vec::new();
+        let mut scratch_labels: BTreeMap<LabelId, usize> = BTreeMap::new();
+        let mut origin: Vec<(usize, usize)> = Vec::new();
+        for (rpo_pos, items) in block_items.iter().enumerate() {
+            let block_id = func.blocks[rpo_order[rpo_pos]].id;
+            scratch_labels.insert(block_id as LabelId, scratch.len());
+            for (item_idx, item) in items.iter().enumerate() {
+                match item {
+                    BlockItem::Inst(inst) => {
+                        origin.push((rpo_pos, item_idx));
+                        scratch.push(inst.clone());
+                    }
+                    BlockItem::BindLabel(label_id) => {
+                        scratch_labels.insert(*label_id, scratch.len());
+                    }
+                }
+            }
+        }
+        let dead = crate::emit::dead_inst::dead_value_moves(&scratch, &scratch_labels);
+        if !dead.is_empty() {
+            let mut drop_at: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); block_items.len()];
+            for &flat in &dead {
+                let (b, item) = origin[flat];
+                drop_at[b].insert(item);
+            }
+            for (b, items) in block_items.iter_mut().enumerate() {
+                let mut idx = 0;
+                items.retain(|_| {
+                    idx += 1;
+                    !drop_at[b].contains(&(idx - 1))
+                });
+            }
+        }
+    }
+
     let mut flat_insts: Vec<MachInst> = Vec::new();
     let mut label_positions: BTreeMap<LabelId, usize> = BTreeMap::new();
 
