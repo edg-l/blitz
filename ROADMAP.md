@@ -201,6 +201,13 @@ repeating them.
   live-range splitter (`-O1`, and only where the colouring fails) -> regalloc
   (`-O1` function-scope Chaitin-Briggs, `-O0` every value in a frame slot) ->
   terminator lowering -> MachInst lowering -> branch relaxation -> ELF.
+- **What the e-graph is actually doing**, since the pipeline line above makes it
+  look like the optimizer: it is the *instruction selector*, which is where
+  competing forms genuinely exist and a cost model has to choose between them,
+  plus a cleanup rewriter. The equality-saturation part -- iterating to a
+  fixpoint while holding every alternative -- is worth 0.39%. Do not go looking
+  for wins in there; see Decisions, and the exploration-rule experiment in P1
+  for the one way that could change.
 - Implemented e-graph rules: see `docs/internal/egraph-optimization-roadmap.md`.
 - Splitter design: see `docs/internal/split-pass-plan.md`.
 
@@ -340,9 +347,24 @@ so the holes stay visible.
       82% of parameters `count_trivial_phis.py` calls redundant on `hash_table`
       is what the *rule* permits, not what is sound to remove -- one e-class is
       one expression, not one value. Read that file before starting.
-- [ ] **GVN / cross-block CSE.** The e-graph does local CSE only. Repeated
-      address computations and field loads survive across blocks. Typical
-      5-15% on real code.
+- [ ] **Dominance-scoped elaboration, which is GVN and several other things at
+      once.** The e-graph does local CSE only, so repeated address computations
+      and field loads survive across blocks -- typically 5-15% on real code. But
+      blitz does worse than miss them: linearization *re-emits* a class in every
+      block whose uses the original definition does not reach, which is the
+      anti-GVN.
+
+      Cranelift gets GVN for free instead, by rebuilding SSA in dominator-tree
+      order with layered scope maps and computing each value on demand in the
+      scope that needs it (Fallin, 2026 -- the aegraph retrospective). One
+      change would collapse this item, delete the per-block re-emission
+      machinery, and shrink the "one class maps to several VRegs" hazard that
+      has produced nine wrong-code bugs here.
+
+      **Invasive, and it lands squarely in what
+      `docs/internal/refactor-roadmap.md` warns about.** Read that first. It is
+      still the single largest take from an outside design that blitz has not
+      already arrived at independently.
 - [ ] **Loop strength reduction + induction variable recognition.** Every array
       loop recomputes `base + i*scale`. Worth 2-5x on loop-heavy code and is
       table stakes for calling the backend "optimizing".
@@ -358,6 +380,27 @@ so the holes stay visible.
 - [ ] **Narrowing / type-width analysis.** `(uint8_t)x + 1` should not promote
       to i32. Domain: `(min_bits, signed)` per e-class.
 - [ ] **Dead call elimination** for provably pure functions.
+- [ ] **EXPERIMENT: do exploration-shaped rules make the e-graph pay?** Every
+      rule blitz has is a *cleanup* rule -- unambiguously better wherever it
+      matches -- which is why saturation converges in two rounds and is worth
+      0.39% (see Decisions). An e-graph earns its keep on *exploration* rules,
+      where which form wins depends on context that is not visible when the rule
+      fires: reassociation, commutativity feeding an addressing mode,
+      distribute-versus-factor.
+
+      **Blitz is in a regime the published data does not cover.** Cranelift
+      measured the multi-alternative machinery at ~0.1% and attributed it partly
+      to compiling Wasm another compiler had already optimized; blitz compiles
+      unoptimized C from tinyc, and its classes are 2.009 nodes against their
+      1.13. Whether that extra material is reachable by exploration rules is an
+      open question, and blitz is unusually well set up to answer it: one
+      target, `--gap` on the `live` corpus for the number, and the differential
+      harness to catch a rule that is wrong.
+
+      **Run it as an experiment with a number, not as an assumption.** Write a
+      handful of exploration rules, measure `--gap` on `live` before and after,
+      and record the result here either way. A negative result is worth as much
+      as a positive one and stops a third attempt.
 
 ### P2 -- x86-64 specialization (the differentiator)
 
@@ -386,6 +429,13 @@ without taking it is picking up work that cannot land.
       parents map to ask**. That is the actual missing structure. If it lands,
       re-check `tests/lit/control/main_falls_off_end.c`, which is what pricing
       the `imm32` form to win broke last time.
+- [ ] **A `subsume` marker on rewrite rules**, so a rule can say its result
+      *replaces* the alternatives rather than joining them (Fallin, 2026). Isel
+      classes carry the generic op forever at infinite cost, extraction skips it
+      on every visit, and `phases::saturate_isel` exists as a separate pass only
+      because extraction fails outright on a class with no machine op. Subsume
+      makes that a property of the rules instead of a pass, and shrinks every
+      class isel touches.
 - [ ] *(unreachable: needs builtins)* **Bit instructions**: `popcnt`, `bsr`/`bsf`, `tzcnt`/`lzcnt`, `bswap`, and
       `bt` itself -- the read form, whose result is a flag and so needs the
       compare seam rather than a value class. `bt` needs a cc-carrying node like
@@ -561,6 +611,26 @@ seconds -- what the other harnesses already cost.
 - **LICM runs before saturation**, on the raw e-graph, so hoisted code still
   gets the full rewrite pass.
 - **Forwarding runs pre-LICM; DSE runs post-forwarding.** Order is load-bearing.
+- **Equality saturation converges in two rounds and is worth 0.39%.** Measured
+  by setting `-O1`'s `saturation_limit` to 16, 8, 4, 2 and 1 and comparing the
+  emitted code over `live` + `bench`: 16, 8, 4 and 2 are byte-identical (4390
+  instructions, 15996 bytes) and 1 costs +17 instructions and +42 bytes. Nothing
+  in the lit corpus hits the limit, and the loop exits on `!changed`, so 16 is a
+  safety cap that costs nothing -- **do not tune it, and do not expect more
+  rounds to find anything.** The rules are all "cleanup" rules, each an
+  unambiguous improvement, and a rewrite that is always better does not need an
+  e-graph to hold the alternative. What the e-graph is actually earning its keep
+  as is the *instruction selector*: dumping multi-node classes shows they are
+  projections and machine forms (`Add | Addr{scale:1} | Addr{scale:4} | X86Lea2
+  | X86Lea3{scale:4}`), where the winner genuinely depends on context and the
+  cost model has to choose. Average class size is 2.009 against Cranelift's
+  measured 1.13, so blitz is in a wider regime than theirs -- see the experiment
+  in P1 before concluding anything from that.
+- **Extraction ignores shared substructure on purpose.** Optimal extraction over
+  a DAG where a shared node is paid for once is NP-hard, by reduction from
+  weighted set cover (Fallin, 2026). `extract` is bottom-up dynamic programming
+  that costs each use independently, which is the same call Cranelift made after
+  proving it. Not a gap, and not worth an ILP solver.
 - **Cost-based extraction picks the instruction form.** Isel rules add every
   legal alternative to the class and let cost decide; no manual selection logic.
 - **There is no `ror` or `shrd` isel form.** `ror k` is `rol (w-k)` in the same
