@@ -51,6 +51,30 @@ pub fn compile_module_with_globals(
     }
     verify_all("dce1", &functions);
 
+    // A call to a pure function whose results nobody reads computes nothing that
+    // can be observed. Module-level because purity is: a function is pure when it
+    // stores nothing and calls nothing impure, and `printf` is impure because
+    // nothing here can see what it does.
+    //
+    // Gated with the dead-load half of DCE and for the same reason: removing a
+    // call takes away something a debugger could have stepped into, which is the
+    // line `-O0` holds. The CFG half of DCE runs at every level; this does not.
+    if opts.enable_dce {
+        let pure = super::dce::pure_functions(&functions);
+        let mut removed = 0;
+        for func in &mut functions {
+            let Some(egraph) = func.egraph.take() else {
+                continue;
+            };
+            removed += super::dce::eliminate_dead_pure_calls(func, &egraph, &pure);
+            func.egraph = Some(egraph);
+        }
+        if removed > 0 && crate::trace::is_enabled("dce") {
+            eprintln!("[dce] eliminated {removed} dead call(s) to pure function(s)");
+        }
+        verify_all("dead-pure-calls", &functions);
+    }
+
     // Collect global and rodata names so we can filter them from externals.
     let global_names: std::collections::HashSet<String> = globals
         .iter()

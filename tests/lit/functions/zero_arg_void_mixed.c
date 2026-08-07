@@ -19,8 +19,17 @@
 // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
 // CHECK: jne
 
+// The store is what keeps this call here at all: a void function that stores
+// nothing and calls nothing is pure, its result list is empty, and
+// `dce::eliminate_dead_pure_calls` removes every call to it -- correctly, and
+// leaving this test asserting nothing about call-point detection. A store makes
+// it observable, and the call site is still the zero-argument void call whose
+// `VoidCallBarrier` carries no operands, which is the shape under test.
 __attribute__((noinline))
-void nop() { return; }
+void nop() {
+    int sink[1];
+    sink[0] = 1;
+}
 
 __attribute__((noinline))
 int id(int x) { return x; }

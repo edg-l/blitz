@@ -531,7 +531,27 @@ so the holes stay visible.
 - [ ] **Loop unrolling.** Compounds with LSR; do it after.
 - [ ] **Narrowing / type-width analysis.** `(uint8_t)x + 1` should not promote
       to i32. Domain: `(min_bits, signed)` per e-class.
-- [ ] **Dead call elimination** for provably pure functions.
+- [x] **Dead call elimination** for provably pure functions.
+      `dce::pure_functions` is the greatest fixpoint over the module -- a function
+      is pure when it stores nothing and calls nothing impure, so a self-recursive
+      one stays pure and every extern is impure because nothing here can see into
+      it. `eliminate_dead_pure_calls` then removes a call whose results no e-node
+      and no other effectful op reads. Both halves of that are needed: the e-graph
+      holds the pure computations and the CFG holds the effectful ones.
+
+      **It removes the one dead computation nothing else could.** An effectful op
+      is invisible to the e-graph by construction, so a call the inliner declined
+      and whose result went unread survived every pass. Measured: 3 `fuzz` rows
+      at `-3.1%`, `-5.2%` and `-4.0%` instructions with copies down with them,
+      `bench` and `live` untouched -- those corpora discard no call results.
+      Gated with the dead-load half, and for the same reason: removing a call
+      takes away something a debugger could step into, which is the line `-O0`
+      holds. `lit/functions/dead_pure_call.c`.
+
+      It found a stale test on the way: `zero_arg_void_mixed.c`'s `void nop()
+      { return; }` is pure, its result list is empty, and all nine calls to it
+      were removed -- correctly, and leaving the test asserting nothing about the
+      call-point detection it was written for. Its callee now stores.
 - [ ] **EXPERIMENT: do exploration-shaped rules make the e-graph pay?** Every
       rule blitz has is a *cleanup* rule -- unambiguously better wherever it
       matches -- which is why saturation converges in two rounds and is worth

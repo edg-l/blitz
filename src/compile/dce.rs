@@ -275,6 +275,149 @@ pub(super) fn eliminate_dead_loads(
     eliminated
 }
 
+/// The functions in this module that cannot be observed by calling them.
+///
+/// A function is pure here when it performs no store and calls nothing impure.
+/// A *load* does not disqualify it: reading memory has no effect, and a load
+/// whose result nobody wants is already what `eliminate_dead_loads` removes.
+/// A function this module does not define -- `printf` and every other extern --
+/// is impure, because nothing here can see what it does.
+///
+/// The fixpoint starts optimistic and removes: a self-recursive function that
+/// stores nothing stays pure, which the other direction would not give.
+pub(super) fn pure_functions(functions: &[Function]) -> BTreeSet<String> {
+    let defined: BTreeSet<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+    let mut pure: BTreeSet<String> = functions.iter().map(|f| f.name.clone()).collect();
+    loop {
+        let mut lost: Option<String> = None;
+        for func in functions {
+            if !pure.contains(&func.name) {
+                continue;
+            }
+            let impure = func.blocks.iter().flat_map(|b| &b.ops).any(|op| match op {
+                EffectfulOp::Store { .. } => true,
+                EffectfulOp::Call { func: callee, .. } => {
+                    !defined.contains(callee.as_str()) || !pure.contains(callee.as_str())
+                }
+                _ => false,
+            });
+            if impure {
+                lost = Some(func.name.clone());
+                break;
+            }
+        }
+        match lost {
+            Some(name) => {
+                pure.remove(&name);
+            }
+            None => break,
+        }
+    }
+    pure
+}
+
+/// Remove calls to pure functions whose results nobody reads.
+///
+/// The result of a pure call is the only thing calling it can produce, so a call
+/// whose results are unread computes nothing that can be observed. This is the
+/// call-shaped case of the dead load below, and it is worth having separately
+/// because a call the inliner declined is otherwise the one dead computation
+/// nothing in the pipeline can remove: the e-graph never sees it, since it is an
+/// effectful op by construction.
+///
+/// A class is "read" if any e-node names it as a child or any *other* effectful
+/// op names it. Both halves are needed and neither is enough: the e-graph holds
+/// the pure computations, the CFG holds the effectful ones, and a result feeding
+/// either is live. There is no parents map in the e-graph, so the node scan is
+/// over every class -- linear in the graph, once per function, on a pass that
+/// only runs at `-O1`.
+///
+/// Returns the number of calls removed.
+pub(super) fn eliminate_dead_pure_calls(
+    func: &mut Function,
+    egraph: &EGraph,
+    pure: &BTreeSet<String>,
+) -> usize {
+    // Every class any e-node reads.
+    let mut read: BTreeSet<ClassId> = BTreeSet::new();
+    for i in 0..egraph.arena_len() as u32 {
+        let id = ClassId(i);
+        if egraph.find_immutable(id) != id {
+            continue;
+        }
+        for node in &egraph.class(id).nodes {
+            for &child in &node.children {
+                if child != ClassId::NONE {
+                    read.insert(egraph.find_immutable(child));
+                }
+            }
+        }
+    }
+
+    // Which call results are candidates, before anything is removed: a result
+    // read by another call's argument list keeps that call alive, and deciding
+    // one call at a time would let the order of the scan decide the answer.
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+    for (bi, block) in func.blocks.iter().enumerate() {
+        for (oi, op) in block.ops.iter().enumerate() {
+            let EffectfulOp::Call {
+                func: callee,
+                results,
+                ..
+            } = op
+            else {
+                continue;
+            };
+            if !pure.contains(callee.as_str()) {
+                continue;
+            }
+            if results
+                .iter()
+                .all(|r| !read.contains(&egraph.find_immutable(r.class())))
+            {
+                candidates.push((bi, oi));
+            }
+        }
+    }
+
+    // Every effectful op that is not itself going to be removed, and the classes
+    // it names. A candidate whose result one of those reads is not dead.
+    let doomed: BTreeSet<(usize, usize)> = candidates.iter().copied().collect();
+    let mut cfg_read: BTreeSet<ClassId> = BTreeSet::new();
+    for (bi, block) in func.blocks.iter().enumerate() {
+        for (oi, op) in block.ops.iter().enumerate() {
+            if doomed.contains(&(bi, oi)) {
+                continue;
+            }
+            op.for_each_class_id(|cid| {
+                cfg_read.insert(egraph.find_immutable(cid));
+            });
+        }
+    }
+
+    let mut removed = 0;
+    for &(bi, oi) in candidates.iter().rev() {
+        let EffectfulOp::Call { results, .. } = &func.blocks[bi].ops[oi] else {
+            continue;
+        };
+        if results
+            .iter()
+            .any(|r| cfg_read.contains(&egraph.find_immutable(r.class())))
+        {
+            continue;
+        }
+        if crate::trace::is_enabled("dce") {
+            eprintln!(
+                "[dce] eliminate dead pure call in bb{}: {:?}",
+                func.blocks[bi].id, func.blocks[bi].ops[oi]
+            );
+        }
+        func.blocks[bi].ops.remove(oi);
+        removed += 1;
+    }
+    removed
+}
+
 /// DCE pass 1: unreachable block elimination after inlining, before LICM.
 pub(super) fn run_dce1(func: &mut Function) {
     eliminate_unreachable_blocks(func);

@@ -330,6 +330,8 @@ float/variadic_al_register.c	O0	26	129	7	6	3
 float/variadic_al_register.c	O1	8	39	0	0	0
 functions/call_arg_remat_bug.c	O0	116	562	20	28	16
 functions/call_arg_remat_bug.c	O1	85	446	11	5	18
+functions/dead_pure_call.c	O0	157	658	37	44	33
+functions/dead_pure_call.c	O1	61	232	0	0	24
 functions/deep_recursion.c	O0	56	231	11	13	15
 functions/deep_recursion.c	O1	29	117	0	0	12
 functions/extern_call.c	O0	7	37	2	2	0
@@ -376,8 +378,8 @@ functions/void_side_effect.c	O0	57	248	11	17	4
 functions/void_side_effect.c	O1	21	59	0	0	1
 functions/zero_args_computed.c	O0	19	88	4	4	0
 functions/zero_args_computed.c	O1	3	8	0	0	0
-functions/zero_arg_void_mixed.c	O0	126	608	20	28	16
-functions/zero_arg_void_mixed.c	O1	97	501	12	6	18
+functions/zero_arg_void_mixed.c	O0	133	640	22	30	16
+functions/zero_arg_void_mixed.c	O1	100	513	12	6	18
 globals/addr_of.c	O0	18	84	5	6	0
 globals/addr_of.c	O1	7	31	0	0	0
 globals/array.c	O0	68	297	17	26	6
