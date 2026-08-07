@@ -1412,7 +1412,11 @@ pub(crate) fn run_phase5(
         let coalesce_aliases = build_transitive_alias_map(&phase4.alias_map);
         return Ok(GlobalRegAllocResult {
             per_block_insts: phase4.per_block_insts,
-            vreg_to_reg: phase4.vreg_to_reg,
+            assignment: phase4
+                .vreg_to_reg
+                .into_iter()
+                .map(|(v, r)| (v, super::Assignment::Reg(r)))
+                .collect(),
             callee_saved_used,
             unprecolored_params: phase4.unprecolored_params,
             coalesce_aliases,
@@ -3137,7 +3141,7 @@ mod tests {
         );
         for idx in 0u32..=3 {
             assert!(
-                result.vreg_to_reg.contains_key(&VReg(idx)),
+                result.assignment.contains_key(&VReg(idx)),
                 "vreg_to_reg must contain VReg v{idx}"
             );
         }
@@ -3213,10 +3217,10 @@ mod tests {
         // XMM VReg v1 must have a physical XMM register (no call on the path
         // means XMM phantoms are never injected -> v1 is freely assignable).
         assert!(
-            result.vreg_to_reg.contains_key(&VReg(1)),
+            result.assignment.contains_key(&VReg(1)),
             "XMM VReg v1 must have a physical register assignment when no call is on the path"
         );
-        let assigned_reg = result.vreg_to_reg[&VReg(1)];
+        let assigned_reg = result.assignment[&VReg(1)].reg().unwrap();
         assert!(
             assigned_reg.is_xmm(),
             "XMM VReg v1 must be assigned an XMM register, got {assigned_reg:?}"
@@ -3292,7 +3296,7 @@ mod tests {
         // All 9 VRegs (v0..v8) must get a physical register.
         for v in 0u32..9 {
             assert!(
-                result.vreg_to_reg.contains_key(&VReg(v)),
+                result.assignment.contains_key(&VReg(v)),
                 "VReg v{v} must have a physical register assignment"
             );
         }
@@ -3307,9 +3311,10 @@ mod tests {
         let assigned_abi_count = (0u32..6)
             .filter(|&v| {
                 result
-                    .vreg_to_reg
+                    .assignment
                     .get(&VReg(v))
-                    .map(|&r| abi_set.contains(&r))
+                    .and_then(|a| a.reg())
+                    .map(|r| abi_set.contains(&r))
                     .unwrap_or(false)
             })
             .count();
@@ -3447,9 +3452,10 @@ mod tests {
                 }
                 cur = aliased;
             }
-            *result
-                .vreg_to_reg
+            result
+                .assignment
                 .get(&cur)
+                .and_then(|a| a.reg())
                 .unwrap_or_else(|| panic!("VReg {cur:?} has no register"))
         };
         let r3 = resolve(VReg(3));

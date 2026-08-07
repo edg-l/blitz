@@ -58,7 +58,13 @@ fn build_mem_addr(
     if let Some((addr_pos, inst)) = addr_inst
         && let Op::Pure(PureOp::Addr { scale, disp }) = &inst.op
     {
-        let reg_of = |v: VReg| regalloc.vreg_to_reg.get(&v).copied();
+        let reg_of = |v: VReg| {
+            regalloc
+                .assignment
+                .get(&v)
+                .copied()
+                .and_then(crate::regalloc::Assignment::reg)
+        };
         let base_reg = inst.operands.first().copied().and_then(reg_of);
         let index_reg = inst
             .operands
@@ -159,7 +165,7 @@ pub(super) fn lower_effectful_op(
     // operands in a fixed order (see `barrier::role_operand_count`), it is taken
     // from the post-coalesce, post-allocation schedule, and every pass that
     // rewrites operands does so by index -- so operand `i` is the VReg this op
-    // actually reads, and `vreg_to_reg` gives the register the allocator put it
+    // actually reads, and `assignment` gives the register the allocator put it
     // in. No reconstruction, nothing to go stale.
     let barrier = barrier_pos.and_then(|p| schedule.get(p));
     // A role operand carries a register only if the allocator gave it one; where
@@ -170,10 +176,16 @@ pub(super) fn lower_effectful_op(
             .filter(|_| i < barrier::role_operand_count(op))
             .and_then(|b| b.operands.get(i))
             .copied()
-            .filter(|v| regalloc.vreg_to_reg.contains_key(v))
+            .filter(|v| regalloc.assignment.contains_key(v))
     };
     let role_reg = |i: usize| -> Option<Reg> {
-        role_vreg(i).and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
+        role_vreg(i).and_then(|v| {
+            regalloc
+                .assignment
+                .get(&v)
+                .copied()
+                .and_then(crate::regalloc::Assignment::reg)
+        })
     };
 
     // Under BLITZ_VERIFY, hold this seam to its own invariant: the register an
@@ -202,7 +214,13 @@ pub(super) fn lower_effectful_op(
         let declared: Vec<Reg> = barrier
             .operands
             .iter()
-            .filter_map(|v| regalloc.vreg_to_reg.get(v).copied())
+            .filter_map(|v| {
+                regalloc
+                    .assignment
+                    .get(v)
+                    .copied()
+                    .and_then(crate::regalloc::Assignment::reg)
+            })
             .collect();
         // An empty operand list means the barrier records nothing to check
         // against (a load whose address is a block param, say).
@@ -241,7 +259,13 @@ pub(super) fn lower_effectful_op(
             // renamed and the consumers read, while the class can name a different
             // VReg whose register nobody is reading.
             let result_reg = barrier
-                .and_then(|inst| regalloc.vreg_to_reg.get(&inst.dst).copied())
+                .and_then(|inst| {
+                    regalloc
+                        .assignment
+                        .get(&inst.dst)
+                        .copied()
+                        .and_then(crate::regalloc::Assignment::reg)
+                })
                 .ok_or_else(|| CompileError {
                     phase: "lowering".into(),
                     message: "Load: no register for result".into(),
@@ -441,7 +465,13 @@ pub(super) fn lower_effectful_op(
             // was in XMM0, because no copy was emitted at all.
             let result_reg = barrier_pos
                 .and_then(|pos| schedule.get(pos))
-                .and_then(|inst| regalloc.vreg_to_reg.get(&inst.dst).copied());
+                .and_then(|inst| {
+                    regalloc
+                        .assignment
+                        .get(&inst.dst)
+                        .copied()
+                        .and_then(crate::regalloc::Assignment::reg)
+                });
             if let Some(&_result_cid) = results.first()
                 && let Some(result_reg) = result_reg
             {

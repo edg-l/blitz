@@ -23,6 +23,46 @@ use crate::ir::op::PseudoOp;
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::reg::{Reg, RegClass};
 
+/// Where one VReg lives once allocation has finished.
+///
+/// A register is not the only answer an allocator has to be able to give. The
+/// splitter already routes a block parameter through a frame slot -- a parameter
+/// no phi copy can write to a register, because there is no register to write --
+/// and that answer had nowhere to go: `vreg_to_reg` maps to `Reg`, so the fact
+/// lived in a side table (`BlockParamSlotMap`) that every consumer had to be
+/// handed separately and remember to consult. A lookup that missed both meant
+/// "no register", which `terminator.rs` could only treat as "emit nothing".
+///
+/// Naming the second answer is what lets a value in a slot be a value like any
+/// other. It is also the sentence an allocator that spills by default has to be
+/// able to say at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Assignment {
+    /// In a physical register for its whole live range.
+    Reg(Reg),
+    /// In a frame slot, addressed as `spill_offset + slot * 8`. Every read
+    /// materializes it and every write stores it back.
+    Slot(u32),
+}
+
+impl Assignment {
+    /// The register this names, or `None` when it names a slot.
+    pub fn reg(self) -> Option<Reg> {
+        match self {
+            Assignment::Reg(r) => Some(r),
+            Assignment::Slot(_) => None,
+        }
+    }
+
+    /// The slot this names, or `None` when it names a register.
+    pub fn slot(self) -> Option<u32> {
+        match self {
+            Assignment::Slot(s) => Some(s),
+            Assignment::Reg(_) => None,
+        }
+    }
+}
+
 /// Result of function-scope (global) register allocation.
 ///
 /// Returned by `allocate_global` once it is implemented. Each field mirrors the
@@ -31,8 +71,8 @@ pub struct GlobalRegAllocResult {
     /// Final instruction lists, one `Vec<ScheduledInst>` per block (same block
     /// order as the input `block_schedules`).
     pub per_block_insts: Vec<Vec<ScheduledInst>>,
-    /// Maps every VReg in the function to its assigned physical register.
-    pub vreg_to_reg: BTreeMap<VReg, Reg>,
+    /// Where every VReg in the function lives: a register, or a frame slot.
+    pub assignment: BTreeMap<VReg, Assignment>,
     /// Callee-saved registers that were actually assigned and must be preserved
     /// in the function prologue/epilogue.
     pub callee_saved_used: Vec<Reg>,

@@ -1358,7 +1358,7 @@ pub fn compile(
         })?;
 
         let block_rewritten_storage = global_result.per_block_insts;
-        let merged_vreg_to_reg = global_result.vreg_to_reg;
+        let merged_assignment = global_result.assignment;
         let mut merged_callee_saved = global_result.callee_saved_used;
         let global_unprecolored_params = global_result.unprecolored_params;
         let coalesce_aliases: BTreeMap<VReg, VReg> = global_result.coalesce_aliases;
@@ -1371,7 +1371,7 @@ pub fn compile(
         merged_callee_saved.dedup();
 
         let merged_result = RegAllocResult {
-            vreg_to_reg: merged_vreg_to_reg,
+            assignment: merged_assignment,
             spill_slots: spill_slot_counter,
             callee_saved_used: merged_callee_saved,
             insts: vec![],
@@ -1412,7 +1412,7 @@ pub fn compile(
             "regalloc",
             &format!(
                 "regs_used={}, spill_slots={}",
-                regalloc_result.vreg_to_reg.len(),
+                regalloc_result.assignment.len(),
                 regalloc_result.spill_slots
             ),
         );
@@ -1423,9 +1423,9 @@ pub fn compile(
             target: "blitz::regalloc",
             "[{}] final assignment ({} vregs, {} spill slots):\n{}",
             func.name,
-            regalloc_result.vreg_to_reg.len(),
+            regalloc_result.assignment.len(),
             regalloc_result.spill_slots,
-            crate::trace::format_vreg_to_reg(&regalloc_result.vreg_to_reg),
+            crate::trace::format_assignment(&regalloc_result.assignment),
         );
     }
 
@@ -1440,7 +1440,7 @@ pub fn compile(
             &verify_phi_uses,
             &verify_block_params,
             &succs,
-            &regalloc_result.vreg_to_reg,
+            &regalloc_result.assignment,
             &coalesce_aliases,
             &verify_copy_pairs,
         );
@@ -1519,7 +1519,11 @@ pub fn compile(
                 && !param_vreg_set.contains(&inst.dst)
                 && let Some(crate::x86::abi::ArgLoc::Reg(abi_reg)) =
                     arg_locs.get(*param_idx as usize)
-                && let Some(&dst_reg) = regalloc_result.vreg_to_reg.get(&inst.dst)
+                && let Some(dst_reg) = regalloc_result
+                    .assignment
+                    .get(&inst.dst)
+                    .copied()
+                    .and_then(crate::regalloc::Assignment::reg)
                 && dst_reg != *abi_reg
             {
                 all_insts.push(MachInst::MovRR {
@@ -1535,7 +1539,11 @@ pub fn compile(
         // are live across a call that clobbers their ABI register.
         if block_idx == rpo_order[0] {
             for &(param_vreg, abi_reg) in &regalloc_result.unprecolored_params {
-                if let Some(&dst_reg) = regalloc_result.vreg_to_reg.get(&param_vreg)
+                if let Some(dst_reg) = regalloc_result
+                    .assignment
+                    .get(&param_vreg)
+                    .copied()
+                    .and_then(crate::regalloc::Assignment::reg)
                     && dst_reg != abi_reg
                 {
                     if abi_reg.is_xmm() {
@@ -1667,7 +1675,7 @@ pub fn compile(
                         continue;
                     }
                     debug_assert!(
-                        regalloc_result.vreg_to_reg.contains_key(&op),
+                        regalloc_result.assignment.contains_key(&op),
                         "8a-effectful safety net fired after global regalloc: \
                          operand VReg {:?} in block {} of function '{}' has no register assignment",
                         op,

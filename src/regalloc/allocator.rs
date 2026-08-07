@@ -6,8 +6,8 @@ use crate::x86::reg::Reg;
 
 /// Result of register allocation for one function.
 pub struct RegAllocResult {
-    /// Maps each VReg to the physical register assigned to it.
-    pub vreg_to_reg: BTreeMap<VReg, Reg>,
+    /// Where each VReg lives: a physical register, or a frame slot.
+    pub assignment: BTreeMap<VReg, super::Assignment>,
     /// Number of spill slots used (each slot is 8 bytes for GPR, 16 for XMM).
     pub spill_slots: u32,
     /// Callee-saved registers that were actually assigned (must be preserved).

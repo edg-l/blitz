@@ -425,7 +425,10 @@ mod tests {
             &phi_uses,
             &block_params,
             &[vec![1], vec![]],
-            &assignment.iter().map(|&(v, r)| (VReg(v), r)).collect(),
+            &assignment
+                .iter()
+                .map(|&(v, r)| (VReg(v), crate::regalloc::Assignment::Reg(r)))
+                .collect(),
             &BTreeMap::new(),
             &[],
         )
@@ -760,7 +763,7 @@ pub fn verify_machinsts(
 /// The machine-level checks cannot see either: the register is written on every
 /// path to the read, just with the wrong value.
 ///
-/// VRegs absent from `vreg_to_reg` are skipped. They hold no register to share:
+/// VRegs absent from `assignment`, and those living in a slot, are skipped. They hold no register to share:
 /// spill pseudo-op destinations are dummies, and a coalesced-away VReg no longer
 /// appears in the emitted operands at all.
 pub fn verify_register_sharing(
@@ -768,7 +771,7 @@ pub fn verify_register_sharing(
     phi_uses: &[crate::regalloc::interference::VRegSet],
     block_params: &[crate::regalloc::interference::VRegSet],
     cfg_succs: &[Vec<usize>],
-    vreg_to_reg: &BTreeMap<VReg, Reg>,
+    assignment: &BTreeMap<VReg, crate::regalloc::Assignment>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
     copy_pairs: &[(VReg, VReg)],
 ) -> Vec<String> {
@@ -854,7 +857,11 @@ pub fn verify_register_sharing(
         let mut by_reg: BTreeMap<Reg, VReg> = BTreeMap::new();
         for v in live {
             let v = VReg(v as u32);
-            let Some(&reg) = vreg_to_reg.get(&v) else {
+            let Some(reg) = assignment
+                .get(&v)
+                .copied()
+                .and_then(crate::regalloc::Assignment::reg)
+            else {
                 continue;
             };
             match by_reg.get(&reg) {

@@ -269,7 +269,13 @@ fn ret_value_reg(
         .copied()
         .or(committed)
         .map(|v| chase_alias(v, coalesce_aliases))
-        .and_then(|v| regalloc.vreg_to_reg.get(&v).copied())
+        .and_then(|v| {
+            regalloc
+                .assignment
+                .get(&v)
+                .copied()
+                .and_then(crate::regalloc::Assignment::reg)
+        })
 }
 
 /// Lower a block terminator, including phi copies for block-parameter passing.
@@ -648,7 +654,12 @@ fn build_phi_copies(
             Some((v, _)) => format!(" k={v}"),
             None => String::new(),
         };
-        let src_reg = match regalloc.vreg_to_reg.get(&arg_vreg).copied() {
+        let src_reg = match regalloc
+            .assignment
+            .get(&arg_vreg)
+            .copied()
+            .and_then(crate::regalloc::Assignment::reg)
+        {
             Some(r) => r,
             None => {
                 // XMM values that flow through cross-block spill slots
@@ -743,12 +754,17 @@ fn build_phi_copies(
             location: None,
         })?;
         // Apply coalesce aliases so a dest VReg coalescing merged away resolves
-        // to its canonical. Without this, vreg_to_reg lookup fails and the copy
+        // to its canonical. Without this, the assignment lookup fails and the copy
         // is silently dropped, dropping the back-edge and miscompiling loops.
         // The source side chases the same chain above.
         let param_vreg = chase_alias(param_vreg, coalesce_aliases);
 
-        match regalloc.vreg_to_reg.get(&param_vreg).copied() {
+        match regalloc
+            .assignment
+            .get(&param_vreg)
+            .copied()
+            .and_then(crate::regalloc::Assignment::reg)
+        {
             Some(dst_reg) => {
                 if trace {
                     tracing::debug!(
@@ -1021,7 +1037,10 @@ mod tests {
 
     fn regalloc_of(pairs: &[(u32, Reg)]) -> RegAllocResult {
         RegAllocResult {
-            vreg_to_reg: pairs.iter().map(|&(v, r)| (VReg(v), r)).collect(),
+            assignment: pairs
+                .iter()
+                .map(|&(v, r)| (VReg(v), crate::regalloc::Assignment::Reg(r)))
+                .collect(),
             spill_slots: 0,
             callee_saved_used: vec![],
             insts: vec![],

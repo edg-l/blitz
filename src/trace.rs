@@ -177,7 +177,7 @@ pub fn format_schedule(
 }
 
 /// Format a VReg-to-Reg mapping sorted by VReg index.
-pub fn format_vreg_to_reg(map: &BTreeMap<VReg, crate::x86::reg::Reg>) -> String {
+pub fn format_assignment(map: &BTreeMap<VReg, crate::regalloc::Assignment>) -> String {
     use std::fmt::Write;
     let mut sorted: Vec<_> = map.iter().collect();
     sorted.sort_by_key(|(v, _)| v.0);

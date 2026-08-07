@@ -1200,7 +1200,13 @@ pub(super) fn lower_block_pure_ops(
     has_proj0_consumer: &BTreeSet<VReg>,
 ) -> Result<Vec<MachInst>, CompileError> {
     let mut result: Vec<MachInst> = Vec::new();
-    let get_reg = |vreg: VReg| -> Option<Reg> { regalloc.vreg_to_reg.get(&vreg).copied() };
+    let get_reg = |vreg: VReg| -> Option<Reg> {
+        regalloc
+            .assignment
+            .get(&vreg)
+            .copied()
+            .and_then(crate::regalloc::Assignment::reg)
+    };
 
     // Projections handled together with their division rather than on their own
     // turn. Taking the quotient and the remainder out of RAX and RDX is one

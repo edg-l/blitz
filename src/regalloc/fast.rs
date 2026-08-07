@@ -19,7 +19,7 @@
 //! It keeps the same interface as `allocate_global` -- one physical register per
 //! VReg for the whole function -- rather than the per-instruction scratch model
 //! a true "fast" allocator uses. That model cannot be expressed here: everything
-//! downstream of allocation reads `vreg_to_reg`, which has one entry per VReg.
+//! downstream of allocation reads `assignment`, which has one entry per VReg.
 //! Spilling mints fresh short-lived VRegs for each reload, so the same effect is
 //! reached through the interface that already exists.
 //!
@@ -531,7 +531,10 @@ fn finish(
 
     GlobalRegAllocResult {
         per_block_insts: schedules,
-        vreg_to_reg: assignment,
+        assignment: assignment
+            .into_iter()
+            .map(|(v, r)| (v, super::Assignment::Reg(r)))
+            .collect(),
         callee_saved_used: used,
         unprecolored_params,
         coalesce_aliases: BTreeMap::new(),
