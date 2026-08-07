@@ -126,15 +126,36 @@ guesses at, and only then write the second allocator.
 result field is `assignment`. The colouring allocator constructs only
 `Assignment::Reg`, so it changed no emitted code on any corpus.
 
-**Step two, not started:** have the splitter's block-param slot routing record
-`Assignment::Slot` instead of the `BlockParamSlotMap` side table, so
-`terminator.rs:651`'s silent `continue` -- reached when a VReg has neither a
-register nor a side-table entry, on a path whose failure mode is a
-non-terminating loop -- becomes a real answer rather than a skip. Note what does
-*not* move: `SlotSpilledParamInfo::value_alias` says whether a parameter names
-the value it carries, which decides whether a back edge must store. That is edge
-identity, not storage, and `docs/internal/refactor-roadmap.md`'s section "A back
-edge is not 'the VRegs are equal'" is why it needs care.
+**Step two, started, with the target now named.** The goal is that a value in a
+slot is a value like any other, so `terminator.rs`'s two silent `continue`s --
+reached when a VReg has neither a register nor a `BlockParamSlotMap` entry, on a
+path whose failure mode is a non-terminating loop -- have something to do rather
+than something to skip.
+
+**They are not dead code, and that is measured.** Turning both into
+`CompileError` fails two saved corpus programs at `-O1`, both on the destination
+branch:
+
+```
+fixed/pressure-seed128.c   b9  -> 130 p0   VReg(10)  class 673
+fixed/pressure-seed35.c    b69 -> 149 p0   VReg(13)  class 1111
+```
+
+So a block parameter with no register and no side-table entry is a real state
+and the skip is load-bearing: the value reaches the block by some route neither
+map records. **Those two programs are the reproducers, and finding what route
+that is is the next step** -- once it can be named as `Assignment::Slot`, the
+branch does the store and a remaining `None` becomes the error it should be.
+
+(An `eprintln!` probe in both branches printed nothing across every corpus and
+was simply wrong: `run_corpus.sh` redirects the compiler's stderr. Rule out the
+scaffolding first.)
+
+Note what does *not* move: `SlotSpilledParamInfo::value_alias` says whether a
+parameter names the value it carries, which decides whether a back edge must
+store. That is edge identity, not storage, and
+`docs/internal/refactor-roadmap.md`'s section "A back edge is not 'the VRegs are
+equal'" is why it needs care.
 
 The shape to aim for is every VReg in a slot, operands loaded into scratch
 registers per instruction, results stored back: no interference graph, no

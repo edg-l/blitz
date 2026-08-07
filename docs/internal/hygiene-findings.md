@@ -65,16 +65,34 @@ documents itself as fixing.
 
 ### 4. A silent `continue` where the neighbouring case is a hard error
 
-`src/compile/terminator.rs:519,651-665`. When `regalloc.vreg_to_reg` has no
-entry for a terminator argument the code continues with no copy, no store and
-no error, documented as *"legacy: 'flow through cross-block spill slots'
-path"* -- a per-block-allocator behaviour. Ten lines above, the structurally
-identical "nothing writes the parameter on this edge" case is a `CompileError`.
-A dropped phi copy on a back edge is a non-terminating loop, which `:637-639`
-says in as many words.
+`src/compile/terminator.rs:519,651-665`. When the assignment has no entry for a
+terminator argument or a destination parameter, the code continues with no copy,
+no store and no error, documented as *"legacy: 'flow through cross-block spill
+slots' path"*. Ten lines above, the structurally identical "nothing writes the
+parameter on this edge" case is a `CompileError`. A dropped phi copy on a back
+edge is a non-terminating loop, which `:637-639` says in as many words.
 
-**Fix:** make it the same `CompileError` as `:625-635`. If the global allocator
-can legitimately leave a VReg unassigned, that is what needs naming.
+**The obvious fix is wrong, and this was measured 2026-08-07.** Turning both
+branches into `CompileError` fails two saved corpus programs at `-O1`:
+
+```
+fixed/pressure-seed128.c   b9  -> 130 p0   VReg(10)  class 673
+fixed/pressure-seed35.c    b69 -> 149 p0   VReg(13)  class 1111
+```
+
+Both are the *destination* branch. So a block parameter with neither a register
+nor an entry in `BlockParamSlotMap` is a real state, and skipping its copy is
+what makes those programs work: the value reaches the block another way.
+
+**A probe said it was unreachable and the probe was wrong.** An `eprintln!` in
+both branches printed nothing across lit, the differential harness, the corpus
+and 180 generated programs -- because `run_corpus.sh` redirects the compiler's
+stderr. Scaffolding first, per `CLAUDE.md`.
+
+**Fix:** not an error. Find where those two parameters' values actually live and
+record it as `Assignment::Slot`, at which point the branch has something to
+*do* rather than something to skip, and a remaining `None` can be the error it
+should have been. The two programs above are the reproducers.
 
 ## Duplication
 
