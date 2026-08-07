@@ -259,6 +259,65 @@ pub fn count_slot_traffic(
     (stores, loads)
 }
 
+/// Register-to-register moves in the emitted stream, and how many of them are the
+/// two-address fixup.
+///
+/// **Copies are the whole remaining instruction gap to `gcc -O2`** -- 697 of
+/// blitz's 2407 instructions over `bench` against gcc's 351 of 2322 -- and the
+/// item asking for fewer of them had no way to say where they came from, which is
+/// a large part of why it never moved. This says it, off the final stream, inside
+/// a run that already happens.
+///
+/// The split is between the two sources that need different fixes. x86 arithmetic
+/// is two-address, so `lower.rs` emits `mov dst, src_a` before the op whenever the
+/// result did not get its first operand's register -- that copy is the colourer's
+/// to avoid, through [`super::regalloc::coloring::ColorHints`]. Everything else is
+/// a *parallel* copy: a phi on an edge, an entry parameter, an argument into its
+/// ABI register. Those are coalescing's and the block-parameter machinery's.
+///
+/// The fixup is recognised by its shape rather than tracked from its emission
+/// site, because that shape is exactly what it is: `mov d, s` immediately followed
+/// by an op that reads and writes `d`. Nothing else emits that pair -- a parallel
+/// copy's destination is not rewritten by the next instruction, or it would not
+/// be a copy.
+pub fn count_copies(insts: &[crate::x86::inst::MachInst]) -> (usize, usize) {
+    use crate::x86::inst::{MachInst, Operand};
+    let reg_to_reg = |i: &MachInst| -> Option<(crate::x86::reg::Reg, crate::x86::reg::Reg)> {
+        match i {
+            MachInst::MovRR {
+                dst: Operand::Reg(d),
+                src: Operand::Reg(s),
+                ..
+            }
+            | MachInst::MovsdRR {
+                dst: Operand::Reg(d),
+                src: Operand::Reg(s),
+            }
+            | MachInst::MovssRR {
+                dst: Operand::Reg(d),
+                src: Operand::Reg(s),
+            } => Some((*d, *s)),
+            _ => None,
+        }
+    };
+    let mut copies = 0;
+    let mut two_address = 0;
+    for (i, inst) in insts.iter().enumerate() {
+        let Some((dst, _)) = reg_to_reg(inst) else {
+            continue;
+        };
+        copies += 1;
+        if let Some(next) = insts.get(i + 1)
+            && reg_to_reg(next).is_none()
+            && next.defs().contains(&dst)
+            && next.uses().contains(&dst)
+        {
+            two_address += 1;
+        }
+    }
+    (copies, two_address)
+}
+
 pub fn format_slot_traffic(
     insts: &[crate::x86::inst::MachInst],
     spill_base: crate::x86::reg::Reg,

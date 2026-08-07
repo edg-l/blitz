@@ -73,9 +73,12 @@ section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
 - **Copies are still a third of what blitz emits** -- `P1`, and now its first
-  entry. 805 register-to-register moves in 2613 instructions over `bench`,
-  against `gcc -O2`'s 345 in 2226. **The whole remaining instruction gap to gcc
-  is copies.** Read `docs/internal/refactor-roadmap.md` before starting.
+  entry. 697 register-to-register moves in 2407 instructions over `bench` against
+  `gcc -O2`'s 351 in 2322, and **585 of the 697 are parallel copies** -- phi
+  copies on edges, entry parameter moves, argument setup -- which on their own
+  exceed gcc's entire copy count. `stats` reports the split and
+  `run_codesize.sh` tracks it. Read `docs/internal/refactor-roadmap.md` before
+  starting.
 
 `P1` is ordered by measured impact. **`P2` is where the
 single-target thesis pays off**, though half of it is unreachable until tinyc
@@ -430,10 +433,24 @@ so the holes stay visible.
 
 ### P1 -- Optimizer gaps with the largest measured impact
 
-- [ ] **Copies are still a third of what blitz emits.** Measured over the 15
-      `bench` kernels: blitz 805 register-to-register moves in 2613
-      instructions, against `gcc -O2`'s 345 in 2226 and `clang -O2`'s 214 in
-      2572. **The whole remaining instruction gap to gcc is copies.**
+- [ ] **Copies are still a third of what blitz emits.** Re-measured 2026-08-07
+      over the 15 `bench` kernels: blitz **697 register-to-register moves in 2407
+      instructions** (29.0%), against `gcc -O2`'s 351 in 2322 (15.1%) and
+      `clang -O2`'s 259 in 2661 (9.7%).
+
+      **The copy surplus is now four times the whole instruction gap**: blitz is
+      85 instructions behind gcc and emits 346 more copies than it, so removing
+      them would put blitz ahead on the count outright.
+
+      **And the split says which fix applies.** `BLITZ_DEBUG=stats` now reports
+      `copies=` and `two_addr=` per function, and `run_codesize.sh` tracks
+      `copies` as a fifth baseline column, so any change here is measured rather
+      than argued. Over `bench`: **112 two-address fixups and 585 parallel
+      copies**. The two-address half is already down from the 246 that
+      `coloring.rs` documents, which is `two_address_hints` working; the
+      remaining 585 are phi copies on edges, entry parameter moves and argument
+      setup, and **blitz's parallel copies alone exceed gcc's entire copy
+      count.** That is where the item is.
       Conservative coalescing is at its limit: with Briggs and George both in,
       34 of 64 candidate copies on `queens` and 43 of 112 on `hash_table` are
       still refused because the merge genuinely constrains the graph

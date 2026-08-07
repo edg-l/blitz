@@ -2033,9 +2033,10 @@ pub fn compile(
             frame_layout.spill_offset,
             &slots,
         );
+        let (copies, two_address) = crate::trace::count_copies(&flat_insts);
         tracing::debug!(
             target: "blitz::stats",
-            "name={} insts={} bytes={func_size} spills={spills} reloads={reloads} frame={} slots={}",
+            "name={} insts={} bytes={func_size} spills={spills} reloads={reloads}              copies={copies} two_addr={two_address} frame={} slots={}",
             func.name,
             flat_insts.len(),
             frame_layout.frame_size,

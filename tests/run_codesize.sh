@@ -2,7 +2,7 @@
 # Did a change make the emitted code better or worse?
 #
 # For every (program, level) pair this records four numbers about the code
-# blitz emits -- instructions, `.text` bytes, spill stores, reloads -- and
+# blitz emits -- instructions, `.text` bytes, spill stores, reloads, copies -- and
 # compares them against checked-in baselines. It answers the question no other
 # harness here answers: `run_identity.sh` says whether the output changed at
 # all, `run_diff.sh` says whether it is correct, and neither says whether it got
@@ -171,7 +171,7 @@ if [ "$1" = "--one" ]; then
     # their code size is a real measurement.
     if printf '%s' "$out" | grep -q "phase '" ||
         ! printf '%s' "$out" | grep -q 'blitz::stats'; then
-        printf '%s\t%s\t-\t-\t-\t-\n' "$name" "${level#-}"
+        printf '%s\t%s\t-\t-\t-\t-\t-\n' "$name" "${level#-}"
         exit 0
     fi
     printf '%s' "$out" | awk -v name="$name" -v level="${level#-}" '
@@ -182,9 +182,13 @@ if [ "$1" = "--one" ]; then
                 if (kv[1] == "bytes")   bytes   += kv[2]
                 if (kv[1] == "spills")  spills  += kv[2]
                 if (kv[1] == "reloads") reloads += kv[2]
+                if (kv[1] == "copies")  copies  += kv[2]
             }
         }
-        END { printf "%s\t%s\t%d\t%d\t%d\t%d\n", name, level, insts, bytes, spills, reloads }
+        END {
+            printf "%s\t%s\t%d\t%d\t%d\t%d\t%d\n",
+                name, level, insts, bytes, spills, reloads, copies
+        }
     '
     exit 0
 fi
@@ -398,24 +402,25 @@ compare() {
     fi
     awk -F'\t' -v corpus="$corpus" '
         FNR == NR {
-            if ($1 ~ /^#/ || NF < 6) next
+            if ($1 ~ /^#/ || NF < 7) next
             key = $1 "\t" $2
-            old[key] = $3 "\t" $4 "\t" $5 "\t" $6
+            old[key] = $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7
             next
         }
         {
-            if (NF < 6) next
+            if (NF < 7) next
             key = $1 "\t" $2
-            new = $3 "\t" $4 "\t" $5 "\t" $6
+            new = $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7
             if (!(key in old)) { added++; printf "  + %-44s %s\n", key, "new program"; next }
             if (old[key] == new) { same++; next }
             split(old[key], o, "\t")
             split($0, n, "\t")
             changed++
-            label[1] = "insts"; label[2] = "bytes"; label[3] = "spills"; label[4] = "reloads"
+            label[1] = "insts"; label[2] = "bytes"; label[3] = "spills"
+            label[4] = "reloads"; label[5] = "copies"
             line = ""
             worse = 0
-            for (i = 1; i <= 4; i++) {
+            for (i = 1; i <= 5; i++) {
                 ov = o[i]; nv = n[i + 2]
                 if (ov == nv) continue
                 if (ov == "-" || nv == "-") {
@@ -496,7 +501,7 @@ for corpus in $corpora; do
                 exit 2
             fi
             {
-                printf '# program\tlevel\tinsts\tbytes\tspills\treloads\n'
+                printf '# program\tlevel\tinsts\tbytes\tspills\treloads\tcopies\n'
                 printf '# corpus: %s -- written by tests/run_codesize.sh --update\n' "$corpus"
                 cat "$WORK/$corpus.tsv"
             } > "$BASELINE_DIR/codesize-$corpus.tsv"
