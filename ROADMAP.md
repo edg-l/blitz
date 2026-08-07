@@ -375,12 +375,15 @@ isel patterns; we should beat it on the ones we implement.
       register, a shift routed through CL, the ALU op) or four for the
       complement, and the bit index stops contending for CL. On
       `tests/lit/asm/bit_ops.c` each of the three is 1 inst / 3 bytes against
-      4 / 11. A constant index is deliberately not matched: the shift folds and
-      the immediate-form `or` is three bytes where `bts` is four. No corpus row
-      changed, because none of them builds a variable one-bit mask.
-      **The immediate-index form is the open half of this**: a folded mask
-      outside the `imm8` range costs `mov r, imm32` plus the ALU op, six or
-      seven bytes more than `bts r, imm8`.
+      4 / 11. The immediate-index forms `X86BtsI`/`X86BtrI`/`X86BtcI` are done
+      too, from bit 7 up: below that the folded mask is an `imm8` and the
+      immediate-form `or` is three bytes where `bts` is four, and at 7 and above
+      the register form has to materialize the mask, so the pair is eight bytes
+      or thirteen for a 64-bit one against `bts r, imm8`'s four. They are priced
+      by that difference for the same reason the immediate-form ALU is -- the
+      `Iconst` the register form reads costs 0.0, so the `mov` is invisible to
+      extraction. On `fuzz`, two -O0 rows lose an instruction and one gains one
+      to a different choice of destination register.
 - [ ] **BMI/BMI2 when available**: `andn`, `bextr`, `blsi`/`blsr`/`blsmsk`,
       `shlx`/`shrx`/`sarx` (no flag clobber, no CL constraint), `mulx`.
       Needs a CPU feature level knob.

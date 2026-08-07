@@ -89,6 +89,9 @@ pub fn fmt_op(op: &Op) -> String {
         Op::Mach(MachOp::X86Bts) => "x86_bts".to_string(),
         Op::Mach(MachOp::X86Btr) => "x86_btr".to_string(),
         Op::Mach(MachOp::X86Btc) => "x86_btc".to_string(),
+        Op::Mach(MachOp::X86BtsI(n)) => format!("x86_bts_imm({n})"),
+        Op::Mach(MachOp::X86BtrI(n)) => format!("x86_btr_imm({n})"),
+        Op::Mach(MachOp::X86BtcI(n)) => format!("x86_btc_imm({n})"),
 
         // x86 flag-only compare with immediate
         Op::Mach(MachOp::X86CmpI { imm, ty }) => format!("x86_cmp_imm({imm}, {ty:?})"),

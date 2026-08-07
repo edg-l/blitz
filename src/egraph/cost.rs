@@ -197,6 +197,27 @@ impl CostModel {
                 .weighted(self.goal)
             }
 
+            // The constant-index forms are priced against the register form they
+            // replace, as the immediate-form ALU is. The mask is a bit at 7 or
+            // above, so no immediate-form ALU node exists for it and the only
+            // other way to reach it is an `Iconst` -- 0.0 here -- read by a
+            // register-form `or`/`and`/`xor` at 3.0. The `mov r, imm32` that
+            // `Iconst` needs is five bytes, ten for a 64-bit mask, so the pair
+            // is eight bytes or thirteen where `bts r, imm8` is four; `size` is
+            // that difference against the register form's own 3.0, clamped at
+            // zero. Where the constant is shared it is materialized anyway and
+            // the four bytes buy only a freed register, but a one-bit mask past
+            // `imm8` with more than one use is rare enough to pay for the case
+            // that is not.
+            Op::Mach(MachOp::X86BtsI(_))
+            | Op::Mach(MachOp::X86BtrI(_))
+            | Op::Mach(MachOp::X86BtcI(_)) => CostTuple {
+                latency: 1.0,
+                throughput: 0.5,
+                size: 0.0,
+            }
+            .weighted(self.goal),
+
             // ── x86 flag-only compare with immediate: no register output; slightly
             //    cheaper than Proj1(X86Sub) since we don't pay for the sub's
             //    dst register write. imm=0 lowers to `test r, r` (2 bytes, even

@@ -474,6 +474,15 @@ impl Encoder {
             MachInst::BtcRR { size, dst, src } => {
                 self.encode_btc_rr(*size, Self::expect_reg(dst), Self::expect_reg(src));
             }
+            MachInst::BtsRI { size, dst, imm } => {
+                self.encode_bts_ri(*size, Self::expect_reg(dst), *imm);
+            }
+            MachInst::BtrRI { size, dst, imm } => {
+                self.encode_btr_ri(*size, Self::expect_reg(dst), *imm);
+            }
+            MachInst::BtcRI { size, dst, imm } => {
+                self.encode_btc_ri(*size, Self::expect_reg(dst), *imm);
+            }
             MachInst::ShlRCL { size, dst } => {
                 self.encode_shl_rcl(*size, Self::expect_reg(dst));
             }

@@ -336,6 +336,21 @@ fn lower_op(
                 MachInst::BtcRR { size, dst, src }
             })
         }
+        Op::Mach(MachOp::X86BtsI(imm)) => {
+            lower_dst_imm("X86BtsI", size, dst_reg, operand_regs, *imm, |dst, imm| {
+                MachInst::BtsRI { size, dst, imm }
+            })
+        }
+        Op::Mach(MachOp::X86BtrI(imm)) => {
+            lower_dst_imm("X86BtrI", size, dst_reg, operand_regs, *imm, |dst, imm| {
+                MachInst::BtrRI { size, dst, imm }
+            })
+        }
+        Op::Mach(MachOp::X86BtcI(imm)) => {
+            lower_dst_imm("X86BtcI", size, dst_reg, operand_regs, *imm, |dst, imm| {
+                MachInst::BtcRI { size, dst, imm }
+            })
+        }
 
         // X86CmpI is handled in the caller (where vreg_types is available) so
         // the OpSize is derived from the operand width, not the Flags dst.

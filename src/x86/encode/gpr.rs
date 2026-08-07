@@ -347,6 +347,33 @@ impl Encoder {
         self.encode_bit_rr(size, 0xBB, dst, src);
     }
 
+    /// `BTS`/`BTR`/`BTC r/m, imm8` -- 0F BA /5 ib, /6 ib, /7 ib. One opcode for
+    /// the group, the operation in the ModRM reg field.
+    fn encode_bit_ri(&mut self, size: OpSize, slash_n: u8, dst: Reg, imm: u8) {
+        assert!(
+            size != OpSize::S8,
+            "BT-group instructions have no byte form"
+        );
+        let d = dst.hw_enc();
+        self.emit_prefix_and_rex(size, 0, 0, d);
+        self.emit_byte(0x0F);
+        self.emit_byte(0xBA);
+        self.emit_modrm(0b11, slash_n, d);
+        self.emit_byte(imm);
+    }
+
+    pub fn encode_bts_ri(&mut self, size: OpSize, dst: Reg, imm: u8) {
+        self.encode_bit_ri(size, 5, dst, imm);
+    }
+
+    pub fn encode_btr_ri(&mut self, size: OpSize, dst: Reg, imm: u8) {
+        self.encode_bit_ri(size, 6, dst, imm);
+    }
+
+    pub fn encode_btc_ri(&mut self, size: OpSize, dst: Reg, imm: u8) {
+        self.encode_bit_ri(size, 7, dst, imm);
+    }
+
     pub fn encode_shl_rcl(&mut self, size: OpSize, dst: Reg) {
         self.encode_shift_cl(size, 4, dst);
     }

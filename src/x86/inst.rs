@@ -185,6 +185,24 @@ pub enum MachInst {
         dst: Operand,
         src: Operand,
     },
+    /// Set bit `imm` of `dst` -- `bts dst, imm8`.
+    BtsRI {
+        size: OpSize,
+        dst: Operand,
+        imm: u8,
+    },
+    /// Clear bit `imm` of `dst` -- `btr dst, imm8`.
+    BtrRI {
+        size: OpSize,
+        dst: Operand,
+        imm: u8,
+    },
+    /// Complement bit `imm` of `dst` -- `btc dst, imm8`.
+    BtcRI {
+        size: OpSize,
+        dst: Operand,
+        imm: u8,
+    },
     /// Shift left by CL
     ShlRCL {
         size: OpSize,
@@ -594,7 +612,10 @@ impl MachInst {
             MachInst::ShldRRI { dst, .. } => collect(&[dst]),
             MachInst::BtsRR { dst, .. }
             | MachInst::BtrRR { dst, .. }
-            | MachInst::BtcRR { dst, .. } => collect(&[dst]),
+            | MachInst::BtcRR { dst, .. }
+            | MachInst::BtsRI { dst, .. }
+            | MachInst::BtrRI { dst, .. }
+            | MachInst::BtcRI { dst, .. } => collect(&[dst]),
             MachInst::Neg { dst, .. } => collect(&[dst]),
             MachInst::Not { dst, .. } => collect(&[dst]),
             MachInst::Inc { dst, .. } => collect(&[dst]),
@@ -698,6 +719,9 @@ impl MachInst {
             MachInst::BtsRR { dst, src, .. }
             | MachInst::BtrRR { dst, src, .. }
             | MachInst::BtcRR { dst, src, .. } => collect(&[dst, src]),
+            MachInst::BtsRI { dst, .. }
+            | MachInst::BtrRI { dst, .. }
+            | MachInst::BtcRI { dst, .. } => collect(&[dst]),
             MachInst::Neg { dst, .. } => collect(&[dst]),
             MachInst::Not { dst, .. } => collect(&[dst]),
             MachInst::Inc { dst, .. } => collect(&[dst]),

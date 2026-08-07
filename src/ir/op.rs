@@ -201,6 +201,15 @@ pub enum MachOp {
     /// `Xor(x, Shl(1, n))`.
     X86Btc,
 
+    /// The same three with a constant bit index -- `bts x, imm8`; 1 child.
+    /// Emitted by isel for `Or`/`Xor`/`And` against a one-bit constant mask (or
+    /// its complement) whose bit sits at 7 or above, which is where the
+    /// immediate-form ALU stops reaching and the register form has to
+    /// materialize the mask.
+    X86BtsI(u8),
+    X86BtrI(u8),
+    X86BtcI(u8),
+
     /// `lea [base + idx]`
     X86Lea2,
     /// `lea [base + idx * scale]` — scale embedded in op
@@ -761,7 +770,10 @@ impl Op {
             | Op::Mach(MachOp::X86ShlImm(_))
             | Op::Mach(MachOp::X86ShrImm(_))
             | Op::Mach(MachOp::X86SarImm(_))
-            | Op::Mach(MachOp::X86RolImm(_)) => {
+            | Op::Mach(MachOp::X86RolImm(_))
+            | Op::Mach(MachOp::X86BtsI(_))
+            | Op::Mach(MachOp::X86BtrI(_))
+            | Op::Mach(MachOp::X86BtcI(_)) => {
                 assert_eq!(child_types.len(), 1, "{self:?} requires 1 child");
                 assert!(
                     child_types[0].is_integer(),
@@ -1202,6 +1214,9 @@ impl Op {
                     | MachOp::X86Bts
                     | MachOp::X86Btr
                     | MachOp::X86Btc
+                    | MachOp::X86BtsI(_)
+                    | MachOp::X86BtrI(_)
+                    | MachOp::X86BtcI(_)
                     | MachOp::X86Addsd
                     | MachOp::X86Subsd
                     | MachOp::X86Mulsd

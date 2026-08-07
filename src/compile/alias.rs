@@ -240,7 +240,10 @@ impl AliasInfo {
             | Op::Mach(MachOp::X86ShldImm(_))
             | Op::Mach(MachOp::X86Bts)
             | Op::Mach(MachOp::X86Btr)
-            | Op::Mach(MachOp::X86Btc) => AddrBase::Unknown,
+            | Op::Mach(MachOp::X86Btc)
+            | Op::Mach(MachOp::X86BtsI(_))
+            | Op::Mach(MachOp::X86BtrI(_))
+            | Op::Mach(MachOp::X86BtcI(_)) => AddrBase::Unknown,
 
             // x86 flag-only compare with immediate: produces Flags, not an address.
             Op::Mach(MachOp::X86CmpI { .. }) => AddrBase::Unknown,

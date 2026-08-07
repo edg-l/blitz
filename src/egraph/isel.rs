@@ -469,8 +469,17 @@ fn apply_funnel_shift_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 /// complement. The bit instructions take the index from any register, so the
 /// whole sequence becomes one instruction and CL stops being contended.
 ///
-/// A constant `n` is not matched. The shift folds to a constant mask, which the
-/// immediate-form ALU already covers in three bytes where `bts` needs four.
+/// A constant `n` folds the shift away, leaving the mask itself, which the
+/// same three take by immediate:
+///
+/// - `Or(x, 1 << k)`     -> `Proj0(X86BtsI(k)(x))`
+/// - `Xor(x, 1 << k)`    -> `Proj0(X86BtcI(k)(x))`
+/// - `And(x, !(1 << k))` -> `Proj0(X86BtrI(k)(x))`
+///
+/// only from bit 7 up. Below that the mask is an `imm8` and the immediate-form
+/// ALU already has it in three bytes where `bts` needs four; at 7 and above the
+/// register form has to materialize the mask, five bytes for a `mov r, imm32`
+/// and ten for a 64-bit one.
 ///
 /// The bit index is taken modulo the operand width by the hardware. A `1 << n`
 /// whose `n` reaches the width is undefined in C, so the two agree wherever the
@@ -493,6 +502,24 @@ fn apply_bit_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             let n = egraph.unionfind.find_immutable(n);
             (n != ClassId::NONE).then_some(n)
         })
+    }
+
+    /// The bit a constant one-bit mask in `class` sets, on a `width`-bit
+    /// operand, taking the mask's complement first for the `And` form.
+    fn const_bit_index(
+        egraph: &EGraph,
+        class: ClassId,
+        width: u32,
+        complement: bool,
+    ) -> Option<u8> {
+        let mask = if width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+        let v = egraph.get_constant(class)?.0 as u64 & mask;
+        let v = if complement { !v & mask } else { v };
+        (v.count_ones() == 1).then(|| v.trailing_zeros() as u8)
     }
 
     /// The bit index of an all-ones complement of a one-bit mask, `Xor(Shl(1, n), -1)`.
@@ -539,33 +566,58 @@ fn apply_bit_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             continue;
         }
         let width = ty.bit_width();
-        let index = if mach == MachOp::X86Btr {
+        let complement = mach == MachOp::X86Btr;
+        let index = if complement {
             complemented_bit_index
         } else {
             bit_index
         };
 
         let (a, b) = (snap.children[0], snap.children[1]);
-        let Some((x, n)) = index(egraph, b)
+        // The value operated on is read at the instruction's own width, and so
+        // is a register index: a narrower one would be read together with
+        // whatever sits above it.
+        let full_width = |c: ClassId| {
+            let c = egraph.unionfind.find_immutable(c);
+            c != ClassId::NONE
+                && infer_class_type(egraph, c)
+                    .is_some_and(|t| t.is_integer() && t.bit_width() == width)
+        };
+
+        let variable = index(egraph, b)
             .map(|n| (a, n))
             .or_else(|| index(egraph, a).map(|n| (b, n)))
-        else {
-            continue;
-        };
-        let x = egraph.unionfind.find_immutable(x);
-        // Both operands are read at the instruction's own width, so a narrower
-        // index would be read together with whatever sits above it.
-        let full_width = |c: ClassId| {
-            infer_class_type(egraph, c).is_some_and(|t| t.is_integer() && t.bit_width() == width)
-        };
-        if x == ClassId::NONE || !full_width(x) || !full_width(n) {
-            continue;
-        }
+            .filter(|&(x, n)| full_width(x) && full_width(n));
+        // A one-bit constant mask below bit 7 is left alone: the immediate-form
+        // ALU reaches it in three bytes where `bts` needs four. At 7 and above
+        // the mask no longer fits an `imm8` and the register form has to
+        // materialize it.
+        let constant = const_bit_index(egraph, b, width, complement)
+            .map(|k| (a, k))
+            .or_else(|| const_bit_index(egraph, a, width, complement).map(|k| (b, k)))
+            .filter(|&(x, k)| k >= 7 && full_width(x) && egraph.get_constant(x).is_none());
 
-        let bit = egraph.add(ENode {
-            op: Op::Mach(mach),
-            children: smallvec![x, n],
-        });
+        let (op, children) = if let Some((x, n)) = variable {
+            let (x, n) = (
+                egraph.unionfind.find_immutable(x),
+                egraph.unionfind.find_immutable(n),
+            );
+            (Op::Mach(mach), smallvec![x, n])
+        } else if let Some((x, k)) = constant {
+            let mach = match mach {
+                MachOp::X86Bts => MachOp::X86BtsI(k),
+                MachOp::X86Btc => MachOp::X86BtcI(k),
+                _ => MachOp::X86BtrI(k),
+            };
+            (
+                Op::Mach(mach),
+                smallvec![egraph.unionfind.find_immutable(x)],
+            )
+        } else {
+            continue;
+        };
+
+        let bit = egraph.add(ENode { op, children });
         let proj0 = egraph.add(ENode {
             op: Op::Pure(PureOp::Proj0),
             children: smallvec![bit],
