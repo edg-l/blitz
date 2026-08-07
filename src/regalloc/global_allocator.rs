@@ -1813,7 +1813,7 @@ pub fn allocate_global(
             let peak = pressure_peak(
                 &phase4.per_block_insts,
                 &global_liveness,
-                &vreg_class_map(&phase4.per_block_insts),
+                &super::build_vreg_classes_from_all_blocks(&phase4.per_block_insts),
                 class,
             )
             .unwrap_or_else(|| "no instructions".to_string());
@@ -1895,7 +1895,7 @@ pub fn allocate_global(
             .unwrap_or(0)
             .max(spill_next_vreg);
         let mut next_schedules = phase4.per_block_insts;
-        let vreg_classes = vreg_class_map(&next_schedules);
+        let vreg_classes = super::build_vreg_classes_from_all_blocks(&next_schedules);
         crate::regalloc::spill::insert_spills_global(
             &mut next_schedules,
             &candidates,
@@ -1960,7 +1960,7 @@ fn choose_spill_candidates(
     over_budget: &[VReg],
     func_name: &str,
 ) -> BTreeSet<usize> {
-    let classes = vreg_class_map(block_schedules);
+    let classes = super::build_vreg_classes_from_all_blocks(block_schedules);
     let of_class = |v: &VReg| classes.get(v).copied() == Some(class);
     let uncolored: BTreeSet<VReg> = over_budget.iter().copied().collect();
 
@@ -2201,23 +2201,6 @@ fn pressure_peak(
 /// backstop against a shape that does not converge, not a budget the allocator
 /// is expected to use.
 const MAX_GLOBAL_SPILL_ROUNDS: usize = 10;
-
-/// Which register class each VReg belongs to, for spill code selection.
-///
-/// Read off the defining instruction's own result type, with block parameters
-/// taking the class their `Op::BlockParam` declares.
-fn vreg_class_map(block_schedules: &[Vec<ScheduledInst>]) -> BTreeMap<VReg, RegClass> {
-    let mut classes: BTreeMap<VReg, RegClass> = BTreeMap::new();
-    for inst in block_schedules.iter().flatten() {
-        let class = if inst.op.is_fp_op() {
-            RegClass::XMM
-        } else {
-            RegClass::GPR
-        };
-        classes.insert(inst.dst, class);
-    }
-    classes
-}
 
 #[cfg(test)]
 mod tests {
