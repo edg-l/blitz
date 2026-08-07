@@ -961,13 +961,11 @@ pub fn compile(
     // pass forces these into the trailing barrier group so they execute after all
     // calls in their block (preventing loads from uninitialized stack slots).
 
-    // The final `phi_uses`, kept for `verify::verify_register_sharing` after
-    // allocation: it is the terminator half of liveness, and the check needs the
-    // same one the allocator was given.
-    let verify_phi_uses: Vec<crate::regalloc::interference::VRegSet>;
-    // The block parameters, for the same reason: a parameter is written by the
-    // phi copy at the edge, so it is not live at a predecessor's exit unless the
-    // predecessor's terminator passes it, which `verify_phi_uses` records.
+    // The block parameters, kept for `verify::verify_register_sharing` after
+    // allocation: a parameter is written by the phi copy at the edge, so it is
+    // not live at a predecessor's exit unless the predecessor's terminator passes
+    // it. The spill loop never renames one, so this copy stays current where a
+    // copy of the terminator uses would not.
     let verify_block_params: Vec<crate::regalloc::interference::VRegSet>;
     // And the copy pairs, so the check exempts the same phi-related VRegs
     // coalescing was allowed to merge.
@@ -1476,7 +1474,6 @@ pub fn compile(
             )
         });
 
-        verify_phi_uses = phi_uses.clone();
         verify_block_params = block_param_vregs_per_block.clone();
         verify_copy_pairs = copy_pairs.clone();
         let global_result = if let Some(result) = probed {
@@ -1599,7 +1596,6 @@ pub fn compile(
         let succs = cfg::successor_indices(func);
         let errors = crate::verify::verify_register_sharing(
             &block_rewritten,
-            &verify_phi_uses,
             &verify_block_params,
             &succs,
             &regalloc_result.assignment,

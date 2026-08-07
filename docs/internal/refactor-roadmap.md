@@ -848,9 +848,11 @@ and there is nothing to compare. Coalescing is where three wrong-code bugs lande
 is the pass with the least verification. Closing it means comparing each merge against
 liveness measured **on the schedules as emitted**, not on the post-coalesce naming.
 Step 6 folded the allocators without closing this: the fold deleted a duplicate
-rather than changing what coalescing is checked against, so the gap is untouched
-and now lives in `ROADMAP.md` P0 as "the allocator's liveness disagrees with the
-emitted code's", which is the same disagreement seen from the reporting end.
+rather than changing what coalescing is checked against, so the gap is untouched.
+The `P0` entry that used to be cited here as the same gap seen from the reporting
+end -- "the allocator's liveness disagrees with the emitted code's" -- was neither:
+it was the check reading its terminator uses from a pre-spill-loop snapshot, and
+it is closed. This one is still open and no reproducer names it.
 
 **3. Nothing checks that a value is *right*, only that it is written.** Stated in
 `CLAUDE.md` and worth keeping stated: the machine verifier is satisfied by a register

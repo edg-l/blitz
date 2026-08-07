@@ -72,10 +72,6 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **`verify_register_sharing` at `-O1`** -- `P0` Correctness. Flags 1 of 450
-  generated programs and holds `BLITZ_VERIFY` red on purpose, at both `1` and
-  `strict`. It has no behavioural symptom, so no oracle can hold it. Done when
-  that gate is green, or when the check is deleted with the reason written down.
 - **Enumerate the ABI surface** -- `P0` Correctness. The generator has never
   emitted an odd stack-argument count, which is how a segfault survived in a
   corpus of 400 seeds a shape. Arg counts 0..14 x {int, double, mixed} x {leaf,
@@ -185,12 +181,46 @@ changed rows, and `live` does not move at all.
 the other end: a pre-pass relieving pressure against a different graph than the
 allocator enforces. It was under-relieving here rather than over-relieving.
 
+### ~~The allocator's liveness disagrees with the emitted code's~~
+
+**It did not.** `verify_register_sharing` was reading one of its inputs from a
+copy taken before the allocator's spill loop, and `BLITZ_VERIFY` is green at
+both `1` and `strict` across all 560 lit tests now that it derives that input
+itself.
+
+The input is the terminator half of liveness -- what each block's terminator
+passes to its successors. `barrier::terminator_uses` states the rule in its own
+doc comment: the set is a function of the schedules at the moment it is asked,
+because every pass that rewrites an operand rewrites it there. `main` in the
+reproducer needs one spill round; that round rematerialized a double a terminator
+passed and renamed the argument, so the pre-loop copy named a VReg whose real
+range ends at its `XmmSpillStore`. Carried to the block exit instead, it read as
+live across the whole tail of block 2, and the value that legitimately held
+XMM13 there read as a clash. `allocate_global` had already been bitten by exactly
+this and recomputes the set every round; the verifier took the stale one.
+
+**What it cost to find**: one probe, printing the reported pair's defs, uses and
+membership in both the stale and the freshly-derived set. Two lines of output
+settled it -- `def block 2 [148]`, `use block 2 [149] Pseudo(XmmSpillStore(193))`,
+`stale phi_uses[2] names it`, and no final `phi_uses` naming it at all.
+
+**The fix is the parameter's removal**, not a check on it. A caller cannot pass a
+stale set to a function that does not take one.
+
+**The lesson is the one the entry above it already carried**, arrived at from the
+verifier's side: a *check* built on a snapshot is as wrong as a *pass* built on
+one, and it is worse, because a red gate with no behavioural symptom is read as a
+bug in the component it names. This entry sat at the top of `P0` for three
+sessions as an allocator bug. Related sub-item it also carried, now stale: the
+pre-coloring conflict assertion exists (`coloring::check_precolorings`, under
+`BLITZ_VERIFY`), and `interval_color` no longer exists to need one.
+
 ## Current state (2026-08-07)
 
 - 1010 Rust tests + 552 lit tests, all green. `cargo fmt` clean, `cargo clippy
   --all-targets` clean, zero build warnings, zero rustdoc warnings.
-- `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites but for
-  `verify_register_sharing_xmm12.c`, which is red on purpose -- see Known bugs.
+- `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites, with no
+  row red on purpose.
 - `bash tests/lit/run_diff.sh`: 337 compared `-O0`-vs-`-O1` and against a
   reference compiler; no skips, no differences under gcc or clang.
 - **`-O0` is on `regalloc::fast` and both levels are correct.** Everything below
@@ -301,22 +331,6 @@ what makes attribution possible here.
       difference and costs a session in the wrong component. This is the same
       item as the ABI enumeration above, moved up a level from calling
       conventions to the language.
-- [ ] **The allocator's liveness disagrees with the emitted code's**, at `-O1`.
-      *Start here points at this one.*
-      `verify_register_sharing` flags 1 of 450 generated programs; `-O0` is
-      clean since the argument-colour fix. The reproducer is checked in as
-      `tests/lit/regalloc/verify_register_sharing_xmm12.c`, which passes the
-      plain lit run and fails `BLITZ_VERIFY=1` and `=strict` alike
-      -- **those gates are red on purpose until this is resolved**. It has no
-      behavioural symptom, so no oracle and no corpus entry can hold it.
-      `build_interference_into` adds an edge for every simultaneously-live pair,
-      so two VRegs can only share a register if the allocator's liveness never
-      had them live together while liveness recomputed from the emitted schedules
-      does. **This is a correctness item with a count attached, not a
-      diagnostic**, which is where it used to sit. Resolve it or delete the
-      check. Related hole worth an assertion regardless: `greedy_color` and
-      `interval_color` apply pre-colorings unconditionally, without checking that
-      two of them sharing a color do not interfere.
 - [ ] **A second implementation of the pass with the worst bug rate.**
       `regalloc::fast` was built for DWARF and turned out to be the highest-yield
       bug finder in the project: it found an `-O1` allocation bug within hours of
@@ -609,16 +623,11 @@ without taking it is picking up work that cannot land.
 
 ## Known bugs
 
-**No wrong answers, one open hole.** At 400 seeds a shape `mixed`, `args` and
-`pressure` are all 400/400 and the saved corpus is 17 `fixed` passing, so no
-generated or saved program computes a wrong value at either level. What is open
-is not reachable from the generator:
-
-- **`verify_register_sharing` flags a `-O1` allocation**, reproduced by
-  `tests/lit/regalloc/verify_register_sharing_xmm12.c`. It passes the plain lit
-  run and fails under `BLITZ_VERIFY`, so **that gate is red on purpose**; the
-  bug has no behavioural symptom, so putting it inside a run that already
-  happens is the only way to hold it, and no corpus entry can.
+**No wrong answers and no open hole.** At 400 seeds a shape `mixed`, `args` and
+`pressure` are all 400/400, the saved corpus is 18 `fixed` passing with nothing
+open, and `BLITZ_VERIFY` is green at `1` and `strict` across all 560 lit tests.
+The one entry that stood here was a defect in the verifier's own inputs rather
+than in the code it checked -- see Closed.
 
 **A green corpus is evidence about the shapes the corpus has.** The last two
 wrong-value bugs were both in six-plus-argument functions that call something,

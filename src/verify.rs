@@ -413,17 +413,25 @@ mod tests {
             operands: operands.into_iter().map(VReg).collect(),
         };
         let schedules = vec![
-            vec![inst(1, vec![]), inst(2, vec![])],
+            vec![
+                inst(1, vec![]),
+                inst(2, vec![]),
+                ScheduledInst {
+                    op: Op::Pseudo(crate::ir::op::PseudoOp::TerminatorArgs(
+                        (0..passed.len() as u32).collect(),
+                    )),
+                    dst: VReg(9),
+                    operands: passed.iter().copied().map(VReg).collect(),
+                },
+            ],
             vec![inst(3, block1_uses.to_vec())],
         ];
-        let phi_uses = vec![passed.iter().map(|&v| v as usize).collect(), VRegSet::new()];
         let block_params = vec![
             VRegSet::new(),
             block1_params.iter().map(|&v| v as usize).collect(),
         ];
         verify_register_sharing(
             &schedules,
-            &phi_uses,
             &block_params,
             &[vec![1], vec![]],
             &assignment
@@ -742,9 +750,6 @@ pub fn verify_machinsts(
     errors
 }
 
-/// Report every read of a spill slot that no store on some path to it has
-/// written.
-///
 /// Two VRegs live at the same program point must not hold the same physical
 /// register. One of them would be reading the other's value.
 ///
@@ -768,9 +773,16 @@ pub fn verify_machinsts(
 /// VRegs absent from `assignment`, and those living in a slot, are skipped. They hold no register to share:
 /// spill pseudo-op destinations are dummies, and a coalesced-away VReg no longer
 /// appears in the emitted operands at all.
+///
+/// The terminator half of liveness is read off `block_schedules` here rather
+/// than taken as an argument. It is a function of the schedules at the moment it
+/// is asked -- see [`crate::compile::barrier::terminator_uses`] -- so a copy
+/// made before the allocator's spill loop names the pre-spill VReg of every
+/// argument that loop rematerialized. That VReg's real range ends at its
+/// SpillStore, and carrying it to the block exit instead makes every value
+/// holding its register in between read as a clash.
 pub fn verify_register_sharing(
     block_schedules: &[Vec<ScheduledInst>],
-    phi_uses: &[crate::regalloc::interference::VRegSet],
     block_params: &[crate::regalloc::interference::VRegSet],
     cfg_succs: &[Vec<usize>],
     assignment: &BTreeMap<VReg, crate::regalloc::Assignment>,
@@ -780,20 +792,18 @@ pub fn verify_register_sharing(
     use crate::regalloc::global_liveness::compute_global_liveness_with_block_params;
 
     let mut errors = Vec::new();
-    if block_schedules.len() != phi_uses.len()
-        || block_schedules.len() != block_params.len()
-        || block_schedules.len() != cfg_succs.len()
-    {
+    if block_schedules.len() != block_params.len() || block_schedules.len() != cfg_succs.len() {
         return errors;
     }
+    let phi_uses = crate::compile::barrier::terminator_uses(block_schedules);
 
     // Everything is named by its coalesce representative, which is what the
-    // emitted code uses. Two things need it. A schedule operand naming a VReg
-    // coalescing merged away has no register of its own, and skipping it would
-    // skip the interesting case, since the emitted code reads the *alias's*
-    // register. And `phi_uses` was built before coalescing, so a renamed VReg
-    // there is a use with no def in any schedule -- liveness would carry it back
-    // to the function entry and report a clash at every point on the way.
+    // emitted code uses. A schedule operand naming a VReg coalescing merged away
+    // has no register of its own, and skipping it would skip the interesting
+    // case, since the emitted code reads the *alias's* register. `phi_uses` comes
+    // off those same operands and needs the same treatment: a merged-away VReg
+    // there is a use with no def in any schedule, and liveness would carry it
+    // back to the function entry and report a clash at every point on the way.
     let canon = |v: VReg| -> VReg { crate::regalloc::coalesce::chase_alias(v, coalesce_aliases) };
     let phi_uses_canon: Vec<crate::regalloc::interference::VRegSet> = phi_uses
         .iter()
