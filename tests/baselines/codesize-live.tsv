@@ -1,7 +1,7 @@
 # program	level	insts	bytes	spills	reloads
 # corpus: live -- written by tests/run_codesize.sh --update
 accum_pair.c	O0	167	586	2	13
-accum_pair.c	O1	163	589	2	19
+accum_pair.c	O1	162	585	2	18
 array_stride.c	O0	76	265	0	0
 array_stride.c	O1	68	245	0	0
 bitscan.c	O0	121	393	0	0
@@ -11,9 +11,9 @@ branchy_filter.c	O1	86	294	0	0
 byte_copy.c	O0	169	664	0	0
 byte_copy.c	O1	141	544	0	0
 call_hot.c	O0	62	196	0	0
-call_hot.c	O1	67	242	3	7
+call_hot.c	O1	66	238	3	6
 early_exit.c	O0	130	424	0	0
-early_exit.c	O1	126	457	1	7
+early_exit.c	O1	125	453	1	6
 float_convert.c	O0	60	243	2	2
 float_convert.c	O1	55	231	2	2
 float_reduce.c	O0	103	411	4	4

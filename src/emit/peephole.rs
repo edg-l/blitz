@@ -41,6 +41,8 @@ fn writes_flags(inst: &MachInst) -> bool {
             | MachInst::Imul3RRI { .. }
             | MachInst::CmpRR { .. }
             | MachInst::CmpRI { .. }
+            | MachInst::UcomisdRR { .. }
+            | MachInst::UcomissRR { .. }
             | MachInst::TestRR { .. }
             | MachInst::TestRI { .. }
             | MachInst::Neg { .. }
@@ -345,11 +347,19 @@ fn push_inst(out: &mut Vec<MachInst>, inst: MachInst) {
 ///     the same for `add rD, imm` / `sub rD, imm` / `add rD, rD` / `shl rD, 1`.
 /// 11. `mov rX, k; mov [addr], rX` -> `mov [addr], k` where nothing else reads
 ///     the register the constant was materialized into.
-pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
-    let mut result = Vec::with_capacity(insts.len());
+///
+/// `tail` is what the block's terminator lowered to, up to its first label: the
+/// phi copies on the outgoing edge and the branch itself. Only the forward scans
+/// read it, and nothing in it is rewritten. Without it every scan ends at the
+/// last instruction of the body, where a register a phi copy overwrites reads as
+/// live and the flags a `jcc` consumes read as dead.
+pub fn peephole(insts: Vec<MachInst>, tail: &[MachInst]) -> Vec<MachInst> {
+    let body_len = insts.len();
+    let mut result = Vec::with_capacity(body_len);
+    let insts: Vec<MachInst> = insts.into_iter().chain(tail.iter().cloned()).collect();
     let mut i = 0;
 
-    while i < insts.len() {
+    while i < body_len {
         match &insts[i] {
             // 8. A definition nothing reads before the block overwrites it.
             _ if def_dead(&insts, i) => {
@@ -384,7 +394,7 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
                 dst: dst_a,
                 src: src_b,
             } if dst_a != src_b
-                && i + 1 < insts.len()
+                && i + 1 < body_len
                 && matches!(
                     &insts[i + 1],
                     MachInst::MovRR { size: OpSize::S64, dst, src }
@@ -400,7 +410,7 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
             // for a constant addend, where nothing reads the flags the add
             // would have written.
             MachInst::MovRR { .. }
-                if i + 1 < insts.len()
+                if i + 1 < body_len
                     && flags_dead_after(&insts, i + 1)
                     && copy_add_to_lea(&insts[i], &insts[i + 1]).is_some() =>
             {
@@ -418,7 +428,7 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
             MachInst::MovRI {
                 dst: Operand::Reg(r),
                 ..
-            } if i + 1 < insts.len()
+            } if i + 1 < body_len
                 && const_store_to_imm(
                     &insts[i],
                     &insts[i + 1],
@@ -522,7 +532,7 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
             // 8. Store-load forwarding: mov [addr], rX; mov rY, [addr] -> mov [addr], rX; mov rY, rX.
             // Same size, same address. Avoids the redundant memory round-trip.
             MachInst::MovMR { size, addr, src }
-                if i + 1 < insts.len()
+                if i + 1 < body_len
                     && matches!(
                         &insts[i + 1],
                         MachInst::MovRM { size: s2, dst: _, addr: a2 }
@@ -573,7 +583,7 @@ mod tests {
             dst: reg(Reg::RAX),
             src: reg(Reg::RAX),
         }];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert!(out.is_empty(), "self-move should be deleted");
     }
 
@@ -585,7 +595,7 @@ mod tests {
             dst: reg(Reg::RAX),
             src: reg(Reg::RAX),
         }];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 1, "S32 self-move must not be deleted");
     }
 
@@ -596,7 +606,7 @@ mod tests {
             dst: reg(Reg::RCX),
             src: reg(Reg::RAX),
         }];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 1);
     }
 
@@ -607,7 +617,7 @@ mod tests {
             dst: reg(Reg::RAX),
             imm: 0,
         }];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0],
@@ -626,7 +636,7 @@ mod tests {
             dst: reg(Reg::RAX),
             imm: 42,
         }];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], MachInst::MovRI { imm: 42, .. }));
     }
@@ -645,7 +655,7 @@ mod tests {
                 target: label,
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert_eq!(
             out[0],
@@ -675,7 +685,7 @@ mod tests {
             },
             MachInst::Ret,
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], MachInst::CmpRI { .. }));
     }
@@ -691,7 +701,7 @@ mod tests {
             },
             MachInst::Ret,
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert_eq!(
             out[0],
@@ -712,7 +722,7 @@ mod tests {
             },
             MachInst::Ret,
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert_eq!(
             out[0],
@@ -737,7 +747,7 @@ mod tests {
                 target: 0,
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], MachInst::AddRI { imm: 1, .. }));
     }
@@ -790,7 +800,7 @@ mod tests {
                 src: reg(Reg::RCX),
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 1, "round-trip mov should be collapsed to one");
         assert_eq!(
             out[0],
@@ -816,7 +826,7 @@ mod tests {
                 src: reg(Reg::RCX),
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2, "S32 round-trip mov must not be eliminated");
     }
 
@@ -835,7 +845,7 @@ mod tests {
                 src: reg(Reg::RCX),
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 3, "non-adjacent round-trip mov must be kept");
     }
 
@@ -852,7 +862,7 @@ mod tests {
                 dst: reg(Reg::RAX),
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert_eq!(
             out[0],
@@ -881,7 +891,7 @@ mod tests {
             },
             MachInst::Ret,
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert_eq!(
             out[0],
@@ -902,7 +912,7 @@ mod tests {
             },
             MachInst::Ret,
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert_eq!(
             out[0],
@@ -926,7 +936,7 @@ mod tests {
                 target: 0,
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], MachInst::AddRI { imm: -1, .. }));
     }
@@ -947,7 +957,7 @@ mod tests {
                 addr: addr.clone(),
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         // Store kept as-is.
         assert!(matches!(out[0], MachInst::MovMR { .. }));
@@ -978,7 +988,7 @@ mod tests {
                 addr: addr.clone(),
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 1, "the forwarded load is a self-move: {out:?}");
         assert!(matches!(out[0], MachInst::MovMR { .. }));
     }
@@ -999,7 +1009,7 @@ mod tests {
                 src: reg(Reg::RAX),
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 1, "the copy is a self-move: {out:?}");
         assert!(matches!(out[0], MachInst::AddRR { .. }));
     }
@@ -1021,7 +1031,7 @@ mod tests {
                 addr: addr2,
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         // Both kept as-is (different addresses).
         assert!(matches!(out[0], MachInst::MovMR { .. }));
@@ -1044,7 +1054,7 @@ mod tests {
                 addr: addr.clone(),
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], MachInst::MovMR { .. }));
         assert!(matches!(out[1], MachInst::MovRM { .. }));
@@ -1062,14 +1072,17 @@ mod tests {
     /// shorter for the stack base this shape comes from.
     #[test]
     fn lea_of_a_bare_register_becomes_a_move() {
-        let out = peephole(vec![
-            lea(Reg::RAX, Reg::RSP, 0),
-            MachInst::MovRR {
-                size: OpSize::S64,
-                dst: reg(Reg::RDX),
-                src: reg(Reg::RAX),
-            },
-        ]);
+        let out = peephole(
+            vec![
+                lea(Reg::RAX, Reg::RSP, 0),
+                MachInst::MovRR {
+                    size: OpSize::S64,
+                    dst: reg(Reg::RDX),
+                    src: reg(Reg::RAX),
+                },
+            ],
+            &[],
+        );
         assert!(matches!(
             out[0],
             MachInst::MovRR {
@@ -1090,14 +1103,17 @@ mod tests {
             addr: crate::x86::addr::Addr::new(Some(Reg::RCX), Some(Reg::RDX), 4, 0),
         };
         for inst in [lea(Reg::RAX, Reg::RCX, 8), indexed] {
-            let out = peephole(vec![
-                inst,
-                MachInst::MovRR {
-                    size: OpSize::S64,
-                    dst: reg(Reg::RDX),
-                    src: reg(Reg::RAX),
-                },
-            ]);
+            let out = peephole(
+                vec![
+                    inst,
+                    MachInst::MovRR {
+                        size: OpSize::S64,
+                        dst: reg(Reg::RDX),
+                        src: reg(Reg::RAX),
+                    },
+                ],
+                &[],
+            );
             assert!(matches!(out[0], MachInst::Lea { .. }));
         }
     }
@@ -1119,7 +1135,7 @@ mod tests {
                 imm: 3,
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], MachInst::MovMR { .. }));
     }
@@ -1140,7 +1156,7 @@ mod tests {
                 addr: crate::x86::addr::Addr::new(Some(Reg::RSP), None, 1, 0x18),
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 1, "the first reload is dead: {out:?}");
         assert!(matches!(
             out[0],
@@ -1172,7 +1188,7 @@ mod tests {
                 imm: 3,
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 3, "flags are read: {out:?}");
         assert!(matches!(out[0], MachInst::Imul3RRI { .. }));
     }
@@ -1192,7 +1208,7 @@ mod tests {
                 imm: 3,
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 3);
         assert!(matches!(out[0], MachInst::Lea { .. }));
     }
@@ -1201,7 +1217,7 @@ mod tests {
     fn lea_kept_when_block_never_overwrites_it() {
         // No redefinition before the end of the list: a later block may read it.
         let insts = vec![lea(Reg::RAX, Reg::RCX, 8)];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 1);
     }
 
@@ -1220,7 +1236,7 @@ mod tests {
                 imm: 3,
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 3);
         assert!(matches!(out[0], MachInst::Lea { .. }));
     }
@@ -1235,7 +1251,7 @@ mod tests {
                 dst: reg(Reg::RAX),
             },
         ];
-        let out = peephole(insts);
+        let out = peephole(insts, &[]);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], MachInst::Lea { .. }));
     }
@@ -1252,14 +1268,17 @@ mod tests {
     /// removes.
     #[test]
     fn a_copy_and_a_destructive_add_become_one_lea() {
-        let out = peephole(vec![
-            mov(Reg::RAX, Reg::RDI),
-            MachInst::AddRR {
-                size: OpSize::S32,
-                dst: reg(Reg::RAX),
-                src: reg(Reg::RDX),
-            },
-        ]);
+        let out = peephole(
+            vec![
+                mov(Reg::RAX, Reg::RDI),
+                MachInst::AddRR {
+                    size: OpSize::S32,
+                    dst: reg(Reg::RAX),
+                    src: reg(Reg::RDX),
+                },
+            ],
+            &[],
+        );
         assert_eq!(out.len(), 1);
         let MachInst::Lea { size, dst, addr } = &out[0] else {
             panic!("expected a lea, got {:?}", out[0]);
@@ -1273,20 +1292,23 @@ mod tests {
     /// negative one.
     #[test]
     fn a_copy_and_a_constant_add_or_sub_become_one_lea() {
-        let out = peephole(vec![
-            mov(Reg::RAX, Reg::RDI),
-            MachInst::AddRI {
-                size: OpSize::S32,
-                dst: reg(Reg::RAX),
-                imm: 5,
-            },
-            mov(Reg::RCX, Reg::RSI),
-            MachInst::SubRI {
-                size: OpSize::S32,
-                dst: reg(Reg::RCX),
-                imm: 5,
-            },
-        ]);
+        let out = peephole(
+            vec![
+                mov(Reg::RAX, Reg::RDI),
+                MachInst::AddRI {
+                    size: OpSize::S32,
+                    dst: reg(Reg::RAX),
+                    imm: 5,
+                },
+                mov(Reg::RCX, Reg::RSI),
+                MachInst::SubRI {
+                    size: OpSize::S32,
+                    dst: reg(Reg::RCX),
+                    imm: 5,
+                },
+            ],
+            &[],
+        );
         assert_eq!(out.len(), 2);
         assert!(
             matches!(&out[0], MachInst::Lea { addr, .. } if *addr == Addr::new(Some(Reg::RDI), None, 1, 5))
@@ -1299,18 +1321,21 @@ mod tests {
     /// `lea` writes no flags, so the fold is unavailable where the add's are read.
     #[test]
     fn a_destructive_add_whose_flags_are_read_is_kept() {
-        let out = peephole(vec![
-            mov(Reg::RAX, Reg::RDI),
-            MachInst::AddRR {
-                size: OpSize::S32,
-                dst: reg(Reg::RAX),
-                src: reg(Reg::RDX),
-            },
-            MachInst::Setcc {
-                cc: CondCode::Eq,
-                dst: reg(Reg::RCX),
-            },
-        ]);
+        let out = peephole(
+            vec![
+                mov(Reg::RAX, Reg::RDI),
+                MachInst::AddRR {
+                    size: OpSize::S32,
+                    dst: reg(Reg::RAX),
+                    src: reg(Reg::RDX),
+                },
+                MachInst::Setcc {
+                    cc: CondCode::Eq,
+                    dst: reg(Reg::RCX),
+                },
+            ],
+            &[],
+        );
         assert_eq!(out.len(), 3);
         assert!(matches!(out[1], MachInst::AddRR { .. }));
     }
@@ -1318,14 +1343,17 @@ mod tests {
     /// The addend the copy overwrote holds the source, so the pair doubles it.
     #[test]
     fn an_add_of_the_copys_own_destination_doubles_the_source() {
-        let out = peephole(vec![
-            mov(Reg::RAX, Reg::RDI),
-            MachInst::AddRR {
-                size: OpSize::S32,
-                dst: reg(Reg::RAX),
-                src: reg(Reg::RAX),
-            },
-        ]);
+        let out = peephole(
+            vec![
+                mov(Reg::RAX, Reg::RDI),
+                MachInst::AddRR {
+                    size: OpSize::S32,
+                    dst: reg(Reg::RAX),
+                    src: reg(Reg::RAX),
+                },
+            ],
+            &[],
+        );
         assert_eq!(out.len(), 1);
         let MachInst::Lea { addr, .. } = &out[0] else {
             panic!("expected a lea, got {:?}", out[0]);
@@ -1339,14 +1367,17 @@ mod tests {
     /// A shift by one is the same doubling written differently.
     #[test]
     fn a_copy_and_a_shift_by_one_become_a_doubling_lea() {
-        let out = peephole(vec![
-            mov(Reg::RAX, Reg::RDI),
-            MachInst::ShlRI {
-                size: OpSize::S32,
-                dst: reg(Reg::RAX),
-                imm: 1,
-            },
-        ]);
+        let out = peephole(
+            vec![
+                mov(Reg::RAX, Reg::RDI),
+                MachInst::ShlRI {
+                    size: OpSize::S32,
+                    dst: reg(Reg::RAX),
+                    imm: 1,
+                },
+            ],
+            &[],
+        );
         assert_eq!(out.len(), 1);
         let MachInst::Lea { addr, .. } = &out[0] else {
             panic!("expected a lea, got {:?}", out[0]);
@@ -1361,14 +1392,17 @@ mod tests {
     /// not pay for, and the slow form of `lea`.
     #[test]
     fn a_copy_and_a_shift_by_two_is_kept() {
-        let out = peephole(vec![
-            mov(Reg::RAX, Reg::RDI),
-            MachInst::ShlRI {
-                size: OpSize::S32,
-                dst: reg(Reg::RAX),
-                imm: 2,
-            },
-        ]);
+        let out = peephole(
+            vec![
+                mov(Reg::RAX, Reg::RDI),
+                MachInst::ShlRI {
+                    size: OpSize::S32,
+                    dst: reg(Reg::RAX),
+                    imm: 2,
+                },
+            ],
+            &[],
+        );
         assert_eq!(out.len(), 2);
         assert!(matches!(out[1], MachInst::ShlRI { .. }));
     }
@@ -1376,18 +1410,21 @@ mod tests {
     /// RSP cannot be an index, so it takes the base position.
     #[test]
     fn a_stack_pointer_addend_becomes_the_base() {
-        let out = peephole(vec![
-            MachInst::MovRR {
-                size: OpSize::S64,
-                dst: reg(Reg::RAX),
-                src: reg(Reg::RDI),
-            },
-            MachInst::AddRR {
-                size: OpSize::S64,
-                dst: reg(Reg::RAX),
-                src: reg(Reg::RSP),
-            },
-        ]);
+        let out = peephole(
+            vec![
+                MachInst::MovRR {
+                    size: OpSize::S64,
+                    dst: reg(Reg::RAX),
+                    src: reg(Reg::RDI),
+                },
+                MachInst::AddRR {
+                    size: OpSize::S64,
+                    dst: reg(Reg::RAX),
+                    src: reg(Reg::RSP),
+                },
+            ],
+            &[],
+        );
         assert_eq!(out.len(), 1);
         assert!(matches!(&out[0], MachInst::Lea { addr, .. }
                 if *addr == Addr::new(Some(Reg::RSP), Some(Reg::RDI), 1, 0)));

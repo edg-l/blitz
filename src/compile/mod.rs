@@ -1668,8 +1668,21 @@ pub fn compile(
         )?;
 
         // Phase 8: Peephole on this block's pure/effectful instructions.
+        //
+        // The terminator's own instructions, up to its first label, are handed
+        // over as context: the phi copies on the outgoing edge end a register's
+        // live range and the branch reads the flags, and a scan that stops at
+        // the last instruction of the body can see neither. Nothing past a label
+        // is reachable only from here, so the run stops there.
         let final_insts = if opts.enable_peephole {
-            peephole(all_insts)
+            let tail: Vec<MachInst> = term_items
+                .iter()
+                .map_while(|item| match item {
+                    BlockItem::Inst(inst) => Some(inst.clone()),
+                    BlockItem::BindLabel(_) => None,
+                })
+                .collect();
+            peephole(all_insts, &tail)
         } else {
             all_insts
         };
