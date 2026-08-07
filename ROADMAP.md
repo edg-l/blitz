@@ -465,8 +465,9 @@ isel patterns; we should beat it on the ones we implement.
       exactly what the mask cleared: that needs a backward analysis the e-graph
       has no parents map for, the same missing structure that blocks the `imm32`
       ALU form.
-- [ ] **MachInst peephole audit** (`src/emit/peephole.rs`): confirm `mov r,r`
-      elimination, LEA shrinking, jmp-to-fallthrough removal.
+- [x] **MachInst peephole audit** (`src/emit/peephole.rs`): `mov r,r` elimination
+      (`push_inst`), LEA shrinking (rule 9) and jmp-to-fallthrough removal
+      (`terminator::remove_fallthrough_jumps`) all exist and are tested.
 - [ ] **Branch layout**: `__builtin_expect` / likely-unlikely hints and
       profile-free heuristics driving block ordering.
 
