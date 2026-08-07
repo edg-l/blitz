@@ -156,6 +156,75 @@ pub(super) fn thread_branches(
     }
 }
 
+/// Delete a jump whose target is the instruction that already follows it.
+///
+/// `lower_terminator` omits a jump to the block that comes next in emission
+/// order, but that is only the one-step case. A jump can become a fallthrough
+/// afterwards: `thread_branches` retargets a jump onto a trampoline's
+/// destination, and a run of blocks that emit nothing can sit between a block
+/// and the block it names. Both leave a jump over zero bytes.
+///
+/// The scan is over emission order, so a label bound after the jump with no
+/// instruction in between names the same point the jump would reach. A `Jcc`
+/// counts for the same reason a `Jmp` does: control continues at the next
+/// instruction whether it is taken or not.
+pub(super) fn remove_fallthrough_jumps(
+    block_items: &mut [Vec<BlockItem>],
+    func: &Function,
+    rpo_order: &[usize],
+) {
+    // Backwards, so a jump made redundant by a later deletion is seen in the
+    // same pass: what follows a jump can only shrink.
+    for rpo_pos in (0..block_items.len()).rev() {
+        for item_idx in (0..block_items[rpo_pos].len()).rev() {
+            let BlockItem::Inst(MachInst::Jmp { target } | MachInst::Jcc { target, .. }) =
+                block_items[rpo_pos][item_idx]
+            else {
+                continue;
+            };
+            if binds_at_next_instruction(block_items, func, rpo_order, rpo_pos, item_idx, target) {
+                block_items[rpo_pos].remove(item_idx);
+            }
+        }
+    }
+}
+
+/// True when `target` is bound at the first instruction after the item at
+/// (`rpo_pos`, `item_idx`), with only label bindings in between.
+fn binds_at_next_instruction(
+    block_items: &[Vec<BlockItem>],
+    func: &Function,
+    rpo_order: &[usize],
+    rpo_pos: usize,
+    item_idx: usize,
+    target: LabelId,
+) -> bool {
+    let binds = |items: &[BlockItem]| -> Option<bool> {
+        for item in items {
+            match item {
+                BlockItem::BindLabel(label) if *label == target => return Some(true),
+                BlockItem::BindLabel(_) => {}
+                BlockItem::Inst(_) => return Some(false),
+            }
+        }
+        None
+    };
+
+    if let Some(found) = binds(&block_items[rpo_pos][item_idx + 1..]) {
+        return found;
+    }
+    for next_pos in rpo_pos + 1..block_items.len() {
+        // A block's own label is bound before its first item.
+        if func.blocks[rpo_order[next_pos]].id as LabelId == target {
+            return true;
+        }
+        if let Some(found) = binds(&block_items[next_pos]) {
+            return found;
+        }
+    }
+    false
+}
+
 /// A phi copy entry: either a register-to-register copy or a slot store.
 ///
 /// Used internally in `lower_terminator` to handle slot-routed block-param
@@ -871,6 +940,83 @@ mod tests {
     fn a_cycle_of_empty_blocks_terminates() {
         let targets = thread(vec![vec![jmp(1)], vec![jmp(2)], vec![jmp(1)]]);
         assert!(targets[0].is_some());
+    }
+
+    /// `remove_fallthrough_jumps` over blocks in index order, returning the
+    /// instruction count of each block.
+    fn fallthrough(items: &mut Vec<Vec<BlockItem>>) -> Vec<usize> {
+        let func = func_of(items.len());
+        let rpo: Vec<usize> = (0..items.len()).collect();
+        remove_fallthrough_jumps(items, &func, &rpo);
+        items
+            .iter()
+            .map(|block| {
+                block
+                    .iter()
+                    .filter(|item| matches!(item, BlockItem::Inst(_)))
+                    .count()
+            })
+            .collect()
+    }
+
+    /// A jump to the block that comes next emits no bytes and moves nothing.
+    #[test]
+    fn a_jump_to_the_following_block_is_deleted() {
+        let counts = fallthrough(&mut vec![vec![mov(), jmp(1)], vec![mov()]]);
+        assert_eq!(counts, vec![1, 1]);
+    }
+
+    /// Blocks that emit nothing lie between a jump and its target without
+    /// separating them, so the jump is still a fallthrough.
+    #[test]
+    fn empty_blocks_between_a_jump_and_its_target_do_not_save_it() {
+        let counts = fallthrough(&mut vec![vec![jmp(3)], vec![], vec![], vec![mov()]]);
+        assert_eq!(counts, vec![0, 0, 0, 1]);
+    }
+
+    /// A jump over a block that emits an instruction goes somewhere.
+    #[test]
+    fn a_jump_over_real_work_is_kept() {
+        let counts = fallthrough(&mut vec![vec![jmp(2)], vec![mov()], vec![mov()]]);
+        assert_eq!(counts, vec![1, 1, 1]);
+    }
+
+    /// A conditional jump continues at the next instruction whether it is taken
+    /// or not, so one that names that instruction is deleted too.
+    #[test]
+    fn a_conditional_jump_to_the_next_instruction_is_deleted() {
+        let counts = fallthrough(&mut vec![
+            vec![BlockItem::Inst(MachInst::Jcc {
+                cc: CondCode::Ne,
+                target: 1,
+            })],
+            vec![mov()],
+        ]);
+        assert_eq!(counts, vec![0, 1]);
+    }
+
+    /// A trampoline label bound in the middle of a block names the instruction
+    /// that follows it, exactly as a block label does.
+    #[test]
+    fn a_jump_to_a_trampoline_label_just_ahead_is_deleted() {
+        let counts = fallthrough(&mut vec![vec![jmp(7), BlockItem::BindLabel(7), mov()]]);
+        assert_eq!(counts, vec![1]);
+    }
+
+    /// Deleting one jump can leave the one in front of it jumping over nothing.
+    /// The backward pass sees that in the same run.
+    #[test]
+    fn a_jump_made_redundant_by_a_deletion_is_deleted_too() {
+        let counts = fallthrough(&mut vec![vec![jmp(1), jmp(1)], vec![mov()]]);
+        assert_eq!(counts, vec![0, 1]);
+    }
+
+    /// The last block has nothing after it, so its jump names a point that is
+    /// not the next instruction.
+    #[test]
+    fn a_jump_out_of_the_last_block_is_kept() {
+        let counts = fallthrough(&mut vec![vec![mov()], vec![jmp(0)]]);
+        assert_eq!(counts, vec![1, 1]);
     }
 
     fn regalloc_of(pairs: &[(u32, Reg)]) -> RegAllocResult {

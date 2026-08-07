@@ -59,7 +59,7 @@ mod precolor;
 pub(crate) mod pressure;
 use precolor::{add_call_precolors_for_block, assign_param_vregs_from_map};
 mod terminator;
-use terminator::{lower_terminator, thread_branches};
+use terminator::{lower_terminator, remove_fallthrough_jumps, thread_branches};
 pub mod alias;
 pub(crate) mod split;
 pub use alias::{AddrBase, AliasInfo};
@@ -1675,6 +1675,11 @@ pub fn compile(
     // Branch threading: rewrite Jcc/Jmp targets that point to empty blocks
     // containing only a single Jmp. Repeat until fixed point.
     thread_branches(&mut block_items, func, &rpo_order);
+
+    // Threading can leave a jump over nothing: its new target may be the block
+    // that follows, which `lower_terminator` could not see when it chose to
+    // emit the jump at all.
+    remove_fallthrough_jumps(&mut block_items, func, &rpo_order);
 
     // Phase 10: Encoding with branch relaxation.
     //
