@@ -12,6 +12,8 @@ call_hot.c	O0	62	196	0	0
 call_hot.c	O1	71	245	3	7
 early_exit.c	O0	130	424	0	0
 early_exit.c	O1	133	470	1	7
+float_convert.c	O0	60	243	2	2
+float_convert.c	O1	59	236	2	2
 float_reduce.c	O0	103	411	4	4
 float_reduce.c	O1	95	364	4	4
 funnel_mix.c	O0	106	387	0	0
@@ -34,3 +36,5 @@ state_machine.c	O0	156	568	0	0
 state_machine.c	O1	154	524	0	0
 struct_fields.c	O0	105	350	0	0
 struct_fields.c	O1	103	341	2	2
+transpose.c	O0	123	409	0	0
+transpose.c	O1	124	398	0	0
