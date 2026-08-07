@@ -72,12 +72,12 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Give the inliner a pressure check, as LICM has** -- `P1`, first entry. Done
-  when `-O1` beats `-O0` on all 15 `bench` kernels. **Re-measure before
-  starting**: the figure behind it is from 2026-08-06 and a lot of codegen has
-  moved since.
+- **Copies are still a third of what blitz emits** -- `P1`, and now its first
+  entry. 805 register-to-register moves in 2613 instructions over `bench`,
+  against `gcc -O2`'s 345 in 2226. **The whole remaining instruction gap to gcc
+  is copies.** Read `docs/internal/refactor-roadmap.md` before starting.
 
-After that, `P1` is ordered by measured impact. **`P2` is where the
+`P1` is ordered by measured impact. **`P2` is where the
 single-target thesis pays off**, though half of it is unreachable until tinyc
 grows builtins -- see the note there.
 
@@ -430,48 +430,6 @@ so the holes stay visible.
 
 ### P1 -- Optimizer gaps with the largest measured impact
 
-- [ ] **Give the inliner a pressure check, as LICM has.** *Start here points at
-      this one.* **Re-measured 2026-08-07, and both the criterion and the
-      framing had to change.**
-
-      **The old criterion is void.** "Done when `-O1` beats `-O0` on all 15
-      `bench` kernels" is already true -- by 2 to 3x on every kernel -- and not
-      because `-O1` improved. `-O0` moved to `regalloc::fast`, which puts every
-      value in a frame slot, so the comparison flipped on the `-O0` side. A
-      criterion that a change to the *other* optimization level can satisfy was
-      never measuring this pass.
-
-      **Inlining is still a net instruction loss on `bench`**: with
-      `BLITZ_PASSES=-inlining` at `-O1`, 7 of 15 kernels change and the total
-      over them is 1098 to 976, `-11.1%`. Four improve with inlining off
-      (`hash_table` `-26.7%`, `strops` `-22.3%`, `fib_memo` `-14.1%`,
-      `binary_search` `-6.7%`) and three get worse (`bitcount` `+25.0%`,
-      `crc32` `+6.0%`, `sort_quick` `+4.5%`).
-
-      **But instructions are not the ranking, and in cycles the asymmetry is the
-      whole story.** `live` had no inlinable call site at all until this session
-      -- 20 of 21 kernels are one function and the 21st is deliberately
-      `noinline` -- so the inliner's effect on the Goal's metric was zero by
-      construction. `call_inlinable.c` and `call_in_pressure.c` close that, and
-      they measure:
-
-      ```
-      call_inlinable     inlining on 129.5M cycles   off 183.9M    on is 1.42x faster
-      call_in_pressure   inlining on 102.6M cycles   off  98.8M    off is 3.8% faster
-      ```
-
-      **Inlining is worth 42% where it wins and costs 3.8% where it loses.** A
-      wrong refusal is an order of magnitude more expensive than a right one is
-      valuable, which is why every model tried on 2026-08-06 got `args` seed 3
-      wrong: refusing there cost 187 instructions and 8x the spills. So the check
-      must be *asymmetric* -- refuse only on a large overflow margin, never on a
-      tie -- and a symmetric comparison of overflow magnitudes is the wrong shape
-      however its arithmetic is arranged. Prior work is in `stash@{0}` on top of
-      committed `src/compile/pressure.rs`.
-
-      **New criterion**: `call_in_pressure` improves in cycles and
-      `call_inlinable` does not regress, with `bench` instructions no worse and
-      `run_perf.sh` over the whole of `live` no worse.
 - [ ] **Copies are still a third of what blitz emits.** Measured over the 15
       `bench` kernels: blitz 805 register-to-register moves in 2613
       instructions, against `gcc -O2`'s 345 in 2226 and `clang -O2`'s 214 in
@@ -734,6 +692,51 @@ seconds -- what the other harnesses already cost.
       `compile/mod.rs` 1865. A rule set being long is fine.
 
 ## Decisions worth not relitigating
+
+- **A register-pressure check on the inliner is measured out, after four
+  models.** The case where refusing an inline helps and the cases where it hurts
+  are *indistinguishable in pressure terms*, so no arrangement of the arithmetic
+  separates them. Do not attempt a fifth.
+
+  What the four models were, and what each did:
+
+  | model | result |
+  | --- | --- |
+  | charge the inlined side only | `lit` insts `-3.2%` spills `-26.1%`, `fuzz` `-1.9%` / `-24.9%`, **`bench` unchanged**, 61 rows worse |
+  | require the call side to fit too | refuses nothing, zero changes anywhere |
+  | compare overflow magnitudes symmetrically | `fuzz` `-4.8%` / `-30.2%`, `lit` and `bench` unchanged, 13 rows worse |
+  | refuse where the enclosing loop already overflows by more than the callee adds | `live` `call_in_pressure` `-4.4%` insts / `-19.1%` reloads and `-3.7%` cycles, `bench` unchanged, **15 of 18 changed `fuzz` rows worse, to `+30.7%`** |
+
+  The fourth is the one built on the right region: the values live across a call
+  in a loop are the *header's* parameters, not the calling block's, and the
+  calling block reports 5 where its loop carries 18. It gets both `live` kernels
+  right -- `call_inlinable` inlines and keeps its `1.42x`, `call_in_pressure`
+  refuses and takes the `3.7%`. Then `pressure-seed19` has callers overflowing by
+  8 to 20 against callees bringing 4 to 6, which is the same shape as
+  `call_in_pressure`'s 23 against 6, and refusing there costs `+28.7%`
+  instructions.
+
+  **Why no model can work**: the cost of refusing is mostly *lost optimization*,
+  not pressure. Inlining lets constant propagation and DCE run through the call
+  -- `args` seed 3 refused one inline and kept 187 instructions that would
+  otherwise have folded, taking spills from 7 to 63. A pressure estimate cannot
+  see that, and the two situations present identical pressure.
+
+  **The asymmetry is the reason it is not worth more attempts.** Measured on
+  `live`, inlining is worth `1.42x` where it wins and `3.8%` where it loses. A
+  check that is wrong in the expensive direction once pays for every time it is
+  right ten times over.
+
+  Kept from the attempt: `tests/lit/live/call_inlinable.c` and
+  `call_in_pressure.c`, which are why any of this has a cycle number --
+  before them `live` had no inlinable call site at all. `src/compile/pressure.rs`
+  stays for LICM, which is still budgeted by it.
+
+  **The old criterion was also void, for an unrelated reason.** "Done when `-O1`
+  beats `-O0` on all 15 `bench` kernels" became true when `-O0` moved to
+  `regalloc::fast`, which puts every value in a frame slot -- `-O1` now wins by
+  2 to 3x on every kernel without the inliner changing at all. A criterion
+  another optimization level can satisfy was never measuring this pass.
 
 - **`-O0` is not slower than `-O1`, and the reason it used to be is settled.**
   Compile time is `~(B*C)^0.86` with both levels on one curve, so `-O1` was
