@@ -527,7 +527,41 @@ so the holes stay visible.
 - [ ] **nsw/nuw/nnan/ninf op flags.** Without them the signed-ordering
       algebraic rewrites stay permanently rejected (see Decisions). Op-flag
       bitfield threaded through saturation.
-- [ ] **Tail call optimization.**
+- [ ] **Tail call optimization.** **Priced, and the design is chosen.**
+      `tests/lit/live/tail_recursion.c` exists to price it, because nothing could:
+      `bench`, `live` and the generated programs contained **zero** tail-call
+      sites between them, and the 59 in `lit` are almost all `main` returning a
+      call once. Median of 5 at `ARGS=100`:
+
+      ```
+      blitz -O1   3.83M cycles
+      gcc -O2     1.98M      blitz is 1.93x
+      clang -O2   1.31M      blitz is 2.92x
+      ```
+
+      gcc's `step` contains no call at all -- it is a loop -- so the gap is
+      exactly this transform. That is a better relative showing than blitz's
+      `x3.07` overall, and still nearly 2x on a shape one transform closes.
+
+      **Do it in lowering, not in the IR.** The IR route is to give the function a
+      loop header whose block parameters are its parameters, and it requires every
+      use of `Param(i)` to become a use of `BlockParam(H, i)`. Merging those two
+      classes is exactly the hazard SCCP hit above -- a class holding both, where
+      the argument on the edge resolves to the parameter itself -- and rewriting
+      the uses instead needs substitution over the e-graph, which e-graphs do not
+      give cheaply and this one has no machinery for.
+
+      The lowering route has neither problem: set the arguments up in their ABI
+      registers exactly as a call does, emit the epilogue, then `jmp` to the entry
+      label instead of `call`. RSP is back to where it was with the return address
+      on top, so the recursion returns straight to the original caller. The
+      argument registers are caller-saved and the epilogue's pops only touch
+      callee-saved ones, so the values survive the teardown. First version should
+      require register-only arguments: a stack argument would have to be written
+      into the function's own incoming argument area, which is sound but fiddly,
+      and 6 integer arguments covers the shape. It generalises to a mutual tail
+      call -- `jmp` to another symbol -- under the same conditions, which the
+      kernel's `even_step`/`odd_step` pair is there to catch.
 - [ ] **Loop unrolling.** Compounds with LSR; do it after.
 - [ ] **Narrowing / type-width analysis.** `(uint8_t)x + 1` should not promote
       to i32. Domain: `(min_bits, signed)` per e-class.
