@@ -52,9 +52,10 @@ frame slots at fixed offsets is what debug info describes.
 ## Start here
 
 Ordered. Each says what it is, why it is placed there, and what would tell you
-it is done. **Items 1 and 2 are closed; item 3 is the open one.** The closed
-entries stay because what they measured is the reason the next attempt should
-not start where they did.
+it is done. **Items 1 and 2 are closed; item 3 is the open one**, and the two
+correctness holes at the top of P0 come before it. The closed entries stay
+because what they measured is the reason the next attempt should not start where
+they did.
 
 ### 1. ~~Finish the `-O0` allocator~~ -- closed
 
@@ -146,7 +147,15 @@ way. `BLITZ_PASSES=-inlining` took `bench` instructions 2637 to 2422 and reloads
 Done when `-O1` beats `-O0` on all 15 kernels.
 
 After those, the P1 list below is ordered by measured impact. **`P2` is where
-the single-target thesis pays off.**
+the single-target thesis pays off**, though half of it is unreachable until
+tinyc grows builtins -- see the note there.
+
+**One reordering worth stating outright.** P2's constant cost model belongs
+above most of P1: it unblocks three isel items at once, the missing structure is
+a parents map in the e-graph, and the payoff is measured. The temptation is to
+start on GVN or loop strength reduction because they are the recognizable names,
+and neither is where this backend is currently losing -- P1's own copies item
+says the whole remaining instruction gap to gcc is copies.
 
 **Do not start in the register allocator, the splitter, or the block-parameter
 machinery without reading `docs/internal/refactor-roadmap.md` first.** It is
@@ -217,9 +226,59 @@ inside the runs that already happen. A battery that grows every time something
 is learned stops being run between every change, and one-change-at-a-time is
 what makes attribution possible here.
 
+**Open correctness work, before any diagnostic.**
+
+- [ ] **An odd number of stack arguments misaligns the stack.** SysV wants
+      `RSP % 16 == 0` at a `call` and `setup_call_args` emits one `push` per
+      stack argument, so seven integer arguments leave the callee eight out and
+      its own call into libc faults. Even counts survive by luck, which is why
+      nothing caught it: the generator's `args` shape and every corpus program
+      land on even counts. `corpus/open/stack_arg_alignment.c`, both levels, and
+      older than the `-O0` allocator. **This was filed under P4** as an unblock;
+      a segfault is not an unblock.
+- [ ] **`assign_args` `unreachable!()`s on a struct** (`src/x86/abi.rs`). Same
+      tier mistake: the frontend cannot produce one today, so it reads as a
+      feature gap, but the failure mode is a panic rather than a diagnostic.
+- [ ] **The allocator's liveness disagrees with the emitted code's**, at `-O1`.
+      `verify_register_sharing` flags 1 of 450 generated programs
+      (`pressure` seed 148); `-O0` is clean since the argument-colour fix.
+      `build_interference_into` adds an edge for every simultaneously-live pair,
+      so two VRegs can only share a register if the allocator's liveness never
+      had them live together while liveness recomputed from the emitted schedules
+      does. **This is a correctness item with a count attached, not a
+      diagnostic**, which is where it used to sit. Resolve it or delete the
+      check. Related hole worth an assertion regardless: `greedy_color` and
+      `interval_color` apply pre-colorings unconditionally, without checking that
+      two of them sharing a color do not interfere.
+- [ ] **A second implementation of the pass with the worst bug rate.**
+      `regalloc::fast` was built for DWARF and turned out to be the highest-yield
+      bug finder in the project: it found an `-O1` allocation bug within hours of
+      being correct, and `BLITZ_VERIFY` over it found two more. That is ~350
+      lines. The same is available for the scheduler (source order, no DAG) and
+      the extractor (greedy, no cost model), and each would make a whole pass's
+      bugs a disagreement `run_diff.sh` can see rather than an answer both levels
+      give. **Treat this as a standing strategy, not the one-off it looks like.**
+- [ ] **Enumerate the ABI surface rather than sampling it.** `gen_c.py` is
+      UB-free by construction, which is its strength and its ceiling: it emits
+      7-12 parameter functions and evidently never an odd stack-argument count
+      with a libc call underneath, which is how the segfault above survived. Arg
+      counts 0..14 x {int, double, mixed} x {leaf, calls libc} is a few hundred
+      programs and a *finite* space you can be done with. Randomness is the wrong
+      tool at that size.
+- [ ] **A "one fact, one place" audit.** Two bugs in one session were the same
+      fact derived twice and disagreeing -- the block's `param_vregs` against
+      `cfg::resolve_block_param_vreg`, and `Op::BlockParam`'s shadow modelled
+      while `Op::Param`'s was not. The repo already knows this pattern:
+      `EffOperand` and `TermArgs` were exactly this refactor, and "a block
+      resolved an e-class to the wrong VReg" is nine bugs. There is no item for
+      finding the instances that are left.
+
 **Diagnostics worth building, each earned by a session it would have shortened.**
-None is a gate; they are what turns a wall of numbers into a name. Ordered by
-hours lost, not by effort to build.
+None is a gate; they are what turns a wall of numbers into a name. **Kept
+deliberately short.** Twelve unbuilt diagnostics is a backlog that never drains,
+and neither of the two things that actually found bugs recently -- a second
+implementation, and a wider sweep -- was on that list. Build the rest the next
+time an absence costs a session.
 
 - [ ] **Make the per-function VReg numbering impossible to miss.** Numbering
       restarts at v0 in every function and the dumps repeat bare `v14` on every
@@ -234,51 +293,16 @@ hours lost, not by effort to build.
       the choice off the list the *colouring* ran on, never off the result -- a
       rematerialized VReg's defining instruction is already dropped there, so
       every candidate reads as "no def" and points at a bug that is not there.
-- [ ] **Name the pass that produced each number in a `--check` regression.** A
-      row moving is currently attributed by re-running with `BLITZ_PASSES=-x`
-      one flag at a time. The stats already exist per function; recording which
-      passes ran beside them would make the bisection a lookup.
-- [ ] **A decision diff, not an output diff.** `run_identity.sh` says the
-      emitted code changed; nothing says *which decision* changed. Two runs'
-      allocation, coalescing and hoisting choices, diffed by VReg, would
-      attribute a regression in one step instead of by bisection.
-- [ ] **The allocator's liveness disagrees with the emitted code's.** What
-      `verify::verify_register_sharing` points at now that it is in.
-      `build_interference_into` adds an edge for every simultaneously-live pair,
-      so two VRegs could only share a register if the allocator's liveness never
-      had them live together -- while liveness recomputed from the emitted
-      schedules does. It flags 3 of 40 fuzz programs. Neither VReg in the seed-20
-      report is pre-colored, so it is not a pre-coloring artifact.
-
-      Related hole worth an assertion regardless: `greedy_color` and
-      `interval_color` apply pre-colorings unconditionally, without checking that
-      two of them sharing a color do not interfere.
-- [ ] **Callee-saved registers actually preserved.** The one machine-level
-      property `MachInst::defs()`/`uses()` do not yet carry.
-- [ ] **A stronger UB guard in `reduce.py`.** It does not know about undefined
-      behaviour the reference compilers agree on by luck, which is how it deleted
-      the array initialisers and had to be corrected by hand. A third compiler, or
-      the generator re-simulating the candidate, would close it.
 - [ ] **Reference IR interpreter.** The stronger oracle: execute the IR
       directly and compare against the compiled binary. Also lets a failure be
       attributed to a specific pass by re-running the interpreter on the IR
       after each stage.
-- [ ] **Rewrite-rule equivalence tests.** For each algebraic/strength rule,
-      randomized equivalence check of LHS vs RHS over the operand space
-      (including boundary values: 0, 1, -1, INT_MIN, INT_MAX, wraparound).
-      Cheap, and the only systematic defense against a rule that is right for
-      most inputs. The two rejected signed-ordering rewrites are the cautionary
-      example.
-- [ ] **Regalloc stress mode.** Generate programs with tunable register
-      pressure, live-range-crossing-call density, and phi-heavy control flow,
-      then differential-execute. Aim it at the code with the worst historical
-      bug rate.
-- [ ] **csmith-lite for tinyc**: random C restricted to the parseable subset,
-      differential against `gcc -O0`/`clang -O0` on the same source. Covers the
-      frontend-to-backend seam that IR-level fuzzing skips.
-- [ ] **Failures become tests, permanently.** Every fuzz find lands as a lit
-      test. Per `CLAUDE.md`, a committed failing test that reproduces a real bug
-      is more valuable than a green suite.
+- [ ] **The rest, unranked and not scheduled**: naming the pass behind each
+      `--check` regression, a decision diff rather than an output diff,
+      callee-saved preservation at machine level, a stronger UB guard in
+      `reduce.py`, rewrite-rule equivalence tests, a regalloc stress mode, a
+      csmith-lite for tinyc, and every fuzz find landing as a lit test. Each is
+      justified; none has been paid for by a session recently enough to rank.
 
 ### P0 -- Measurement
 
@@ -336,8 +360,18 @@ so the holes stay visible.
 This is where single-target focus is supposed to pay off. LLVM has ~10x the
 isel patterns; we should beat it on the ones we implement.
 
+**A non-goal blocks half of this tier.** The bit instructions, BMI and the carry
+chain are not blocked on encoding but on *tinyc having no builtins*, and tinyc
+is declared a test consumer rather than a product -- so under the current plan
+they can never become reachable. They are marked below rather than ranked. The
+cheapest unblock for the whole group is a small set of builtins in tinyc, which
+is a decision to take deliberately or not at all; picking one of these items up
+without taking it is picking up work that cannot land.
+
 - [ ] **A cost model that can see a constant being materialized.** This blocks
-      three separate items, which is why it leads the list. `Iconst` costs 0.0,
+      three separate items, which is why it leads the list -- and with half this
+      tier unreachable it is the highest ratio of unblocks-to-cost in the whole
+      document, not just here. `Iconst` costs 0.0,
       so the `mov r, imm32` a register form needs is invisible to extraction and
       any immediate form has to carry the credit itself. Consequences today: the
       `imm32` ALU form is not selected (only `imm8`), worth a measured -1.4pp on
@@ -348,7 +382,7 @@ isel patterns; we should beat it on the ones we implement.
       parents map to ask**. That is the actual missing structure. If it lands,
       re-check `tests/lit/control/main_falls_off_end.c`, which is what pricing
       the `imm32` form to win broke last time.
-- [ ] **Bit instructions**: `popcnt`, `bsr`/`bsf`, `tzcnt`/`lzcnt`, `bswap`, and
+- [ ] *(unreachable: needs builtins)* **Bit instructions**: `popcnt`, `bsr`/`bsf`, `tzcnt`/`lzcnt`, `bswap`, and
       `bt` itself -- the read form, whose result is a flag and so needs the
       compare seam rather than a value class. `bt` needs a cc-carrying node like
       `X86UcomisdCc` so an `Icmp` class can take its flags from a CF-only
@@ -357,10 +391,10 @@ isel patterns; we should beat it on the ones we implement.
       no builtins, so nothing reaches these rules. `bswap` (a 4-way `Or` of
       masked shifts) is the only plausible one to match today.
       `bts`/`btr`/`btc` are done in both register and immediate-index forms.
-- [ ] **BMI/BMI2 when available**: `andn`, `bextr`, `blsi`/`blsr`/`blsmsk`,
+- [ ] *(unreachable: needs builtins, and a CPU feature knob)* **BMI/BMI2 when available**: `andn`, `bextr`, `blsi`/`blsr`/`blsmsk`,
       `shlx`/`shrx`/`sarx` (no flag clobber, no CL constraint), `mulx`.
       Needs a CPU feature level knob that does not exist yet.
-- [ ] **Carry-chain `adc`/`sbb` proper.** A multi-word add has no source idiom
+- [ ] *(unreachable: needs a source idiom)* **Carry-chain `adc`/`sbb` proper.** A multi-word add has no source idiom
       in tinyc, so this needs a shape to match (`a + b`, then `c + (sum < a)`)
       or nothing reaches it. The `setcc`-free 0/-1 mask is done, `Ult` only:
       `Ugt` and `Ule` would need the compare's operands swapped, which is a
@@ -413,21 +447,35 @@ isel patterns; we should beat it on the ones we implement.
 ### P4 -- Unblocks only if they gate measurement
 
 - [ ] Switch/case + dense jump-table lowering (frontend + backend).
-- [ ] `>6` int / `>8` float args via stack: verify the callee read side and
-      caller-side alignment.
-- [ ] SysV struct-by-value passing/returning. `assign_args`
-      (`src/x86/abi.rs:112`) `unreachable!()`s on non-int/float; needs
-      INTEGER/SSE/MEMORY classification and hidden-pointer return.
+- [x] `>6` int / `>8` float args via stack, callee read side. A stack-passed
+      double is read with `movsd`, not a `mov` of an `OpSize`, and the caller
+      moves it out through the scratch GPR because `push` addresses no XMM
+      register. `tests/lit/functions/stack_fp_args.c`. **Caller-side alignment
+      is broken and moved to P0** -- it is a segfault, not an unblock.
+- [ ] SysV struct-by-value passing/returning. Needs INTEGER/SSE/MEMORY
+      classification and hidden-pointer return; the `unreachable!()` it hits
+      today is listed in P0.
 - [ ] Error recovery: emit a diagnostic instead of panicking on internal errors.
 
 ## Known bugs
 
-**Nothing is open.** No wrong-value programs and no capacity failures at either
-level: at 400 seeds a shape `mixed`, `args` and `pressure` are all 400/400, and
-the saved corpus is 16 passing with an empty `open/`. The last one, an `-O1`
-allocation bug the `-O0` allocator's arrival made visible, closed when
-`Op::Param` got the shadow `Op::BlockParam` already had -- see item 1 of Start
-here.
+**No wrong answers, two open holes.** At 400 seeds a shape `mixed`, `args` and
+`pressure` are all 400/400 and the saved corpus is 16 `fixed` passing, so no
+generated or saved program computes a wrong value at either level. What is open
+is not reachable from the generator:
+
+- **An odd number of stack arguments segfaults**, both levels, older than the
+  `-O0` allocator. `corpus/open/stack_arg_alignment.c`, and P0 above.
+- **`verify_register_sharing` flags 1 of 450 generated programs at `-O1`**
+  (`pressure` seed 148). Reproduce with
+  `BLITZ_VERIFY=strict bash tests/fuzz/run_fuzz.sh 150`. No gate covers this:
+  the four runs use `BLITZ_VERIFY` over lit and the unit tests, not over the
+  generator, and the rule that the gate set stays fixed means the fix is to put
+  it inside a run that already happens rather than to add a fifth.
+
+The last *wrong-value* bug, an `-O1` allocation bug the `-O0` allocator's
+arrival made visible, closed when `Op::Param` got the shadow `Op::BlockParam`
+already had -- see item 1 of Start here.
 
 **Re-measure rather than trust that.** Entries have left this list without
 anyone fixing them, and one went the other way -- a capacity failure that a fold
