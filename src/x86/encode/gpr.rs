@@ -320,6 +320,33 @@ impl Encoder {
         self.emit_byte(imm);
     }
 
+    /// `BTS`/`BTR`/`BTC r/m, r` -- 0F AB /r, 0F B3 /r, 0F BB /r. The bit index
+    /// is the ModRM reg field and the value operated on is r/m, as in `SHLD`.
+    fn encode_bit_rr(&mut self, size: OpSize, opcode: u8, dst: Reg, src: Reg) {
+        assert!(
+            size != OpSize::S8,
+            "BT-group instructions have no byte form"
+        );
+        let d = dst.hw_enc();
+        let s = src.hw_enc();
+        self.emit_prefix_and_rex(size, s, 0, d);
+        self.emit_byte(0x0F);
+        self.emit_byte(opcode);
+        self.emit_modrm(0b11, s, d);
+    }
+
+    pub fn encode_bts_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
+        self.encode_bit_rr(size, 0xAB, dst, src);
+    }
+
+    pub fn encode_btr_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
+        self.encode_bit_rr(size, 0xB3, dst, src);
+    }
+
+    pub fn encode_btc_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
+        self.encode_bit_rr(size, 0xBB, dst, src);
+    }
+
     pub fn encode_shl_rcl(&mut self, size: OpSize, dst: Reg) {
         self.encode_shift_cl(size, 4, dst);
     }

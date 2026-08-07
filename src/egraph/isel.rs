@@ -13,6 +13,7 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_shift_isel(egraph, &snaps);
     changed |= apply_shift_imm_isel(egraph, &snaps);
     changed |= apply_funnel_shift_isel(egraph, &snaps);
+    changed |= apply_bit_isel(egraph, &snaps);
     changed |= apply_alu_imm_isel(egraph, &snaps);
     changed |= apply_select_isel(egraph, &snaps);
     changed |= apply_icmp_isel(egraph, &snaps);
@@ -444,6 +445,130 @@ fn apply_funnel_shift_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let proj0 = egraph.add(ENode {
             op: Op::Pure(PureOp::Proj0),
             children: smallvec![funnel],
+        });
+
+        let canon = egraph.unionfind.find_immutable(snap.class_id);
+        let proj0_canon = egraph.unionfind.find_immutable(proj0);
+        if canon != proj0_canon {
+            egraph.merge(snap.class_id, proj0);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// A one-bit mask built at run time collapses into the single-bit instruction
+/// that reads its index directly:
+///
+/// - `Or(x, Shl(1, n))`             -> `Proj0(X86Bts(x, n))`
+/// - `Xor(x, Shl(1, n))`            -> `Proj0(X86Btc(x, n))`
+/// - `And(x, Xor(Shl(1, n), -1))`   -> `Proj0(X86Btr(x, n))`
+///
+/// The mask form costs three instructions: the `1` into a register, a shift that
+/// must route `n` through CL, and the ALU op itself; `btr` pays a fourth for the
+/// complement. The bit instructions take the index from any register, so the
+/// whole sequence becomes one instruction and CL stops being contended.
+///
+/// A constant `n` is not matched. The shift folds to a constant mask, which the
+/// immediate-form ALU already covers in three bytes where `bts` needs four.
+///
+/// The bit index is taken modulo the operand width by the hardware. A `1 << n`
+/// whose `n` reaches the width is undefined in C, so the two agree wherever the
+/// source has a meaning. There is no byte form, so 8-bit masks stay as they are.
+fn apply_bit_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    /// The bit index of a `Shl(1, n)` in `class`, with `n` not a constant.
+    fn bit_index(egraph: &EGraph, class: ClassId) -> Option<ClassId> {
+        let canon = egraph.unionfind.find_immutable(class);
+        if canon == ClassId::NONE {
+            return None;
+        }
+        egraph.class(canon).nodes.iter().find_map(|node| {
+            if node.op != Op::Pure(PureOp::Shl) || node.children.len() != 2 {
+                return None;
+            }
+            let (one, n) = (node.children[0], node.children[1]);
+            if egraph.get_constant(one)?.0 != 1 || egraph.get_constant(n).is_some() {
+                return None;
+            }
+            let n = egraph.unionfind.find_immutable(n);
+            (n != ClassId::NONE).then_some(n)
+        })
+    }
+
+    /// The bit index of an all-ones complement of a one-bit mask, `Xor(Shl(1, n), -1)`.
+    fn complemented_bit_index(egraph: &EGraph, class: ClassId) -> Option<ClassId> {
+        let canon = egraph.unionfind.find_immutable(class);
+        if canon == ClassId::NONE {
+            return None;
+        }
+        egraph.class(canon).nodes.iter().find_map(|node| {
+            if node.op != Op::Pure(PureOp::Xor) || node.children.len() != 2 {
+                return None;
+            }
+            let (a, b) = (node.children[0], node.children[1]);
+            let ones = |c: ClassId| egraph.get_constant(c).is_some_and(|(v, _)| v == -1);
+            if ones(b) {
+                bit_index(egraph, a)
+            } else if ones(a) {
+                bit_index(egraph, b)
+            } else {
+                None
+            }
+        })
+    }
+
+    let mut changed = false;
+
+    for snap in snaps {
+        let mach = match snap.op {
+            Op::Pure(PureOp::Or) => MachOp::X86Bts,
+            Op::Pure(PureOp::Xor) => MachOp::X86Btc,
+            Op::Pure(PureOp::And) => MachOp::X86Btr,
+            _ => continue,
+        };
+        if snap.children.len() != 2 {
+            continue;
+        }
+        // `bt` has no byte form, and the value operated on must be the whole of
+        // its own type: a mask on a wider type truncated into this one would set
+        // a bit the single instruction cannot reach.
+        let Some(ty) = infer_class_type(egraph, snap.class_id) else {
+            continue;
+        };
+        if !ty.is_integer() || ty.bit_width() < 16 {
+            continue;
+        }
+        let width = ty.bit_width();
+        let index = if mach == MachOp::X86Btr {
+            complemented_bit_index
+        } else {
+            bit_index
+        };
+
+        let (a, b) = (snap.children[0], snap.children[1]);
+        let Some((x, n)) = index(egraph, b)
+            .map(|n| (a, n))
+            .or_else(|| index(egraph, a).map(|n| (b, n)))
+        else {
+            continue;
+        };
+        let x = egraph.unionfind.find_immutable(x);
+        // Both operands are read at the instruction's own width, so a narrower
+        // index would be read together with whatever sits above it.
+        let full_width = |c: ClassId| {
+            infer_class_type(egraph, c).is_some_and(|t| t.is_integer() && t.bit_width() == width)
+        };
+        if x == ClassId::NONE || !full_width(x) || !full_width(n) {
+            continue;
+        }
+
+        let bit = egraph.add(ENode {
+            op: Op::Mach(mach),
+            children: smallvec![x, n],
+        });
+        let proj0 = egraph.add(ENode {
+            op: Op::Pure(PureOp::Proj0),
+            children: smallvec![bit],
         });
 
         let canon = egraph.unionfind.find_immutable(snap.class_id);

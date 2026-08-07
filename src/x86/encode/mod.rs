@@ -465,6 +465,15 @@ impl Encoder {
             } => {
                 self.encode_shld_rri(*size, Self::expect_reg(dst), Self::expect_reg(src), *imm);
             }
+            MachInst::BtsRR { size, dst, src } => {
+                self.encode_bts_rr(*size, Self::expect_reg(dst), Self::expect_reg(src));
+            }
+            MachInst::BtrRR { size, dst, src } => {
+                self.encode_btr_rr(*size, Self::expect_reg(dst), Self::expect_reg(src));
+            }
+            MachInst::BtcRR { size, dst, src } => {
+                self.encode_btc_rr(*size, Self::expect_reg(dst), Self::expect_reg(src));
+            }
             MachInst::ShlRCL { size, dst } => {
                 self.encode_shl_rcl(*size, Self::expect_reg(dst));
             }

@@ -166,6 +166,25 @@ pub enum MachInst {
         src: Operand,
         imm: u8,
     },
+    /// Set bit `src` of `dst` -- `bts dst, src`. The bit index is taken modulo
+    /// the operand size; the previous value of the bit lands in CF.
+    BtsRR {
+        size: OpSize,
+        dst: Operand,
+        src: Operand,
+    },
+    /// Clear bit `src` of `dst` -- `btr dst, src`.
+    BtrRR {
+        size: OpSize,
+        dst: Operand,
+        src: Operand,
+    },
+    /// Complement bit `src` of `dst` -- `btc dst, src`.
+    BtcRR {
+        size: OpSize,
+        dst: Operand,
+        src: Operand,
+    },
     /// Shift left by CL
     ShlRCL {
         size: OpSize,
@@ -573,6 +592,9 @@ impl MachInst {
             MachInst::SarRI { dst, .. } => collect(&[dst]),
             MachInst::RolRI { dst, .. } => collect(&[dst]),
             MachInst::ShldRRI { dst, .. } => collect(&[dst]),
+            MachInst::BtsRR { dst, .. }
+            | MachInst::BtrRR { dst, .. }
+            | MachInst::BtcRR { dst, .. } => collect(&[dst]),
             MachInst::Neg { dst, .. } => collect(&[dst]),
             MachInst::Not { dst, .. } => collect(&[dst]),
             MachInst::Inc { dst, .. } => collect(&[dst]),
@@ -673,6 +695,9 @@ impl MachInst {
             MachInst::SarRI { dst, .. } => collect(&[dst]),
             MachInst::RolRI { dst, .. } => collect(&[dst]),
             MachInst::ShldRRI { dst, src, .. } => collect(&[dst, src]),
+            MachInst::BtsRR { dst, src, .. }
+            | MachInst::BtrRR { dst, src, .. }
+            | MachInst::BtcRR { dst, src, .. } => collect(&[dst, src]),
             MachInst::Neg { dst, .. } => collect(&[dst]),
             MachInst::Not { dst, .. } => collect(&[dst]),
             MachInst::Inc { dst, .. } => collect(&[dst]),

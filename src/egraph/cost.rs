@@ -182,6 +182,21 @@ impl CostModel {
             }
             .weighted(self.goal),
 
+            // ── x86-64 single-bit ops ────────────────────────────────────────
+            //
+            // Skylake's `bts r,r` is latency 1 and reciprocal throughput 0.5, and
+            // four bytes of encoding. It is priced as one instruction against the
+            // three the shift form needs, and it takes the bit index from any
+            // register rather than CL.
+            Op::Mach(MachOp::X86Bts) | Op::Mach(MachOp::X86Btr) | Op::Mach(MachOp::X86Btc) => {
+                CostTuple {
+                    latency: 1.0,
+                    throughput: 0.5,
+                    size: 4.0,
+                }
+                .weighted(self.goal)
+            }
+
             // ── x86 flag-only compare with immediate: no register output; slightly
             //    cheaper than Proj1(X86Sub) since we don't pay for the sub's
             //    dst register write. imm=0 lowers to `test r, r` (2 bytes, even

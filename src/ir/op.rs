@@ -186,6 +186,21 @@ pub enum MachOp {
     /// the same and neither knows which operand dies here.
     X86ShldImm(u8),
 
+    /// Set bit `n` of `x` -- `bts x, n`; 2 children `(x, n)`. Emitted by isel
+    /// for `Or(x, Shl(1, n))`, where a variable `n` otherwise costs a constant
+    /// materialization, a shift through CL and the `or` itself.
+    ///
+    /// x86 takes the bit index modulo the operand width, and a `1 << n` that
+    /// reached here with `n` at or past the width is undefined in C, so the two
+    /// agree everywhere the source is defined. There is no byte form.
+    X86Bts,
+    /// Clear bit `n` of `x` -- `btr x, n`; 2 children. Isel for
+    /// `And(x, Xor(Shl(1, n), -1))`.
+    X86Btr,
+    /// Complement bit `n` of `x` -- `btc x, n`; 2 children. Isel for
+    /// `Xor(x, Shl(1, n))`.
+    X86Btc,
+
     /// `lea [base + idx]`
     X86Lea2,
     /// `lea [base + idx * scale]` — scale embedded in op
@@ -703,7 +718,12 @@ impl Op {
                 );
                 Type::Pair(Box::new(t.clone()), Box::new(Type::Flags))
             }
-            Op::Mach(MachOp::X86Shl) | Op::Mach(MachOp::X86Sar) | Op::Mach(MachOp::X86Shr) => {
+            Op::Mach(MachOp::X86Shl)
+            | Op::Mach(MachOp::X86Sar)
+            | Op::Mach(MachOp::X86Shr)
+            | Op::Mach(MachOp::X86Bts)
+            | Op::Mach(MachOp::X86Btr)
+            | Op::Mach(MachOp::X86Btc) => {
                 assert_eq!(child_types.len(), 2, "{self:?} requires 2 children");
                 assert!(
                     child_types[0].is_integer(),
@@ -1179,6 +1199,9 @@ impl Op {
                     | MachOp::X86SarImm(_)
                     | MachOp::X86RolImm(_)
                     | MachOp::X86ShldImm(_)
+                    | MachOp::X86Bts
+                    | MachOp::X86Btr
+                    | MachOp::X86Btc
                     | MachOp::X86Addsd
                     | MachOp::X86Subsd
                     | MachOp::X86Mulsd

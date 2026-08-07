@@ -366,8 +366,21 @@ isel patterns; we should beat it on the ones we implement.
       case is worth a further -1.4pp on `lit` and `fuzz` and -0.13pp on `bench`.
       It comes back when the credit can be made honest -- it is owed only where
       the constant has a single use, and the e-graph has no parents map to ask.
-- [ ] **Bit instructions**: `bt`/`bts`/`btr`/`btc`, `popcnt`, `bsr`/`bsf`,
-      `tzcnt`/`lzcnt`, `bswap`.
+- [ ] **Bit instructions**: `popcnt`, `bsr`/`bsf`, `tzcnt`/`lzcnt`, `bswap`, and
+      `bt` itself -- the read form, whose result is a flag and so needs the
+      compare seam rather than a value class.
+      `bts`/`btr`/`btc` are done: a mask built at run time,
+      `Or(x, Shl(1, n))` / `Xor(x, Shl(1, n))` / `And(x, Xor(Shl(1, n), -1))`,
+      becomes one instruction where the mask form costs three (the `1` into a
+      register, a shift routed through CL, the ALU op) or four for the
+      complement, and the bit index stops contending for CL. On
+      `tests/lit/asm/bit_ops.c` each of the three is 1 inst / 3 bytes against
+      4 / 11. A constant index is deliberately not matched: the shift folds and
+      the immediate-form `or` is three bytes where `bts` is four. No corpus row
+      changed, because none of them builds a variable one-bit mask.
+      **The immediate-index form is the open half of this**: a folded mask
+      outside the `imm8` range costs `mov r, imm32` plus the ALU op, six or
+      seven bytes more than `bts r, imm8`.
 - [ ] **BMI/BMI2 when available**: `andn`, `bextr`, `blsi`/`blsr`/`blsmsk`,
       `shlx`/`shrx`/`sarx` (no flag clobber, no CL constraint), `mulx`.
       Needs a CPU feature level knob.

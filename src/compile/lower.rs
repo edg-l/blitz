@@ -321,6 +321,22 @@ fn lower_op(
             })
         }
 
+        Op::Mach(MachOp::X86Bts) => {
+            lower_binary_alu("X86Bts", size, dst_reg, operand_regs, |dst, src| {
+                MachInst::BtsRR { size, dst, src }
+            })
+        }
+        Op::Mach(MachOp::X86Btr) => {
+            lower_binary_alu("X86Btr", size, dst_reg, operand_regs, |dst, src| {
+                MachInst::BtrRR { size, dst, src }
+            })
+        }
+        Op::Mach(MachOp::X86Btc) => {
+            lower_binary_alu("X86Btc", size, dst_reg, operand_regs, |dst, src| {
+                MachInst::BtcRR { size, dst, src }
+            })
+        }
+
         // X86CmpI is handled in the caller (where vreg_types is available) so
         // the OpSize is derived from the operand width, not the Flags dst.
         Op::Mach(MachOp::X86CmpI { .. }) => unreachable!("X86CmpI handled in lower_block_pure_ops"),
