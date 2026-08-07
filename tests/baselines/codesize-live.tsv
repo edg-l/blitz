@@ -12,6 +12,10 @@ byte_copy.c	O0	932	6433	331	400
 byte_copy.c	O1	332	1713	52	90
 call_hot.c	O0	227	1186	65	78
 call_hot.c	O1	92	329	5	16
+call_inlinable.c	O0	227	1186	65	78
+call_inlinable.c	O1	75	239	0	0
+call_in_pressure.c	O0	688	3592	167	223
+call_in_pressure.c	O1	338	1236	41	68
 early_exit.c	O0	569	3700	196	222
 early_exit.c	O1	235	906	21	45
 float_convert.c	O0	235	1393	68	79
