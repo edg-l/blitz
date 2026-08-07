@@ -17,7 +17,10 @@ use super::liveness::LivenessInfo;
 /// stores four bytes per neighbour instead of a node.
 ///
 /// `LivenessInfo` holds its per-program-point sets in the same form, for the
-/// same reason: it copies the running live set once per instruction.
+/// same reason: it copies the running live set once per instruction. So does
+/// `GlobalLiveness`, whose fixpoint rebuilds a block's live-out from every
+/// successor's live-in on every round; there the whole update is one
+/// [`VRegSet::union_minus`] merge per edge rather than an insert per member.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct VRegSet {
     elems: Vec<u32>,
@@ -69,6 +72,44 @@ impl VRegSet {
     /// Ascending, which is what every caller that cares about order wants.
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         self.elems.iter().map(|&v| v as usize)
+    }
+
+    /// Add every member of `other` that is not a member of `minus`.
+    ///
+    /// The dataflow in [`super::global_liveness`] is written entirely in this
+    /// shape -- `live_out(B) = union of live_in(S) - params(S)`, `live_in(B) =
+    /// use(B) + (live_out(B) - def(B))` -- and doing it a member at a time costs
+    /// a binary search and a memmove each. Both operands are sorted, so one
+    /// merge pass builds the answer.
+    pub fn union_minus(&mut self, other: &VRegSet, minus: &VRegSet) {
+        let mut merged = Vec::with_capacity(self.elems.len() + other.elems.len());
+        let (mut i, mut j, mut k) = (0, 0, 0);
+        while j < other.elems.len() {
+            let v = other.elems[j];
+            // Advance the exclusion cursor to the first member >= v.
+            while k < minus.elems.len() && minus.elems[k] < v {
+                k += 1;
+            }
+            j += 1;
+            if minus.elems.get(k) == Some(&v) {
+                continue;
+            }
+            while i < self.elems.len() && self.elems[i] < v {
+                merged.push(self.elems[i]);
+                i += 1;
+            }
+            if self.elems.get(i) == Some(&v) {
+                i += 1;
+            }
+            merged.push(v);
+        }
+        merged.extend_from_slice(&self.elems[i..]);
+        self.elems = merged;
+    }
+
+    /// Add every member of `other`.
+    pub fn union_with(&mut self, other: &VRegSet) {
+        self.union_minus(other, &VRegSet::new());
     }
 }
 
@@ -365,6 +406,37 @@ fn add_interferences_in_set(graph: &mut InterferenceGraph, live_set: &VRegSet) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set(elems: &[usize]) -> VRegSet {
+        elems.iter().copied().collect()
+    }
+
+    #[test]
+    fn union_minus_adds_what_the_exclusion_does_not_cover() {
+        let mut a = set(&[1, 5, 9]);
+        a.union_minus(&set(&[0, 5, 6, 7]), &set(&[6]));
+        assert_eq!(a.iter().collect::<Vec<_>>(), vec![0, 1, 5, 7, 9]);
+    }
+
+    #[test]
+    fn union_minus_keeps_a_member_the_exclusion_names_but_the_addend_does_not() {
+        // The exclusion applies to `other`, not to what `self` already holds:
+        // in the dataflow, `def(B)` removes a value from what flows in from
+        // below, and says nothing about `use(B)`.
+        let mut a = set(&[3]);
+        a.union_minus(&set(&[3, 4]), &set(&[3, 4]));
+        assert_eq!(a.iter().collect::<Vec<_>>(), vec![3]);
+    }
+
+    #[test]
+    fn union_with_is_a_union() {
+        let mut a = set(&[2, 4]);
+        a.union_with(&set(&[1, 4, 8]));
+        assert_eq!(a.iter().collect::<Vec<_>>(), vec![1, 2, 4, 8]);
+        let mut empty = VRegSet::new();
+        empty.union_with(&set(&[7]));
+        assert_eq!(empty.iter().collect::<Vec<_>>(), vec![7]);
+    }
     use crate::ir::op::{Op, PureOp};
     use crate::ir::types::Type;
     use crate::regalloc::liveness::compute_liveness;
@@ -404,7 +476,7 @@ mod tests {
         // v1 = iconst  (inst 1)
         // v2 = add(v0, v1)  (inst 2) -- v0 and v1 live simultaneously
         let insts = vec![iconst_inst(0), iconst_inst(1), add_inst(2, 0, 1)];
-        let live_out = BTreeSet::new();
+        let live_out = VRegSet::new();
         let liveness = compute_liveness(&insts, &live_out);
         let classes = default_classes(&insts);
         let graph = build_interference(&liveness, &insts, &classes);
@@ -437,7 +509,7 @@ mod tests {
                 operands: vec![VReg(2)],
             },
         ];
-        let live_out = BTreeSet::new();
+        let live_out = VRegSet::new();
         let liveness = compute_liveness(&insts, &live_out);
         let classes = default_classes(&insts);
         let graph = build_interference(&liveness, &insts, &classes);
@@ -458,7 +530,7 @@ mod tests {
             iconst_inst(1), // v1 = XMM
             add_inst(2, 0, 1),
         ];
-        let live_out = BTreeSet::new();
+        let live_out = VRegSet::new();
         let liveness = compute_liveness(&insts, &live_out);
         let mut classes = BTreeMap::new();
         classes.insert(VReg(0), RegClass::GPR);

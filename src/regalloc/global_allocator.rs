@@ -154,7 +154,7 @@ pub(crate) struct Phase3State {
 /// before it was read, and no two *modelled* ranges overlapped.
 fn add_block_param_interferences(
     graph: &mut InterferenceGraph,
-    block_param_vregs_per_block: &[BTreeSet<VReg>],
+    block_param_vregs_per_block: &[VRegSet],
     block_schedules: &[Vec<ScheduledInst>],
     alias_map: &BTreeMap<u32, u32>,
 ) {
@@ -182,7 +182,7 @@ fn add_block_param_interferences(
         let mut seen: BTreeSet<VReg> = BTreeSet::new();
         let unique: Vec<VReg> = params
             .iter()
-            .map(|&p| resolve(p))
+            .map(|p| resolve(VReg(p as u32)))
             .filter(|&v| seen.insert(v))
             .collect();
         for i in 0..unique.len() {
@@ -260,8 +260,7 @@ fn build_global_interference(
             .iter()
             .chain(global_liveness.live_out.iter())
         {
-            for v in live_set {
-                let idx = v.0 as usize;
+            for idx in live_set {
                 if idx > max_idx {
                     max_idx = idx;
                 }
@@ -338,10 +337,9 @@ fn build_global_interference(
 }
 
 /// Add interference edges between all pairs in `boundary_set` of the same class.
-fn add_boundary_interferences(graph: &mut InterferenceGraph, boundary_set: &BTreeSet<VReg>) {
+fn add_boundary_interferences(graph: &mut InterferenceGraph, boundary_set: &VRegSet) {
     let live: Vec<usize> = boundary_set
         .iter()
-        .map(|v| v.0 as usize)
         .filter(|&idx| idx < graph.num_vregs)
         .collect();
     for i in 0..live.len() {
@@ -814,7 +812,7 @@ fn run_phase3(
     call_arg_precolors: Vec<(VReg, Reg)>,
     copy_pairs: &[(VReg, VReg)],
     cfg_succs: &[Vec<usize>],
-    block_param_vregs_per_block: &[BTreeSet<VReg>],
+    block_param_vregs_per_block: &[VRegSet],
     uses_frame_pointer: bool,
     mut next_vreg: u32,
     coalesce_now: bool,
@@ -893,9 +891,13 @@ fn run_phase3(
         VReg(idx)
     };
     let post_coalesce_phi_uses = crate::compile::barrier::terminator_uses(&post_coalesce_schedules);
-    let renamed_block_param_vregs: Vec<BTreeSet<VReg>> = block_param_vregs_per_block
+    let renamed_block_param_vregs: Vec<VRegSet> = block_param_vregs_per_block
         .iter()
-        .map(|set| set.iter().map(|&v| resolve_vreg_early(v)).collect())
+        .map(|set| {
+            set.iter()
+                .map(|v| resolve_vreg_early(VReg(v as u32)).0 as usize)
+                .collect()
+        })
         .collect();
     let rebuild_global_liveness =
         crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
@@ -1300,9 +1302,9 @@ pub(crate) struct Phase5Context {
     /// CFG successors per block (block index -> successor block indices).
     cfg_succs: Vec<Vec<usize>>,
     /// Per-block phi uses (VRegs referenced by terminators).
-    phi_uses: Vec<BTreeSet<VReg>>,
+    phi_uses: Vec<VRegSet>,
     /// Per-block sets of VRegs that are block parameters (phi destinations).
-    block_param_vregs_per_block: Vec<BTreeSet<VReg>>,
+    block_param_vregs_per_block: Vec<VRegSet>,
     /// Function parameter VRegs with their ABI physical registers.
     param_vregs: Vec<(VReg, Reg)>,
     /// Call-argument precolors (computed before effectful-op operand sorting).
@@ -1661,7 +1663,7 @@ pub fn allocate_global(
     copy_pairs: &[(VReg, VReg)],
     loop_depths: &BTreeMap<VReg, u32>,
     cfg_succs: &[Vec<usize>],
-    block_param_vregs_per_block: &[BTreeSet<VReg>],
+    block_param_vregs_per_block: &[VRegSet],
     func_name: &str,
     uses_frame_pointer: bool,
     slots: &mut SlotAllocator,
@@ -1712,7 +1714,7 @@ pub fn allocate_global(
     // parameters of one block, and the colouring would be free to give them the
     // same register -- which the phi copies then detect as a parallel copy with
     // a repeated destination, one value short.
-    let mut block_params_now: Vec<BTreeSet<VReg>> = block_param_vregs_per_block.to_vec();
+    let mut block_params_now: Vec<VRegSet> = block_param_vregs_per_block.to_vec();
 
     for round in 0..=MAX_GLOBAL_SPILL_ROUNDS {
         let block_schedules: &[Vec<ScheduledInst>] = &schedules;
@@ -1729,7 +1731,7 @@ pub fn allocate_global(
         // successful spill reports a *higher* overshoot than the one before it
         // and the loop stops, blaming a program that in fact fits.
         let phi_uses = crate::compile::barrier::terminator_uses(block_schedules);
-        let phi_uses: &[BTreeSet<VReg>] = &phi_uses;
+        let phi_uses: &[VRegSet] = &phi_uses;
 
         // Compute function-wide global liveness. Block params are added
         // to their block's live_in so pairs of params on the same block interfere
@@ -1753,9 +1755,8 @@ pub fn allocate_global(
         // read off, against the emitted schedules rather than argued about.
         if crate::trace::is_enabled("liveness") && crate::trace::fn_matches(func_name) {
             for (bi, sched) in block_schedules.iter().enumerate() {
-                let fmt = |s: &BTreeSet<VReg>| {
-                    let mut v: Vec<u32> = s.iter().map(|r| r.0).collect();
-                    v.sort_unstable();
+                let fmt = |s: &VRegSet| {
+                    let v: Vec<usize> = s.iter().collect();
                     format!("{v:?}")
                 };
                 tracing::debug!(
@@ -1843,7 +1844,10 @@ pub fn allocate_global(
                 VReg(idx)
             };
             for set in block_params_now.iter_mut() {
-                *set = set.iter().map(|&v| resolve(v)).collect();
+                *set = set
+                    .iter()
+                    .map(|v| resolve(VReg(v as u32)).0 as usize)
+                    .collect();
             }
         }
 
@@ -1870,7 +1874,11 @@ pub fn allocate_global(
         // would store whatever the register held before the copy. Routing one
         // through a slot is the splitter's `slot_spilled_params`, which decides
         // it before the schedules are built.
-        let block_params: BTreeSet<VReg> = block_params_now.iter().flatten().copied().collect();
+        let block_params: BTreeSet<VReg> = block_params_now
+            .iter()
+            .flatten()
+            .map(|v| VReg(v as u32))
+            .collect();
         // Nor is a division's pair, for the reason `Op::result_in_fixed_regs`
         // gives: the store would save a register that never held it.
         let fixed_reg_results: BTreeSet<VReg> = phase4
@@ -2076,13 +2084,14 @@ fn choose_spill_candidates(
     let uncolored: BTreeSet<VReg> = over_budget.iter().copied().collect();
 
     let phi_uses = crate::compile::barrier::terminator_uses(block_schedules);
-    let block_param_sets: Vec<BTreeSet<VReg>> = block_schedules
+    let block_param_sets: Vec<VRegSet> = block_schedules
         .iter()
         .map(|sched| {
             sched
                 .iter()
                 .map(|inst| inst.dst)
                 .filter(|v| block_params.contains(v))
+                .map(|v| v.0 as usize)
                 .collect()
         })
         .collect();
@@ -2305,8 +2314,8 @@ mod tests {
         }
     }
 
-    fn empty_phi_uses(n: usize) -> Vec<BTreeSet<VReg>> {
-        vec![BTreeSet::new(); n]
+    fn empty_phi_uses(n: usize) -> Vec<VRegSet> {
+        vec![VRegSet::new(); n]
     }
 
     /// Build a `Phase2State` for a test CFG.
@@ -2446,11 +2455,11 @@ mod tests {
             compute_global_liveness(&block_schedules, &successors, &phi_uses)
         };
         assert!(
-            global_liveness.live_out[0].contains(&VReg(0)),
+            global_liveness.live_out[0].contains(0),
             "v0 must be live_out of block 0 (live across back edge)"
         );
         assert!(
-            global_liveness.live_in[1].contains(&VReg(0)),
+            global_liveness.live_in[1].contains(0),
             "v0 must be live_in of block 1"
         );
 
@@ -2468,7 +2477,7 @@ mod tests {
         // value. Confirm v2 does NOT appear in live_out[1] (it does not cross
         // the back edge back to block 0).
         assert!(
-            !global_liveness.live_out[1].contains(&VReg(2)),
+            !global_liveness.live_out[1].contains(2),
             "v2 (body-local) must NOT be live_out of block 1"
         );
     }
@@ -2587,7 +2596,7 @@ mod tests {
             call_arg_precolors,
             &copy_pairs,
             &successors,
-            &Vec::<std::collections::BTreeSet<VReg>>::new(),
+            &Vec::<VRegSet>::new(),
             false, // uses_frame_pointer
             10,    // next_vreg start
             true,  // coalesce_now
@@ -2659,7 +2668,7 @@ mod tests {
             call_arg_precolors,
             &copy_pairs,
             &successors,
-            &Vec::<std::collections::BTreeSet<VReg>>::new(),
+            &Vec::<VRegSet>::new(),
             false,
             next_vreg,
             true, // coalesce_now
@@ -2713,7 +2722,7 @@ mod tests {
             call_arg_precolors,
             &copy_pairs,
             &successors,
-            &Vec::<std::collections::BTreeSet<VReg>>::new(),
+            &Vec::<VRegSet>::new(),
             false,
             next_vreg,
             true, // coalesce_now
@@ -2766,7 +2775,7 @@ mod tests {
             call_arg_precolors,
             &copy_pairs,
             &successors,
-            &Vec::<std::collections::BTreeSet<VReg>>::new(),
+            &Vec::<VRegSet>::new(),
             false,
             next_vreg,
             true, // coalesce_now
@@ -2803,7 +2812,7 @@ mod tests {
             call_arg_precolors,
             copy_pairs,
             successors,
-            &Vec::<std::collections::BTreeSet<VReg>>::new(),
+            &Vec::<VRegSet>::new(),
             uses_frame_pointer,
             next_vreg,
             true,
@@ -2983,7 +2992,7 @@ mod tests {
         slots: &mut SlotAllocator,
     ) -> GlobalRegAllocResult {
         let n = block_schedules.len();
-        let block_param_vregs: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
+        let block_param_vregs: Vec<VRegSet> = vec![VRegSet::new(); n];
         allocate_global(
             block_schedules,
             param_vregs,
@@ -3171,7 +3180,7 @@ mod tests {
             .collect();
 
         let n = block_schedules.len();
-        let block_param_vregs: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
+        let block_param_vregs: Vec<VRegSet> = vec![VRegSet::new(); n];
 
         let result = allocate_global(
             &block_schedules,
@@ -3308,9 +3317,9 @@ mod tests {
             ],
         ];
         let cfg_succs = vec![vec![1usize], vec![2usize], vec![]];
-        let mut block_param_vregs: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); 3];
-        block_param_vregs[1].extend([VReg(3), VReg(4), VReg(5)]);
-        block_param_vregs[2].insert(VReg(7));
+        let mut block_param_vregs: Vec<VRegSet> = vec![VRegSet::new(); 3];
+        block_param_vregs[1] = [3usize, 4, 5].into_iter().collect();
+        block_param_vregs[2].insert(7);
         // Copy pairs: the phi args → block params. These are what coalesce
         // will attempt to merge. Critically, (v0, v3) (v1, v4) (v2, v5) must
         // NOT coalesce in a way that collapses v3/v4/v5 onto a single color.

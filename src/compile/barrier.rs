@@ -6,6 +6,7 @@ use crate::ir::effectful::{BlockId, EffOperand, EffectfulOp, TermArgs};
 use crate::ir::function::BasicBlock;
 use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
+use crate::regalloc::interference::VRegSet;
 use crate::regalloc::{SlotAllocator, SlotOwner};
 use crate::schedule::scheduler::ScheduledInst;
 
@@ -834,13 +835,13 @@ pub(crate) fn terminator_arg_operands(schedule: &[ScheduledInst]) -> Vec<(u32, V
 /// allocator's spill loop rematerializes one and renames it -- so the set is a
 /// function of the schedules at the moment it is asked, and asking it of a
 /// stale copy names a VReg those schedules no longer define.
-pub(crate) fn terminator_uses(schedules: &[Vec<ScheduledInst>]) -> Vec<BTreeSet<VReg>> {
+pub(crate) fn terminator_uses(schedules: &[Vec<ScheduledInst>]) -> Vec<VRegSet> {
     schedules
         .iter()
         .map(|s| {
             terminator_arg_operands(s)
                 .into_iter()
-                .map(|(_, v)| v)
+                .map(|(_, v)| v.0 as usize)
                 .collect()
         })
         .collect()

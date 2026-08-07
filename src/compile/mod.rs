@@ -841,11 +841,11 @@ pub fn compile(
     // The final `phi_uses`, kept for `verify::verify_register_sharing` after
     // allocation: it is the terminator half of liveness, and the check needs the
     // same one the allocator was given.
-    let verify_phi_uses: Vec<BTreeSet<VReg>>;
+    let verify_phi_uses: Vec<crate::regalloc::interference::VRegSet>;
     // The block parameters, for the same reason: a parameter is written by the
     // phi copy at the edge, so it is not live at a predecessor's exit unless the
     // predecessor's terminator passes it, which `verify_phi_uses` records.
-    let verify_block_params: Vec<BTreeSet<VReg>>;
+    let verify_block_params: Vec<crate::regalloc::interference::VRegSet>;
     // And the copy pairs, so the check exempts the same phi-related VRegs
     // coalescing was allowed to merge.
     let verify_copy_pairs: Vec<(VReg, VReg)>;
@@ -1260,7 +1260,7 @@ pub fn compile(
                 if slot_spilled_params.contains_key(&(block.id, pidx as u32)) {
                     continue;
                 }
-                block_param_vregs_per_block[block_idx].insert(vreg);
+                block_param_vregs_per_block[block_idx].insert(vreg.0 as usize);
             }
         }
 
@@ -1273,9 +1273,9 @@ pub fn compile(
         if !slot_spilled_params.is_empty() {
             for (&(bid, pidx), info) in &slot_spilled_params {
                 let block_idx = block_id_to_idx[&bid];
-                block_param_vregs_per_block[block_idx].remove(&info.vreg);
+                block_param_vregs_per_block[block_idx].remove(info.vreg.0 as usize);
                 if let Some(own) = func.blocks[block_idx].param_vreg(pidx) {
-                    block_param_vregs_per_block[block_idx].remove(&own);
+                    block_param_vregs_per_block[block_idx].remove(own.0 as usize);
                 }
             }
         }

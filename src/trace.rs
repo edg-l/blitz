@@ -149,7 +149,7 @@ pub fn init_tracing() {
 use crate::egraph::extract::VReg;
 use crate::regalloc::interference::VRegSet;
 use crate::schedule::scheduler::ScheduledInst;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Format a schedule with optional barrier group annotations.
 pub fn format_schedule(
@@ -360,11 +360,7 @@ pub fn format_slot_traffic(
 }
 
 /// Format a liveness info's live_at sets.
-pub fn format_liveness(
-    insts: &[ScheduledInst],
-    live_at: &[VRegSet],
-    live_out: &BTreeSet<VReg>,
-) -> String {
+pub fn format_liveness(insts: &[ScheduledInst], live_at: &[VRegSet], live_out: &VRegSet) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     for (i, (inst, live)) in insts.iter().zip(live_at.iter()).enumerate() {
@@ -377,8 +373,7 @@ pub fn format_liveness(
         )
         .unwrap();
     }
-    let mut lo: Vec<u32> = live_out.iter().map(|v| v.0).collect();
-    lo.sort();
+    let lo: Vec<usize> = live_out.iter().collect();
     writeln!(out, "  live_out={lo:?}").unwrap();
     out
 }

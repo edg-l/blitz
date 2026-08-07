@@ -1,18 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::compile::program_point::ProgramPoint;
-use crate::egraph::extract::{ClassVRegMap, VReg};
+use crate::egraph::extract::ClassVRegMap;
 use crate::ir::effectful::BlockId;
 use crate::ir::function::Function;
 use crate::ir::op::ClassId;
+use crate::regalloc::interference::VRegSet;
 use crate::schedule::scheduler::ScheduledInst;
 
 /// Per-block liveness information computed by global iterative dataflow.
 pub struct GlobalLiveness {
     /// VRegs live at the start of each block (indexed by block index).
-    pub live_in: Vec<BTreeSet<VReg>>,
+    pub live_in: Vec<VRegSet>,
     /// VRegs live at the end of each block (indexed by block index).
-    pub live_out: Vec<BTreeSet<VReg>>,
+    pub live_out: Vec<VRegSet>,
 }
 
 /// Compute per-block live_in and live_out sets using backward iterative dataflow.
@@ -31,7 +32,7 @@ pub struct GlobalLiveness {
 pub fn compute_global_liveness(
     block_schedules: &[Vec<ScheduledInst>],
     successors: &[Vec<usize>],
-    phi_uses: &[BTreeSet<VReg>],
+    phi_uses: &[VRegSet],
 ) -> GlobalLiveness {
     compute_global_liveness_with_block_params(block_schedules, successors, phi_uses, &[])
 }
@@ -46,57 +47,53 @@ pub fn compute_global_liveness(
 pub fn compute_global_liveness_with_block_params(
     block_schedules: &[Vec<ScheduledInst>],
     successors: &[Vec<usize>],
-    phi_uses: &[BTreeSet<VReg>],
-    block_param_vregs_per_block: &[BTreeSet<VReg>],
+    phi_uses: &[VRegSet],
+    block_param_vregs_per_block: &[VRegSet],
 ) -> GlobalLiveness {
     let n = block_schedules.len();
     assert_eq!(successors.len(), n);
     assert_eq!(phi_uses.len(), n);
 
     // Compute def(B) and use(B) for each block.
-    let mut block_def: Vec<BTreeSet<VReg>> = Vec::with_capacity(n);
-    let mut block_use: Vec<BTreeSet<VReg>> = Vec::with_capacity(n);
+    let mut block_def: Vec<VRegSet> = Vec::with_capacity(n);
+    let mut block_use: Vec<VRegSet> = Vec::with_capacity(n);
 
     for (b, sched) in block_schedules.iter().enumerate() {
-        let mut def: BTreeSet<VReg> = BTreeSet::new();
-        let mut uses: BTreeSet<VReg> = BTreeSet::new();
+        let mut def = VRegSet::new();
+        let mut uses = VRegSet::new();
 
         // Process instructions in forward order to compute upward-exposed uses.
         for inst in sched {
             // Operands that are not yet defined in this block are upward-exposed uses.
             for &op in &inst.operands {
-                if !def.contains(&op) {
-                    uses.insert(op);
+                if !def.contains(op.0 as usize) {
+                    uses.insert(op.0 as usize);
                 }
             }
-            def.insert(inst.dst);
+            def.insert(inst.dst.0 as usize);
         }
 
         // phi_uses[b] are VRegs used in the block's terminator.
         // If they are not defined in this block, they are upward-exposed.
-        for &v in &phi_uses[b] {
-            if !def.contains(&v) {
-                uses.insert(v);
-            }
-        }
+        uses.union_minus(&phi_uses[b], &def);
 
         block_def.push(def);
         block_use.push(uses);
     }
 
-    let mut live_in: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
-    let mut live_out: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
+    let mut live_in: Vec<VRegSet> = vec![VRegSet::new(); n];
+    let mut live_out: Vec<VRegSet> = vec![VRegSet::new(); n];
 
     // Initialize live_in = use(B) ∪ block_params(B). Block params receive
     // distinct values from phi copies at block entry and must occupy distinct
     // registers throughout that copy sequence. The simplest way to enforce
     // this in a liveness-driven interference builder is to treat params as
     // "live at entry" so the boundary pass wires up pairwise edges.
+    let no_params = VRegSet::new();
+    let params_of = |b: usize| block_param_vregs_per_block.get(b).unwrap_or(&no_params);
     for b in 0..n {
-        live_in[b].extend(block_use[b].iter().copied());
-        if let Some(params) = block_param_vregs_per_block.get(b) {
-            live_in[b].extend(params.iter().copied());
-        }
+        live_in[b] = block_use[b].clone();
+        live_in[b].union_with(params_of(b));
     }
 
     // Iterate until fixed point.
@@ -116,20 +113,9 @@ pub fn compute_global_liveness_with_block_params(
             // terminator writes phi-source VRegs into the successor's params
             // via phi copies), so when propagating live_in[succ] upward we
             // strip out the successor's block params.
-            let mut new_out: BTreeSet<VReg> = BTreeSet::new();
-            for &v in &phi_uses[b] {
-                new_out.insert(v);
-            }
+            let mut new_out = phi_uses[b].clone();
             for &s in &successors[b] {
-                let succ_params = block_param_vregs_per_block.get(s);
-                for &v in &live_in[s] {
-                    if let Some(params) = succ_params
-                        && params.contains(&v)
-                    {
-                        continue;
-                    }
-                    new_out.insert(v);
-                }
+                new_out.union_minus(&live_in[s], params_of(s));
             }
 
             if new_out != live_out[b] {
@@ -139,14 +125,8 @@ pub fn compute_global_liveness_with_block_params(
 
             // live_in(B) = use(B) ∪ block_params(B) ∪ (live_out(B) - def(B)).
             let mut new_in = block_use[b].clone();
-            if let Some(params) = block_param_vregs_per_block.get(b) {
-                new_in.extend(params.iter().copied());
-            }
-            for &v in &live_out[b] {
-                if !block_def[b].contains(&v) {
-                    new_in.insert(v);
-                }
-            }
+            new_in.union_with(params_of(b));
+            new_in.union_minus(&live_out[b], &block_def[b]);
 
             if new_in != live_in[b] {
                 live_in[b] = new_in;
@@ -173,14 +153,14 @@ pub fn collect_block_param_vregs_per_block(
     egraph: &crate::egraph::EGraph,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     class_to_vreg: &ClassVRegMap,
-) -> Vec<BTreeSet<VReg>> {
+) -> Vec<VRegSet> {
     debug_assert!(
         class_to_vreg.split_generation > 0,
         "collect_block_param_vregs_per_block called before splitter committed output \
          (class_to_vreg.split_generation == 0); call apply_plan_to first"
     );
     let n = func.blocks.len();
-    let mut result: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
+    let mut result: Vec<VRegSet> = vec![VRegSet::new(); n];
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
         let entry_point = ProgramPoint::block_entry(block_idx);
@@ -188,7 +168,7 @@ pub fn collect_block_param_vregs_per_block(
             if let Some(&cid) = block_param_map.get(&(block.id, pidx))
                 && let Some(vreg) = class_to_vreg.lookup(egraph.find_immutable(cid), entry_point)
             {
-                result[block_idx].insert(vreg);
+                result[block_idx].insert(vreg.0 as usize);
             }
         }
     }
@@ -199,6 +179,7 @@ pub fn collect_block_param_vregs_per_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::egraph::extract::VReg;
     use crate::ir::op::{MachOp, Op, PureOp};
     use crate::ir::types::Type;
 
@@ -226,8 +207,8 @@ mod tests {
         }
     }
 
-    fn empty_phi_uses(n: usize) -> Vec<BTreeSet<VReg>> {
-        vec![BTreeSet::new(); n]
+    fn empty_phi_uses(n: usize) -> Vec<VRegSet> {
+        vec![VRegSet::new(); n]
     }
 
     // Test 1: Straight-line CFG (0 -> 1 -> 2).
@@ -250,16 +231,13 @@ mod tests {
         let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
 
         // v0 defined in block 0, used in block 2.
-        assert!(gl.live_out[0].contains(&VReg(0)), "v0 live_out of block 0");
-        assert!(gl.live_in[1].contains(&VReg(0)), "v0 live_in of block 1");
-        assert!(gl.live_out[1].contains(&VReg(0)), "v0 live_out of block 1");
-        assert!(gl.live_in[2].contains(&VReg(0)), "v0 live_in of block 2");
+        assert!(gl.live_out[0].contains(0), "v0 live_out of block 0");
+        assert!(gl.live_in[1].contains(0), "v0 live_in of block 1");
+        assert!(gl.live_out[1].contains(0), "v0 live_out of block 1");
+        assert!(gl.live_in[2].contains(0), "v0 live_in of block 2");
 
         // v0 should NOT be live_out of block 2 (no successors use it).
-        assert!(
-            !gl.live_out[2].contains(&VReg(0)),
-            "v0 not live_out of block 2"
-        );
+        assert!(!gl.live_out[2].contains(0), "v0 not live_out of block 2");
     }
 
     // Test 2: Diamond CFG (0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3).
@@ -282,12 +260,12 @@ mod tests {
 
         let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
 
-        assert!(gl.live_out[0].contains(&VReg(0)));
-        assert!(gl.live_in[1].contains(&VReg(0)));
-        assert!(gl.live_out[1].contains(&VReg(0)));
-        assert!(gl.live_in[2].contains(&VReg(0)));
-        assert!(gl.live_out[2].contains(&VReg(0)));
-        assert!(gl.live_in[3].contains(&VReg(0)));
+        assert!(gl.live_out[0].contains(0));
+        assert!(gl.live_in[1].contains(0));
+        assert!(gl.live_out[1].contains(0));
+        assert!(gl.live_in[2].contains(0));
+        assert!(gl.live_out[2].contains(0));
+        assert!(gl.live_in[3].contains(0));
     }
 
     // Test 3: Loop CFG (0 -> 1 -> 0, with loop).
@@ -308,8 +286,8 @@ mod tests {
         let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
 
         // v0 is defined in block 0 and used in block 1.
-        assert!(gl.live_out[0].contains(&VReg(0)));
-        assert!(gl.live_in[1].contains(&VReg(0)));
+        assert!(gl.live_out[0].contains(0));
+        assert!(gl.live_in[1].contains(0));
     }
 
     // Test 4: Value defined and used only within one block.
@@ -328,9 +306,9 @@ mod tests {
         let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
 
         // v0 and v1 are local to block 0 -- should not be live across any boundary.
-        assert!(!gl.live_out[0].contains(&VReg(0)));
-        assert!(!gl.live_in[1].contains(&VReg(0)));
-        assert!(!gl.live_out[0].contains(&VReg(1)));
+        assert!(!gl.live_out[0].contains(0));
+        assert!(!gl.live_in[1].contains(0));
+        assert!(!gl.live_out[0].contains(1));
     }
 
     // Test 5: phi_uses propagation.
@@ -347,7 +325,7 @@ mod tests {
         let successors = vec![vec![1], vec![]];
         // v0 is used as a phi source at the terminator of block 0.
         let mut phi_uses = empty_phi_uses(2);
-        phi_uses[0].insert(VReg(0));
+        phi_uses[0].insert(0);
 
         let gl = compute_global_liveness(&schedules, &successors, &phi_uses);
 
@@ -358,7 +336,7 @@ mod tests {
         // Block 1 doesn't use v0, so it's not in live_in[1], so live_out[0] won't have it.
         // This is correct: phi_uses track what the terminator consumes locally.
         assert!(
-            !gl.live_in[0].contains(&VReg(0)),
+            !gl.live_in[0].contains(0),
             "v0 is defined in block 0, not upward-exposed"
         );
     }

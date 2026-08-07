@@ -16,6 +16,7 @@ use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 use crate::regalloc::global_liveness::GlobalLiveness;
+use crate::regalloc::interference::VRegSet as BlockLiveSet;
 use crate::regalloc::spill::LOOP_DEPTH_PENALTY_BASE;
 use crate::regalloc::vregset::VRegSet;
 use crate::regalloc::{SlotAllocator, SlotOwner};
@@ -140,7 +141,7 @@ const SLOT_STORE_LOAD_COST: f64 = 5.0;
 fn compute_local_liveness(
     block_idx: usize,
     schedule: &[ScheduledInst],
-    live_out_seed: &BTreeSet<VReg>,
+    live_out_seed: &BlockLiveSet,
     vreg_count: usize,
 ) -> Vec<VRegSet> {
     let n = schedule.len();
@@ -155,7 +156,7 @@ fn compute_local_liveness(
 
     // Seed the backward scan from live_out: values live at the exit of the block.
     let mut live = VRegSet::default();
-    live.extend(live_out_seed.iter().copied());
+    live.extend(live_out_seed.iter().map(|v| VReg(v as u32)));
     result[n] = live.clone();
 
     // Walk backward.
@@ -260,7 +261,7 @@ fn compute_pressure_for_class(
 /// materialized only where a caller has something to decide.
 fn compute_pressures_only(
     schedule: &[ScheduledInst],
-    live_out_seed: &BTreeSet<VReg>,
+    live_out_seed: &BlockLiveSet,
     masks: &[&VRegSet],
 ) -> Vec<Vec<u32>> {
     let n = schedule.len();
@@ -286,7 +287,7 @@ fn compute_pressures_only(
         .collect();
 
     let mut live = VRegSet::default();
-    live.extend(live_out_seed.iter().copied());
+    live.extend(live_out_seed.iter().map(|v| VReg(v as u32)));
 
     let record = |i: usize, live: &VRegSet, out: &mut Vec<Vec<u32>>| {
         for (c, mask) in masks.iter().enumerate() {
@@ -1468,7 +1469,7 @@ fn detect_blockparam_slot_routing(
         if group.reg_class == RegClass::XMM
             && call_blocks.iter().any(|&call_bi| {
                 call_bi < global_liveness.live_in.len()
-                    && global_liveness.live_in[call_bi].contains(&vreg)
+                    && global_liveness.live_in[call_bi].contains(vreg.0 as usize)
             })
             && routable(vreg, group)
         {
@@ -1590,7 +1591,7 @@ fn detect_blockparam_slot_routing(
                     || global_liveness
                         .live_in
                         .get(block_idx)
-                        .is_some_and(|live| live.contains(v))
+                        .is_some_and(|live| live.contains(v.0 as usize))
             };
             let mut by_arg: BTreeMap<VReg, Option<BTreeSet<VReg>>> = BTreeMap::new();
             for &(arg_idx, arg_vreg) in &args {
@@ -2282,6 +2283,7 @@ mod tests {
     use crate::ir::op::Op;
     use crate::ir::types::Type;
     use crate::regalloc::global_liveness::GlobalLiveness;
+    use crate::regalloc::interference::VRegSet as BlockLiveSet;
     use crate::schedule::scheduler::ScheduledInst;
     use std::cmp::Reverse;
     use std::collections::{BTreeMap, BTreeSet};
@@ -2323,8 +2325,8 @@ mod tests {
 
     fn make_global_liveness(n_blocks: usize) -> GlobalLiveness {
         GlobalLiveness {
-            live_in: vec![BTreeSet::new(); n_blocks],
-            live_out: vec![BTreeSet::new(); n_blocks],
+            live_in: vec![BlockLiveSet::new(); n_blocks],
+            live_out: vec![BlockLiveSet::new(); n_blocks],
         }
     }
 
@@ -2594,7 +2596,7 @@ mod tests {
 
         // Global liveness: param_vreg is live_in to block1 (where the call is).
         let mut global_liveness = make_global_liveness(2);
-        global_liveness.live_in[block1_idx].insert(param_vreg);
+        global_liveness.live_in[block1_idx].insert(param_vreg.0 as usize);
 
         let mut slots = SlotAllocator::new();
         let mut next_vreg = 2u32;
@@ -2675,7 +2677,7 @@ mod tests {
         let block_schedules = vec![vec![], vec![call_inst]];
 
         let mut global_liveness = make_global_liveness(2);
-        global_liveness.live_in[block1_idx].insert(param_vreg);
+        global_liveness.live_in[block1_idx].insert(param_vreg.0 as usize);
 
         let mut slots = SlotAllocator::new();
         let mut next_vreg = 2u32;
@@ -2740,7 +2742,7 @@ mod tests {
         let block_schedules = vec![vec![], vec![call_inst, use2]];
 
         let mut global_liveness = make_global_liveness(2);
-        global_liveness.live_in[block1_idx].insert(param_vreg);
+        global_liveness.live_in[block1_idx].insert(param_vreg.0 as usize);
 
         let mut slots = SlotAllocator::new();
         let mut next_vreg = 3u32;
@@ -2845,7 +2847,7 @@ mod tests {
 
         // param_vreg is live_in to block2 (which has the call).
         let mut global_liveness = make_global_liveness(3);
-        global_liveness.live_in[2].insert(param_vreg);
+        global_liveness.live_in[2].insert(param_vreg.0 as usize);
 
         let mut slots = SlotAllocator::new();
         let mut next_vreg = 2u32;

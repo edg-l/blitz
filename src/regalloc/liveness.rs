@@ -1,6 +1,3 @@
-use std::collections::BTreeSet;
-
-use crate::egraph::extract::VReg;
 use crate::schedule::scheduler::ScheduledInst;
 
 use super::interference::VRegSet;
@@ -33,10 +30,10 @@ pub struct LivenessInfo {
 ///     Remove dst from live (if this inst defines it)
 ///     Add all operands to live
 ///   live_in = live after processing all instructions
-pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &BTreeSet<VReg>) -> LivenessInfo {
+pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &VRegSet) -> LivenessInfo {
     let n = insts.len();
     let mut live_at: Vec<VRegSet> = vec![VRegSet::new(); n];
-    let mut live: VRegSet = block_live_out.iter().map(|v| v.0 as usize).collect();
+    let mut live: VRegSet = block_live_out.clone();
 
     for i in (0..n).rev() {
         let inst = &insts[i];
@@ -59,13 +56,14 @@ pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &BTreeSet<VReg>
     LivenessInfo {
         live_at,
         live_in,
-        live_out: block_live_out.iter().map(|v| v.0 as usize).collect(),
+        live_out: block_live_out.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::egraph::extract::VReg;
     use crate::ir::op::{MachOp, Op, PureOp};
     use crate::ir::types::Type;
 
@@ -112,7 +110,7 @@ mod tests {
             add_inst(2, 0, 1), // v2 = add(v0, v1)
             use_inst(3, 2),    // v3 = use(v2)
         ];
-        let live_out: BTreeSet<VReg> = BTreeSet::new();
+        let live_out = VRegSet::new();
         let info = compute_liveness(&insts, &live_out);
 
         // Before inst 2 (add): v0 and v1 must be live.
@@ -142,8 +140,8 @@ mod tests {
             iconst_inst(0), // v0 = iconst
             iconst_inst(1), // v1 = iconst
         ];
-        let mut live_out: BTreeSet<VReg> = BTreeSet::new();
-        live_out.insert(VReg(0)); // v0 is used in a successor block
+        let mut live_out = VRegSet::new();
+        live_out.insert(0); // v0 is used in a successor block
 
         let info = compute_liveness(&insts, &live_out);
 
@@ -169,7 +167,7 @@ mod tests {
         // The block uses v5 which is defined outside (in a predecessor).
         // Inst: v6 = use(v5)
         let insts = vec![use_inst(6, 5)];
-        let live_out: BTreeSet<VReg> = BTreeSet::new();
+        let live_out = VRegSet::new();
 
         let info = compute_liveness(&insts, &live_out);
 

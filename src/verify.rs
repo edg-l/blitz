@@ -363,6 +363,7 @@ mod tests {
     use crate::ir::effectful::{EffOperand, EffectfulOp};
     use crate::ir::function::BasicBlock;
     use crate::ir::op::{Op, PureOp};
+    use crate::regalloc::interference::VRegSet;
 
     /// `fn f(a: I64) -> I64 { return a + 1; }`
     fn simple_function() -> (Function, EGraph) {
@@ -414,10 +415,10 @@ mod tests {
             vec![inst(1, vec![]), inst(2, vec![])],
             vec![inst(3, block1_uses.to_vec())],
         ];
-        let phi_uses = vec![passed.iter().copied().map(VReg).collect(), BTreeSet::new()];
+        let phi_uses = vec![passed.iter().map(|&v| v as usize).collect(), VRegSet::new()];
         let block_params = vec![
-            BTreeSet::new(),
-            block1_params.iter().copied().map(VReg).collect(),
+            VRegSet::new(),
+            block1_params.iter().map(|&v| v as usize).collect(),
         ];
         verify_register_sharing(
             &schedules,
@@ -764,8 +765,8 @@ pub fn verify_machinsts(
 /// appears in the emitted operands at all.
 pub fn verify_register_sharing(
     block_schedules: &[Vec<ScheduledInst>],
-    phi_uses: &[std::collections::BTreeSet<VReg>],
-    block_params: &[std::collections::BTreeSet<VReg>],
+    phi_uses: &[crate::regalloc::interference::VRegSet],
+    block_params: &[crate::regalloc::interference::VRegSet],
     cfg_succs: &[Vec<usize>],
     vreg_to_reg: &BTreeMap<VReg, Reg>,
     coalesce_aliases: &BTreeMap<VReg, VReg>,
@@ -789,9 +790,13 @@ pub fn verify_register_sharing(
     // there is a use with no def in any schedule -- liveness would carry it back
     // to the function entry and report a clash at every point on the way.
     let canon = |v: VReg| -> VReg { crate::regalloc::coalesce::chase_alias(v, coalesce_aliases) };
-    let phi_uses_canon: Vec<std::collections::BTreeSet<VReg>> = phi_uses
+    let phi_uses_canon: Vec<crate::regalloc::interference::VRegSet> = phi_uses
         .iter()
-        .map(|set| set.iter().map(|&v| canon(v)).collect())
+        .map(|set| {
+            set.iter()
+                .map(|v| canon(VReg(v as u32)).0 as usize)
+                .collect()
+        })
         .collect();
     let schedules_canon: Vec<Vec<ScheduledInst>> = block_schedules
         .iter()
@@ -812,9 +817,13 @@ pub fn verify_register_sharing(
     // both a parameter of some block and the destination of a dead def in a
     // predecessor reads as live across that predecessor, and every value holding
     // its register in between reads as a clash.
-    let block_params_canon: Vec<std::collections::BTreeSet<VReg>> = block_params
+    let block_params_canon: Vec<crate::regalloc::interference::VRegSet> = block_params
         .iter()
-        .map(|set| set.iter().map(|&v| canon(v)).collect())
+        .map(|set| {
+            set.iter()
+                .map(|v| canon(VReg(v as u32)).0 as usize)
+                .collect()
+        })
         .collect();
     let liveness = compute_global_liveness_with_block_params(
         &schedules_canon,
@@ -838,12 +847,13 @@ pub fn verify_register_sharing(
     // over a range of points and would otherwise be reported at each of them.
     let mut seen: BTreeSet<(Reg, VReg, VReg)> = BTreeSet::new();
 
-    let check = |live: &std::collections::BTreeSet<VReg>,
+    let check = |live: &crate::regalloc::interference::VRegSet,
                  where_: &str,
                  errors: &mut Vec<String>,
                  seen: &mut BTreeSet<(Reg, VReg, VReg)>| {
         let mut by_reg: BTreeMap<Reg, VReg> = BTreeMap::new();
-        for &v in live {
+        for v in live {
+            let v = VReg(v as u32);
             let Some(&reg) = vreg_to_reg.get(&v) else {
                 continue;
             };
@@ -872,9 +882,9 @@ pub fn verify_register_sharing(
         let mut live = liveness.live_out[b].clone();
         check(&live, &format!("block {b} exit"), &mut errors, &mut seen);
         for (i, inst) in schedule.iter().enumerate().rev() {
-            live.remove(&inst.dst);
+            live.remove(inst.dst.0 as usize);
             for &op in &inst.operands {
-                live.insert(op);
+                live.insert(op.0 as usize);
             }
             check(
                 &live,
