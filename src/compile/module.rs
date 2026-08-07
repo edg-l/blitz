@@ -90,6 +90,25 @@ pub fn compile_module_with_globals(
     for func in functions {
         let obj = compile(func, opts, None)?;
 
+        // Every function starts on a 16-byte boundary.
+        //
+        // Not a micro-optimization of the entry itself: it is what makes any
+        // statement about where code *inside* a function sits mean anything.
+        // Without it a function begins wherever the previous one ended -- measured
+        // before this, the four functions of `live/tail_recursion.c` started at
+        // offsets 0, 13, 14 and 14 mod 16 -- so a loop's distance from a fetch
+        // boundary is decided by the length of everything emitted before it.
+        //
+        // That is not a theoretical concern here. Deleting 4 dead instructions
+        // from `live/matmul_rt.c` cost `+20.7%` cycles, and three instructions of
+        // unrelated padding took the same comparison to `-1.0%`; see the loop
+        // alignment item in `ROADMAP.md`. Padding *between* functions cannot
+        // affect any distance within one, so it carries none of the ordering
+        // hazard that aligning a loop header does.
+        const FUNC_ALIGN: usize = 16;
+        let pad = (FUNC_ALIGN - combined_code.len() % FUNC_ALIGN) % FUNC_ALIGN;
+        combined_code.resize(combined_code.len() + pad, 0x90);
+
         // Adjust relocation offsets by the current combined code offset.
         let base_offset = combined_code.len();
         for mut reloc in obj.relocations {
@@ -128,4 +147,56 @@ pub fn compile_module_with_globals(
         globals,
         rodata,
     })
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::FunctionBuilder;
+    use crate::ir::types::Type;
+
+    fn adder(name: &str, extra: usize) -> Function {
+        let mut b = FunctionBuilder::new(name, &[Type::I64], &[Type::I64]);
+        let p = b.params().to_vec();
+        let mut acc = p[0];
+        // `extra` controls the function's length, which is the whole point of the
+        // test below: it is what would shift everything after it.
+        for k in 0..=extra {
+            let c = b.iconst(k as i64 + 1, Type::I64);
+            acc = b.add(acc, c);
+        }
+        b.ret(Some(acc));
+        b.finalize().expect("finalize")
+    }
+
+    /// Every function starts on a 16-byte boundary, whatever precedes it.
+    ///
+    /// This is what makes a statement about where code sits *inside* a function
+    /// mean anything: with it, a function's offsets modulo 16 do not depend on the
+    /// length of any function before it, so a codegen change in one cannot re-time
+    /// the loops of another. Measured without it, growing the first of four
+    /// functions moved every absolute address in the last one modulo 16.
+    #[test]
+    fn function_starts_are_16_byte_aligned() {
+        for extra in [0usize, 1, 3, 7] {
+            let obj = compile_module(
+                vec![adder("first", extra), adder("second", 2), adder("third", 5)],
+                &CompileOptions::o1(),
+            )
+            .expect("module compiles");
+            assert_eq!(obj.functions.len(), 3);
+            for fi in &obj.functions {
+                assert_eq!(
+                    fi.offset % 16,
+                    0,
+                    "function '{}' starts at offset {} with extra={extra}, which is not \
+                     16-byte aligned",
+                    fi.name,
+                    fi.offset,
+                );
+            }
+        }
+    }
 }

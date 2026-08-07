@@ -72,11 +72,12 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Loop headers are aligned by accident** -- `P1`. `align_loop_headers` is
-  written and never called, and it is worth up to 20% on one kernel: removing 4
-  dead instructions from `matmul_rt` cost `+20.7%` cycles, and three unrelated
-  instructions before the loop took the same comparison to `-1.0%`. Until it is
-  wired, every `run_perf.sh` number carries a layout term nobody controls.
+- **Loop headers are aligned by accident** -- `P1`. Function starts are aligned
+  now, so a change in one function no longer re-times another; the loop headers
+  themselves still are not, and `align_loop_headers` needs align and relax
+  iterated to a fixpoint before it can be wired. Worth up to 20% on one kernel:
+  removing 4 dead instructions from `matmul_rt` cost `+20.7%` cycles, and three
+  unrelated instructions before its loop took the same comparison to `-1.0%`.
 - **Copies are still a third of what blitz emits** -- `P1`.
   697 register-to-register moves in 2407 instructions over `bench` against
   `gcc -O2`'s 351 in 2322, and **585 of the 697 are parallel copies** -- phi
@@ -617,6 +618,26 @@ so the holes stay visible.
       **never called**; `enable_nop_alignment` is `false` at both levels and is
       never read. So where a hot loop falls relative to a fetch boundary is
       whatever the instruction stream happens to produce.
+
+      **Function starts are aligned now, which is the half of this that had no
+      hazard.** `compile_module_with_globals` pads to 16 between functions, and
+      what that buys is not speed -- `+0.04%` geometric mean over 24 `live`
+      kernels, which is nothing -- but *invariance*: a function's offsets modulo 16
+      no longer depend on the length of anything before it, so a codegen change in
+      one function cannot re-time the loops of another. Demonstrated rather than
+      argued: growing the first of four functions used to shift every absolute
+      address in the last one modulo 16 (`14 15 0 2 4 ...` became `9 10 11 13
+      15 ...`) and now leaves them identical. `compile::module`'s
+      `function_starts_are_16_byte_aligned` pins it.
+
+      **What is left is the loop headers, and the ordering is the problem.** NOPs
+      have to go in before branch relaxation, or a jump the relaxer shortened may
+      no longer reach; but relaxation then shrinks jumps and moves the header it
+      just aligned. It needs align and relax iterated to a fixpoint, which is what
+      an assembler does and what this pass does not. Two other things it gets
+      wrong as written: the offset it computes is relative to the *body*, while the
+      prologue is encoded separately and is part of the distance, and it never asks
+      whether a loop is hot enough to be worth the padding.
 
       **Measured, and the measurement is the point.** Removing 4 dead `lea`s from
       `live/matmul_rt.c` -- a strict reduction, `-107M` dynamic instructions --
