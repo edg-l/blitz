@@ -623,6 +623,14 @@ fn lower_op(
             }
         }
 
+        Op::Mach(MachOp::X86SbbSelf(ty)) => {
+            let dst = dst_reg.ok_or_else(|| "X86SbbSelf: no register for dst".to_string())?;
+            Ok(vec![MachInst::SbbSelf {
+                size: OpSize::from_int_type(ty),
+                dst: Operand::Reg(dst),
+            }])
+        }
+
         Op::Mach(MachOp::X86Lea2) => {
             let dst = dst_reg.ok_or_else(|| "X86Lea2: no register for dst".to_string())?;
             let base = operand_regs

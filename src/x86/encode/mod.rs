@@ -542,6 +542,9 @@ impl Encoder {
             MachInst::Setcc { cc, dst } => {
                 self.encode_setcc(*cc, Self::expect_reg(dst));
             }
+            MachInst::SbbSelf { size, dst } => {
+                self.encode_sbb_rr(*size, Self::expect_reg(dst), Self::expect_reg(dst));
+            }
             MachInst::Cmov { size, cc, dst, src } => {
                 self.encode_cmov(*size, *cc, Self::expect_reg(dst), Self::expect_reg(src));
             }

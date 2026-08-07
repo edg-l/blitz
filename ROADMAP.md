@@ -387,8 +387,21 @@ isel patterns; we should beat it on the ones we implement.
 - [ ] **BMI/BMI2 when available**: `andn`, `bextr`, `blsi`/`blsr`/`blsmsk`,
       `shlx`/`shrx`/`sarx` (no flag clobber, no CL constraint), `mulx`.
       Needs a CPU feature level knob.
-- [ ] **Carry-chain forms**: `adc`/`sbb`, and `setcc`-free branchless idioms
-      (`sbb reg,reg` as a 0/-1 mask).
+- [ ] **Carry-chain forms**: `adc`/`sbb` proper. A multi-word add has no source
+      idiom in tinyc, so this needs a shape to match (`a + b`, then
+      `c + (sum < a)`) or nothing reaches it.
+      The `setcc`-free 0/-1 mask is done: `-(unsigned)(a < b)` arrives as
+      `Sub(0, Select(flags, 1, 0))`, and after `cmp a, b` the carry flag *is*
+      `a < b`, so `sbb r, r` broadcasts it over the register in one
+      instruction. On `tests/lit/asm/carry_mask.c` the whole function is
+      3 insts / 5 bytes against 9 / 24 at 32 bits and 3 / 7 against 10 / 31 at
+      64, where the select form materializes both constants, moves, `cmov`s and
+      subtracts. One extension between the select and the subtract is
+      transparent, since C gives the comparison type `int` and a value that is
+      already 0 or 1 extends to 0 or 1 either way. Only `Ult`: `Ugt` and `Ule`
+      would need the compare's operands swapped, which is a different compare,
+      and the signed conditions are not the carry flag at all. No corpus row
+      changed -- none of them masks.
 - [x] **Rotates.** `Or(Shl(x, k), Shr(x, w - k))` on a `w`-bit `x` becomes
       `rol k`: three instructions and two reads of `x` collapse to one of each.
       There is no `ror` form -- `ror k` is `rol (w - k)` in the same encoding

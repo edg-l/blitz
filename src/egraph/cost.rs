@@ -291,6 +291,14 @@ impl CostModel {
             }
             .weighted(self.goal),
 
+            // ── X86SbbSelf: latency=1, throughput=0.33, size=2 ───────────────────
+            Op::Mach(MachOp::X86SbbSelf(_)) => CostTuple {
+                latency: 1.0,
+                throughput: 0.33,
+                size: 2.0,
+            }
+            .weighted(self.goal),
+
             // ── x86 FP ops SSE2 double (sd) ───────────────────────────────────────
             Op::Mach(MachOp::X86Addsd) | Op::Mach(MachOp::X86Subsd) => CostTuple {
                 latency: 3.0,

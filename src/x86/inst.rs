@@ -290,6 +290,13 @@ pub enum MachInst {
         cc: CondCode,
         dst: Operand,
     },
+    /// `sbb dst, dst` — leaves `-CF` in `dst`: all ones when the carry flag is
+    /// set, zero when it is clear. The previous contents of `dst` cancel, so
+    /// this reads the flags and nothing else.
+    SbbSelf {
+        size: OpSize,
+        dst: Operand,
+    },
     Cmov {
         size: OpSize,
         cc: CondCode,
@@ -625,6 +632,7 @@ impl MachInst {
             MachInst::SarRCL { dst, .. } => collect(&[dst]),
             MachInst::MovRI { dst, .. } => collect(&[dst]),
             MachInst::Setcc { dst, .. } => collect(&[dst]),
+            MachInst::SbbSelf { dst, .. } => collect(&[dst]),
             MachInst::MovRM { dst, .. } => collect(&[dst]),
             MachInst::Lea { dst, .. } => collect(&[dst]),
             MachInst::MovzxBRM { dst, .. } => collect(&[dst]),
@@ -742,7 +750,7 @@ impl MachInst {
                 v
             }
             MachInst::MovRI { .. } => Vec::new(),
-            MachInst::Setcc { .. } => Vec::new(),
+            MachInst::Setcc { .. } | MachInst::SbbSelf { .. } => Vec::new(),
             MachInst::MovRM { dst: _, addr, .. } => addr_regs(addr),
             MachInst::Lea { dst: _, addr, .. } => addr_regs(addr),
             MachInst::MovzxBRM { dst: _, addr, .. } => addr_regs(addr),

@@ -16,6 +16,7 @@ pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     changed |= apply_bit_isel(egraph, &snaps);
     changed |= apply_alu_imm_isel(egraph, &snaps);
     changed |= apply_select_isel(egraph, &snaps);
+    changed |= apply_carry_mask_isel(egraph, &snaps);
     changed |= apply_icmp_isel(egraph, &snaps);
     changed |= apply_fcmp_isel(egraph, &snaps);
     changed |= apply_sext_zext_trunc_isel(egraph, &snaps);
@@ -782,6 +783,95 @@ fn apply_select_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let cmov_canon = egraph.unionfind.find_immutable(cmov);
         if canon != cmov_canon {
             egraph.merge(class_id, cmov);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// `Sub(0, Select(flags, 1, 0))` -> `X86SbbSelf(flags)` when the flags come
+/// from an unsigned-below compare.
+///
+/// `sbb r, r` subtracts a register from itself with borrow, so it leaves `-CF`:
+/// all ones when the carry flag is set, zero when it is clear. After
+/// `cmp a, b` the carry flag *is* `a < b` unsigned, so the whole 0/-1 mask is
+/// two bytes and one instruction where the select form is five -- the two
+/// constants into registers, the `cmov`, and the subtract -- and it holds no
+/// register but its own result across the compare.
+///
+/// Only `Ult`. The other conditions are not the carry flag: `Ugt` and `Ule`
+/// would need the compare's operands swapped, which is a different compare,
+/// and the signed ones are not carry at all.
+///
+/// A widening between the select and the subtract is transparent. C gives the
+/// comparison type `int`, so a mask wider than that arrives as
+/// `Sub(0, Sext(Select(..)))`, and extending a value that is already 0 or 1
+/// leaves it 0 or 1 whichever way the extension fills.
+fn apply_carry_mask_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
+    /// The flags class of a `Select(flags, 1, 0)` in `class`, looking through
+    /// up to `exts` extensions.
+    fn zero_one_select_flags(egraph: &EGraph, class: ClassId, exts: u32) -> Option<ClassId> {
+        let canon = egraph.unionfind.find_immutable(class);
+        if canon == ClassId::NONE {
+            return None;
+        }
+        let mut extended = None;
+        for node in &egraph.class(canon).nodes {
+            match &node.op {
+                Op::Pure(PureOp::Select)
+                    if node.children.len() == 3
+                        && egraph.get_constant(node.children[1]).map(|(v, _)| v) == Some(1)
+                        && egraph.get_constant(node.children[2]).map(|(v, _)| v) == Some(0) =>
+                {
+                    return Some(node.children[0]);
+                }
+                Op::Pure(PureOp::Sext(_) | PureOp::Zext(_))
+                    if exts > 0 && node.children.len() == 1 =>
+                {
+                    extended.get_or_insert(node.children[0]);
+                }
+                _ => {}
+            }
+        }
+        extended.and_then(|inner| zero_one_select_flags(egraph, inner, exts - 1))
+    }
+
+    let mut changed = false;
+
+    for snap in snaps {
+        let class_id = snap.class_id;
+        if snap.op != Op::Pure(PureOp::Sub) || snap.children.len() != 2 {
+            continue;
+        }
+        if egraph.get_constant(snap.children[0]).map(|(v, _)| v) != Some(0) {
+            continue;
+        }
+
+        // The flags class, taken before `egraph.add` invalidates the borrow.
+        let Some(flags) = zero_one_select_flags(egraph, snap.children[1], 1) else {
+            continue;
+        };
+        if find_cc_in_class(egraph, flags) != Some(CondCode::Ult) {
+            continue;
+        }
+
+        let ty = egraph
+            .class(egraph.unionfind.find_immutable(class_id))
+            .ty
+            .clone();
+        if !ty.is_integer() {
+            continue;
+        }
+
+        let sbb = egraph.add(ENode {
+            op: Op::Mach(MachOp::X86SbbSelf(ty)),
+            children: smallvec![flags],
+        });
+
+        let canon = egraph.unionfind.find_immutable(class_id);
+        let sbb_canon = egraph.unionfind.find_immutable(sbb);
+        if canon != sbb_canon {
+            egraph.merge(class_id, sbb);
             changed = true;
         }
     }

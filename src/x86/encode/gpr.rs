@@ -178,6 +178,10 @@ impl Encoder {
         self.encode_alu_rr(size, 0x29, dst, src);
     }
 
+    pub fn encode_sbb_rr(&mut self, size: OpSize, dst: Reg, src: Reg) {
+        self.encode_alu_rr(size, 0x19, dst, src);
+    }
+
     pub fn encode_sub_ri(&mut self, size: OpSize, dst: Reg, imm: i32) {
         self.encode_alu_ri(size, 5, 0x2D, dst, imm);
     }

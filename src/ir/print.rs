@@ -111,6 +111,7 @@ pub fn fmt_op(op: &Op) -> String {
         // x86 conditional ops
         Op::Mach(MachOp::X86Cmov(cc)) => format!("x86_cmov({cc:?})"),
         Op::Mach(MachOp::X86Setcc(cc)) => format!("x86_setcc({cc:?})"),
+        Op::Mach(MachOp::X86SbbSelf(ty)) => format!("x86_sbb_self({ty:?})"),
 
         // Addressing
         Op::Pure(PureOp::Addr { scale, disp }) => format!("addr(scale={scale}, disp={disp})"),

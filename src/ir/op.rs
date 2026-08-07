@@ -254,6 +254,11 @@ pub enum MachOp {
     /// Set byte from flags — `setcc` → I8.
     X86Setcc(CondCode),
 
+    /// `sbb r, r` — the carry flag broadcast over the whole register: `-CF`,
+    /// so all ones below and zero at or above. Carries its result type, since
+    /// its only child is `Flags` and so says nothing about the width.
+    X86SbbSelf(Type),
+
     // ── x86-64 FP machine ops ─────────────────────────────────────────────────
     /// `addsd dst, src` — f64 + f64 → f64.
     X86Addsd,
@@ -882,6 +887,17 @@ impl Op {
                 assert_eq!(child_types.len(), 1, "X86Setcc requires 1 child");
                 assert_eq!(child_types[0], Type::Flags, "X86Setcc child must be Flags");
                 Type::I8
+            }
+
+            // ── X86SbbSelf (flags → the width it carries) ─────────────────────
+            Op::Mach(MachOp::X86SbbSelf(ty)) => {
+                assert_eq!(child_types.len(), 1, "X86SbbSelf requires 1 child");
+                assert_eq!(
+                    child_types[0],
+                    Type::Flags,
+                    "X86SbbSelf child must be Flags"
+                );
+                ty.clone()
             }
 
             // ── x86 FP binary ops (F64, F64 → F64) ──────────────────────────

@@ -253,8 +253,10 @@ impl AliasInfo {
             | Op::Mach(MachOp::X86Idiv(..))
             | Op::Mach(MachOp::X86Div(..)) => AddrBase::Unknown,
 
-            // x86 conditional move / setcc
-            Op::Mach(MachOp::X86Cmov(_)) | Op::Mach(MachOp::X86Setcc(_)) => AddrBase::Unknown,
+            // x86 conditional move / setcc / carry mask
+            Op::Mach(MachOp::X86Cmov(_))
+            | Op::Mach(MachOp::X86Setcc(_))
+            | Op::Mach(MachOp::X86SbbSelf(_)) => AddrBase::Unknown,
 
             // x86 FP arithmetic
             Op::Mach(MachOp::X86Addsd)

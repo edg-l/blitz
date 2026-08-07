@@ -74,6 +74,8 @@ asm/bit_ops.c	O0	116	381	7	7
 asm/bit_ops.c	O1	115	375	7	7
 asm/call_instruction.c	O0	6	24	0	0
 asm/call_instruction.c	O1	6	24	0	0
+asm/carry_mask.c	O0	106	470	0	0
+asm/carry_mask.c	O1	106	470	0	0
 asm/cmp_zero_test.c	O0	13	44	0	0
 asm/cmp_zero_test.c	O1	13	40	0	0
 asm/div_instruction.c	O0	9	32	0	0
