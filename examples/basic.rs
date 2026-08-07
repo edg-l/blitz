@@ -24,7 +24,7 @@ fn build_max() -> blitz::ir::function::Function {
     let mut b = FunctionBuilder::new("max", &[Type::I64, Type::I64], &[Type::I64]);
     let p = b.params().to_vec();
     let cond = b.icmp(CondCode::Sgt, p[0], p[1]);
-    let result = b.select(cond, p[0], p[1]);
+    let result = b.select(CondCode::Sgt, cond, p[0], p[1]);
     b.ret(Some(result));
     b.finalize().expect("max")
 }

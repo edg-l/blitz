@@ -295,7 +295,7 @@ impl FunctionBuilder {
         let flags = self.icmp(cc, a, b);
         let one = self.iconst(1, Type::I64);
         let zero = self.iconst(0, Type::I64);
-        self.select(flags, one, zero)
+        self.select(cc, flags, one, zero)
     }
 
     /// Get the ClassIds for the function's parameters.
@@ -534,9 +534,9 @@ impl FunctionBuilder {
     /// `if flags { t } else { f }`, where `flags` comes from [`Self::icmp`] or
     /// [`Self::fcmp`]. Both arms are evaluated, so this is a branchless choice
     /// rather than control flow; use [`Self::branch`] when an arm must not run.
-    pub fn select(&mut self, flags: Value, t: Value, f: Value) -> Value {
+    pub fn select(&mut self, cc: CondCode, flags: Value, t: Value, f: Value) -> Value {
         let node = ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(cc)),
             children: smallvec![flags.0, t.0, f.0],
         };
         self.add_node(node)

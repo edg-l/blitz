@@ -95,7 +95,15 @@ pub enum PureOp {
 
     // ── Conditional select ───────────────────────────────────────────────────
     /// `Select(flags, t, f)` — returns `t` if condition holds, else `f`.
-    Select,
+    /// Select the `t` operand when `cc` holds of the flags, else `f`.
+    ///
+    /// The condition code rides on the node for the same reason it rides on
+    /// `EffectfulOp::Branch`: flags are shared between comparisons, so the
+    /// flags operand cannot say which condition this select tests. `a == b`
+    /// and `a != b` set identical flags and their `Icmp` classes merge onto one
+    /// shared compare; recovering the cc from that class afterwards returns
+    /// whichever node came first.
+    Select(CondCode),
 
     // ── Projections ──────────────────────────────────────────────────────────
     /// Extract first element of a Pair.
@@ -678,7 +686,7 @@ impl Op {
             }
 
             // ── Select ────────────────────────────────────────────────────────
-            Op::Pure(PureOp::Select) => {
+            Op::Pure(PureOp::Select(_)) => {
                 assert_eq!(
                     child_types.len(),
                     3,
@@ -1617,14 +1625,18 @@ mod tests {
 
     #[test]
     fn select_i64() {
-        let ty = Op::Pure(PureOp::Select).result_type(&[Type::Flags, Type::I64, Type::I64]);
+        let ty = Op::Pure(PureOp::Select(CondCode::Ne)).result_type(&[
+            Type::Flags,
+            Type::I64,
+            Type::I64,
+        ]);
         assert_eq!(ty, Type::I64);
     }
 
     #[test]
     #[should_panic]
     fn select_branch_mismatch() {
-        Op::Pure(PureOp::Select).result_type(&[Type::Flags, Type::I32, Type::I64]);
+        Op::Pure(PureOp::Select(CondCode::Ne)).result_type(&[Type::Flags, Type::I32, Type::I64]);
     }
 
     // ── Projections ───────────────────────────────────────────────────────────

@@ -756,23 +756,27 @@ fn apply_fcmp_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     changed
 }
 
-/// Select(flags, t, f) -> X86Cmov(cc, flags, t, f)
-/// The cc is taken from the Icmp that produced the flags class.
+/// `Select(cc, flags, t, f)` -> `X86Cmov(cc, flags, t, f)`
+///
+/// The cc comes off the `Select` node. It cannot come from the flags class:
+/// every `Icmp` over the same operands is merged onto one shared compare by
+/// `apply_icmp_isel`, which is right -- `a == b` and `a != b` set identical
+/// flags -- so that class names a comparison, not a condition.
 fn apply_select_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
     let mut changed = false;
 
     for snap in snaps {
         let class_id = snap.class_id;
-        if snap.op != Op::Pure(PureOp::Select) || snap.children.len() != 3 {
+        let Op::Pure(PureOp::Select(cc)) = snap.op else {
+            continue;
+        };
+        if snap.children.len() != 3 {
             continue;
         }
 
         let flags = snap.children[0];
         let t = snap.children[1];
         let f = snap.children[2];
-
-        // Find cc from the Icmp node in the flags class; fall back to Ne if absent.
-        let cc = find_cc_in_class(egraph, flags).unwrap_or(CondCode::Ne);
 
         let cmov = egraph.add(ENode {
             op: Op::Mach(MachOp::X86Cmov(cc)),
@@ -818,7 +822,7 @@ fn apply_carry_mask_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
         let mut extended = None;
         for node in &egraph.class(canon).nodes {
             match &node.op {
-                Op::Pure(PureOp::Select)
+                Op::Pure(PureOp::Select(_))
                     if node.children.len() == 3
                         && egraph.get_constant(node.children[1]).map(|(v, _)| v) == Some(1)
                         && egraph.get_constant(node.children[2]).map(|(v, _)| v) == Some(0) =>
@@ -1263,7 +1267,7 @@ mod tests {
         let t = iconst(&mut g, 1);
         let f = iconst(&mut g, 0);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Eq)),
             children: smallvec![flags, t, f],
         });
         apply_isel_rules(&mut g);

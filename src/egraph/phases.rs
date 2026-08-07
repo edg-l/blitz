@@ -646,7 +646,7 @@ mod tests {
             children: smallvec![a, zero],
         });
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Eq)),
             children: smallvec![cond, add_zero, garbage],
         });
 
@@ -755,7 +755,7 @@ mod tests {
             children: smallvec![c3, c5],
         });
         let inner_sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Slt)),
             children: smallvec![inner_cond, x, y],
         });
 
@@ -765,7 +765,7 @@ mod tests {
             children: smallvec![a, a],
         });
         let outer_sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Eq)),
             children: smallvec![outer_cond, inner_sel, z],
         });
 

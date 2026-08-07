@@ -106,7 +106,7 @@ fn op_cost(op: &Op) -> u32 {
         | Op::Pure(PureOp::Bitcast(..))
         | Op::Pure(PureOp::Icmp(..))
         | Op::Pure(PureOp::Fcmp(..))
-        | Op::Pure(PureOp::Select)
+        | Op::Pure(PureOp::Select(_))
         | Op::Pure(PureOp::IntToFloat(..))
         | Op::Pure(PureOp::FloatToInt(..))
         | Op::Pure(PureOp::FloatExt)

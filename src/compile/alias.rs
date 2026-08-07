@@ -210,7 +210,7 @@ impl AliasInfo {
             | Op::Pure(PureOp::Fsqrt) => AddrBase::Unknown,
 
             // Conditional select
-            Op::Pure(PureOp::Select) => AddrBase::Unknown,
+            Op::Pure(PureOp::Select(_)) => AddrBase::Unknown,
 
             // Projections
             Op::Pure(PureOp::Proj0) | Op::Pure(PureOp::Proj1) => AddrBase::Unknown,

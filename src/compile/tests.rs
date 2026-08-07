@@ -256,7 +256,7 @@ fn e2e_conditional_max() {
     let a = params[0];
     let b = params[1];
     let flags = builder.icmp(CondCode::Sgt, a, b);
-    let result = builder.select(flags, a, b);
+    let result = builder.select(CondCode::Sgt, flags, a, b);
     builder.ret(Some(result));
     let func = builder.finalize().expect("max finalize");
 
@@ -486,7 +486,7 @@ fn e2e_flag_fusion() {
     let diff = builder.sub(a, b);
     let zero = builder.iconst(0, Type::I64);
     let cond = builder.icmp(CondCode::Sgt, diff, zero);
-    let result = builder.select(cond, diff, zero);
+    let result = builder.select(CondCode::Sgt, cond, diff, zero);
     builder.ret(Some(result));
     let func = builder.finalize().expect("flag_fusion finalize");
 
@@ -1831,7 +1831,7 @@ fn codegen_flag_fusion_single_sub() {
     let diff = builder.sub(a, b);
     let zero = builder.iconst(0, Type::I64);
     let cond = builder.icmp(CondCode::Sgt, diff, zero);
-    let result = builder.select(cond, diff, zero);
+    let result = builder.select(CondCode::Sgt, cond, diff, zero);
     builder.ret(Some(result));
     let func = builder.finalize().expect("flag_single_sub finalize");
 
@@ -2725,7 +2725,7 @@ fn e2e_i32_icmp() {
     // Select 1 or 0 based on the comparison.
     let one = builder.iconst(1, Type::I64);
     let zero = builder.iconst(0, Type::I64);
-    let r = builder.select(cond, one, zero);
+    let r = builder.select(CondCode::Sgt, cond, one, zero);
     builder.ret(Some(r));
     let func = builder.finalize().expect("i32_icmp finalize");
 

@@ -595,7 +595,7 @@ impl<'b> FnCtx<'b> {
                 let r_flags = self.val_to_flags(r, &rt);
                 let one = self.builder.iconst(1, Type::I32);
                 let zero2 = self.builder.iconst(0, Type::I32);
-                let rbool = self.builder.select(r_flags, one, zero2);
+                let rbool = self.builder.select(CondCode::Ne, r_flags, one, zero2);
                 if !self.builder.is_current_block_terminated() {
                     self.builder.jump(bb_merge, &[rbool]);
                 }
@@ -623,7 +623,7 @@ impl<'b> FnCtx<'b> {
                 let r_flags = self.val_to_flags(r, &rt);
                 let one = self.builder.iconst(1, Type::I32);
                 let zero2 = self.builder.iconst(0, Type::I32);
-                let rbool = self.builder.select(r_flags, one, zero2);
+                let rbool = self.builder.select(CondCode::Ne, r_flags, one, zero2);
                 if !self.builder.is_current_block_terminated() {
                     self.builder.jump(bb_merge, &[rbool]);
                 }
@@ -674,6 +674,34 @@ impl<'b> FnCtx<'b> {
                 let (r, rt) = self.compile_expr(rhs)?;
                 if lt.is_pointer() && rt.is_integer() {
                     self.emit_ptr_arith(l, &lt, r, lhs.span, &rt, true)
+                } else if lt.is_pointer() && rt.is_pointer() {
+                    // C17 6.5.6p9: the difference of two pointers into the same
+                    // array is the number of *elements* between them, and its
+                    // type is ptrdiff_t. Subtracting the addresses gives bytes,
+                    // which is the same answer only for a one-byte pointee.
+                    let pointee = lt.pointee().clone();
+                    if pointee == CType::Void {
+                        return Err(err(lhs.span, "pointer arithmetic on void* is not allowed"));
+                    }
+                    let elem_size = self.pointee_elem_size(&pointee)?;
+                    let bytes = self.builder.sub(l, r);
+                    // C17 6.5.6p9 defines the difference only for pointers into
+                    // the same array, so the byte distance is an exact multiple
+                    // of the element size and the division has no remainder to
+                    // round. That makes an arithmetic shift right exact where a
+                    // signed division would emit its whole rounding sequence.
+                    let result = if elem_size == 1 {
+                        bytes
+                    } else if elem_size > 0 && elem_size.count_ones() == 1 {
+                        let sh = self
+                            .builder
+                            .iconst(elem_size.trailing_zeros() as i64, Type::I64);
+                        self.builder.sar(bytes, sh)
+                    } else {
+                        let scale = self.builder.iconst(elem_size, Type::I64);
+                        self.builder.sdiv(bytes, scale)
+                    };
+                    Ok((result, CType::Long))
                 } else {
                     let (l, r, common) = self.emit_usual_conversion(l, &lt, r, &rt);
                     if common.is_float() {

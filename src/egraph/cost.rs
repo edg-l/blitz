@@ -484,7 +484,10 @@ mod tests {
     #[test]
     fn select_is_infinite() {
         let cm = CostModel::new(OptGoal::Balanced);
-        assert_eq!(cm.cost(&Op::Pure(PureOp::Select)), f64::INFINITY);
+        assert_eq!(
+            cm.cost(&Op::Pure(PureOp::Select(crate::ir::condcode::CondCode::Ne))),
+            f64::INFINITY
+        );
     }
 
     #[test]

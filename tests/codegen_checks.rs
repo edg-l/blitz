@@ -267,9 +267,9 @@ fn ir_nested_select_to_cmov() {
     let mut b = FunctionBuilder::new("max3", &[Type::I64, Type::I64, Type::I64], &[Type::I64]);
     let params = b.params().to_vec();
     let cond1 = b.icmp(CondCode::Sgt, params[0], params[1]);
-    let m1 = b.select(cond1, params[0], params[1]);
+    let m1 = b.select(CondCode::Sgt, cond1, params[0], params[1]);
     let cond2 = b.icmp(CondCode::Sgt, m1, params[2]);
-    let r = b.select(cond2, m1, params[2]);
+    let r = b.select(CondCode::Sgt, cond2, m1, params[2]);
     b.ret(Some(r));
 
     check_ir(
@@ -424,7 +424,7 @@ fn asm_flag_fusion_sub_cmov() {
     let diff = b.sub(params[0], params[1]);
     let zero = b.iconst(0, Type::I64);
     let cond = b.icmp(CondCode::Sgt, diff, zero);
-    let r = b.select(cond, diff, zero);
+    let r = b.select(CondCode::Sgt, cond, diff, zero);
     b.ret(Some(r));
 
     check_asm(
@@ -733,9 +733,9 @@ fn asm_nested_cmov() {
     let mut b = FunctionBuilder::new("max3", &[Type::I64, Type::I64, Type::I64], &[Type::I64]);
     let params = b.params().to_vec();
     let cond1 = b.icmp(CondCode::Sgt, params[0], params[1]);
-    let m1 = b.select(cond1, params[0], params[1]);
+    let m1 = b.select(CondCode::Sgt, cond1, params[0], params[1]);
     let cond2 = b.icmp(CondCode::Sgt, m1, params[2]);
-    let r = b.select(cond2, m1, params[2]);
+    let r = b.select(CondCode::Sgt, cond2, m1, params[2]);
     b.ret(Some(r));
 
     check_asm(
@@ -882,7 +882,7 @@ fn ir_select_same_arms() {
     let mut b = FunctionBuilder::new("sel_same", &[Type::I64, Type::I64], &[Type::I64]);
     let params = b.params().to_vec();
     let flags = b.icmp(CondCode::Slt, params[0], params[1]);
-    let r = b.select(flags, params[0], params[0]);
+    let r = b.select(CondCode::Slt, flags, params[0], params[0]);
     b.ret(Some(r));
 
     check_ir(
@@ -1485,7 +1485,7 @@ fn ir_combo_select_double_neg() {
     let neg_x = b.neg(params[0]);
     let dbl_neg = b.neg(neg_x);
     let cond = b.icmp(CondCode::Slt, params[1], zero);
-    let r = b.select(cond, dbl_neg, dbl_neg);
+    let r = b.select(CondCode::Slt, cond, dbl_neg, dbl_neg);
     b.ret(Some(r));
 
     check_ir(
@@ -1544,7 +1544,7 @@ fn asm_icmp_with_imm_uses_cmp_ri() {
     let cond = b.icmp(CondCode::Sgt, x, one);
     let yes = b.iconst(42, Type::I64);
     let no = b.iconst(0, Type::I64);
-    let r = b.select(cond, yes, no);
+    let r = b.select(CondCode::Sgt, cond, yes, no);
     b.ret(Some(r));
 
     check_asm(
@@ -1568,7 +1568,7 @@ fn asm_icmp_zero_uses_test() {
     let zero = b.iconst(0, Type::I64);
     let cond = b.icmp(CondCode::Ne, x, zero);
     let one = b.iconst(1, Type::I64);
-    let r = b.select(cond, one, zero);
+    let r = b.select(CondCode::Ne, cond, one, zero);
     b.ret(Some(r));
 
     check_asm(
@@ -1592,7 +1592,7 @@ fn asm_icmp_alone_uses_cmp() {
     let cond = b.icmp(CondCode::Sgt, params[0], params[1]);
     let one = b.iconst(1, Type::I64);
     let zero = b.iconst(0, Type::I64);
-    let r = b.select(cond, one, zero);
+    let r = b.select(CondCode::Sgt, cond, one, zero);
     b.ret(Some(r));
 
     check_asm(
@@ -1616,7 +1616,7 @@ fn asm_shared_sub_keeps_destructive() {
     let diff = b.sub(params[0], params[1]);
     let cond = b.icmp(CondCode::Sgt, params[0], params[1]);
     let zero = b.iconst(0, Type::I64);
-    let r = b.select(cond, diff, zero);
+    let r = b.select(CondCode::Sgt, cond, diff, zero);
     b.ret(Some(r));
 
     check_asm(

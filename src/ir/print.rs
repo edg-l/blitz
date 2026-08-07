@@ -59,7 +59,7 @@ pub fn fmt_op(op: &Op) -> String {
         Op::Pure(PureOp::Fsqrt) => "fsqrt".into(),
 
         // Select
-        Op::Pure(PureOp::Select) => "select".into(),
+        Op::Pure(PureOp::Select(cc)) => format!("select({cc:?})"),
 
         // Projections
         Op::Pure(PureOp::Proj0) => "proj0".into(),

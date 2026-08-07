@@ -304,8 +304,8 @@ float/load_multiblock.c	O0	26	132	6	7
 float/load_multiblock.c	O1	12	54	0	0
 float/nan_branch_conditions.c	O0	203	995	39	40
 float/nan_branch_conditions.c	O1	105	474	0	0
-float/nan_comparisons.c	O0	233	1292	37	64
-float/nan_comparisons.c	O1	116	480	0	0
+float/nan_comparisons.c	O0	257	1419	40	76
+float/nan_comparisons.c	O1	125	507	0	0
 float/negation_ieee.c	O0	133	778	25	41
 float/negation_ieee.c	O1	67	270	0	0
 float/pointer_arg.c	O0	23	119	6	7
@@ -574,8 +574,8 @@ pointers/pass_by_ptr.c	O0	24	106	6	8
 pointers/pass_by_ptr.c	O1	7	19	0	0
 pointers/ptr_arithmetic.c	O0	17	72	4	6
 pointers/ptr_arithmetic.c	O1	5	15	0	0
-pointers/ptr_subtract.c	O0	26	111	6	9
-pointers/ptr_subtract.c	O1	12	35	0	0
+pointers/ptr_subtract.c	O0	34	140	7	10
+pointers/ptr_subtract.c	O1	16	50	0	0
 pointers/swap.c	O0	56	231	13	20
 pointers/swap.c	O1	18	50	0	0
 regalloc/array_spill_frame_corruption.c	O0	179	960	46	60

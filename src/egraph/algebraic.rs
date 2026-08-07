@@ -788,7 +788,7 @@ fn apply_select_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 
     for snap in snaps {
         let class_id = snap.class_id;
-        if snap.op != Op::Pure(PureOp::Select) || snap.children.len() != 3 {
+        if !matches!(snap.op, Op::Pure(PureOp::Select(_))) || snap.children.len() != 3 {
             continue;
         }
         let t = snap.children[1];
@@ -835,7 +835,10 @@ fn apply_comparison_select_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> b
 
     for snap in snaps {
         let class_id = snap.class_id;
-        if snap.op != Op::Pure(PureOp::Select) || snap.children.len() != 3 {
+        let Op::Pure(PureOp::Select(sel_cc)) = snap.op else {
+            continue;
+        };
+        if snap.children.len() != 3 {
             continue;
         }
         let cond_class_id = snap.children[0];
@@ -846,11 +849,12 @@ fn apply_comparison_select_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> b
         let cond_nodes = egraph.class(cond_canon).nodes.clone();
 
         for icmp_node in &cond_nodes {
-            let cc = match &icmp_node.op {
-                Op::Pure(PureOp::Icmp(cc)) => cc,
-                _ => continue,
-            };
-            if icmp_node.children.len() != 2 {
+            // Only the operands are read off the node. The condition is the
+            // *select's*, because every `Icmp` over one pair of operands shares
+            // a class -- `a == b` and `a != b` set the same flags -- so the cc
+            // found here would be whichever node happened to be first.
+            let cc = &sel_cc;
+            if !matches!(icmp_node.op, Op::Pure(PureOp::Icmp(_))) || icmp_node.children.len() != 2 {
                 continue;
             }
 
@@ -1528,7 +1532,7 @@ mod tests {
         });
         let val = iconst(&mut g, 99, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Ne)),
             children: smallvec![cond, val, val],
         });
         apply_algebraic_rules(&mut g);
@@ -1549,7 +1553,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Eq)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1569,7 +1573,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Ne)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1589,7 +1593,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Slt)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1610,7 +1614,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Slt)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1631,7 +1635,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Slt)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1652,7 +1656,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Ult)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1673,7 +1677,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Eq)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1693,7 +1697,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Sle)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1713,7 +1717,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Uge)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1733,7 +1737,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Ugt)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1754,7 +1758,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Sge)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1775,7 +1779,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Ne)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);
@@ -1796,7 +1800,7 @@ mod tests {
         let t = iconst(&mut g, 1, Type::I64);
         let f = iconst(&mut g, 0, Type::I64);
         let sel = g.add(ENode {
-            op: Op::Pure(PureOp::Select),
+            op: Op::Pure(PureOp::Select(CondCode::Ule)),
             children: smallvec![cond, t, f],
         });
         apply_algebraic_rules(&mut g);

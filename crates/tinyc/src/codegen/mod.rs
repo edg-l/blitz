@@ -329,7 +329,7 @@ impl<'b> FnCtx<'b> {
         let flags = self.builder.icmp(cc, a, b);
         let one = self.builder.iconst(1, Type::I32);
         let zero = self.builder.iconst(0, Type::I32);
-        self.builder.select(flags, one, zero)
+        self.builder.select(cc, flags, one, zero)
     }
 
     /// Emit fcmp+select yielding an I32 0/1 value for float comparisons.
@@ -353,17 +353,17 @@ impl<'b> FnCtx<'b> {
             CondCode::Ult => {
                 // ordered-less-than: swap operands, use Ugt (JA is NaN-safe)
                 let flags = self.builder.fcmp(CondCode::Ugt, b, a);
-                self.builder.select(flags, one, zero)
+                self.builder.select(CondCode::Ugt, flags, one, zero)
             }
             CondCode::Ule => {
                 // ordered-less-or-equal: swap operands, use Uge (JAE is NaN-safe)
                 let flags = self.builder.fcmp(CondCode::Uge, b, a);
-                self.builder.select(flags, one, zero)
+                self.builder.select(CondCode::Uge, flags, one, zero)
             }
             _ => {
                 // Ugt (JA) and Uge (JAE) are already NaN-safe
                 let flags = self.builder.fcmp(cc, a, b);
-                self.builder.select(flags, one, zero)
+                self.builder.select(cc, flags, one, zero)
             }
         }
     }
