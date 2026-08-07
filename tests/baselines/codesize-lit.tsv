@@ -612,6 +612,8 @@ regalloc/dup_const_block_params.c	O0	819	5303	267	321
 regalloc/dup_const_block_params.c	O1	416	2311	94	126
 regalloc/entry_param_parallel_copy.c	O0	163	704	42	46
 regalloc/entry_param_parallel_copy.c	O1	81	292	1	2
+regalloc/entry_param_stack_scratch.c	O0	195	1224	43	41
+regalloc/entry_param_stack_scratch.c	O1	139	763	9	9
 regalloc/float_sum_guard_seed23.c	O0	1854	12308	623	737
 regalloc/float_sum_guard_seed23.c	O1	736	3348	84	140
 regalloc/folded_addr_under_pressure.c	O0	1648	10301	431	588

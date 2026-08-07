@@ -211,7 +211,24 @@ pub fn allocate_fast(
         // before anything else runs costs nothing, since a marker reads no
         // operand and so depends on nothing in the block.
         let is_param = |i: &ScheduledInst| matches!(i.op, Op::Pure(PureOp::Param(..)));
-        for inst in insts.iter().filter(|i| is_param(i)) {
+        // And among the parameters, the register-passed ones first. A
+        // stack-passed parameter is a load from the caller's frame and needs a
+        // register to land in, which `pick` takes from whatever is free -- and at
+        // the function's entry, "free" is a lie: every argument register still
+        // holds the argument the caller left in it. With nine doubles, the load
+        // of the ninth was handed XMM0 and overwrote the first, whose own store
+        // came later in schedule order and wrote the wrong value into its slot.
+        // Reading every argument register before any scratch is picked is the
+        // invariant, and this ordering is the whole of it: once the register
+        // parameters are in their slots, no argument register holds anything.
+        let in_reg = |i: &ScheduledInst| {
+            matches!(i.op, Op::Pure(PureOp::Param(idx, _))
+                if matches!(ctx.arg_locs.get(idx as usize), Some(ArgLoc::Reg(_))))
+        };
+        for inst in insts.iter().filter(|i| is_param(i) && in_reg(i)) {
+            expand(inst, &mut block, &mut frame, &ctx)?;
+        }
+        for inst in insts.iter().filter(|i| is_param(i) && !in_reg(i)) {
             expand(inst, &mut block, &mut frame, &ctx)?;
         }
         for inst in insts.iter().filter(|i| !is_param(i)) {

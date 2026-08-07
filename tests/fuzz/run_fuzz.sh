@@ -12,7 +12,13 @@
 #   bash tests/fuzz/run_fuzz.sh [count] [shape]
 #
 #   count   number of programs per shape (default 400)
-#   shape   mixed | args | pressure | all  (default all)
+#   shape   mixed | args | pressure | abi | all  (default all)
+#
+# `abi` is the odd one out and deliberately so: it is an enumeration, not a
+# sample, so it ignores `count` and emits the same 98 programs every run (see
+# gen_abi.py). It lives here rather than in a gate of its own because the oracles
+# and the driver are the same ones -- `bash tests/fuzz/run_fuzz.sh 0 abi` is the
+# way to run just it.
 #
 # THE WIDTH IS THE POINT. A narrow sweep is not a cheaper version of this check,
 # it is a different and much weaker one: at 30 seeds a shape all three shapes
@@ -73,7 +79,7 @@ if [ -n "$RESULTS" ]; then
 fi
 
 if [ "$SHAPE" = all ]; then
-    SHAPES="mixed args pressure"
+    SHAPES="abi mixed args pressure"
 else
     SHAPES="$SHAPE"
 fi
@@ -84,6 +90,27 @@ for shape in $SHAPES; do
     pass=0
     fail=0
     skip=0
+
+    # The enumerated shape: a fixed set of programs walked in order, so the count
+    # says nothing about it. First in the sweep because it is the cheap one and it
+    # covers the calling convention every other shape depends on -- a broken ABI
+    # makes the random programs fail in ways that read as anything but.
+    if [ "$shape" = abi ]; then
+        mkdir -p "$WORK/abi"
+        for stem in $(python3 "$SCRIPT_DIR/gen_abi.py" --out-dir "$WORK/abi"); do
+            st=0
+            check_program "$stem" "$stem" "$WORK/abi/$stem.c" || st=$?
+            case "$st" in
+                0) pass=$((pass + 1)); printf "." ;;
+                2) skip=$((skip + 1)) ;;
+                *) fail=$((fail + 1)) ;;
+            esac
+        done
+        printf "\n\n%d programs (abi, enumerated): %d passed, %d failed, %d skipped\n" \
+            "$((pass + fail + skip))" "$pass" "$fail" "$skip"
+        total_fail=$((total_fail + fail))
+        continue
+    fi
 
     seed=1
     while [ "$seed" -le "$COUNT" ]; do
