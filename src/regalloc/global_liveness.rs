@@ -50,6 +50,26 @@ pub fn compute_global_liveness_with_block_params(
     phi_uses: &[VRegSet],
     block_param_vregs_per_block: &[VRegSet],
 ) -> GlobalLiveness {
+    compute_global_liveness_excluding(
+        block_schedules,
+        successors,
+        phi_uses,
+        block_param_vregs_per_block,
+        &VRegSet::new(),
+    )
+}
+
+/// As [`compute_global_liveness_with_block_params`], with `slot_resident` VRegs
+/// excluded from every use set -- see [`super::liveness::compute_liveness_excluding`]
+/// for what makes one, and why counting it would claim a register nothing needs
+/// and carry a value with no definition back to the function's entry.
+pub fn compute_global_liveness_excluding(
+    block_schedules: &[Vec<ScheduledInst>],
+    successors: &[Vec<usize>],
+    phi_uses: &[VRegSet],
+    block_param_vregs_per_block: &[VRegSet],
+    slot_resident: &VRegSet,
+) -> GlobalLiveness {
     let n = block_schedules.len();
     assert_eq!(successors.len(), n);
     assert_eq!(phi_uses.len(), n);
@@ -66,7 +86,7 @@ pub fn compute_global_liveness_with_block_params(
         for inst in sched {
             // Operands that are not yet defined in this block are upward-exposed uses.
             for &op in &inst.operands {
-                if !def.contains(op.0 as usize) {
+                if !def.contains(op.0 as usize) && !slot_resident.contains(op.0 as usize) {
                     uses.insert(op.0 as usize);
                 }
             }

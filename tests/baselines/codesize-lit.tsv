@@ -340,6 +340,8 @@ functions/fibonacci.c	O0	68	275	13	18
 functions/fibonacci.c	O1	35	139	0	0
 functions/forward_decl.c	O0	66	287	14	16
 functions/forward_decl.c	O1	28	115	0	0
+functions/fourteen_int_args.c	O0	199	1083	47	46
+functions/fourteen_int_args.c	O1	123	704	9	9
 functions/linked_list.c	O0	222	1020	53	75
 functions/linked_list.c	O1	94	377	0	0
 functions/many_args.c	O0	80	331	21	20

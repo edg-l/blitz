@@ -1174,6 +1174,7 @@ pub fn compile(
                     &bp,
                     &func.name,
                     opts.force_frame_pointer,
+                    &stack_arg_vregs,
                     &mut slots,
                     0,
                 ) {
@@ -1506,6 +1507,7 @@ pub fn compile(
                 &block_param_vregs_per_block,
                 &func.name,
                 opts.force_frame_pointer,
+                &stack_arg_vregs,
                 &mut slots,
                 crate::regalloc::MAX_GLOBAL_SPILL_ROUNDS,
             )

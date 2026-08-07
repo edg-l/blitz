@@ -67,7 +67,7 @@ use super::interference::{
     InterferenceGraph, VRegSet, build_interference_into, dying_clobber_operands,
     resolve_precoloring_conflicts,
 };
-use super::liveness::{LivenessInfo, compute_liveness};
+use super::liveness::LivenessInfo;
 use super::rewrite::CoalesceAliases;
 use super::slots::SlotAllocator;
 
@@ -239,6 +239,7 @@ fn add_param_interferences(
 fn build_global_interference(
     block_schedules: &[Vec<ScheduledInst>],
     global_liveness: &crate::regalloc::global_liveness::GlobalLiveness,
+    slot_resident: &VRegSet,
 ) -> Phase2State {
     // Function-wide class map (must complete before graph init).
     let vreg_class_map = build_vreg_classes_from_all_blocks(block_schedules);
@@ -320,7 +321,11 @@ fn build_global_interference(
     // For each block: compute liveness, add edges, then add boundary interferences.
     for (b, sched) in block_schedules.iter().enumerate() {
         let block_live_out = &global_liveness.live_out[b];
-        let liveness = compute_liveness(sched, block_live_out);
+        let liveness = crate::regalloc::liveness::compute_liveness_excluding(
+            sched,
+            block_live_out,
+            slot_resident,
+        );
 
         // Add intra-block interference edges.
         build_interference_into(&mut graph, &liveness, sched);
@@ -839,6 +844,7 @@ fn run_phase3(
     uses_frame_pointer: bool,
     mut next_vreg: u32,
     coalesce_now: bool,
+    slot_resident: &VRegSet,
 ) -> Phase3State {
     // Build function-wide precoloring (params + shifts + divs +
     // caller-supplied call-arg precolors).
@@ -914,14 +920,19 @@ fn run_phase3(
         })
         .collect();
     let rebuild_global_liveness =
-        crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
+        crate::regalloc::global_liveness::compute_global_liveness_excluding(
             &post_coalesce_schedules,
             cfg_succs,
             &post_coalesce_phi_uses,
             &renamed_block_param_vregs,
+            slot_resident,
         );
 
-    let mut rebuilt = build_global_interference(&post_coalesce_schedules, &rebuild_global_liveness);
+    let mut rebuilt = build_global_interference(
+        &post_coalesce_schedules,
+        &rebuild_global_liveness,
+        slot_resident,
+    );
     add_param_interferences(
         &mut rebuilt.graph,
         &renamed_block_param_vregs,
@@ -1352,6 +1363,7 @@ pub(crate) fn run_phase5(
     phase4: Phase4State,
     func_name: &str,
     accumulated_aliases: &BTreeMap<u32, u32>,
+    slot_resident: &BTreeMap<VReg, u32>,
     slots: &mut SlotAllocator,
 ) -> Result<GlobalRegAllocResult, String> {
     use crate::x86::abi::CALLEE_SAVED;
@@ -1375,13 +1387,23 @@ pub(crate) fn run_phase5(
         // and leave every stale `class_to_vreg` entry pointing at a VReg that no
         // longer exists.
         let coalesce_aliases = build_transitive_alias_map(accumulated_aliases);
+        // A slot-resident call argument holds no register, and the colouring gave
+        // it none: it is excluded from every live set, so it is not a node the
+        // graph coloured. Its assignment is the slot, which is what lowering
+        // reads to push the argument out of memory.
+        let assignment = phase4
+            .vreg_to_reg
+            .into_iter()
+            .map(|(v, r)| (v, super::Assignment::Reg(r)))
+            .chain(
+                slot_resident
+                    .iter()
+                    .map(|(&v, &slot)| (v, super::Assignment::Slot(slot))),
+            )
+            .collect();
         return Ok(GlobalRegAllocResult {
             per_block_insts: phase4.per_block_insts,
-            assignment: phase4
-                .vreg_to_reg
-                .into_iter()
-                .map(|(v, r)| (v, super::Assignment::Reg(r)))
-                .collect(),
+            assignment,
             callee_saved_used,
             unprecolored_params: phase4.unprecolored_params,
             coalesce_aliases,
@@ -1586,6 +1608,7 @@ pub fn allocate_global(
     block_param_vregs_per_block: &[VRegSet],
     func_name: &str,
     uses_frame_pointer: bool,
+    stack_args: &BTreeSet<VReg>,
     slots: &mut SlotAllocator,
     spill_rounds: usize,
 ) -> Result<GlobalRegAllocResult, String> {
@@ -1636,8 +1659,28 @@ pub fn allocate_global(
     // same register -- which the phi copies then detect as a parallel copy with
     // a repeated destination, one value short.
     let mut block_params_now: Vec<VRegSet> = block_param_vregs_per_block.to_vec();
+    // Call arguments taken out of the register file entirely, and the slot each
+    // stands for. A call reads every argument at one program point, so a call
+    // with more arguments than there are registers cannot be coloured however
+    // much is spilled -- see `spill::route_call_args_to_slots`. Populated only
+    // after a round has failed, so a function that colours today is untouched.
+    let mut slot_resident: BTreeMap<VReg, u32> = BTreeMap::new();
+    let mut slot_resident_set = VRegSet::new();
+    let mut routed_stack_args = false;
+    // Coalescing runs once per function, and "once" cannot be spelled `round == 0`
+    // any more: routing the stack arguments through slots does not consume a
+    // round, so round 0 can be entered twice. The second entry would coalesce
+    // schedules that are already post-coalesce, against copy pairs stated in the
+    // pre-coalesce numbering.
+    let mut coalesced = false;
 
-    for round in 0..=spill_rounds {
+    // `round` counts *spill* rounds, and taking the stack arguments out of the
+    // register file is not one: it does not choose a value to spill, it removes a
+    // register requirement the program never had. Counting it would spend the
+    // only round the splitter's probe allows (`spill_rounds` of 0) on the
+    // measurement that made it necessary.
+    let mut round = 0usize;
+    while round <= spill_rounds {
         let block_schedules: &[Vec<ScheduledInst>] = &schedules;
 
         // What each terminator consumes, off the schedules this round colors.
@@ -1658,13 +1701,13 @@ pub fn allocate_global(
         // to their block's live_in so pairs of params on the same block interfere
         // (they're written simultaneously by phi copies and must occupy distinct
         // registers even when the block body never reads them).
-        let global_liveness =
-            crate::regalloc::global_liveness::compute_global_liveness_with_block_params(
-                block_schedules,
-                cfg_succs,
-                phi_uses,
-                &block_params_now,
-            );
+        let global_liveness = crate::regalloc::global_liveness::compute_global_liveness_excluding(
+            block_schedules,
+            cfg_succs,
+            phi_uses,
+            &block_params_now,
+            &slot_resident_set,
+        );
         // Also augment the global liveness that run_phase3 will recompute
         // internally: it uses plain `compute_global_liveness` which doesn't know
         // about block params. We pass block_param_vregs_per_block down and augment
@@ -1689,9 +1732,10 @@ pub fn allocate_global(
                     fmt(&block_params_now[bi]),
                     crate::trace::format_liveness(
                         sched,
-                        &crate::regalloc::liveness::compute_liveness(
+                        &crate::regalloc::liveness::compute_liveness_excluding(
                             sched,
                             &global_liveness.live_out[bi],
+                            &slot_resident_set,
                         )
                         .live_at,
                         &global_liveness.live_out[bi],
@@ -1702,7 +1746,8 @@ pub fn allocate_global(
 
         // Tasks 2.3, 2.4, 2.4.5: Build function-wide interference graph and
         // per-block liveness (stored in Phase2State for Phase 3/5 consumption).
-        let mut phase2 = build_global_interference(block_schedules, &global_liveness);
+        let mut phase2 =
+            build_global_interference(block_schedules, &global_liveness, &slot_resident_set);
         // Pre-coalesce Phase 2 graph: block_params are still distinct VRegs, so no
         // alias resolution needed.
         add_param_interferences(
@@ -1733,8 +1778,10 @@ pub fn allocate_global(
             &block_params_now,
             uses_frame_pointer,
             next_vreg,
-            round == 0,
+            !coalesced,
+            &slot_resident_set,
         );
+        coalesced = true;
 
         // Phase 4: global coloring and color-to-register mapping.
         let phase4 = run_phase4(phase3, uses_frame_pointer);
@@ -1764,7 +1811,60 @@ pub fn allocate_global(
         }
 
         if phase4.gpr_overshoot == 0 && phase4.xmm_overshoot == 0 {
-            return run_phase5(phase4, func_name, &alias_map, slots);
+            return run_phase5(phase4, func_name, &alias_map, &slot_resident, slots);
+        }
+
+        // Before spilling: a call argument that goes on the stack needs no
+        // register at all, and no amount of spilling can relieve a point where
+        // the instruction itself reads more values than there are registers.
+        // Taking those out of the register file is the only relief that shape
+        // has, so it is tried once, ahead of the first spill round.
+        if !routed_stack_args && !stack_args.is_empty() {
+            routed_stack_args = true;
+            let mut next = spill_next_vreg.max(
+                phase4
+                    .per_block_insts
+                    .iter()
+                    .flatten()
+                    .flat_map(|i| std::iter::once(i.dst.0).chain(i.operands.iter().map(|v| v.0)))
+                    .max()
+                    .map(|m| m + 1)
+                    .unwrap_or(0),
+            );
+            let mut next_schedules = phase4.per_block_insts.clone();
+            let vreg_classes = super::build_vreg_classes_from_all_blocks(&next_schedules);
+            // In the names this round's schedules use: coalescing renamed some of
+            // them, and the CFG's list is in the pre-coalesce numbering.
+            let targets: BTreeSet<VReg> = stack_args
+                .iter()
+                .map(|&v| VReg(chase_u32(v.0, &coalesce_aliases)))
+                .collect();
+            let routed = crate::regalloc::spill::route_call_args_to_slots(
+                &mut next_schedules,
+                &targets,
+                slots,
+                &mut next,
+                &vreg_classes,
+            );
+            if !routed.is_empty() {
+                if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+                    tracing::debug!(
+                        target: "blitz::regalloc",
+                        "[{func_name}] routed {} stack call argument(s) through slots after \
+                         round {round} (gpr_overshoot={}, xmm_overshoot={})",
+                        routed.len(),
+                        phase4.gpr_overshoot,
+                        phase4.xmm_overshoot,
+                    );
+                }
+                for (&v, &slot) in &routed {
+                    slot_resident_set.insert(v.0 as usize);
+                    slot_resident.insert(v, slot);
+                }
+                spill_next_vreg = next;
+                schedules = next_schedules;
+                continue;
+            }
         }
 
         // Spill and try again. A block parameter is not a candidate: its value
@@ -1806,6 +1906,7 @@ pub fn allocate_global(
             class,
             loop_depths,
             &phase4.over_budget,
+            &slot_resident_set,
             func_name,
         );
 
@@ -1833,6 +1934,7 @@ pub fn allocate_global(
                 &global_liveness,
                 &super::build_vreg_classes_from_all_blocks(&phase4.per_block_insts),
                 class,
+                &slot_resident_set,
             )
             .unwrap_or_else(|| "no instructions".to_string());
             let defs = over_budget_defs(&phase4.over_budget, &phase4.per_block_insts);
@@ -1938,6 +2040,7 @@ pub fn allocate_global(
                 chosen.join(", "),
             );
         }
+        round += 1;
     }
 
     unreachable!("the spill loop returns before exhausting its rounds")
@@ -1976,6 +2079,7 @@ fn choose_spill_candidates(
     class: RegClass,
     loop_depths: &BTreeMap<VReg, u32>,
     over_budget: &[VReg],
+    slot_resident: &VRegSet,
     func_name: &str,
 ) -> BTreeSet<usize> {
     let classes = super::build_vreg_classes_from_all_blocks(block_schedules);
@@ -2010,7 +2114,8 @@ fn choose_spill_candidates(
             .get(block_idx)
             .cloned()
             .unwrap_or_default();
-        let per_inst = crate::regalloc::liveness::compute_liveness(sched, &live_out);
+        let per_inst =
+            crate::regalloc::liveness::compute_liveness_excluding(sched, &live_out, slot_resident);
         for (i, inst) in sched.iter().enumerate() {
             if !per_inst.live_at[i]
                 .iter()
@@ -2181,6 +2286,7 @@ fn pressure_peak(
     global_liveness: &crate::regalloc::global_liveness::GlobalLiveness,
     vreg_classes: &BTreeMap<VReg, RegClass>,
     class: RegClass,
+    slot_resident: &VRegSet,
 ) -> Option<String> {
     let of_class = |v: &&VReg| vreg_classes.get(*v).copied() == Some(class);
     let mut best: Option<(usize, usize, usize, &ScheduledInst)> = None;
@@ -2190,7 +2296,8 @@ fn pressure_peak(
             .get(block_idx)
             .cloned()
             .unwrap_or_default();
-        let liveness = crate::regalloc::liveness::compute_liveness(sched, &live_out);
+        let liveness =
+            crate::regalloc::liveness::compute_liveness_excluding(sched, &live_out, slot_resident);
         for (i, inst) in sched.iter().enumerate() {
             let live = liveness.live_at[i]
                 .iter()
@@ -2299,7 +2406,7 @@ mod tests {
     ) -> Phase2State {
         let phi_uses = empty_phi_uses(block_schedules.len());
         let global_liveness = compute_global_liveness(block_schedules, successors, &phi_uses);
-        build_global_interference(block_schedules, &global_liveness)
+        build_global_interference(block_schedules, &global_liveness, &VRegSet::new())
     }
 
     fn interfere(state: &Phase2State, a: u32, b: u32) -> bool {
@@ -2476,7 +2583,7 @@ mod tests {
         let successors = vec![vec![1usize], vec![]];
         let phi_uses = empty_phi_uses(2);
         let global_liveness = compute_global_liveness(&block_schedules, &successors, &phi_uses);
-        let phase2 = build_global_interference(&block_schedules, &global_liveness);
+        let phase2 = build_global_interference(&block_schedules, &global_liveness, &VRegSet::new());
 
         // v0 and v1 should NOT interfere (different blocks, no overlap).
         assert!(
@@ -2557,7 +2664,7 @@ mod tests {
         let successors = vec![vec![]];
         let phi_uses = empty_phi_uses(1);
         let global_liveness = compute_global_liveness(&block_schedules, &successors, &phi_uses);
-        let phase2 = build_global_interference(&block_schedules, &global_liveness);
+        let phase2 = build_global_interference(&block_schedules, &global_liveness, &VRegSet::new());
 
         let param_vregs = vec![(VReg(0), Reg::RDI)];
         let call_arg_precolors: Vec<(VReg, Reg)> = vec![];
@@ -2574,6 +2681,7 @@ mod tests {
             false, // uses_frame_pointer
             10,    // next_vreg start
             true,  // coalesce_now
+            &VRegSet::new(),
         );
 
         // v0 was precolored to RDI. With a call phantom for RDI interfering
@@ -2621,7 +2729,7 @@ mod tests {
         let successors = vec![vec![1usize], vec![]];
         let phi_uses = empty_phi_uses(2);
         let global_liveness = compute_global_liveness(&block_schedules, &successors, &phi_uses);
-        let phase2 = build_global_interference(&block_schedules, &global_liveness);
+        let phase2 = build_global_interference(&block_schedules, &global_liveness, &VRegSet::new());
 
         // Phase 2 graph has exactly the real VRegs (0..=3) — no phantoms.
         let phase2_num_vregs = phase2.graph.num_vregs;
@@ -2645,7 +2753,8 @@ mod tests {
             &Vec::<VRegSet>::new(),
             false,
             next_vreg,
-            true, // coalesce_now
+            true, // coalesce_now,
+            &VRegSet::new(),
         );
 
         // Phase 3 graph must have more VRegs than Phase 2 due to phantom
@@ -2681,7 +2790,7 @@ mod tests {
         let successors = vec![vec![]];
         let phi_uses = empty_phi_uses(1);
         let global_liveness = compute_global_liveness(&block_schedules, &successors, &phi_uses);
-        let phase2 = build_global_interference(&block_schedules, &global_liveness);
+        let phase2 = build_global_interference(&block_schedules, &global_liveness, &VRegSet::new());
 
         let param_vregs: Vec<(VReg, Reg)> = vec![];
         // Caller supplies these in ABI argument order (v0=first arg, v1=second arg).
@@ -2699,7 +2808,8 @@ mod tests {
             &Vec::<VRegSet>::new(),
             false,
             next_vreg,
-            true, // coalesce_now
+            true, // coalesce_now,
+            &VRegSet::new(),
         );
 
         let gpr_order = allocatable_gpr_order(false);
@@ -2734,7 +2844,7 @@ mod tests {
         let successors = vec![vec![]];
         let phi_uses = empty_phi_uses(1);
         let global_liveness = compute_global_liveness(&block_schedules, &successors, &phi_uses);
-        let phase2 = build_global_interference(&block_schedules, &global_liveness);
+        let phase2 = build_global_interference(&block_schedules, &global_liveness, &VRegSet::new());
 
         let param_vregs: Vec<(VReg, Reg)> = vec![];
         // Caller supplies the return-value precoloring.
@@ -2752,7 +2862,8 @@ mod tests {
             &Vec::<VRegSet>::new(),
             false,
             next_vreg,
-            true, // coalesce_now
+            true, // coalesce_now,
+            &VRegSet::new(),
         );
 
         let gpr_order = allocatable_gpr_order(false);
@@ -2777,7 +2888,7 @@ mod tests {
     ) -> Phase3State {
         let phi_uses = empty_phi_uses(block_schedules.len());
         let global_liveness = compute_global_liveness(&block_schedules, successors, &phi_uses);
-        let phase2 = build_global_interference(&block_schedules, &global_liveness);
+        let phase2 = build_global_interference(&block_schedules, &global_liveness, &VRegSet::new());
         let next_vreg = phase2.graph.num_vregs as u32;
         run_phase3(
             phase2,
@@ -2790,6 +2901,7 @@ mod tests {
             uses_frame_pointer,
             next_vreg,
             true,
+            &VRegSet::new(),
         )
     }
 
@@ -2979,6 +3091,7 @@ mod tests {
             &block_param_vregs,
             "test_fn",
             uses_frame_pointer,
+            &BTreeSet::new(),
             slots,
             MAX_GLOBAL_SPILL_ROUNDS,
         )
@@ -3169,6 +3282,7 @@ mod tests {
             &block_param_vregs,
             "test_many_args",
             false,
+            &BTreeSet::new(),
             &mut SlotAllocator::new(),
             MAX_GLOBAL_SPILL_ROUNDS,
         )
@@ -3319,6 +3433,7 @@ mod tests {
             &block_param_vregs,
             "three_phi_params",
             false,
+            &BTreeSet::new(),
             &mut SlotAllocator::new(),
             MAX_GLOBAL_SPILL_ROUNDS,
         )

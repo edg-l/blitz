@@ -990,11 +990,48 @@ fn verify_spill_slots(
     // The frame displacement a memory operand names, when it is a plain
     // `[spill_base + disp]` inside the slot region. An indexed address is not a
     // slot reference: nothing addresses a spill slot that way.
-    let slot_of = |addr: &crate::x86::addr::Addr| -> Option<i32> {
+    //
+    // `drift` is how far RSP has moved below where the frame was laid out, and it
+    // is subtracted before the window is tested: the call sequence pushes stack
+    // arguments, and a slot read between two pushes names the same cell at a
+    // larger displacement. Without this the check cannot see either half of that
+    // -- a correct read looks like a slot nothing wrote, and a wrong one looks
+    // like any other displacement. RBP-relative frames never drift, which is why
+    // the base is checked first.
+    let slot_of = |addr: &crate::x86::addr::Addr, drift: i32| -> Option<i32> {
         if addr.base != Some(spill_base) || addr.index.is_some() {
             return None;
         }
-        (addr.disp >= spill_lo && addr.disp < spill_hi).then_some(addr.disp)
+        let disp = if spill_base == Reg::RSP {
+            addr.disp - drift
+        } else {
+            addr.disp
+        };
+        (disp >= spill_lo && disp < spill_hi).then_some(disp)
+    };
+
+    // How much this instruction moves RSP down by. A `push` is eight bytes
+    // whatever it pushes; `sub rsp, n` and `add rsp, n` are the argument area and
+    // its cleanup. Anything else that writes RSP is not something this pass can
+    // follow, and `None` says so: the scan stops trusting its own drift from
+    // there rather than reporting against a number it cannot justify.
+    let rsp_delta = |inst: &MachInst| -> Option<i32> {
+        match inst {
+            MachInst::Push { .. } => Some(8),
+            MachInst::Pop { .. } => Some(-8),
+            MachInst::SubRI {
+                dst: crate::x86::Operand::Reg(Reg::RSP),
+                imm,
+                ..
+            } => Some(*imm),
+            MachInst::AddRI {
+                dst: crate::x86::Operand::Reg(Reg::RSP),
+                imm,
+                ..
+            } => Some(-*imm),
+            other if other.defs().contains(&Reg::RSP) => None,
+            _ => Some(0),
+        }
     };
 
     let leaders = block_leaders(insts, labels);
@@ -1011,11 +1048,18 @@ fn verify_spill_slots(
                 continue;
             };
             let mut out = state;
+            let mut drift = 0i32;
+            let mut tracked = true;
             for i in blocks[b].clone() {
-                if let Some(addr) = insts[i].mem_store_addr()
-                    && let Some(slot) = slot_of(addr)
+                if tracked
+                    && let Some(addr) = insts[i].mem_store_addr()
+                    && let Some(slot) = slot_of(addr, drift)
                 {
                     out.insert(slot);
+                }
+                match rsp_delta(&insts[i]) {
+                    Some(d) => drift += d,
+                    None => tracked = false,
                 }
             }
             for &s in &succs[b] {
@@ -1037,9 +1081,12 @@ fn verify_spill_slots(
             continue;
         };
         let mut written = state;
+        let mut drift = 0i32;
+        let mut tracked = true;
         for i in range.clone() {
-            if let Some(addr) = insts[i].mem_load_addr()
-                && let Some(slot) = slot_of(addr)
+            if tracked
+                && let Some(addr) = insts[i].mem_load_addr()
+                && let Some(slot) = slot_of(addr, drift)
                 && !written.contains(&slot)
             {
                 errors.push(format!(
@@ -1047,10 +1094,15 @@ fn verify_spill_slots(
                     spill_base, slot, insts[i]
                 ));
             }
-            if let Some(addr) = insts[i].mem_store_addr()
-                && let Some(slot) = slot_of(addr)
+            if tracked
+                && let Some(addr) = insts[i].mem_store_addr()
+                && let Some(slot) = slot_of(addr, drift)
             {
                 written.insert(slot);
+            }
+            match rsp_delta(&insts[i]) {
+                Some(d) => drift += d,
+                None => tracked = false,
             }
         }
     }

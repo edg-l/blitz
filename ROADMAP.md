@@ -72,10 +72,13 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Enumerate the ABI surface** -- `P0` Correctness. The generator has never
-  emitted an odd stack-argument count, which is how a segfault survived in a
-  corpus of 400 seeds a shape. Arg counts 0..14 x {int, double, mixed} x {leaf,
-  calls libc} is finite; be done with it.
+- **Fifteen or more integer parameters do not colour** -- `P0` Correctness. The
+  *callee* side of the enumeration below, and the last four red rows in it:
+  `abi_n15_int_*` and `abi_n16_int_*` at `-O1`, in `callee` rather than at the
+  call. `gpr_overshoot=1` with `over-budget VRegs=1 defined by Pure(Param)x1` at
+  a *peak of 8 GPRs live*, so this is not pressure -- a parameter cannot be
+  given a colour where eight registers are free, which points at the
+  pre-colouring rather than the budget. `-O0` takes all sixteen.
 - **Give the inliner a pressure check, as LICM has** -- `P1`, first entry. Done
   when `-O1` beats `-O0` on all 15 `bench` kernels. **Re-measure before
   starting**: the figure behind it is from 2026-08-06 and a lot of codegen has
@@ -228,7 +231,9 @@ pre-coloring conflict assertion exists (`coloring::check_precolorings`, under
 - `bash tests/fuzz/run_corpus.sh`: 17 `fixed` programs, all passing at both
   levels, and nothing open.
 - Generated programs: `mixed` 400/400, `args` 400/400, `pressure` 400/400, which
-  is what `run_fuzz.sh` now sweeps by default. **The width is what makes it a
+  is what `run_fuzz.sh` now sweeps by default, plus `abi` -- 98 programs
+  enumerating the argument surface rather than sampling it, 94 passing and 4 open
+  above. **The width is what makes it a
   check** -- the `-O1` allocator bug in `fixed/args-seed310.c` is at seed 310 of
   `args` alone, and at the 30 seeds the gates used to be run at, all three
   shapes were green while seven programs miscompiled.
@@ -339,13 +344,19 @@ what makes attribution possible here.
       the extractor (greedy, no cost model), and each would make a whole pass's
       bugs a disagreement `run_diff.sh` can see rather than an answer both levels
       give. **Treat this as a standing strategy, not the one-off it looks like.**
-- [ ] **Enumerate the ABI surface rather than sampling it.** `gen_c.py` is
-      UB-free by construction, which is its strength and its ceiling: it emits
-      7-12 parameter functions and evidently never an odd stack-argument count
-      with a libc call underneath, which is how the segfault above survived. Arg
-      counts 0..14 x {int, double, mixed} x {leaf, calls libc} is a few hundred
-      programs and a *finite* space you can be done with. Randomness is the wrong
-      tool at that size.
+- [x] **Enumerate the ABI surface rather than sampling it.** `tests/fuzz/gen_abi.py`
+      walks counts 0..16 x {int, double, mixed} x {leaf, calls printf}: 98
+      programs, 4.7s, the fourth shape of `run_fuzz.sh` rather than a fifth gate.
+      A failing program *names the argument* -- the callee returns the 1-based
+      index of the first one that did not arrive. **Three defects on the first
+      run**, none of them reachable from `gen_c.py`, which caps at 12 parameters:
+      a silently wrong first double at `-O0` from nine parameters up (the entry
+      sequence scratched XMM0 while it still held one), a call of 14 arguments
+      that could not be allocated at either level, and 15 or more *parameters*
+      still open above.
+- [ ] **Fifteen or more integer parameters do not colour, at `-O1`.** See Start
+      here. The callee's side of the same shape, and the only red rows the
+      enumeration has left.
 - [ ] **A "one fact, one place" audit.** Two bugs in one session were the same
       fact derived twice and disagreeing -- the block's `param_vregs` against
       `cfg::resolve_block_param_vreg`, and `Op::BlockParam`'s shadow modelled
@@ -623,11 +634,18 @@ without taking it is picking up work that cannot land.
 
 ## Known bugs
 
-**No wrong answers and no open hole.** At 400 seeds a shape `mixed`, `args` and
-`pressure` are all 400/400, the saved corpus is 18 `fixed` passing with nothing
-open, and `BLITZ_VERIFY` is green at `1` and `strict` across all 560 lit tests.
-The one entry that stood here was a defect in the verifier's own inputs rather
-than in the code it checked -- see Closed.
+**No wrong answers, one shape that does not compile.** At 400 seeds a shape
+`mixed`, `args` and `pressure` are all 400/400, the saved corpus is 18 `fixed`
+passing with nothing open, and `BLITZ_VERIFY` is green at `1` and `strict` across
+all 562 lit tests.
+
+- **Fifteen or more integer parameters do not colour at `-O1`**, four rows of the
+  enumerated ABI shape (`run_fuzz.sh 0 abi`). It is a compile error, not a wrong
+  answer, and `-O0` takes the same programs. See Start here.
+
+The entry that used to stand here -- a register-sharing violation with no
+behavioural symptom -- was a defect in the verifier's own inputs rather than in
+the code it checked. See Closed.
 
 **A green corpus is evidence about the shapes the corpus has.** The last two
 wrong-value bugs were both in six-plus-argument functions that call something,

@@ -31,6 +31,23 @@ pub struct LivenessInfo {
 ///     Add all operands to live
 ///   live_in = live after processing all instructions
 pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &VRegSet) -> LivenessInfo {
+    compute_liveness_excluding(insts, block_live_out, &VRegSet::new())
+}
+
+/// Liveness where `slot_resident` VRegs are not uses.
+///
+/// A slot-resident VReg is one the allocator decided lives in a frame slot for
+/// its whole range: a call argument that goes on the stack, which
+/// `abi::setup_call_args` pushes straight out of memory. It appears in the call
+/// barrier's operand list because that list is positional and the lowering reads
+/// argument `i` from operand `i`, but it is not read out of a register anywhere,
+/// so counting it as live claims a register that nothing needs. It has no
+/// definition either, so counting it would carry it back to the function's entry.
+pub fn compute_liveness_excluding(
+    insts: &[ScheduledInst],
+    block_live_out: &VRegSet,
+    slot_resident: &VRegSet,
+) -> LivenessInfo {
     let n = insts.len();
     let mut live_at: Vec<VRegSet> = vec![VRegSet::new(); n];
     let mut live: VRegSet = block_live_out.clone();
@@ -44,6 +61,9 @@ pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &VRegSet) -> Li
 
         // Add uses: VRegs used by this instruction are live before it.
         for &op in &inst.operands {
+            if slot_resident.contains(op.0 as usize) {
+                continue;
+            }
             live.insert(op.0 as usize);
         }
 

@@ -164,6 +164,98 @@ pub fn insert_spills_global(
     }
 }
 
+/// Route each of `targets` through a frame slot for the whole of its use at a
+/// call, and report the fresh VReg standing for it there against its slot.
+///
+/// This is the relief for a call whose arguments outnumber the registers. Every
+/// operand of a call barrier is read at one program point, so `n` arguments need
+/// `n` registers there -- but a stack-position argument is only going to be
+/// pushed, and `abi::setup_call_args` pushes it out of memory. Spilling cannot
+/// help, because a reload lands immediately before the call and is live there
+/// too; the value has to leave the register file entirely.
+///
+/// So: a store after the definition, and the barrier's operand replaced by a
+/// fresh VReg that names the slot and nothing else. The original keeps its short
+/// definition-to-store range and its register; the fresh one is defined nowhere,
+/// used only here, and excluded from liveness by
+/// [`super::liveness::compute_liveness_excluding`], so it claims no register at
+/// the call and is not carried back to the function's entry for want of a
+/// definition.
+///
+/// `targets` must be VRegs the CFG passes only at stack positions
+/// (`compile::precolor::stack_arg_vregs`): one that also reaches a register
+/// position would have its operand replaced there too, where a register is
+/// exactly what the ABI requires.
+pub fn route_call_args_to_slots(
+    block_schedules: &mut [Vec<ScheduledInst>],
+    targets: &BTreeSet<VReg>,
+    slots: &mut SlotAllocator,
+    next_vreg: &mut u32,
+    vreg_classes: &BTreeMap<VReg, crate::x86::reg::RegClass>,
+) -> BTreeMap<VReg, u32> {
+    let mut slot_of: BTreeMap<VReg, u32> = BTreeMap::new();
+    let mut routed: BTreeMap<VReg, u32> = BTreeMap::new();
+    // A value defined in no schedule has nothing to store, so routing it would
+    // read a slot no instruction wrote.
+    let defined: BTreeSet<VReg> = block_schedules
+        .iter()
+        .flatten()
+        .map(|inst| inst.dst)
+        .collect();
+    for &v in targets {
+        if defined.contains(&v) {
+            slot_of.insert(v, slots.alloc(SlotOwner::Allocator));
+        }
+    }
+    if slot_of.is_empty() {
+        return routed;
+    }
+
+    for insts in block_schedules.iter_mut() {
+        let old = std::mem::take(insts);
+        let mut new_insts: Vec<ScheduledInst> = Vec::with_capacity(old.len() + slot_of.len());
+        for mut inst in old {
+            let is_call = matches!(
+                inst.op,
+                Op::Pseudo(PseudoOp::CallResult(_, _)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
+            );
+            if is_call {
+                // One fresh VReg per occurrence: two arguments of one call can
+                // name the same value, and each is a separate position the
+                // lowering resolves on its own.
+                for op in inst.operands.iter_mut() {
+                    if let Some(&slot) = slot_of.get(op) {
+                        let stand_in = VReg(*next_vreg);
+                        *next_vreg += 1;
+                        routed.insert(stand_in, slot);
+                        *op = stand_in;
+                    }
+                }
+            }
+            let def_slot = slot_of.get(&inst.dst).copied();
+            new_insts.push(inst);
+            if let Some(slot) = def_slot {
+                let stored = new_insts.last().expect("just pushed").dst;
+                let is_xmm = super::is_xmm_vreg(stored, vreg_classes);
+                let store_op = if is_xmm {
+                    Op::Pseudo(PseudoOp::XmmSpillStore(slot as i64))
+                } else {
+                    Op::Pseudo(PseudoOp::SpillStore(slot as i64))
+                };
+                let sink = VReg(*next_vreg);
+                *next_vreg += 1;
+                new_insts.push(ScheduledInst {
+                    op: store_op,
+                    dst: sink,
+                    operands: vec![stored],
+                });
+            }
+        }
+        *insts = new_insts;
+    }
+    routed
+}
+
 /// What spilling a set of VRegs needs decided once, before any list is rewritten:
 /// where each one is defined, which are call arguments, and which slot each takes.
 struct SpillPlacement<'a> {
