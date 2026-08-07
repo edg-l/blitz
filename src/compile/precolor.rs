@@ -52,7 +52,6 @@ pub(super) fn assign_param_vregs_from_map(
     pairs
 }
 
-/// Collect the schedule indices of X86Idiv/X86Div instructions.
 /// Pre-color call argument and result VRegs for a single block.
 ///
 /// Same logic as `add_call_precolors` but scoped to one block, preventing
@@ -119,5 +118,114 @@ pub(super) fn add_call_precolors_for_block(
                 }
             }
         }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::function::BasicBlock;
+    use crate::ir::op::ClassId;
+    use crate::ir::types::Type;
+
+    fn operand(n: u32) -> EffOperand {
+        EffOperand::Committed {
+            class: ClassId(n),
+            vreg: VReg(n),
+        }
+    }
+
+    /// One call, `arg_tys` integers unless `float_ret`, results in VReg 100.
+    fn call(arg_count: u32, float_ret: bool) -> EffectfulOp {
+        EffectfulOp::Call {
+            func: "callee".to_string(),
+            args: (0..arg_count).map(operand).collect(),
+            arg_tys: vec![Type::I64; arg_count as usize],
+            ret_tys: vec![if float_ret { Type::F64 } else { Type::I64 }],
+            results: vec![operand(100)],
+        }
+    }
+
+    fn block_of(ops: Vec<EffectfulOp>) -> BasicBlock {
+        let mut ops = ops;
+        ops.push(EffectfulOp::Ret { val: None });
+        BasicBlock {
+            id: 0,
+            param_types: vec![],
+            param_vregs: vec![],
+            ops,
+        }
+    }
+
+    fn run(block: &BasicBlock) -> (Vec<(VReg, Reg)>, BTreeSet<VReg>) {
+        let mut pairs = Vec::new();
+        let mut live_out = BTreeSet::new();
+        add_call_precolors_for_block(block, &mut pairs, &mut live_out);
+        (pairs, live_out)
+    }
+
+    /// Register arguments take their ABI register, in `assign_args` order, and
+    /// the result takes the ABI return register.
+    #[test]
+    fn single_call_precolors_args_and_result() {
+        let (pairs, live_out) = run(&block_of(vec![call(3, false)]));
+        assert_eq!(
+            pairs,
+            vec![
+                (VReg(0), Reg::RDI),
+                (VReg(1), Reg::RSI),
+                (VReg(2), Reg::RDX),
+                (VReg(100), GPR_RETURN_REG),
+            ]
+        );
+        assert!(live_out.is_empty());
+    }
+
+    /// A float return goes to xmm0, not rax.
+    #[test]
+    fn float_result_takes_the_fp_return_reg() {
+        let (pairs, _) = run(&block_of(vec![call(0, true)]));
+        assert_eq!(pairs, vec![(VReg(100), FP_RETURN_REG)]);
+    }
+
+    /// Past the six argument registers an argument is passed on the stack, so
+    /// it gets no color; it is live out instead, since the caller's stores read
+    /// it after the barrier.
+    #[test]
+    fn stack_args_are_live_out_rather_than_precolored() {
+        let (pairs, live_out) = run(&block_of(vec![call(8, false)]));
+        assert_eq!(pairs.len(), 7, "6 register args plus the result");
+        assert!(!pairs.iter().any(|&(v, _)| v == VReg(6) || v == VReg(7)));
+        assert_eq!(live_out, BTreeSet::from([VReg(6), VReg(7)]));
+    }
+
+    /// Two calls in one block share the argument registers, so a fixed color
+    /// per VReg cannot satisfy both. The pass colors nothing and leaves the
+    /// allocator to place the copies; stack arguments are still live out.
+    #[test]
+    fn two_calls_in_a_block_precolor_nothing() {
+        let (pairs, live_out) = run(&block_of(vec![call(8, false), call(2, false)]));
+        assert!(pairs.is_empty());
+        assert_eq!(live_out, BTreeSet::from([VReg(6), VReg(7)]));
+    }
+
+    /// A register already claimed by an earlier pairing is not handed out
+    /// twice, and a VReg already colored keeps its first color.
+    #[test]
+    fn existing_pairings_win() {
+        let mut pairs = vec![(VReg(50), Reg::RSI)];
+        let mut live_out = BTreeSet::new();
+        add_call_precolors_for_block(&block_of(vec![call(2, false)]), &mut pairs, &mut live_out);
+        assert_eq!(
+            pairs,
+            vec![
+                (VReg(50), Reg::RSI),
+                (VReg(0), Reg::RDI),
+                (VReg(100), GPR_RETURN_REG)
+            ],
+            "VReg 1 wanted rsi, which VReg 50 already holds"
+        );
     }
 }
