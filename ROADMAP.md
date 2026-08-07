@@ -485,6 +485,36 @@ so the holes stay visible.
       table stakes for calling the backend "optimizing".
 - [ ] **SCCP.** `propagate_block_params` only handles single-predecessor
       constants; conditional arms that become constant are missed.
+
+      **The constant meet is written and measured, and it cannot land as
+      written.** Extending the pass from one predecessor to a meet over all of
+      them -- a parameter every predecessor passes the same constant to *is* that
+      constant -- is `lit` `-5.2%` instructions over 33 changed rows and `fuzz`
+      `-1.3%` over 88, with `bench` and `live` unchanged. It also cuts copies,
+      which is the item above: `inline/inline_multi_return.c` goes from 9 to 1.
+
+      **It introduces an `-O0` miscompile, and the cause is the merge rather than
+      the meet.** `run_diff.sh` catches it on `control/block_scope_shadowing.c`:
+      `-O0` prints 0 where `cc` and `-O1` print 7. Merging the parameter's class
+      with the constant's leaves a class holding *both* `BlockParam(b3, 0)` and
+      `Iconst(7)`, and `cfg::resolve_block_param_vreg` asks the target block's own
+      `BlockParam` first -- so the use reads the parameter's slot, whose phi copy
+      sources that same merged class and therefore copies the slot from itself.
+      The slot holds 0.
+
+      Ruled out on the way, so the next attempt does not re-check them: a
+      constant class used in a block its definition does not dominate is
+      *correctly* re-emitted at `-O0`, both as a `Ret` value and as a call
+      argument (`if/else` where both arms print the same literal is fine). The
+      hazard is specific to a class that is also a block parameter.
+
+      **So the route is `phi_removal`'s protocol, not a merge.** A parameter the
+      meet proves constant has to be *removed* from the block and its edges, then
+      re-extracted and re-linearized, and the result verified -- which is exactly
+      what `phi_removal` already does, and why it "proves its own result rather
+      than predicting it" after two attempts to predict merge composition were
+      both defeated by a program. **The existing single-predecessor merge has the
+      same latent hazard**; nothing in the current corpus reaches it.
 - [ ] **Memory SSA / memory versioning.** Makes forwarding, DSE, and GVN work
       cross-block on shared machinery instead of three intra-block passes.
 - [ ] **nsw/nuw/nnan/ninf op flags.** Without them the signed-ordering
