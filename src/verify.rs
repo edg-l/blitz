@@ -1301,3 +1301,71 @@ mod machine_tests {
         assert_eq!(verify(&insts), Vec::<String>::new());
     }
 }
+
+/// Every read of a Flags value happens before anything else writes EFLAGS.
+///
+/// EFLAGS is in no register file and no store reaches it, so a Flags value
+/// cannot be spilled and reloaded the way an ordinary one can. It survives only
+/// by nothing writing flags between the comparison and its consumer -- and the
+/// scheduler sinks each consumer to its own use, so a `call` gets in between as
+/// soon as one comparison has two of them. The result is a `cmov` reading a
+/// stranger's flags, which is wrong code with no crash and no verifier to catch
+/// it: the register-level checks are blind here, because EFLAGS is not a
+/// register they model.
+///
+/// `compile::flags_remat` establishes this by re-emitting the comparison where
+/// it is needed, and this is that pass proving its own result rather than
+/// predicting it -- the shape `phi_removal` already uses.
+///
+/// Block-local on purpose. A Flags value is never a block parameter and no pass
+/// creates one that crosses a block boundary; a use whose definition is in
+/// another block is reported rather than assumed benign.
+pub fn verify_flags_liveness(
+    block_schedules: &[Vec<ScheduledInst>],
+    classes: &BTreeMap<VReg, crate::x86::reg::RegClass>,
+) -> Vec<String> {
+    use crate::x86::reg::RegClass;
+
+    let mut errors = Vec::new();
+    let is_flags = |v: &VReg| classes.get(v) == Some(&RegClass::Flags);
+
+    for (b, sched) in block_schedules.iter().enumerate() {
+        // For each live Flags VReg, the index of the instruction that defined
+        // it, and the last index at which anything wrote EFLAGS.
+        let mut def_at: BTreeMap<VReg, usize> = BTreeMap::new();
+        let mut clobbered_at: Option<usize> = None;
+
+        for (i, inst) in sched.iter().enumerate() {
+            for op in &inst.operands {
+                if !is_flags(op) {
+                    continue;
+                }
+                let Some(&def) = def_at.get(op) else {
+                    errors.push(format!(
+                        "block {b} inst {i} ({:?}): reads flags {op:?} defined in another block",
+                        inst.op
+                    ));
+                    continue;
+                };
+                if let Some(c) = clobbered_at
+                    && c > def
+                {
+                    errors.push(format!(
+                        "block {b} inst {i} ({:?}) reads flags {op:?} defined at {def}, \
+                         but inst {c} ({:?}) wrote EFLAGS in between",
+                        inst.op, sched[c].op
+                    ));
+                }
+            }
+
+            if crate::compile::flags_writer(&inst.op) {
+                clobbered_at = Some(i);
+            }
+            if is_flags(&inst.dst) {
+                def_at.insert(inst.dst, i);
+            }
+        }
+    }
+
+    errors
+}

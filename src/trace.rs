@@ -32,9 +32,9 @@ struct BlitzDebugConfig {
 }
 
 /// Every valid `BLITZ_DEBUG` category. `all` enables the lot.
-const CATEGORIES: [&str; 14] = [
+const CATEGORIES: [&str; 15] = [
     "sched", "liveness", "regalloc", "asm", "licm", "egraph", "dce", "alias", "split", "phi",
-    "coalesce", "slots", "stats", "paramsrc",
+    "coalesce", "slots", "stats", "paramsrc", "merges",
 ];
 
 fn start_time() -> &'static Instant {

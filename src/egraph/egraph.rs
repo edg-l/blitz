@@ -112,6 +112,12 @@ pub struct EGraph {
     pub(crate) memo: Memo,
     pub(crate) worklist: Vec<ClassId>,
     pub(crate) node_count: usize,
+    /// The rewrite rule currently running, for `BLITZ_DEBUG=merges`.
+    ///
+    /// A dump says which nodes ended up in one class; this says who put them
+    /// there. Those are different questions, and the second one is the one you
+    /// have when the first has surprised you.
+    merge_rule: &'static str,
 }
 
 impl Default for EGraph {
@@ -128,6 +134,7 @@ impl EGraph {
             memo: Memo::default(),
             worklist: Vec::new(),
             node_count: 0,
+            merge_rule: "",
         }
     }
 
@@ -198,12 +205,44 @@ impl EGraph {
     /// Merge two e-classes. Panics if their types differ.
     ///
     /// Returns the canonical representative after merging.
+    /// Run `f` with every merge it performs attributed to `name`.
+    pub fn under_rule(&mut self, name: &'static str, f: impl FnOnce(&mut Self) -> bool) -> bool {
+        let outer = self.merge_rule;
+        self.merge_rule = name;
+        let changed = f(self);
+        self.merge_rule = outer;
+        changed
+    }
+
     pub fn merge(&mut self, a: ClassId, b: ClassId) -> ClassId {
         let a = self.unionfind.find(a);
         let b = self.unionfind.find(b);
 
         if a == b {
             return a;
+        }
+
+        if crate::trace::is_enabled("merges") {
+            let ops = |c: ClassId| {
+                self.classes[c.0 as usize]
+                    .nodes
+                    .iter()
+                    .map(|n| crate::ir::print::fmt_op(&n.op))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            };
+            eprintln!(
+                "[merges] {}: c{} <- c{}   ({})  <=  ({})",
+                if self.merge_rule.is_empty() {
+                    "?"
+                } else {
+                    self.merge_rule
+                },
+                a.0,
+                b.0,
+                ops(a),
+                ops(b)
+            );
         }
 
         assert_eq!(

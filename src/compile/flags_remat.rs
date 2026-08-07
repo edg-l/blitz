@@ -36,7 +36,7 @@ use crate::x86::reg::RegClass;
 /// added later is treated as clobbering until someone says otherwise. The cost
 /// of being wrong in that direction is one redundant compare; the cost of being
 /// wrong in the other is a `cmov` reading a stranger's flags.
-fn writes_flags(op: &Op) -> bool {
+pub(crate) fn writes_flags(op: &Op) -> bool {
     !matches!(
         op,
         // No code, or code that only moves bits.

@@ -9,21 +9,27 @@ use crate::ir::types::Type;
 pub fn apply_isel_rules(egraph: &mut EGraph) -> bool {
     let snaps = snapshot_all(egraph);
     let mut changed = false;
-    changed |= apply_alu_isel(egraph, &snaps);
-    changed |= apply_shift_isel(egraph, &snaps);
-    changed |= apply_shift_imm_isel(egraph, &snaps);
-    changed |= apply_funnel_shift_isel(egraph, &snaps);
-    changed |= apply_bit_isel(egraph, &snaps);
-    changed |= apply_alu_imm_isel(egraph, &snaps);
-    changed |= apply_select_isel(egraph, &snaps);
-    changed |= apply_carry_mask_isel(egraph, &snaps);
-    changed |= apply_icmp_isel(egraph, &snaps);
-    changed |= apply_fcmp_isel(egraph, &snaps);
-    changed |= apply_sext_zext_trunc_isel(egraph, &snaps);
-    changed |= apply_bitcast_isel(egraph, &snaps);
-    changed |= apply_fp_isel(egraph, &snaps);
-    changed |= apply_conv_isel(egraph, &snaps);
-    changed |= apply_div_isel(egraph, &snaps);
+    changed |= egraph.under_rule("apply_alu_isel", |g| apply_alu_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_shift_isel", |g| apply_shift_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_shift_imm_isel", |g| apply_shift_imm_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_funnel_shift_isel", |g| {
+        apply_funnel_shift_isel(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_bit_isel", |g| apply_bit_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_alu_imm_isel", |g| apply_alu_imm_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_select_isel", |g| apply_select_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_carry_mask_isel", |g| {
+        apply_carry_mask_isel(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_icmp_isel", |g| apply_icmp_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_fcmp_isel", |g| apply_fcmp_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_sext_zext_trunc_isel", |g| {
+        apply_sext_zext_trunc_isel(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_bitcast_isel", |g| apply_bitcast_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_fp_isel", |g| apply_fp_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_conv_isel", |g| apply_conv_isel(g, &snaps));
+    changed |= egraph.under_rule("apply_div_isel", |g| apply_div_isel(g, &snaps));
     changed
 }
 

@@ -56,6 +56,7 @@ mod effectful;
 use effectful::lower_effectful_op;
 mod dce;
 mod flags_remat;
+pub(crate) use flags_remat::writes_flags as flags_writer;
 mod licm;
 mod lower;
 use lower::lower_block_pure_ops;
@@ -913,6 +914,19 @@ pub fn compile(
             eprintln!(
                 "[sched] {}: re-emitted {n} comparison(s) for stale flags",
                 func.name
+            );
+        }
+        // The pass proving its own result. EFLAGS is in no register file, so
+        // nothing else in the verifier can see a consumer reading the wrong
+        // flags -- they are written on every path to it, just by the wrong
+        // instruction.
+        if crate::verify::level() != crate::verify::VerifyLevel::Off {
+            let errs = crate::verify::verify_flags_liveness(&block_schedules, &flags_classes);
+            assert!(
+                errs.is_empty(),
+                "flags liveness broken in '{}' after flags_remat:\n  - {}",
+                func.name,
+                errs.join("\n  - ")
             );
         }
     }

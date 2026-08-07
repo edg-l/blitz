@@ -47,25 +47,55 @@ fn mask_to_type(val: i64, ty: &Type) -> i64 {
 pub fn apply_algebraic_rules(egraph: &mut EGraph) -> bool {
     let snaps = snapshot_all(egraph);
     let mut changed = false;
-    changed |= apply_identity_rules(egraph, &snaps);
-    changed |= apply_annihilation_rules(egraph, &snaps);
-    changed |= apply_idempotence_rules(egraph, &snaps);
-    changed |= apply_inverse_rules(egraph, &snaps);
-    changed |= apply_double_negation_rules(egraph, &snaps);
-    changed |= apply_constant_folding(egraph, &snaps);
-    changed |= apply_commutativity_rules(egraph, &snaps);
-    changed |= apply_reassociation_rules(egraph, &snaps);
-    changed |= apply_shift_combining_rules(egraph, &snaps);
-    changed |= apply_absorption_rules(egraph, &snaps);
-    changed |= apply_div_identity_rules(egraph, &snaps);
-    changed |= apply_select_rules(egraph, &snaps);
-    changed |= apply_comparison_select_folding(egraph, &snaps);
-    changed |= apply_extension_folding_rules(egraph, &snaps);
-    changed |= apply_complement_rules(egraph, &snaps);
-    changed |= apply_demorgan_rules(egraph, &snaps);
-    changed |= apply_negation_distribution_rules(egraph, &snaps);
-    changed |= apply_sub_zero_eq_ne_rules(egraph, &snaps);
-    changed |= apply_add_const_zero_eq_ne_rules(egraph, &snaps);
+    changed |= egraph.under_rule("apply_identity_rules", |g| apply_identity_rules(g, &snaps));
+    changed |= egraph.under_rule("apply_annihilation_rules", |g| {
+        apply_annihilation_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_idempotence_rules", |g| {
+        apply_idempotence_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_inverse_rules", |g| apply_inverse_rules(g, &snaps));
+    changed |= egraph.under_rule("apply_double_negation_rules", |g| {
+        apply_double_negation_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_constant_folding", |g| {
+        apply_constant_folding(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_commutativity_rules", |g| {
+        apply_commutativity_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_reassociation_rules", |g| {
+        apply_reassociation_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_shift_combining_rules", |g| {
+        apply_shift_combining_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_absorption_rules", |g| {
+        apply_absorption_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_div_identity_rules", |g| {
+        apply_div_identity_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_select_rules", |g| apply_select_rules(g, &snaps));
+    changed |= egraph.under_rule("apply_comparison_select_folding", |g| {
+        apply_comparison_select_folding(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_extension_folding_rules", |g| {
+        apply_extension_folding_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_complement_rules", |g| {
+        apply_complement_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_demorgan_rules", |g| apply_demorgan_rules(g, &snaps));
+    changed |= egraph.under_rule("apply_negation_distribution_rules", |g| {
+        apply_negation_distribution_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_sub_zero_eq_ne_rules", |g| {
+        apply_sub_zero_eq_ne_rules(g, &snaps)
+    });
+    changed |= egraph.under_rule("apply_add_const_zero_eq_ne_rules", |g| {
+        apply_add_const_zero_eq_ne_rules(g, &snaps)
+    });
     changed
 }
 
