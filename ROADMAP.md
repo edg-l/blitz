@@ -420,8 +420,17 @@ isel patterns; we should beat it on the ones we implement.
 - [ ] **Latency/port-aware DAG scheduling.** A uarch model (ports, latencies,
       throughput) is only tractable because there is one target. ~5% but it is
       exactly the kind of win the single-target thesis predicts.
-- [ ] **Shift+mask folding**: `And(Shr(a,n), mask)` when the shift already
-      zeroed the masked bits (last open rule in the e-graph rule inventory).
+- [x] **Shift+mask folding**: `And(Shr(a,n), mask)` when the shift already
+      zeroed the masked bits. No new rule was needed: `known_bits::propagate`
+      already gives `Shr(x, n)` zeros in its top n bits and `Shl(x, n)` zeros in
+      its low n bits, and `apply_known_bits_rules`' redundant-And removal merges
+      the mask away on that. `tests/lit/asm/shift_mask.c` pins the three folding
+      shapes and the negative control -- `(x >> 8) & 255`, whose masked bits the
+      shift left unknown, still emits its `and`. What is *not* covered is the
+      demanded-bits direction, `Shr(And(a, mask), n)` where the shift discards
+      exactly what the mask cleared: that needs a backward analysis the e-graph
+      has no parents map for, the same missing structure that blocks the `imm32`
+      ALU form.
 - [ ] **MachInst peephole audit** (`src/emit/peephole.rs`): confirm `mov r,r`
       elimination, LEA shrinking, jmp-to-fallthrough removal.
 - [ ] **Branch layout**: `__builtin_expect` / likely-unlikely hints and
