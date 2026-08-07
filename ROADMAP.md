@@ -240,8 +240,12 @@ what makes attribution possible here.
       tier mistake: the frontend cannot produce one today, so it reads as a
       feature gap, but the failure mode is a panic rather than a diagnostic.
 - [ ] **The allocator's liveness disagrees with the emitted code's**, at `-O1`.
-      `verify_register_sharing` flags 1 of 450 generated programs
-      (`pressure` seed 148); `-O0` is clean since the argument-colour fix.
+      `verify_register_sharing` flags 1 of 450 generated programs; `-O0` is
+      clean since the argument-colour fix. The reproducer is checked in as
+      `tests/lit/regalloc/verify_register_sharing_xmm12.c`, which passes the
+      plain lit run and fails `BLITZ_VERIFY=strict bash tests/lit/run_tests.sh`
+      -- **that gate is red on purpose until this is resolved**. It has no
+      behavioural symptom, so no oracle and no corpus entry can hold it.
       `build_interference_into` adds an edge for every simultaneously-live pair,
       so two VRegs can only share a register if the allocator's liveness never
       had them live together while liveness recomputed from the emitted schedules
@@ -466,12 +470,12 @@ is not reachable from the generator:
 
 - **An odd number of stack arguments segfaults**, both levels, older than the
   `-O0` allocator. `corpus/open/stack_arg_alignment.c`, and P0 above.
-- **`verify_register_sharing` flags 1 of 450 generated programs at `-O1`**
-  (`pressure` seed 148). Reproduce with
-  `BLITZ_VERIFY=strict bash tests/fuzz/run_fuzz.sh 150`. No gate covers this:
-  the four runs use `BLITZ_VERIFY` over lit and the unit tests, not over the
-  generator, and the rule that the gate set stays fixed means the fix is to put
-  it inside a run that already happens rather than to add a fifth.
+- **`verify_register_sharing` flags a `-O1` allocation**, reproduced by
+  `tests/lit/regalloc/verify_register_sharing_xmm12.c`. It passes the plain lit
+  run and fails `BLITZ_VERIFY=strict bash tests/lit/run_tests.sh`, so **that
+  gate is red on purpose**; the bug has no behavioural symptom, so putting it
+  inside a run that already happens is the only way to hold it, and no corpus
+  entry can.
 
 The last *wrong-value* bug, an `-O1` allocation bug the `-O0` allocator's
 arrival made visible, closed when `Op::Param` got the shadow `Op::BlockParam`
