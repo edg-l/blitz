@@ -8,6 +8,8 @@ bitscan.c	O0	121	393	0	0
 bitscan.c	O1	120	373	0	0
 branchy_filter.c	O0	97	322	0	0
 branchy_filter.c	O1	94	303	0	0
+byte_copy.c	O0	169	664	0	0
+byte_copy.c	O1	150	562	0	0
 call_hot.c	O0	62	196	0	0
 call_hot.c	O1	71	245	3	7
 early_exit.c	O0	130	424	0	0
