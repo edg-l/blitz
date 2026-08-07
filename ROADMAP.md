@@ -1,7 +1,5 @@
 # Blitz Roadmap
 
-Supersedes the old `goals.txt`, `next.txt`, and `ideas.txt`.
-
 ## Goal
 
 Produce the best possible x86-64 machine code. Blitz targets **one** ISA on
@@ -13,25 +11,24 @@ is fair game here.
 The measure of success is code quality against `gcc -O2` / `clang -O2` on the
 same input: fewer instructions, fewer bytes, fewer spills, better loops.
 
-**Where that stands: `x1.36` against `gcc -O2`**, geometric mean of the
-per-program instruction ratio over the 8 `live` kernels, from
-`bash tests/run_codesize.sh --gap`. Worst is `call_hot` at `x2.44`.
+**Where that stands: `x1.29` against `gcc -O2`**, geometric mean of the
+per-program instruction ratio over the 21 `live` kernels, from
+`bash tests/run_codesize.sh --gap`. Worst is `call_hot` at `x2.29`.
 
-Read `live`, not `bench`. Both are reported, and `bench` says `x1.29` -- but its
-kernels resist folding only by being large enough that `gcc` gives up, so that
-ratio is against whatever `gcc` happened to leave behind. Every `live` kernel
-seeds its data from `argc`, which no reference compiler can evaluate.
+Read `live`, not `bench`. Both are reported, but `bench`'s kernels resist
+folding only by being large enough that `gcc` gives up, so that ratio is against
+whatever `gcc` happened to leave behind. Every `live` kernel seeds its data from
+`argc`, which no reference compiler can evaluate.
 
-**The `clang` column is not a ranking.** It reads `x0.74` on `live`, meaning
+**The `clang` column is not a ranking.** It reads `x0.78` on `live`, meaning
 blitz emits fewer instructions than `clang -O2` -- because `clang` vectorizes
-and unrolls these loops into 1315 instructions against blitz's 831, and its code
-is much faster. This counts static instructions, so a ratio under 1.0 is a
-program to go and read, not a win.
+and unrolls these loops. This counts static instructions, so a ratio under 1.0
+is a program to go and read, not a win.
 
 Correctness is a precondition, not a tradeoff against that. An aggressive
 single-target optimizer has more room to be subtly wrong than a conservative
-portable one, so the correctness infrastructure in P0 is part of the goal
-rather than overhead against it.
+portable one, so the correctness infrastructure in P0 is part of the goal rather
+than overhead against it.
 
 ## Non-goals
 
@@ -41,105 +38,142 @@ rather than overhead against it.
   Explicitly not planned: preprocessor, typedef/enum/union, initializer lists,
   function pointers, bitfields, diagnostics quality.
 - **Multi-target.** Single-ISA specialization is the whole thesis.
-- **Toolchain completeness.** DWARF, `.eh_frame`/CFI, PIC/PIE, TLS, inline asm,
+- **Toolchain completeness** for now: `.eh_frame`/CFI, PIC/PIE, TLS, inline asm,
   atomics, sanitizers, LTO, PGO. These are what a *shipping* compiler needs, not
-  what a *good* optimizer needs. Revisit only if one blocks measurement.
+  what a *good* optimizer needs.
+
+**DWARF is wanted eventually**, which is the one item that has moved off this
+list. It is not scheduled, but it constrains decisions now: `-O0` has to stay
+the level that maps to source, so a pass that deletes a value someone could
+inspect does not belong there. That is the line the DCE split is drawn on, and
+it is the line a fast `-O0` allocator sits on the right side of -- locals in
+frame slots at fixed offsets is what debug info describes.
 
 ## Start here
 
-Ordered. Each says what it is, why it is placed there, and what would tell you it
-is done.
+Ordered. Each says what it is, why it is placed there, and what would tell you
+it is done.
 
-1. **Sixteen capacity failures are what is left.** No generated program
-   computes a wrong value any more: 600 at 200 seeds a shape are `mixed`
-   198/200, `args` 188/200, `pressure` 198/200, and **every one of those
-   failures is the allocator refusing to colour, not a wrong answer.**
-   Reproducers in `tests/fuzz/corpus/open/`; `run_corpus.sh` checks them in
-   seconds.
+### 1. Give `-O0` a fast allocator instead of the colouring one
 
-   **A program that does not compile is a program no oracle can judge**: 21 of
-   the 1200 (program, level) pairs are unjudged for that reason, so "no wrong
-   value remains" is a statement about the 1179 that ran, not about all 1200.
-   That is the second reason to close these. The count moves with the schedule
-   in both directions: immediate-form ALU cost `args` two programs, and dropping
-   the def's interference with the operand it overwrites returned eight.
+`-O0` and `-O1` run the **same** pressure splitter and the same function-scope
+Chaitin-Briggs allocator. That is the problem, and compile time is the least of
+it.
 
-   The allocator names the shape itself: *"spilling did not reduce it, so the
-   pressure point is one instruction whose own operands are what is live
-   there"*. Spilling cannot relieve a value that is live at a point *because
-   the instruction there reads it*, which is why the spill loop stops -- see
-   the four measured attempts at the end of `docs/internal/refactor-roadmap.md` before
-   trying a fifth. `args` is where it concentrates, 12 of the 16. Done when a
-   200-seed run of each shape is clean.
-2. ~~**Make the gate able to see them.**~~ Done: `tests/fuzz/corpus/` plus
-   `run_corpus.sh`, and `oracles.sh` so the saved programs and the generated ones
-   are judged by the same three oracles. Save a failing program there before
-   chasing it -- `run_fuzz.sh` is still pinned at 30 seeds everywhere, and 30
-   seeds is where seven miscompiles hid behind three green shapes.
-3. **Give the inliner a pressure check, as LICM now has.** `-O1` still emits
-   worse code than `-O0` on 7 of the 15 `bench` kernels. LICM was 60% of that and
-   is now budgeted; the rest is inlining, which decides without looking at
-   pressure in exactly the same way -- `BLITZ_PASSES=-inlining` takes `bench`
-   instructions 2637 to 2422 and reloads 377 to 247. The fix has the same shape
-   as `licm::within_budget`. Done when `-O1` beats `-O0` on all 15 kernels.
-4. ~~**Offset-aware alias analysis.**~~ Done: `alias.rs` splits an address into
-   a base expression plus a constant displacement, and two accesses off one base
-   whose `[offset, offset + width)` ranges do not meet cannot clobber each
-   other. **Its measured effect is close to nothing, and that is the finding**:
-   one `lit` row moves (-13.4% instructions, -24.5% bytes) and `struct_walk`
-   goes the other way by 2.7% because better forwarding keeps more values live.
-   Nothing else in `lit`, `bench` or `fuzz` changes, because almost nothing in
-   them accesses two fields of a struct -- `gen_c.py` does not generate structs
-   at all. The capability is real and `tests/lit/alias/forward_across_struct_field.c`
-   covers it; the corpus cannot price it. That is item 1 of P1 restated.
+**The correctness argument is the real one.** The bug priors in P0 put regalloc
+first by a wide margin, and `run_diff.sh`'s `-O0`-vs-`-O1` oracle is by
+construction blind to anything equally wrong at both levels. Sharing the
+allocator means the highest-risk component in the compiler is exactly the one
+the primary oracle cannot see; every allocator bug so far was caught by the `cc`
+reference leg or by reading asm. A separate `-O0` allocator makes allocator bugs
+visible to self-consistency for the first time.
 
-After those, the P1 list below is ordered by measured impact. **`P2` is where the
-single-target thesis pays off**, and its first item is now in: immediate-form ALU
-took the `gcc -O2` gap x1.39 -> x1.34 on its own. The rest of P2 is untouched.
+Two more payoffs. **Capacity failures stop existing at `-O0`**: a fast allocator
+spills rather than refusing to colour, so every generated program compiles at
+one level and gets judged -- see item 2, which is the last one left, and the
+note there about unjudged programs. And **it is what DWARF will want**: locals
+in frame slots at fixed offsets is what `-O0` debug info describes, where the
+colouring allocator's whole job is to keep values in registers.
+
+The shape is LLVM's `RegAllocFast`: every VReg gets a slot, operands are loaded
+into scratch registers per instruction, results stored back, no interference
+graph, no coalescing, no splitting, linear in instructions. What it still has to
+honour, none of it optional:
+
+- precoloring and the SysV ABI at calls (`compile/precolor.rs`), including AL on
+  every call
+- block parameters, which are written by phi copies on the edge before the
+  block's first instruction runs
+- `regalloc::SlotAllocator`, which owns one frame-slot numbering per function and
+  records the pass each slot belongs to -- a second allocator is a fourth
+  spilling pass, not an exception to that rule
+- the machine-level verifier (`BLITZ_VERIFY`): no VReg surviving allocation, no
+  physical register read unwritten on some path
+
+**This reverses "the only allocator"**, which `CLAUDE.md` records as a
+deliberate consolidation. Reversing it is the point rather than an oversight,
+but say so in the commit.
+
+Expect `-O0` code quality to drop a lot and every `-O0` codesize baseline to
+churn. That is fine and it is not a regression: `-O0` quality was never a goal.
+It does mean `-O0` rows stop being a quality signal, so read `-O1` rows after
+this lands.
+
+Done when: `-O0` uses the fast path, all four corpora and the fuzz shapes are
+green at both levels, `args` seed 88 compiles at `-O0`, and `-O1` codesize rows
+are **unchanged** -- the change must not reach the optimized level at all.
+
+### 2. The last capacity failure
+
+`tests/fuzz/corpus/open/args-seed88.c`, and at 200 seeds a shape it is the only
+one: `mixed` 200/200, `args` 199/200, `pressure` 200/200. Every other failure in
+the table this file used to carry has closed.
+
+The allocator names the shape itself: *"nothing live at the pressure point can
+be spilled: every value there is read by the instruction, a block parameter, or
+a result the hardware pins to a register"*. Thirteen block parameters feed a
+`TerminatorArgs` that reads all thirteen as its own operands, so spilling cannot
+relieve it -- the values are live at that point *because the instruction there
+reads them*. Only the splitter can, by routing a parameter through a slot before
+the schedules are built.
+
+**A program that does not compile is a program no oracle can judge**, which is
+the second reason to close it rather than a cosmetic one. Item 1 makes this
+program compile at `-O0` and so judgeable, but does not fix it at `-O1`; the two
+are worth doing in that order for exactly that reason.
+
+Before trying a fifth approach, read the four measured ones at the end of
+`docs/internal/refactor-roadmap.md`. Done when a 200-seed run of each shape is
+clean at both levels.
+
+### 3. Give the inliner a pressure check, as LICM has
+
+**Re-measure before starting: this was last measured 2026-08-06 and a lot of
+codegen has moved since.** As of then, `-O1` emitted worse code than `-O0` on 7
+of the 15 `bench` kernels; LICM was 60% of that and is now budgeted, and the
+rest was inlining, which decides without looking at pressure in exactly the same
+way. `BLITZ_PASSES=-inlining` took `bench` instructions 2637 to 2422 and reloads
+377 to 247. The fix has the same shape as `licm::within_budget`.
+
+Done when `-O1` beats `-O0` on all 15 kernels.
+
+After those, the P1 list below is ordered by measured impact. **`P2` is where
+the single-target thesis pays off.**
 
 **Do not start in the register allocator, the splitter, or the block-parameter
-machinery without reading `docs/internal/refactor-roadmap.md` first.** It is finished as
-work and is now the record of what eleven steps measured -- including the
-predictions that were wrong, which is what stops the next attempt repeating them.
-Three are worth knowing before touching the splitter: the Chaitin ratio has been
-rejected by measurement three times, `insert_early_barrier_spills` cannot be
-gated on pressure because it runs before global liveness exists, and
-`Op::BlockParam` cannot leave the e-graph because expressions consume it.
+machinery without reading `docs/internal/refactor-roadmap.md` first.** It is
+finished as work and is now the record of what eleven steps measured --
+including the predictions that were wrong, which is what stops the next attempt
+repeating them.
 
-## Current state (2026-08-06)
+## Current state (2026-08-07)
 
-- 925 Rust tests + 480 lit tests, all green. `cargo fmt` clean, zero build warnings.
+- 1010 Rust tests + 543 lit tests, all green. `cargo fmt` clean, `cargo clippy
+  --all-targets` clean, zero build warnings, zero rustdoc warnings.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 302 compared O0-vs-O1 and against a reference
-  compiler; no skips, no differences under gcc or clang.
-- `bash tests/fuzz/run_corpus.sh`: the saved corpus, seconds. 8 `fixed` pass,
-  2 `open` fail as recorded -- both capacity, neither a wrong value.
-- Generated programs at 30 seeds a shape -- the width every gate runs -- are
-  `mixed` 30/30, `args` 30/30, `pressure` 30/30. **That width measures nothing**,
-  and it is what `run_corpus.sh` exists to compensate for. At 200 seeds it is
-  `mixed` 198/200, `args` 188/200, `pressure` 198/200: **no wrong-value programs
-  and 16 capacity failures.**
-- Code quality has a baseline: `bash tests/run_codesize.sh --check`, 894 rows
-  across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
-  the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
+- `bash tests/lit/run_diff.sh`: 334 compared `-O0`-vs-`-O1` and against a
+  reference compiler; no skips, no differences under gcc or clang.
+- `bash tests/fuzz/run_corpus.sh`: 13 `fixed` pass, 1 `open` fails as recorded.
+- Generated programs at 200 seeds a shape: `mixed` 200/200, `args` 199/200,
+  `pressure` 200/200. **No wrong-value programs and one capacity failure.**
+  At the 30 seeds every gate is pinned to, all three are clean -- **that width
+  measures nothing**, and `run_corpus.sh` is what compensates for it.
+- Code quality has a baseline: `bash tests/run_codesize.sh --check`, over `lit`,
+  `bench`, `live` and `fuzz`, fed by `BLITZ_DEBUG=stats`.
 - Code quality also has an *absolute* number, which is the one the Goal is
   written against: `--gap`, `x1.29` vs `gcc -O2` over the 21 `live` kernels.
   `lit` and `fuzz` compute a fixed answer from no runtime input, so `gcc -O2`
-  evaluates the whole program and emits the constant -- a generated program
-  becomes `mov $0x562,%esi; call printf`. `--gap` detects that where it is
-  total but not where it is partial, and partial is the common case. `bench`
-  resists only by being big and reports a flattering `x1.29`; `live` seeds every
-  kernel from `argc` and cannot be folded at all. **8 kernels is still a thin
-  basis** -- widening `live` is the cheapest way to make every later quality
-  claim mean more.
-- **Compile time is quadratic in blocks x classes.** `secs ~ (B*C)^0.86`,
-  R2=0.92 over 44 (program, level) points, and both levels sit on one line, so
-  `-O1` is not intrinsically cheaper -- it just hands the same pipeline a smaller
-  IR. DCE is what shrinks it: `args` seed 108 takes 33s at `-O0` and 4.8s with
-  `BLITZ_PASSES=+dce`, and `-O1 -dce` is slower than `-O0`. The two Theta(B*C)
-  loops are `linearize`'s per-block evict-and-restore of the whole class map and
-  the splitter's pressure scan. `bash tests/profile.sh <src> [flags]` is the way
-  in; `perf report` hangs on these profiles, `perf script` does not.
+  evaluates the whole program and emits the constant. `--gap` detects that where
+  it is total but not where it is partial, and partial is the common case.
+  `live` seeds every kernel from `argc` and cannot be folded at all. Widening it
+  further has no natural ceiling and is always a valid use of leftover time.
+- **Compile time is superlinear in blocks x classes**: `secs ~ (B*C)^0.86`,
+  R2=0.92, and **both levels sit on one line**. `-O1` is not intrinsically
+  cheaper, it hands the same pipeline a smaller IR. On a 6048-line input the two
+  levels are now 246ms (`-O0`) and 250ms (`-O1`). The remaining Theta(B*C) site
+  is the splitter's pressure scan; linearize's per-block class-map
+  evict-and-restore has been narrowed. `bash tests/profile.sh <src> [flags]` is
+  the way in; `perf report` hangs on these profiles, `perf script` does not.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
   e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> trivial
   block-parameter removal (re-extract + linearize again) -> DAG schedule ->
@@ -154,40 +188,26 @@ gated on pressure because it runs before global liveness exists, and
 
 A fast wrong answer is worthless, and an optimizer this size certainly has
 subtle bugs left. Every miscompile of the last several months was found by the
-generated corpus and its two oracles, not by a hand-written test happening to hit
-the right shape -- which is the argument for keeping the generator ahead of the
-compiler rather than treating a green suite as evidence. The priors on where bugs
-live: **regalloc** (splitting, coalescing, spill/remat, cross-block liveness)
-first by a wide margin, then the **memory passes** (forwarding/DSE resting on a
-conservative alias model), then **isel width and type handling** (the `X86CmpI`
-`ty` bug was exactly this class).
+generated corpus and its two oracles, not by a hand-written test happening to
+hit the right shape -- which is the argument for keeping the generator ahead of
+the compiler rather than treating a green suite as evidence. The priors on where
+bugs live: **regalloc** (splitting, coalescing, spill/remat, cross-block
+liveness) first by a wide margin, then the **memory passes** (forwarding/DSE
+resting on a conservative alias model), then **isel width and type handling**.
 
 **What exists**, all green and described in `CLAUDE.md`: the `-O0`-vs-`-O1`
 differential with a `cc` oracle beside it (`run_diff.sh`), the UB-free generator
 and its shrinker (`gen_c.py`, `reduce.py`), the per-pass IR verifier and its
 strict mode (`BLITZ_VERIFY`), and the machine-level verifier over the final
 instruction stream. The gate set is **fixed at four runs**; new invariants go
-inside the runs that already happen. A battery that grows every time something is
-learned stops being run between every change, and one-change-at-a-time is what
-makes attribution possible here.
+inside the runs that already happen. A battery that grows every time something
+is learned stops being run between every change, and one-change-at-a-time is
+what makes attribution possible here.
 
 **Diagnostics worth building, each earned by a session it would have shortened.**
-None of these is a gate; they are what turns a wall of numbers into a name. The
-ordering is by hours lost, not by effort to build.
+None is a gate; they are what turns a wall of numbers into a name. Ordered by
+hours lost, not by effort to build.
 
-- [x] **Put the over-budget histogram in the error, not just the trace.** The
-      allocator's failure names a count -- "over-budget VRegs=48, of which
-      spillable=21" -- and a peak. It does not say *what* those values are, and
-      the answer settles the whole question: 21 of 24 on `args` seed 61 are
-      `Pure(BlockParam)`, which says "this is the block-parameter wall" rather
-      than "spilling failed". The error now carries the top three defining ops
-      with counts. Cost of not having had it: most of a session spent on the
-      spill loop, which was not the cause.
-- [x] **Say which register class each VReg is in, in the liveness dump.** There
-      was no way to see that a value lived in EFLAGS rather than a GPR short of
-      joining the `sched` and `liveness` dumps and re-deriving it from the op
-      defining each operand. One column would have shown 35 of 196 values in the
-      wrong class immediately.
 - [ ] **Make the per-function VReg numbering impossible to miss.** Numbering
       restarts at v0 in every function and the dumps repeat bare `v14` on every
       line, so any analysis over a whole `--emit` run silently pools `v5` in
@@ -209,7 +229,6 @@ ordering is by hours lost, not by effort to build.
       emitted code changed; nothing says *which decision* changed. Two runs'
       allocation, coalescing and hoisting choices, diffed by VReg, would
       attribute a regression in one step instead of by bisection.
-
 - [ ] **The allocator's liveness disagrees with the emitted code's.** What
       `verify::verify_register_sharing` points at now that it is in.
       `build_interference_into` adds an edge for every simultaneously-live pair,
@@ -234,9 +253,9 @@ ordering is by hours lost, not by effort to build.
 - [ ] **Rewrite-rule equivalence tests.** For each algebraic/strength rule,
       randomized equivalence check of LHS vs RHS over the operand space
       (including boundary values: 0, 1, -1, INT_MIN, INT_MAX, wraparound).
-      Cheap, and it is the only systematic defense against a rule that is right
-      for most inputs. The two rejected signed-ordering rewrites are the
-      cautionary example.
+      Cheap, and the only systematic defense against a rule that is right for
+      most inputs. The two rejected signed-ordering rewrites are the cautionary
+      example.
 - [ ] **Regalloc stress mode.** Generate programs with tunable register
       pressure, live-range-crossing-call density, and phi-heavy control flow,
       then differential-execute. Aim it at the code with the worst historical
@@ -252,7 +271,7 @@ ordering is by hours lost, not by effort to build.
 
 Without numbers, "most optimized" is unfalsifiable and every session drifts.
 
-**What exists**: `bash tests/run_codesize.sh [--check|--update]` over three
+**What exists**: `bash tests/run_codesize.sh [--check|--update|--gap]` over four
 corpora with a baseline each in `tests/baselines/`, fed by `BLITZ_DEBUG=stats`.
 Instruction count, `.text` bytes, spill stores and reloads per (program, level);
 a generated program that does not compile is a `-` row rather than an omission,
@@ -265,68 +284,21 @@ so the holes stay visible.
 
 ### P1 -- Optimizer gaps with the largest measured impact
 
-- [x] **A benchmark corpus whose inputs are not known at compile time.**
-      `tests/lit/live`, 8 kernels seeding their data from `argc`: a strided array
-      walk, a struct-field walk, a dependent pointer chase, two float
-      reductions, a hot loop over a `noinline` callee, a dense matmul, a
-      data-dependent branch filter, and a bit-manipulation loop. `--gap` now
-      defaults to `bench live`, and `live` is the one to read.
-      **It disagreed with `bench` immediately: `x1.36` against `gcc -O2` where
-      `bench` says `x1.29`.** `bench` resists folding only by being large enough
-      that `gcc` gives up, so its ratio is against whatever `gcc` left behind;
-      `live` cannot be folded at all. They are lit tests too, so `run_tests.sh`
-      and `run_diff.sh` check each still computes the right answer at both
-      levels and against `cc`. Widening this from 8 is the cheapest way to make
-      every later quality claim mean more.
-- [x] **LICM has a pressure check.** Hoisting is budgeted by the register file
-      less what the loop already needs (`licm::within_budget`). instructions
-      -12.3% on `bench` and -21.3% on `fuzz`, spills -91.1% and -47.3%, no row
-      worse on any corpus, `gcc -O2` gap x1.42 -> x1.39. **The same defect is
-      still open in the inliner** -- see item 3 of Start here.
-- [x] **Offset-aware alias analysis.** `alias.rs::split_offset` takes an address
-      apart into a base expression and a constant displacement; two accesses off
-      one base are disjoint when their byte ranges do not meet. `s->a` and
-      `s->b` stop killing each other. The corpora barely exercise it -- see item
-      4 of Start here, and the corpus item at the top of this list.
-- [x] **The def no longer interferes with the operand it overwrites.** x86
-      arithmetic is two-address, and `build_interference_into` gave every result
-      an edge to `live_at[i]` -- the set live *before* the instruction, which
-      contains that operand. The form was unsatisfiable by construction and
-      every such op cost a `mov`. `gcc -O2` gap x1.34 -> x1.29, `clang -O2`
-      x1.07 -> x1.04; over changed rows `lit` -5.5% insts, `fuzz` -3.7%, `bench`
-      -3.6%. It also removed **eight capacity failures**, 24 -> 16: the spurious
-      edges were making graphs uncolourable that are not.
 - [ ] **Copies are still a third of what blitz emits.** Measured over the 15
       `bench` kernels: blitz 805 register-to-register moves in 2613
       instructions, against `gcc -O2`'s 345 in 2226 and `clang -O2`'s 214 in
       2572. **The whole remaining instruction gap to gcc is copies.**
-      Conservative coalescing is at its limit: `BLITZ_DEBUG=coalesce` now
-      reports the declines, and with Briggs and George both in, 34 of 64
-      candidate copies on `queens` and 43 of 112 on `hash_table` are still
-      refused because the merge genuinely constrains the graph. Getting further
-      needs a structural change rather than more tuning, and **one of the two
-      candidates is now measured out**:
-
-      - *Iterated coalescing is worthless here.* George & Appel's leverage is
-        `simplify`, which removes every node of degree < k so the rest fall
-        below the threshold the two tests are stated against. Simulated on the
-        `bench` kernels it removes 62 of 165 nodes on `queens` and 80 of 297 on
-        `hash_table`, and **zero** refused copies would pass afterwards: the
-        survivors have their endpoints in the dense core, which is what
-        simplification does not touch. Re-testing to a fixpoint, which is what
-        landed, is worth -0.2% on `fuzz`. Do not write the worklist allocator
-        for this.
-      - *Fewer block parameters to copy* is the candidate left, and
-        `docs/internal/refactor-roadmap.md` argues it at length. Note `phi_removal`
-        already does both tiers including self-references, so the 82% of
-        parameters `count_trivial_phis.py` calls redundant on `hash_table` is
-        what the *rule* permits, not what is sound to remove -- one e-class is
-        one expression, not one value. Read that file before starting.
-- [x] **Coalescing takes George's rule as well as Briggs'.** Either test
-      passing admits the merge; both are conservative, so the pair is too. Over
-      the rows that changed: `fuzz` -7.1% insts and -4.5% bytes, `lit` -5.6% and
-      -3.9%, `bench` -1.0%. It helps where the interference graph is dense,
-      which is where Briggs alone refuses most merges.
+      Conservative coalescing is at its limit: with Briggs and George both in,
+      34 of 64 candidate copies on `queens` and 43 of 112 on `hash_table` are
+      still refused because the merge genuinely constrains the graph
+      (`BLITZ_DEBUG=coalesce` reports the declines). Getting further needs a
+      structural change, and **iterated coalescing is measured out** -- see
+      Decisions. *Fewer block parameters to copy* is the candidate left, and
+      `docs/internal/refactor-roadmap.md` argues it at length. Note
+      `phi_removal` already does both tiers including self-references, so the
+      82% of parameters `count_trivial_phis.py` calls redundant on `hash_table`
+      is what the *rule* permits, not what is sound to remove -- one e-class is
+      one expression, not one value. Read that file before starting.
 - [ ] **GVN / cross-block CSE.** The e-graph does local CSE only. Repeated
       address computations and field loads survive across blocks. Typical
       5-15% on real code.
@@ -351,122 +323,40 @@ so the holes stay visible.
 This is where single-target focus is supposed to pay off. LLVM has ~10x the
 isel patterns; we should beat it on the ones we implement.
 
-- [x] **Immediate-form ALU.** `X86AddI`/`X86SubI`/`X86AndI`/`X86OrI`/`X86XorI`,
-      one child producing `Pair(childtype, Flags)` exactly as the register form
-      does. `gcc -O2` gap x1.39 -> x1.34, `clang -O2` x1.11 -> x1.07, worst
-      kernel x2.82 -> x2.70; over the rows that changed, `bench` -3.8% insts and
-      -5.1% bytes, `lit` -2.3%/-2.7%, `fuzz` -1.7%/-2.2%.
-      **Only the `imm8` form is selected.** `Iconst` costs 0.0, so the `mov r,
-      imm32` the register form needs is invisible to extraction and the
-      immediate form has to carry the credit itself; an `imm8` form is 3 bytes
-      against that form's 7 and wins outright, while an `imm32` form is 6
-      against 7 and pricing it to win costs
-      `tests/lit/control/main_falls_off_end.c` its compile. Measured, the wide
-      case is worth a further -1.4pp on `lit` and `fuzz` and -0.13pp on `bench`.
-      It comes back when the credit can be made honest -- it is owed only where
-      the constant has a single use, and the e-graph has no parents map to ask.
-- [x] **Store of an immediate.** `mov rX, k; mov [addr], rX` writes the constant
-      twice, once into a register and once into memory. It is a peephole rather
-      than an isel rule, for the same reason the 3-operand `lea` is: whether the
-      register carries the constant anywhere else is the allocator's answer, not
-      the cost model's, and `Iconst` costs 0.0 so extraction cannot see the `mov`
-      at all. The register must die at the store and must not be part of the
-      address; the block-local scan is conservative at a branch, a call or the
-      end of the block, so a constant stored last in a block keeps its register.
-      On `lit` 18 rows lose 1-7 instructions each (-10.7% insts / -3.0% bytes on
-      `arrays/param_decay_bracket.c`, -18.8%/-4.9% on
-      `control/constant_index_stores_then_call.c`) and on `fuzz` 3 rows; `bench`
-      and `live` are unchanged, since neither stores a constant in a loop.
+- [ ] **A cost model that can see a constant being materialized.** This blocks
+      three separate items, which is why it leads the list. `Iconst` costs 0.0,
+      so the `mov r, imm32` a register form needs is invisible to extraction and
+      any immediate form has to carry the credit itself. Consequences today: the
+      `imm32` ALU form is not selected (only `imm8`), worth a measured -1.4pp on
+      `lit` and `fuzz` and -0.13pp on `bench`; the demanded-bits direction of
+      shift+mask folding cannot be done; and store-of-immediate and the
+      3-operand LEA had to be peepholes rather than isel rules. The credit is
+      owed only where the constant has a single use, and **the e-graph has no
+      parents map to ask**. That is the actual missing structure. If it lands,
+      re-check `tests/lit/control/main_falls_off_end.c`, which is what pricing
+      the `imm32` form to win broke last time.
 - [ ] **Bit instructions**: `popcnt`, `bsr`/`bsf`, `tzcnt`/`lzcnt`, `bswap`, and
       `bt` itself -- the read form, whose result is a flag and so needs the
-      compare seam rather than a value class.
-      `bts`/`btr`/`btc` are done: a mask built at run time,
-      `Or(x, Shl(1, n))` / `Xor(x, Shl(1, n))` / `And(x, Xor(Shl(1, n), -1))`,
-      becomes one instruction where the mask form costs three (the `1` into a
-      register, a shift routed through CL, the ALU op) or four for the
-      complement, and the bit index stops contending for CL. On
-      `tests/lit/asm/bit_ops.c` each of the three is 1 inst / 3 bytes against
-      4 / 11. The immediate-index forms `X86BtsI`/`X86BtrI`/`X86BtcI` are done
-      too, from bit 7 up: below that the folded mask is an `imm8` and the
-      immediate-form `or` is three bytes where `bts` is four, and at 7 and above
-      the register form has to materialize the mask, so the pair is eight bytes
-      or thirteen for a 64-bit one against `bts r, imm8`'s four. They are priced
-      by that difference for the same reason the immediate-form ALU is -- the
-      `Iconst` the register form reads costs 0.0, so the `mov` is invisible to
-      extraction. On `fuzz`, two -O0 rows lose an instruction and one gains one
-      to a different choice of destination register.
+      compare seam rather than a value class. `bt` needs a cc-carrying node like
+      `X86UcomisdCc` so an `Icmp` class can take its flags from a CF-only
+      instruction with the cc rewritten `Ne -> Ult`.
+      **The blocker on the rest is a source idiom, not the encoding**: tinyc has
+      no builtins, so nothing reaches these rules. `bswap` (a 4-way `Or` of
+      masked shifts) is the only plausible one to match today.
+      `bts`/`btr`/`btc` are done in both register and immediate-index forms.
 - [ ] **BMI/BMI2 when available**: `andn`, `bextr`, `blsi`/`blsr`/`blsmsk`,
       `shlx`/`shrx`/`sarx` (no flag clobber, no CL constraint), `mulx`.
-      Needs a CPU feature level knob.
-- [ ] **Carry-chain forms**: `adc`/`sbb` proper. A multi-word add has no source
-      idiom in tinyc, so this needs a shape to match (`a + b`, then
-      `c + (sum < a)`) or nothing reaches it.
-      The `setcc`-free 0/-1 mask is done: `-(unsigned)(a < b)` arrives as
-      `Sub(0, Select(flags, 1, 0))`, and after `cmp a, b` the carry flag *is*
-      `a < b`, so `sbb r, r` broadcasts it over the register in one
-      instruction. On `tests/lit/asm/carry_mask.c` the whole function is
-      3 insts / 5 bytes against 9 / 24 at 32 bits and 3 / 7 against 10 / 31 at
-      64, where the select form materializes both constants, moves, `cmov`s and
-      subtracts. One extension between the select and the subtract is
-      transparent, since C gives the comparison type `int` and a value that is
-      already 0 or 1 extends to 0 or 1 either way. Only `Ult`: `Ugt` and `Ule`
-      would need the compare's operands swapped, which is a different compare,
-      and the signed conditions are not the carry flag at all. No corpus row
-      changed -- none of them masks.
-- [x] **Rotates.** `Or(Shl(x, k), Shr(x, w - k))` on a `w`-bit `x` becomes
-      `rol k`: three instructions and two reads of `x` collapse to one of each.
-      There is no `ror` form -- `ror k` is `rol (w - k)` in the same encoding
-      size, and the operand order of the `Or` says nothing about which direction
-      the source meant. `Shr` and not `Sar`, since an arithmetic shift feeds the
-      sign bit into the high end. On `tests/lit/asm/rotate.c` a rotate function
-      is 3 insts / 6 bytes against 9 / 19 for the same shape on a signed
-      operand; no corpus row changed, because none of them rotates.
-- [x] **Double shifts.** The rotate rule generalized: `Or(Shl(x, k), Shr(y, w - k))`
-      on `w`-bit `x` and `y` is `rol k` where the two are the same value and
-      `shld x, y, k` where they differ. There is no `shrd` form -- `shrd y, x, w - k`
-      computes the same bits, so the two differ only in which operand the
-      destructive form consumes and extraction has no basis to prefer either.
-      On `tests/lit/asm/double_shift.c` a funnel shift is 3 insts / 7 bytes
-      against 7 / 15 for the same shape on signed operands; no corpus row
-      changed, because none of them funnel-shifts. `shld` is priced at Skylake's
-      latency 3 / throughput 1, which loses under the `Latency` goal and wins
-      under `Balanced` on its size and its single read of each operand.
-- [x] **LHS-iconst compare commutation.** A constant left-hand operand moves
-      right and the condition flips, so `X86CmpI` matches it and the constant
-      is never materialized. Over the rows that changed, `lit` -0.54% insts and
-      -0.40% bytes, `fuzz` -0.79%/-0.71%; `bench` and `live` unchanged.
-      The swap is a normal form `IRBuilder::icmp` builds the node in, not an
-      e-graph equality: an `Icmp`'s condition code is read from its e-class,
-      independently of which node extraction picks, so two `Icmp` nodes with
-      different codes in one class would make that read ambiguous.
-- [ ] **Wider LEA coverage** beyond LEA2/3/4 already present.
-      The 3-operand add is done, as a peephole rather than an isel rule: an add
-      whose result goes somewhere that is neither operand lowers to
-      `mov dst, a; add dst, b`, and `lea dst, [a+b]` is the same value in one
-      instruction and one byte fewer. A constant addend becomes a displacement
-      and a constant subtrahend a negative one. `lea` writes no flags, so the
-      fold is taken only where nothing reads the add's. Extraction cannot make
-      this choice: whether the copy exists at all is the allocator's answer, not
-      the cost model's. Over the rows that changed, `live` -7.5% insts and -2.6%
-      bytes, `bench` -5.7%/-1.6%, `lit` -2.3%/-0.5%, `fuzz` -1.1%/-0.3%;
-      `gcc -O2` gap on `live` x1.39 -> x1.29 and on `bench` x1.26 -> x1.19.
+      Needs a CPU feature level knob that does not exist yet.
+- [ ] **Carry-chain `adc`/`sbb` proper.** A multi-word add has no source idiom
+      in tinyc, so this needs a shape to match (`a + b`, then `c + (sum < a)`)
+      or nothing reaches it. The `setcc`-free 0/-1 mask is done, `Ult` only:
+      `Ugt` and `Ule` would need the compare's operands swapped, which is a
+      different compare, and the signed conditions are not the carry flag at all.
+- [ ] **Wider LEA coverage** beyond LEA2/3/4 and the 3-operand add already
+      present.
 - [ ] **Latency/port-aware DAG scheduling.** A uarch model (ports, latencies,
       throughput) is only tractable because there is one target. ~5% but it is
       exactly the kind of win the single-target thesis predicts.
-- [x] **Shift+mask folding**: `And(Shr(a,n), mask)` when the shift already
-      zeroed the masked bits. No new rule was needed: `known_bits::propagate`
-      already gives `Shr(x, n)` zeros in its top n bits and `Shl(x, n)` zeros in
-      its low n bits, and `apply_known_bits_rules`' redundant-And removal merges
-      the mask away on that. `tests/lit/asm/shift_mask.c` pins the three folding
-      shapes and the negative control -- `(x >> 8) & 255`, whose masked bits the
-      shift left unknown, still emits its `and`. What is *not* covered is the
-      demanded-bits direction, `Shr(And(a, mask), n)` where the shift discards
-      exactly what the mask cleared: that needs a backward analysis the e-graph
-      has no parents map for, the same missing structure that blocks the `imm32`
-      ALU form.
-- [x] **MachInst peephole audit** (`src/emit/peephole.rs`): `mov r,r` elimination
-      (`push_inst`), LEA shrinking (rule 9) and jmp-to-fallthrough removal
-      (`terminator::remove_fallthrough_jumps`) all exist and are tested.
 - [ ] **Branch layout**: `__builtin_expect` / likely-unlikely hints and
       profile-free heuristics driving block ordering.
 
@@ -480,20 +370,32 @@ isel patterns; we should beat it on the ones we implement.
       `live_range_length / loop_penalty`, which cannot tell a long-lived value
       read twice from one read twenty times -- on
       `regalloc/array_spill_frame_corruption.c` it picks a value stored once and
-      reloaded 23 times, which is most of that program's +55%. Moved here from
-      `docs/internal/refactor-roadmap.md` step 6: the fold is done and this is allocation
-      policy, not a refactor. **Two directions are closed by measurement**, and a
-      replacement has to beat those numbers rather than be reasoned from first
-      principles: dividing by use count (the Chaitin ratio) costs 35 regressed
-      codesize rows against 12 and 88 on fuzz, tried three times now; and the
-      pass in front of it, `insert_early_barrier_spills`, cannot be gated on
-      pressure because it runs before global liveness exists, while deleting it
-      outright improves the corpus in aggregate but costs `args` seed 3 its
-      compile.
+      reloaded 23 times, which is most of that program's +55%. **Two directions
+      are closed by measurement** and a replacement has to beat those numbers
+      rather than be reasoned from first principles: the Chaitin ratio (dividing
+      by use count) costs 35 regressed codesize rows against 12, tried three
+      times; and `insert_early_barrier_spills` cannot be gated on pressure
+      because it runs before global liveness exists, while deleting it outright
+      improves the corpus in aggregate but costs `args` seed 3 its compile.
 - [ ] Better spill placement: split at loop boundaries, more remat shapes
       (currently leaf/free ops only).
 - [ ] Per-param precoloring: today all params are skipped when the block
       contains a call; could be decided per param at each call point.
+- [ ] **The constant-remat lever is still open and still worth taking.** The
+      offenders are long-lived hash-consed constants: one `Iconst(3)` serving
+      `arr[3]`'s index in the entry block and a `+ 3` twenty blocks later holds a
+      register in between, and one fuzzer function had ~100 simultaneously live
+      needing 117 colors. `mov reg, imm` is one instruction with no memory
+      traffic, so the register is never worth keeping. Two implementations were
+      reverted, **both on the seam refactor step 4 has since removed rather than
+      on the policy**: a splitter pre-pass rematerializing at cross-block
+      `Iconst` uses (sound, ~70 lines, dropped `-O1` overshoots from 14-18 to
+      10-15, rejected by `BLITZ_VERIFY=strict` because segment points were fixed
+      against the post-split schedule while coalescing moved instructions
+      again), and re-emitting `Iconst` classes per block (62 lit failures).
+      Not attempted: `StackAddr`/`GlobalAddr`, which segfault 7 lit tests on
+      their own by defeating `build_mem_addr`'s folding check, and terminator
+      uses, which need a copy at block end with a segment covering block exit.
 
 ### P4 -- Unblocks only if they gate measurement
 
@@ -507,45 +409,25 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**No wrong-value programs are open. Sixteen capacity failures are**, found
-by running the generator at 200 seeds a shape instead of the 30 every gate is
-pinned at. The ones worth keeping are checked in under `tests/fuzz/corpus/open/`,
-where `run_corpus.sh` re-checks them in seconds; the files are the durable
-artifact and the seed is not, since `gen_c.py --seed N --shape S` only
-regenerates a program until the generator changes.
+**No wrong-value programs are open.** One capacity failure is: `args` seed 88,
+checked in at `tests/fuzz/corpus/open/args-seed88.c`, described in item 2 of
+Start here. At 200 seeds a shape `mixed` and `pressure` are clean and `args` is
+199/200.
 
-| shape | passing | wrong value | capacity |
-| --- | --- | --- | --- |
-| `mixed` at 200 | 198/200 | -- | 57, 123 |
-| `args` at 200 | 188/200 | -- | 12 seeds |
-| `pressure` at 200 | 198/200 | -- | 98, 148 |
+**Re-measure rather than trust that.** Entries have left this list without
+anyone fixing them, and one went the other way -- a capacity failure that a fold
+introduced. The files under `tests/fuzz/corpus/` are the durable artifact and
+the seed is not, since `gen_c.py --seed N --shape S` only regenerates a program
+until the generator changes.
 
-**Re-measure rather than trust the list.** Entries have left it without anyone
-fixing them before, and one went the other way: `mixed` 57 is a capacity failure
-step 6's fold introduced.
-
-The last wrong-value bug closed was one defect behind all of them: slot routing
-named a block parameter by the VReg the *class map* gave at block entry rather
-than the one the block's own `Op::BlockParam` defines. Where those disagreed the
-reloads went in front of uses of a VReg the block never mentions, so the block
-kept reading a register no predecessor writes -- on `pressure` seed 14 an
-inlined loop counter started at 14 instead of 0 and the loop was skipped
-entirely. `BLITZ_DEBUG=paramsrc` prints exactly that disagreement,
-`b41.p0 -> 252: schedule=252 map=167 cfg=252`, and is the first thing to run
-when a parameter reads the wrong value.
-
-The capacity failures are the two shapes the allocator names itself: *"spilling
-did not reduce it, so the pressure point is one instruction whose own operands are
-what is live there"*, and *"every over-budget VReg is a block parameter, which
-only the splitter can route through a slot"*.
-
-What the fixed ones are worth is the shape they kept having, which is the first
-thing to check on any of these:
+**What the fixed ones are worth is the shape they kept having**, which is the
+first thing to check on any wrong-value bug:
 
 - **A block resolved an e-class to the wrong VReg** -- nine bugs, and the reason
-  steps 1-4 of `docs/internal/refactor-roadmap.md` exist. `BLITZ_DEBUG=regalloc` dumps the
-  final assignment, and a value with several VRegs where only one has the right
-  register is the signature.
+  steps 1-4 of `docs/internal/refactor-roadmap.md` exist. `BLITZ_DEBUG=regalloc`
+  dumps the final assignment, and a value with several VRegs where only one has
+  the right register is the signature. `BLITZ_DEBUG=paramsrc` prints the
+  block-parameter form of the disagreement directly.
 - **Liveness measured against one instruction order while another is emitted.**
 - **A pseudo-op's position taken for its value's position.** `Op::BlockParam` is
   a marker; every parameter of a block already holds its register before the
@@ -554,51 +436,47 @@ thing to check on any of these:
 `CLAUDE.md` and `DEBUGGING-NOTES.md` carry these with the techniques that found
 them.
 
-**The capacity failures are not closed, and 30/30 was never evidence that they
-were.** Step 5's spill loop and 5c's slot routing took all three shapes to 30/30
-and that reads as a fix; at 200 seeds sixteen remain. What the two steps did buy
-is real -- the same corpus was 14/30 on `pressure` before them -- but the gate's
-width, not the compiler, is what made the number green.
-
-**The lesson is about the gate, not about the bugs.** A corpus pinned at the
-width where it stops failing reports its own width back as a pass. `run_fuzz.sh`
-takes a seed count as its first argument and 200 seeds is 67 seconds, so nothing
-but habit was keeping it at 30.
-
-**The constant-remat lever is still open and still worth taking.** The offenders
-were long-lived hash-consed constants: one `Iconst(3)` serving `arr[3]`'s index
-in the entry block and a `+ 3` twenty blocks later holds a register in between,
-and one fuzzer function had ~100 simultaneously live needing 117 colors.
-`mov reg, imm` is one instruction with no memory traffic, so the register is
-never worth keeping. Two implementations were reverted, **both on the seam step 4
-has since removed rather than on the policy**:
-
-1. A splitter pre-pass rematerializing constants at cross-block `Iconst` uses,
-   with copies pinned to their consuming barrier's group. Sound and ~70 lines; it
-   dropped -O1 overshoots from 14-18 to 10-15 and was rejected by
-   `BLITZ_VERIFY=strict` because segment points were fixed against the post-split
-   schedule while coalescing moved instructions again.
-   Not attempted: `StackAddr`/`GlobalAddr`, which segfault 7 lit tests on their
-   own by defeating `build_mem_addr`'s folding check, and terminator uses, which
-   need a copy at block end with a segment covering block exit.
-2. Re-emitting `Iconst` classes per block, reusing the flags-typed mechanism. 62
-   lit failures.
+**A corpus pinned at the width where it stops failing reports its own width back
+as a pass.** All three shapes read 30/30 while seven programs miscompiled.
+`run_fuzz.sh` takes a seed count as its first argument and 200 seeds is ~67
+seconds a shape, so nothing but habit keeps the gate at 30 -- which is what
+`run_corpus.sh` exists to compensate for.
 
 ## Tech debt
 
-- [ ] `docs/internal/split-pass-plan.md` Phase 8 and Final Audit are unchecked. The audit
-      requires zero hits for `coalesce_aliases`; there are 25. Decide whether it
-      is now load-bearing, then finish or amend the plan.
-- [ ] Clear the clippy backlog (47 warnings, cosmetic), including the
-      `unused_mut` on `let mut emit` at `src/schedule/scheduler.rs:265`.
-- [ ] `README.md` quotes 917 unit / 406 lit / 268 differential and omits
-      forwarding, DSE and the splitter from its pipeline diagram.
+- [ ] `docs/internal/split-pass-plan.md` Phase 8 and Final Audit are unchecked.
+      The audit requires zero hits for `coalesce_aliases`; there are 25. Decide
+      whether it is now load-bearing, then finish or amend the plan.
 - [ ] File sizes, with no evidence of harm attached to any of them:
       `compile/tests.rs` 3751 lines, `egraph/algebraic.rs` 2289,
       `compile/mod.rs` 1865. A rule set being long is fine.
 
 ## Decisions worth not relitigating
 
+- **`-O0` is not slower than `-O1`, and the reason it used to be is settled.**
+  Compile time is `~(B*C)^0.86` with both levels on one curve, so `-O1` was
+  never intrinsically cheaper -- it handed the same pipeline a smaller IR. DCE
+  was the whole of it: on a 6048-line input it deletes 2519 of 3763 blocks and
+  zero dead loads. The CFG half of DCE now runs at every level and the dead-load
+  half stays on `-O1`. Do not re-open this as a profiling question.
+- **Unreachable-block elimination is canonicalization, not optimization.** A
+  block no path reaches costs the scheduler, splitter and allocator their full
+  price for code that cannot run. Removing a dead *load* is the optimization,
+  because it takes away a read of a value someone may want to inspect -- which
+  is the same line gcc and clang draw at `-O0` for debug info.
+- **Iterated coalescing is worthless here.** George & Appel's leverage is
+  `simplify`, which removes every node of degree < k so the rest fall below the
+  threshold the two tests are stated against. Simulated on the `bench` kernels
+  it removes 62 of 165 nodes on `queens` and 80 of 297 on `hash_table`, and
+  **zero** refused copies would pass afterwards: the survivors have their
+  endpoints in the dense core, which simplification does not touch. Do not write
+  the worklist allocator for this.
+- **Offset-aware alias analysis is in and its measured effect is close to
+  nothing** -- one `lit` row moves and `struct_walk` goes the other way by 2.7%
+  because better forwarding keeps more values live. The capability is real and
+  `tests/lit/alias/forward_across_struct_field.c` covers it; the corpus cannot
+  price it, because `gen_c.py` does not generate structs at all. That is a gap
+  in the corpus, not a reason to revisit the pass.
 - **Real flag fusion is rejected, not deferred.** Reusing an earlier
   `X86Sub(a,b)`'s flags for a later `Icmp(cc, diff, 0)` is unsound for signed
   ordering across overflow. Eq/Ne and unsigned only.
@@ -606,8 +484,9 @@ has since removed rather than on the policy**:
   Regression guards: `icmp_sgt_sub_zero_not_rewritten`,
   `icmp_sgt_add_const_zero_not_rewritten`.
 - **x86-64 has no flag-only ADD.** SUB has CMP, AND has TEST, ADD has nothing;
-  LEA computes without flags. The `Icmp(Eq/Ne, Add(a,k), 0)` -> `Icmp(Eq/Ne, a, -k)`
-  rewrite is the answer for the common case. Do not revisit as an isel pattern.
+  LEA computes without flags. The `Icmp(Eq/Ne, Add(a,k), 0)` -> `Icmp(Eq/Ne, a,
+  -k)` rewrite is the answer for the common case. Do not revisit as an isel
+  pattern.
 - **`must_alias` is canonical e-class equality only.** "Same base" heuristics
   belong in `may_alias`. Hashconsing gives real must-alias for free.
 - **LICM runs before saturation**, on the raw e-graph, so hoisted code still
@@ -615,3 +494,7 @@ has since removed rather than on the policy**:
 - **Forwarding runs pre-LICM; DSE runs post-forwarding.** Order is load-bearing.
 - **Cost-based extraction picks the instruction form.** Isel rules add every
   legal alternative to the class and let cost decide; no manual selection logic.
+- **There is no `ror` or `shrd` isel form.** `ror k` is `rol (w-k)` in the same
+  encoding size and `shrd y,x,w-k` computes the same bits as `shld x,y,k`, so
+  the pairs differ only in which operand the destructive form consumes and
+  extraction has no basis to prefer either.

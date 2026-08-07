@@ -70,18 +70,18 @@ and tagged enums, with worked examples.
 
 The point of the project is the output, so it is measured rather than asserted.
 `bash tests/run_codesize.sh --gap` compares instruction counts against system
-compilers on eight loop kernels that seed their data from `argc`, so no
-reference compiler can fold the program away and print the answer:
+compilers on 21 loop kernels that seed their data from `argc`, so no reference
+compiler can fold the program away and print the answer:
 
 | | instructions, geomean |
 |---|---|
-| vs `gcc -O2` | **x1.36** |
-| vs `clang -O2` | **x0.74** |
+| vs `gcc -O2` | **x1.29** |
+| vs `clang -O2` | **x0.78** |
 
-The `clang` figure is not a victory lap; clang unrolls where blitz does not,
-which inflates its count on these kernels. `gcc -O2` is the number to watch. The
-worst kernel is `call_hot` at `x2.44`, the ABI cost of a loop around a `noinline`
-callee.
+The `clang` figure is not a victory lap; clang unrolls and vectorizes where
+blitz does not, which inflates its count on these kernels. `gcc -O2` is the
+number to watch. The worst kernel is `call_hot` at `x2.29`, the ABI cost of a
+loop around a `noinline` callee.
 
 ## What's in it
 
@@ -115,10 +115,11 @@ the implementation notes.
 ## Testing
 
 ```console
-$ cargo test --all-targets --workspace   # 925 unit and codegen tests
-$ bash tests/lit/run_tests.sh            # 498 FileCheck-style tests
-$ bash tests/lit/run_diff.sh             # 311 comparisons: -O0 vs -O1 vs cc
+$ cargo test --all-targets --workspace   # 1010 unit and codegen tests
+$ bash tests/lit/run_tests.sh            # 543 FileCheck-style tests
+$ bash tests/lit/run_diff.sh             # 334 comparisons: -O0 vs -O1 vs cc
 $ bash tests/fuzz/run_fuzz.sh 40 mixed   # random UB-free programs
+$ bash tests/fuzz/run_corpus.sh          # the saved failures, in seconds
 ```
 
 Two harnesses check *values* rather than patterns, and they fail differently.
