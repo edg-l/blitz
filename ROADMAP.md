@@ -54,143 +54,62 @@ frame slots at fixed offsets is what debug info describes.
 Ordered. Each says what it is, why it is placed there, and what would tell you
 it is done.
 
-### 1. Give `-O0` a fast allocator instead of the colouring one
+### 1. Finish the `-O0` allocator
 
-`-O0` and `-O1` run the **same** pressure splitter and the same function-scope
-Chaitin-Briggs allocator. That is the problem, and compile time is the least of
-it.
+**It is the `-O0` default now** (`regalloc::fast`), and it is not correct yet.
+`BLITZ_PASSES=-fast-regalloc` puts `-O0` back on the colouring path, which is
+the comparison to reach for when something at `-O0` looks wrong.
 
-**The correctness argument is the real one.** The bug priors in P0 put regalloc
-first by a wide margin, and `run_diff.sh`'s `-O0`-vs-`-O1` oracle is by
-construction blind to anything equally wrong at both levels. Sharing the
-allocator means the highest-risk component in the compiler is exactly the one
-the primary oracle cannot see; every allocator bug so far was caught by the `cc`
-reference leg or by reading asm. A separate `-O0` allocator makes allocator bugs
-visible to self-consistency for the first time.
+**The model.** Every value gets a frame slot; before each instruction its
+operands load into fresh VRegs, the instruction writes another, and that stores
+back. Nothing is held across an instruction, so no live range outlives one
+expansion and a handful of registers serves the whole function. Fresh VRegs are
+also how it fits `assignment`, which has one entry per VReg.
 
-Two more payoffs. **Capacity failures stop existing at `-O0`**: a fast allocator
-spills rather than refusing to colour, so every generated program compiles at
-one level and gets judged -- see item 2, which is the last one left, and the
-note there about unjudged programs. And **it is what DWARF will want**: locals
-in frame slots at fixed offsets is what `-O0` debug info describes, where the
-colouring allocator's whole job is to keep values in registers.
+**Why it exists**, now that capacity failures are closed and it is not needed to
+rescue anything: `run_diff.sh`'s `-O0`-vs-`-O1` leg is blind to anything equally
+wrong at both levels, and while both levels shared an allocator the component
+the bug priors rank first was the one that comparison could not see. Turning it
+on proved the point immediately -- 37 differences, **all of them
+`-O0`-vs-`-O1`, with the reference-compiler leg clean at 288/288**. Those are
+allocation bugs that were structurally invisible the day before.
 
-**A whole-live-range linear scan was tried and is measured out. Do not start
-there again.** `src/regalloc/fast.rs` is that attempt, behind
-`BLITZ_PASSES=+fast-regalloc`. Forced on it reaches 268 of 334 differential
-comparisons and refuses 55 programs, and the refusals are structural rather than
-a list of bugs: keeping `allocate_global`'s interface means one physical register
-per VReg for the whole function, so a value live in an early block and a late one
-holds a register across everything between. Blocks laid end to end give no holes
-to exploit. Pressure is then high everywhere, which would only mean heavy
-spilling -- except that block parameters cannot be spilled at all, since a phi
-copy on the edge writes them. A loop-heavy function has many long-lived
-parameters live at once and the scan runs out with nothing it may take. On
-`tests/lit/bench/sieve.c` this happens in round 0, before any spilling: 48
-intervals, and `v19` needs a register no value can give up.
+It is also 1.41x faster at `-O0` (211.7ms to 150.5ms on a 6048-line input),
+because it skips the pressure splitter. An allocator holding nothing across an
+instruction has no pressure to relieve; the only shape it cannot place is one
+instruction reading more operands than the machine has registers, which no split
+helps.
 
-**Pre-spilling every cross-block value before the scan was tried and is also
-measured out**, which is the same finding from the other side. It is the obvious
-repair -- take the long-lived values out first so only block-local ones and the
-parameters compete -- and it makes things worse: refusals 55 to 67, on `sieve.c`
-the same `v19` is unplaceable with ten values already in slots. The reason is
-that spilling converts a long-lived *spillable* value into reloads, and a reload
-is unspillable in turn, so the pressure is not removed but relabelled as
-pressure nothing may relieve. `insert_spills_global` places a reload per
-(value, block) rather than per use, so those reloads are not short either.
+**State, 2026-08-07.** `-O1` is untouched throughout -- 0 changed codesize rows
+at that level, and the reference oracle clean.
 
-The lesson is that the whole-range model and the one-register-per-VReg interface
-cannot both hold. **The per-instruction scratch model does not have this failure
-mode**, because nothing is held across an instruction: every interval is about
-one instruction long, so long live ranges stop mattering and many VRegs share a
-register without ever being live together. It reaches `vreg_to_reg` by rewriting
-the stream so each use loads into a *fresh* short-lived VReg and each definition
-stores back -- the same interface, different VRegs.
+```
+unit    1010/1010          lit      536/543
+diff    288/334 matched    37 differed, 9 skipped   (cc oracle 288/288)
+corpus  0/14
+fuzz    mixed 7/60   args 4/60   pressure 6/60
+```
 
-**And the pipeline, not the allocator, is where this is decided.**
-`docs/internal/refactor-roadmap.md` measured it while folding the two allocators
-into one: *"Skip the splitter for single-block functions and let the global
-allocator's spill loop cope: 159 of 474 lit tests fail, most of them compilation
-failures. The spill loop is not a substitute for the splitter even on one
-block."* And it names the cause: *"What blocks step 6 is not the merge; it is
-that the passes in front of the allocator spill before knowing whether the
-allocator needs them to."* A second allocator with its own pressure model
-inherits relief planned against the colouring allocator's, which is why the
-attempt above failed with the splitter running. Read that file first.
+**The remaining bugs are one class, not a list**: an op that *names* a value
+without writing it into a register. A comparison was the first member -- its
+result is EFLAGS, but its dst reached the class map as an ordinary GPR from a
+block that saw the VReg only as an operand, so the allocator gave it a slot and
+stored whatever the scratch register held. Asking `produces_flags()` on the op
+rather than the class map fixed that one. `tests/lit/asm/rotate.c` still returns
+0 for 216, so there are more members; a pair-producing op whose `Proj1` is flags
+and whose `Proj0` is the value is the place to look next, since the pair VReg
+itself holds neither.
 
-So the order is: teach the allocator result to say where a value lives, then
-make pressure relief something the allocator asks for rather than a pre-pass
-guesses at, and only then write the second allocator.
+Start there, with `BLITZ_PASSES=-fast-regalloc` as the control.
 
-**Step one is in** (`1a4b1cb`): `Assignment` is `Reg(Reg) | Slot(u32)` and the
-result field is `assignment`. The colouring allocator constructs only
-`Assignment::Reg`, so it changed no emitted code on any corpus.
-
-**Step two is done (`891c2af`), and the answer was not a slot.** `terminator.rs`
-had two silent `continue`s where a VReg had neither a register nor a
-`BlockParamSlotMap` entry, on a path whose failure mode is a non-terminating
-loop. Tracing the two programs that reach the destination one showed a single
-condition: the parameter's class *is* the argument's, so the parameter carries
-the expression the argument already names and the target block resolves that
-class itself -- on `pressure-seed128.c` both sides are `ClassId(673)` and
-`v10 = Iconst(0, I32)` sits in the entry block with no register, because a
-constant is re-emitted in every block that needs it. Both branches now state
-their condition, and anything else is an error.
-
-`SlotSpilledParamInfo::value_alias` stays where it is regardless: it says
-whether a parameter names the value it carries, which decides whether a back
-edge must store. That is edge identity, not storage.
-
-**Step three is in.** The split loop now stops when the *allocator* fits rather
-than when the splitter runs out of ideas: from round 1 each iteration colours
-with the allocator's own spill loop switched off, and a round that fits ends the
-loop and is the allocation. Relief is what the colouring could not do without.
-
-It pays on both axes -- `-0.68%` instructions, `-1.42%` reloads and `-0.49%`
-spills over 39 changed rows, and `big.c` at `-O1` goes 250.2ms to 242.5ms,
-because the rounds it stops paying for cost more than the probe does.
-
-**Probing round 0 is worthless and measurably so.** On a chordal interference
-graph the chromatic number is the maximum clique, so a non-empty plan means
-pressure already exceeds the budget and the colouring cannot fit, while an empty
-plan ends the loop with nothing split. Round 0's colouring is a full allocation
-spent on a foregone conclusion either way: probing from round 0 costs 294.4ms
-against 242.5ms for the same result, and probing *only* at round 0 reaches
-302.6ms while capturing a sixth of the improvement.
-
-What is left of item 1 is the allocator itself, and its case is now narrower --
-see the note under the heading.
-
-The shape to aim for is every VReg in a slot, operands loaded into scratch
-registers per instruction, results stored back: no interference graph, no
-coalescing, no splitting, linear in instructions. Derive the details from
-blitz's own constraints rather than from another compiler's fast allocator --
-the reason there is one here is oracle independence, where LLVM's is compile
-time at scale, and the two do not want the same design. What it still has to
-honour, none of it optional:
-
-- precoloring and the SysV ABI at calls (`compile/precolor.rs`), including AL on
-  every call
-- block parameters, which are written by phi copies on the edge before the
-  block's first instruction runs
-- `regalloc::SlotAllocator`, which owns one frame-slot numbering per function and
-  records the pass each slot belongs to -- a second allocator is a fourth
-  spilling pass, not an exception to that rule
-- the machine-level verifier (`BLITZ_VERIFY`): no VReg surviving allocation, no
-  physical register read unwritten on some path
-
-**This reverses "the only allocator"**, which `CLAUDE.md` records as a
-deliberate consolidation. Reversing it is the point rather than an oversight,
-but say so in the commit.
-
-Expect `-O0` code quality to drop a lot and every `-O0` codesize baseline to
-churn. That is fine and it is not a regression: `-O0` quality was never a goal.
-It does mean `-O0` rows stop being a quality signal, so read `-O1` rows after
-this lands.
-
-Done when: `-O0` uses the fast path, all four corpora and the fuzz shapes are
-green at both levels, `args` seed 88 compiles at `-O0`, and `-O1` codesize rows
-are **unchanged** -- the change must not reach the optimized level at all.
+**Two models are already ruled out; do not start on either.** A whole-live-range
+linear scan cannot work under one-register-per-VReg: a value live in an early
+block and a late one holds a register across everything between, block
+parameters cannot be spilled, and a loop-heavy function runs out with nothing it
+may take -- on `bench/sieve.c` in round 0, before any spilling. Pre-spilling
+every cross-block value first is worse (refusals 55 to 67), because spilling
+converts a spillable value into reloads and a reload cannot be spilled in turn,
+so the pressure is relabelled rather than removed.
 
 ### 2. ~~The last capacity failure~~ -- closed
 
@@ -239,9 +158,15 @@ repeating them.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
 - `bash tests/lit/run_diff.sh`: 334 compared `-O0`-vs-`-O1` and against a
   reference compiler; no skips, no differences under gcc or clang.
-- `bash tests/fuzz/run_corpus.sh`: 14 `fixed` pass, `open/` is empty.
-- Generated programs at 200 seeds a shape: `mixed` 200/200, `args` 200/200,
-  `pressure` 200/200. **Nothing fails at either level.**
+- **`-O0` is on the new allocator and is not correct yet** -- see item 1 for the
+  numbers and the one bug class behind them. Everything below is `-O1` unless it
+  says otherwise, and `-O1` is unaffected: 0 changed codesize rows at that level
+  and the reference oracle clean at 288/288.
+- `bash tests/fuzz/run_corpus.sh`: 14 `fixed` programs, all passing at `-O1` and
+  failing at `-O0` until item 1 lands.
+- Generated programs at 200 seeds a shape were `mixed` 200/200, `args` 200/200,
+  `pressure` 200/200 on the colouring allocator at both levels
+  (`BLITZ_PASSES=-fast-regalloc` reproduces that).
   At the 30 seeds every gate is pinned to, all three are clean -- **that width
   measures nothing**, and `run_corpus.sh` is what compensates for it.
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, over `lit`,

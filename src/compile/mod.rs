@@ -98,13 +98,18 @@ pub struct CompileOptions {
     /// Eliminate dead loads. The CFG half of DCE -- constant branch folding and
     /// unreachable-block removal -- is not gated on this and runs at every level.
     pub enable_dce: bool,
-    /// Allocate registers by linear scan (`regalloc::fast`) instead of the
-    /// Chaitin-Briggs colouring allocator.
+    /// Put every value in a frame slot and borrow registers one instruction at
+    /// a time (`regalloc::fast`), instead of the Chaitin-Briggs colouring
+    /// allocator.
     ///
-    /// Opt-in while it is being brought up: `BLITZ_PASSES=+fast-regalloc`. The
-    /// point of a second allocator is that `-O0` and `-O1` stop sharing one, so
-    /// an allocation bug becomes a disagreement the differential oracle can see
-    /// rather than an answer both levels give.
+    /// **On at `-O0`, off at `-O1`.** That is the point: the two levels stop
+    /// sharing an allocator, so an allocation bug becomes a disagreement
+    /// `run_diff.sh` can see rather than an answer both levels give, and the
+    /// bug priors put regalloc first by a wide margin. It also skips the
+    /// pressure splitter, which an allocator holding nothing across an
+    /// instruction has no use for -- worth 1.41x on a 6048-line input.
+    ///
+    /// `BLITZ_PASSES=-fast-regalloc` puts `-O0` back on the colouring path.
     pub enable_fast_regalloc: bool,
     /// Enable intra-block store-to-load and load-to-load forwarding.
     pub enable_store_forwarding: bool,
@@ -211,7 +216,7 @@ impl CompileOptions {
             force_frame_pointer: false,
             enable_licm: false,
             enable_dce: false,
-            enable_fast_regalloc: false,
+            enable_fast_regalloc: true,
             enable_store_forwarding: false,
             enable_dse: false,
             enable_phi_removal: true,
