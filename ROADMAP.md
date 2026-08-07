@@ -52,13 +52,16 @@ frame slots at fixed offsets is what debug info describes.
 ## Start here
 
 Ordered. Each says what it is, why it is placed there, and what would tell you
-it is done.
+it is done. **Items 1 and 2 are closed; item 3 is the open one.** The closed
+entries stay because what they measured is the reason the next attempt should
+not start where they did.
 
-### 1. Finish the `-O0` allocator
+### 1. ~~Finish the `-O0` allocator~~ -- closed
 
-**It is the `-O0` default now** (`regalloc::fast`), and it is not correct yet.
-`BLITZ_PASSES=-fast-regalloc` puts `-O0` back on the colouring path, which is
-the comparison to reach for when something at `-O0` looks wrong.
+**It is the `-O0` default** (`regalloc::fast`) and it is correct.
+`BLITZ_PASSES=-fast-regalloc` puts `-O0` back on the colouring path, and
+`+fast-regalloc` puts `-O1` on the slot path; either is the comparison to reach
+for when an allocation looks wrong.
 
 **The model.** Every value gets a frame slot; before each instruction its
 operands load into fresh VRegs, the instruction writes another, and that stores
@@ -69,10 +72,7 @@ also how it fits `assignment`, which has one entry per VReg.
 **Why it exists**, now that capacity failures are closed and it is not needed to
 rescue anything: `run_diff.sh`'s `-O0`-vs-`-O1` leg is blind to anything equally
 wrong at both levels, and while both levels shared an allocator the component
-the bug priors rank first was the one that comparison could not see. Turning it
-on proved the point immediately -- 37 differences, **all of them
-`-O0`-vs-`-O1`, with the reference-compiler leg clean at 288/288**. Those are
-allocation bugs that were structurally invisible the day before.
+the bug priors rank first was the one that comparison could not see.
 
 It is also 1.41x faster at `-O0` (211.7ms to 150.5ms on a 6048-line input),
 because it skips the pressure splitter. An allocator holding nothing across an
@@ -80,27 +80,29 @@ instruction has no pressure to relieve; the only shape it cannot place is one
 instruction reading more operands than the machine has registers, which no split
 helps.
 
-**State, 2026-08-07.** `-O1` is untouched throughout -- 0 changed codesize rows
-at that level, and the reference oracle clean.
+**State, 2026-08-07.** `-O1` output is byte-identical to before the allocator
+landed, at every one of 780 identity comparisons.
 
 ```
-unit    1010/1010          lit      536/543
-diff    288/334 matched    37 differed, 9 skipped   (cc oracle 288/288)
-corpus  0/14
-fuzz    mixed 7/60   args 4/60   pressure 6/60
+unit    1010/1010          lit      546/546
+diff    335/335 matched    0 differed        (cc oracle 335/335)
+corpus  16/16, nothing open
+fuzz    mixed 400/400   args 400/400   pressure 400/400
 ```
 
-**The remaining bugs are one class, not a list**: an op that *names* a value
-without writing it into a register. A comparison was the first member -- its
-result is EFLAGS, but its dst reached the class map as an ordinary GPR from a
-block that saw the VReg only as an operand, so the allocator gave it a slot and
-stored whatever the scratch register held. Asking `produces_flags()` on the op
-rather than the class map fixed that one. `tests/lit/asm/rotate.c` still returns
-0 for 216, so there are more members; a pair-producing op whose `Proj1` is flags
-and whose `Proj0` is the value is the place to look next, since the pair VReg
-itself holds neither.
+**The bugs were one class, not a list**: an op that *names* a value the
+every-value-in-a-slot model cannot hold. EFLAGS, which no store reaches; a pair
+VReg, which holds neither of the halves it names; a jump's arguments, which
+must not each cost a register; an ABI register, which is where a value has to be
+*at a call* rather than a property it carries everywhere; and `idiv`'s operands.
+A scratch also has to carry the type of the value it stands in for, or lowering
+sizes the instruction 64 bits wide by default.
 
-Start there, with `BLITZ_PASSES=-fast-regalloc` as the control.
+**It found its first bug in the `-O1` allocator immediately**, which is what it
+is for: a function parameter is in its register before the function's first
+instruction runs, and `Op::Param`'s shadow was not modelled the way
+`Op::BlockParam`'s was, so a splitter store took RCX while it held the fourth
+argument (`tests/fuzz/corpus/fixed/args-seed310.c`).
 
 **Two models are already ruled out; do not start on either.** A whole-live-range
 linear scan cannot work under one-register-per-VReg: a value live in an early
@@ -114,8 +116,9 @@ so the pressure is relabelled rather than removed.
 ### 2. ~~The last capacity failure~~ -- closed
 
 `args` seed 88 compiles, and **200 seeds a shape is clean on all three for the
-first time**: `mixed` 200/200, `args` 200/200, `pressure` 200/200. The saved
-corpus is 14 passing with nothing open.
+first time**: `mixed` 200/200, `args` 200/200, `pressure` 200/200. (At 400
+seeds a shape, which is what `run_fuzz.sh` now sweeps by default, all three are
+clean too.)
 
 What closed it was not a fifth attempt at the spill loop. The splitter models
 the registers a call takes away (`callee_saved_budget`) and modelled nothing at
@@ -153,22 +156,20 @@ repeating them.
 
 ## Current state (2026-08-07)
 
-- 1010 Rust tests + 543 lit tests, all green. `cargo fmt` clean, `cargo clippy
+- 1010 Rust tests + 546 lit tests, all green. `cargo fmt` clean, `cargo clippy
   --all-targets` clean, zero build warnings, zero rustdoc warnings.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 334 compared `-O0`-vs-`-O1` and against a
+- `bash tests/lit/run_diff.sh`: 335 compared `-O0`-vs-`-O1` and against a
   reference compiler; no skips, no differences under gcc or clang.
-- **`-O0` is on the new allocator and is not correct yet** -- see item 1 for the
-  numbers and the one bug class behind them. Everything below is `-O1` unless it
-  says otherwise, and `-O1` is unaffected: 0 changed codesize rows at that level
-  and the reference oracle clean at 288/288.
-- `bash tests/fuzz/run_corpus.sh`: 14 `fixed` programs, all passing at `-O1` and
-  failing at `-O0` until item 1 lands.
-- Generated programs at 200 seeds a shape were `mixed` 200/200, `args` 200/200,
-  `pressure` 200/200 on the colouring allocator at both levels
-  (`BLITZ_PASSES=-fast-regalloc` reproduces that).
-  At the 30 seeds every gate is pinned to, all three are clean -- **that width
-  measures nothing**, and `run_corpus.sh` is what compensates for it.
+- **`-O0` is on `regalloc::fast` and both levels are correct.** Everything below
+  is `-O1` unless it says otherwise.
+- `bash tests/fuzz/run_corpus.sh`: 16 `fixed` programs, all passing at both
+  levels, and nothing open.
+- Generated programs: `mixed` 400/400, `args` 400/400, `pressure` 400/400, which
+  is what `run_fuzz.sh` now sweeps by default. **The width is what makes it a
+  check** -- the `-O1` allocator bug in `fixed/args-seed310.c` is at seed 310 of
+  `args` alone, and at the 30 seeds the gates used to be run at, all three
+  shapes were green while seven programs miscompiled.
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, over `lit`,
   `bench`, `live` and `fuzz`, fed by `BLITZ_DEBUG=stats`.
 - Code quality also has an *absolute* number, which is the one the Goal is
@@ -188,8 +189,9 @@ repeating them.
 - Pipeline: IR -> inlining -> DCE1 -> store/load forwarding -> DSE -> LICM ->
   e-graph saturation -> cost-based extraction -> DCE2 -> linearize -> trivial
   block-parameter removal (re-extract + linearize again) -> DAG schedule ->
-  live-range splitter -> function-scope Chaitin-Briggs regalloc -> terminator
-  lowering -> MachInst lowering -> branch relaxation -> ELF.
+  live-range splitter (`-O1`, and only where the colouring fails) -> regalloc
+  (`-O1` function-scope Chaitin-Briggs, `-O0` every value in a frame slot) ->
+  terminator lowering -> MachInst lowering -> branch relaxation -> ELF.
 - Implemented e-graph rules: see `docs/internal/egraph-optimization-roadmap.md`.
 - Splitter design: see `docs/internal/split-pass-plan.md`.
 
@@ -420,11 +422,12 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**Nothing is open.** No wrong-value programs and no capacity failures: at 200
-seeds a shape `mixed`, `args` and `pressure` are all 200/200, and the saved
-corpus is 14 passing with an empty `open/`. `args` seed 88, the last one, closed
-when the splitter learned that a division clobbers RAX and RDX -- see item 2 of
-Start here.
+**Nothing is open.** No wrong-value programs and no capacity failures at either
+level: at 400 seeds a shape `mixed`, `args` and `pressure` are all 400/400, and
+the saved corpus is 16 passing with an empty `open/`. The last one, an `-O1`
+allocation bug the `-O0` allocator's arrival made visible, closed when
+`Op::Param` got the shadow `Op::BlockParam` already had -- see item 1 of Start
+here.
 
 **Re-measure rather than trust that.** Entries have left this list without
 anyone fixing them, and one went the other way -- a capacity failure that a fold
@@ -441,18 +444,20 @@ first thing to check on any wrong-value bug:
   the right register is the signature. `BLITZ_DEBUG=paramsrc` prints the
   block-parameter form of the disagreement directly.
 - **Liveness measured against one instruction order while another is emitted.**
-- **A pseudo-op's position taken for its value's position.** `Op::BlockParam` is
-  a marker; every parameter of a block already holds its register before the
-  block's first instruction runs.
+- **A pseudo-op's position taken for its value's position.** `Op::BlockParam`
+  and `Op::Param` are markers; every parameter of a block already holds its
+  register before the block's first instruction runs, whether the phi copies on
+  the edge wrote it or the caller did. `Op::is_param_marker` is the one place
+  that says which ops these are.
 
 `CLAUDE.md` and `DEBUGGING-NOTES.md` carry these with the techniques that found
 them.
 
 **A corpus pinned at the width where it stops failing reports its own width back
-as a pass.** All three shapes read 30/30 while seven programs miscompiled.
-`run_fuzz.sh` takes a seed count as its first argument and 200 seeds is ~67
-seconds a shape, so nothing but habit keeps the gate at 30 -- which is what
-`run_corpus.sh` exists to compensate for.
+as a pass.** All three shapes read 30/30 while seven programs miscompiled, and
+the `-O1` allocation bug in `fixed/args-seed310.c` needed seed 310 of `args`.
+`run_fuzz.sh` now defaults to 400 seeds of all three shapes, which is 164
+seconds -- what the other harnesses already cost.
 
 ## Tech debt
 
