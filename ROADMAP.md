@@ -596,17 +596,6 @@ without taking it is picking up work that cannot land.
 generated or saved program computes a wrong value at either level. What is open
 is not reachable from the generator:
 
-- **EFLAGS is shared between comparisons and clobbered by the calls between
-  them.** `apply_icmp_isel` merges every `Icmp` over one pair of operands onto
-  one shared compare -- sound, since `a == b` and `a != b` set identical flags
-  -- and then the scheduler sinks each `cmov` to its use, putting a `call`
-  between the compare and three of its four consumers. A flags value cannot be
-  spilled, so the fix is rematerialization: a Flags class must not be shared
-  across an op that clobbers flags, the way a constant is re-emitted per block.
-  `corpus/open/icmp_cc_shared_flags.c`, both levels. Branches are unaffected --
-  their cc rides on the CFG's `Branch` and the terminator ends its block -- and
-  a comparison used inside an `if` is all `gen_c.py` and the lit corpus
-  generate, which is why nothing reached it.
 - **`verify_register_sharing` flags a `-O1` allocation**, reproduced by
   `tests/lit/regalloc/verify_register_sharing_xmm12.c`. It passes the plain lit
   run and fails under `BLITZ_VERIFY`, so **that gate is red on purpose**; the

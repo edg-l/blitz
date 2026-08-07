@@ -55,6 +55,7 @@ use cfg::{
 mod effectful;
 use effectful::lower_effectful_op;
 mod dce;
+mod flags_remat;
 mod licm;
 mod lower;
 use lower::lower_block_pure_ops;
@@ -893,6 +894,27 @@ pub fn compile(
                 1
             }
         });
+    }
+
+    // A Flags value cannot be spilled, so it is re-emitted wherever something
+    // has written EFLAGS since it was computed. Before allocation, so the
+    // operands the re-emitted compare reads have their live ranges extended in
+    // the graph the allocator colours.
+    {
+        let flags_classes = crate::regalloc::build_vreg_classes_from_all_blocks(&block_schedules);
+        let mut next = block_schedules
+            .iter()
+            .flatten()
+            .flat_map(|i| std::iter::once(i.dst.0).chain(i.operands.iter().map(|v| v.0)))
+            .max()
+            .map_or(0, |m| m + 1);
+        let n = flags_remat::remat_flags(&mut block_schedules, &flags_classes, &mut next);
+        if n > 0 && crate::trace::is_enabled("sched") && crate::trace::fn_matches(&func.name) {
+            eprintln!(
+                "[sched] {}: re-emitted {n} comparison(s) for stale flags",
+                func.name
+            );
+        }
     }
 
     // Phase 5: Register allocation -- per-block with cross-block live range splitting.

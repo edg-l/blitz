@@ -16,12 +16,14 @@
 //    d1:  cmovge edx,eax        <- reads printf's flags
 //
 // A flags value cannot be spilled and reloaded -- no store reaches EFLAGS -- so
-// the fix is to rematerialize it: a Flags class must not be shared across an op
-// that clobbers flags, the way a constant is re-emitted per block rather than
-// held in a register. `regalloc::fast` states the assumption this breaks --
-// "nothing this pass inserts between a comparison and its consumer writes
-// EFLAGS: a spill load and a spill store are both `mov`" -- which covers spills
-// and says nothing about calls.
+// it is rematerialized instead, the way a constant is: `compile::flags_remat`
+// re-emits the comparison wherever something has written flags since it was
+// computed. It runs before register allocation, so the operands the re-emitted
+// compare reads have their live ranges extended in the graph the allocator
+// colours. `regalloc::fast` stated the assumption that broke -- "nothing this
+// pass inserts between a comparison and its consumer writes EFLAGS: a spill
+// load and a spill store are both `mov`" -- which covers spills and said
+// nothing about calls.
 //
 // WRITING THE COMPARISONS AWAY FROM THE CALLS DOES NOT HELP: computing all
 // four into locals first and printing them afterwards emits the same thing,
