@@ -89,6 +89,16 @@ parameters live at once and the scan runs out with nothing it may take. On
 `tests/lit/bench/sieve.c` this happens in round 0, before any spilling: 48
 intervals, and `v19` needs a register no value can give up.
 
+**Pre-spilling every cross-block value before the scan was tried and is also
+measured out**, which is the same finding from the other side. It is the obvious
+repair -- take the long-lived values out first so only block-local ones and the
+parameters compete -- and it makes things worse: refusals 55 to 67, on `sieve.c`
+the same `v19` is unplaceable with ten values already in slots. The reason is
+that spilling converts a long-lived *spillable* value into reloads, and a reload
+is unspillable in turn, so the pressure is not removed but relabelled as
+pressure nothing may relieve. `insert_spills_global` places a reload per
+(value, block) rather than per use, so those reloads are not short either.
+
 The lesson is that the whole-range model and the one-register-per-VReg interface
 cannot both hold. **The per-instruction scratch model does not have this failure
 mode**, because nothing is held across an instruction: every interval is about
