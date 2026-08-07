@@ -1042,7 +1042,16 @@ pub fn compile(
 
         let mut probed: Option<crate::regalloc::GlobalRegAllocResult> = None;
         let mut probed_inputs: Option<AllocInputs> = None;
-        for _round in 0..split::MAX_SPLIT_ROUNDS {
+        // An allocator that puts every value in a slot has no pressure for the
+        // splitter to relieve: nothing is live across an instruction, so the
+        // only shape it cannot place is a single instruction reading more
+        // operands than the machine has registers, which no split can help.
+        let split_rounds = if opts.enable_fast_regalloc {
+            0
+        } else {
+            split::MAX_SPLIT_ROUNDS
+        };
+        for _round in 0..split_rounds {
             use crate::regalloc::coloring::{AVAILABLE_XMM_COLORS, available_gpr_colors};
 
             if _round > 0 && !opts.enable_fast_regalloc {

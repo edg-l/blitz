@@ -26,7 +26,12 @@
 //! what that ruled out.
 //!
 //! **What it does not do**: no interference graph, no liveness, no coalescing,
-//! no splitting, no rematerialization. One pass over the instructions.
+//! no splitting, no rematerialization. One pass over the instructions. It does
+//! not need the pressure splitter in front of it either, and skipping that is
+//! where the speed is: on a 6048-line input `-O0` goes 211.7ms to 150.5ms,
+//! 1.41x. Nothing is live across an instruction, so the only shape this cannot
+//! place is one instruction reading more operands than the machine has
+//! registers -- which no amount of splitting would help.
 //!
 //! **Not finished.** Forced on it reaches 323 of 334 differential comparisons
 //! and refuses 5 programs, against 268 and 55 for the model before it. What is
