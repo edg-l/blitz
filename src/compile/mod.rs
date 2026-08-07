@@ -324,6 +324,15 @@ pub(super) fn run_egraph_and_extract(
         max_classes: 500_000,
     };
     crate::egraph::algebraic::propagate_block_params(func, egraph);
+    // Before the rules run, so what they added is readable off the pair. No
+    // extraction choices exist yet: nothing has a machine form to win with.
+    crate::egraph::dump::dump(
+        egraph,
+        &func.name,
+        "pre-saturation",
+        &CostModel::new(opts.opt_goal),
+        None,
+    );
     run_phases(egraph, &egraph_opts).map_err(|e| CompileError {
         phase: "egraph".into(),
         message: e,
@@ -381,6 +390,16 @@ pub(super) fn extract_from_egraph(
             inst: None,
         }),
     })?;
+
+    // After saturation *and* isel closure, which is the one point where every
+    // alternative exists side by side and extraction has said which it wants.
+    crate::egraph::dump::dump(
+        egraph,
+        &func.name,
+        "post-saturation",
+        &cost_model,
+        Some(&extraction.choices),
+    );
 
     Ok((block_param_map, extraction))
 }
