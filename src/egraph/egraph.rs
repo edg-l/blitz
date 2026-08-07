@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::BuildHasherDefault;
 
 use smallvec::SmallVec;
 
@@ -9,6 +10,70 @@ use crate::egraph::unionfind::UnionFind;
 use crate::ir::effectful::BlockId;
 use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
+
+/// A multiply-xor-rotate hasher over the bytes an `ENode` writes.
+///
+/// SipHash is built to survive an adversary choosing the keys, which is a
+/// property a compiler's own hashcons table has no use for: the keys are its own
+/// e-nodes. Hashing them was 3.8% of a `-O1` compile with the default hasher.
+///
+/// The seed and the constant are fixed, so the same source hashes the same way
+/// on every run -- [`Memo`] explains why that matters here.
+#[derive(Default)]
+pub(crate) struct NodeHasher(u64);
+
+impl std::hash::Hasher for NodeHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u8(byte);
+        }
+    }
+
+    fn write_u8(&mut self, n: u8) {
+        self.write_u64(n as u64)
+    }
+
+    fn write_u16(&mut self, n: u16) {
+        self.write_u64(n as u64)
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.write_u64(n as u64)
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64)
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        // The 64-bit variant of Fibonacci hashing: multiply by 2^64 / phi, which
+        // spreads a small integer across the whole word, then rotate so the high
+        // bits reach the low ones the table indexes on.
+        self.0 = (self.0 ^ n)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .rotate_left(31);
+    }
+}
+
+/// The hashcons table: canonicalized `ENode` -> canonical `ClassId`.
+///
+/// A hash map with a fixed-seed hasher, not a `BTreeMap`. Ordering the table
+/// costs one `ENode` comparison per level of the tree on every probe, and an
+/// `ENode` comparison walks an `Op` and a child list; hashing touches the same
+/// bytes once. What the ordering bought is that [`EGraph::rebuild`] drains the
+/// table and pushes each node into its class, so an ordered table left every
+/// `EClass::nodes` sorted, and extraction breaks a cost tie on that order.
+/// `rebuild` sorts the lists itself instead, which is the same order for the
+/// same reason a sorted subsequence of a sorted sequence is sorted.
+///
+/// The hasher must be seeded identically on every run: a randomly seeded one
+/// would make the drain order, and so the emitted code, differ between
+/// compilations of the same source.
+pub(crate) type Memo = HashMap<ENode, ClassId, BuildHasherDefault<NodeHasher>>;
 
 /// Snapshot of an e-node for safe iteration during mutation.
 #[derive(Clone)]
@@ -44,7 +109,7 @@ pub struct EGraph {
     /// Arena: ClassId(i) indexes directly into classes[i].
     pub(crate) classes: Vec<EClass>,
     /// Hashcons: canonicalized ENode -> canonical ClassId.
-    pub(crate) memo: BTreeMap<ENode, ClassId>,
+    pub(crate) memo: Memo,
     pub(crate) worklist: Vec<ClassId>,
     pub(crate) node_count: usize,
 }
@@ -60,7 +125,7 @@ impl EGraph {
         Self {
             unionfind: UnionFind::new(),
             classes: Vec::new(),
-            memo: BTreeMap::new(),
+            memo: Memo::default(),
             worklist: Vec::new(),
             node_count: 0,
         }
@@ -219,12 +284,14 @@ impl EGraph {
     /// Re-canonicalizes all e-nodes across the entire memo until no non-canonical
     /// children remain and no further congruence merges are implied.
     pub fn rebuild(&mut self) {
+        let mut ran = false;
         while !self.worklist.is_empty() {
             self.worklist.clear();
+            ran = true;
 
             // Drain the entire memo, re-canonicalize every node, re-insert.
             // Any collision means congruence: merge the two classes and add to worklist.
-            let old_memo: BTreeMap<ENode, ClassId> = std::mem::take(&mut self.memo);
+            let old_memo: Memo = std::mem::take(&mut self.memo);
 
             // Also clear all class node lists so we can rebuild them clean
             for class in self.classes.iter_mut() {
@@ -257,6 +324,21 @@ impl EGraph {
                     }
                 }
             }
+        }
+        if ran {
+            self.sort_class_nodes();
+        }
+    }
+
+    /// Order every class's node list by [`ENode`].
+    ///
+    /// The order a drain of the hashcons table would have produced if the table
+    /// were ordered; see [`Memo`]. The pass that ends [`Self::rebuild`]'s loop
+    /// performed no merge -- a merge pushes to the worklist -- so its lists were
+    /// built by push alone and this is exactly their ordered-drain order.
+    fn sort_class_nodes(&mut self) {
+        for class in self.classes.iter_mut() {
+            class.nodes.sort_unstable();
         }
     }
 
@@ -310,7 +392,7 @@ impl EGraph {
             })
             .collect();
 
-        let old_memo: BTreeMap<ENode, ClassId> = std::mem::take(&mut self.memo);
+        let old_memo: Memo = std::mem::take(&mut self.memo);
         for class in self.classes.iter_mut() {
             class.nodes.clear();
         }
@@ -346,6 +428,7 @@ impl EGraph {
                 }
             }
         }
+        self.sort_class_nodes();
         self.rebuild();
     }
 
