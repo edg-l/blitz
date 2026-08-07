@@ -1,3 +1,4 @@
+use crate::x86::addr::Addr;
 use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
 
@@ -163,6 +164,63 @@ fn lea_result_dead(insts: &[MachInst], idx: usize) -> bool {
     false
 }
 
+/// The `lea` that computes what a copy into a destination followed by a
+/// destructive add computes, if there is one.
+///
+/// An add whose result goes somewhere that is neither operand has to be
+/// `mov dst, a; add dst, b`, because the x86 form overwrites one of the two.
+/// `lea` reads two registers and a displacement and writes a third register, so
+/// the pair is one instruction, is a byte shorter, and stays a single cycle on
+/// the address unit as long as the address is base-plus-index or
+/// base-plus-displacement. What it does not do is write EFLAGS, so the fold is
+/// only available where nothing reads them.
+fn copy_add_to_lea(mov: &MachInst, add: &MachInst) -> Option<MachInst> {
+    let MachInst::MovRR {
+        size,
+        dst: Operand::Reg(d),
+        src: Operand::Reg(s),
+    } = mov
+    else {
+        return None;
+    };
+    // An 8- or 16-bit add leaves the rest of the destination in place; `lea`
+    // writes the whole register.
+    if !matches!(size, OpSize::S32 | OpSize::S64) {
+        return None;
+    }
+    let addr = match add {
+        MachInst::AddRR {
+            size: add_size,
+            dst: Operand::Reg(add_dst),
+            src: Operand::Reg(t),
+        } if add_size == size && add_dst == d && t != d => {
+            // RSP is the one register an address cannot index by, so it takes
+            // the base position; both operands being RSP has nowhere to go.
+            if *t == Reg::RSP && *s == Reg::RSP {
+                return None;
+            }
+            let (base, index) = if *t == Reg::RSP { (*t, *s) } else { (*s, *t) };
+            Addr::new(Some(base), Some(index), 1, 0)
+        }
+        MachInst::AddRI {
+            size: add_size,
+            dst: Operand::Reg(add_dst),
+            imm,
+        } if add_size == size && add_dst == d => Addr::new(Some(*s), None, 1, *imm),
+        MachInst::SubRI {
+            size: add_size,
+            dst: Operand::Reg(add_dst),
+            imm,
+        } if add_size == size && add_dst == d => Addr::new(Some(*s), None, 1, imm.checked_neg()?),
+        _ => return None,
+    };
+    Some(MachInst::Lea {
+        size: *size,
+        dst: Operand::Reg(*d),
+        addr,
+    })
+}
+
 /// Apply peephole optimizations to a sequence of `MachInst`s.
 ///
 /// Optimizations applied (in order of pattern matching):
@@ -176,6 +234,8 @@ fn lea_result_dead(insts: &[MachInst], idx: usize) -> bool {
 /// 7. `sub rX, -1` -> `inc rX` when flags are dead.
 /// 8. Delete a LEA whose address the block overwrites before reading.
 /// 9. `lea rX, [rY]` -> `mov rX, rY`.
+/// 10. `mov rD, rS; add rD, rT` -> `lea rD, [rS+rT]` when flags are dead, and
+///     the same for `add rD, imm` / `sub rD, imm`.
 pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
     let mut result = Vec::with_capacity(insts.len());
     let mut i = 0;
@@ -234,6 +294,21 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
                 src,
             } if dst == src => {
                 i += 1;
+                continue;
+            }
+
+            // 10. `mov rD, rS; add rD, rT` -> `lea rD, [rS+rT]`, and the same
+            // for a constant addend, where nothing reads the flags the add
+            // would have written.
+            MachInst::MovRR { .. }
+                if i + 1 < insts.len()
+                    && flags_dead_after(&insts, i + 1)
+                    && copy_add_to_lea(&insts[i], &insts[i + 1]).is_some() =>
+            {
+                result.push(
+                    copy_add_to_lea(&insts[i], &insts[i + 1]).expect("the guard just built it"),
+                );
+                i += 2;
                 continue;
             }
 
@@ -924,5 +999,116 @@ mod tests {
         let out = peephole(insts);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], MachInst::Lea { .. }));
+    }
+
+    fn mov(dst: Reg, src: Reg) -> MachInst {
+        MachInst::MovRR {
+            size: OpSize::S32,
+            dst: reg(dst),
+            src: reg(src),
+        }
+    }
+
+    /// The copy the destructive add needs is exactly what `lea`'s third operand
+    /// removes.
+    #[test]
+    fn a_copy_and_a_destructive_add_become_one_lea() {
+        let out = peephole(vec![
+            mov(Reg::RAX, Reg::RDI),
+            MachInst::AddRR {
+                size: OpSize::S32,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RDX),
+            },
+        ]);
+        assert_eq!(out.len(), 1);
+        let MachInst::Lea { size, dst, addr } = &out[0] else {
+            panic!("expected a lea, got {:?}", out[0]);
+        };
+        assert_eq!(*size, OpSize::S32);
+        assert_eq!(*dst, reg(Reg::RAX));
+        assert_eq!(*addr, Addr::new(Some(Reg::RDI), Some(Reg::RDX), 1, 0));
+    }
+
+    /// A constant addend is a displacement, and a constant subtrahend is a
+    /// negative one.
+    #[test]
+    fn a_copy_and_a_constant_add_or_sub_become_one_lea() {
+        let out = peephole(vec![
+            mov(Reg::RAX, Reg::RDI),
+            MachInst::AddRI {
+                size: OpSize::S32,
+                dst: reg(Reg::RAX),
+                imm: 5,
+            },
+            mov(Reg::RCX, Reg::RSI),
+            MachInst::SubRI {
+                size: OpSize::S32,
+                dst: reg(Reg::RCX),
+                imm: 5,
+            },
+        ]);
+        assert_eq!(out.len(), 2);
+        assert!(
+            matches!(&out[0], MachInst::Lea { addr, .. } if *addr == Addr::new(Some(Reg::RDI), None, 1, 5))
+        );
+        assert!(
+            matches!(&out[1], MachInst::Lea { addr, .. } if *addr == Addr::new(Some(Reg::RSI), None, 1, -5))
+        );
+    }
+
+    /// `lea` writes no flags, so the fold is unavailable where the add's are read.
+    #[test]
+    fn a_destructive_add_whose_flags_are_read_is_kept() {
+        let out = peephole(vec![
+            mov(Reg::RAX, Reg::RDI),
+            MachInst::AddRR {
+                size: OpSize::S32,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RDX),
+            },
+            MachInst::Setcc {
+                cc: CondCode::Eq,
+                dst: reg(Reg::RCX),
+            },
+        ]);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[1], MachInst::AddRR { .. }));
+    }
+
+    /// The copy has already overwritten the addend, so there is no address that
+    /// computes the same sum.
+    #[test]
+    fn an_add_of_the_copys_own_destination_is_kept() {
+        let out = peephole(vec![
+            mov(Reg::RAX, Reg::RDI),
+            MachInst::AddRR {
+                size: OpSize::S32,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RAX),
+            },
+        ]);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[1], MachInst::AddRR { .. }));
+    }
+
+    /// RSP cannot be an index, so it takes the base position.
+    #[test]
+    fn a_stack_pointer_addend_becomes_the_base() {
+        let out = peephole(vec![
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RDI),
+            },
+            MachInst::AddRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RSP),
+            },
+        ]);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], MachInst::Lea { addr, .. }
+                if *addr == Addr::new(Some(Reg::RSP), Some(Reg::RDI), 1, 0)));
     }
 }

@@ -123,7 +123,7 @@ gated on pressure because it runs before global liveness exists, and
   across `lit`, `bench` and `fuzz`. **`-O1` emits worse code than `-O0` on 7 of
   the 15 `bench` kernels**, and LICM is 60% of it -- see P1 below.
 - Code quality also has an *absolute* number, which is the one the Goal is
-  written against: `--gap`, `x1.36` vs `gcc -O2` over the 8 `live` kernels.
+  written against: `--gap`, `x1.29` vs `gcc -O2` over the 21 `live` kernels.
   `lit` and `fuzz` compute a fixed answer from no runtime input, so `gcc -O2`
   evaluates the whole program and emits the constant -- a generated program
   becomes `mov $0x562,%esi; call printf`. `--gap` detects that where it is
@@ -428,8 +428,17 @@ isel patterns; we should beat it on the ones we implement.
       e-graph equality: an `Icmp`'s condition code is read from its e-class,
       independently of which node extraction picks, so two `Icmp` nodes with
       different codes in one class would make that read ambiguous.
-- [ ] **Wider LEA coverage** beyond LEA2/3/4 already present; `lea` as a
-      3-operand add to avoid destructive-form moves.
+- [ ] **Wider LEA coverage** beyond LEA2/3/4 already present.
+      The 3-operand add is done, as a peephole rather than an isel rule: an add
+      whose result goes somewhere that is neither operand lowers to
+      `mov dst, a; add dst, b`, and `lea dst, [a+b]` is the same value in one
+      instruction and one byte fewer. A constant addend becomes a displacement
+      and a constant subtrahend a negative one. `lea` writes no flags, so the
+      fold is taken only where nothing reads the add's. Extraction cannot make
+      this choice: whether the copy exists at all is the allocator's answer, not
+      the cost model's. Over the rows that changed, `live` -7.5% insts and -2.6%
+      bytes, `bench` -5.7%/-1.6%, `lit` -2.3%/-0.5%, `fuzz` -1.1%/-0.3%;
+      `gcc -O2` gap on `live` x1.39 -> x1.29 and on `bench` x1.26 -> x1.19.
 - [ ] **Latency/port-aware DAG scheduling.** A uarch model (ports, latencies,
       throughput) is only tractable because there is one target. ~5% but it is
       exactly the kind of win the single-target thesis predicts.

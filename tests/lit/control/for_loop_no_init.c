@@ -4,8 +4,8 @@
 // comparison against bound 10 (immediate fused into cmp via X86CmpI)
 // CHECK: cmp    {{[a-z0-9]+}},0xa
 // CHECK: jl
-// loop body: add 1, as `inc`
-// CHECK: inc
+// loop body: add 1, the constant a lea displacement
+// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}+0x1]
 
 int main() {
     int i = 0;

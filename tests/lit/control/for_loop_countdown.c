@@ -1,10 +1,10 @@
 // EXIT: 10
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// counting down from 10 to 0, decrement as `dec` -- the constant is in the
-// instruction rather than a register of its own
+// counting down from 10 to 0, the decrement a negative lea displacement --
+// the constant is in the instruction rather than a register of its own
 // CHECK: mov    {{[a-z0-9]+}},0xa
-// CHECK: dec
+// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}-0x1]
 // backward jump
 // CHECK: jmp
 

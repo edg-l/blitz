@@ -3,7 +3,7 @@
 // CHECK-LABEL: # main
 // CHECK: cmp
 // CHECK: jl
-// CHECK: add
+// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}+{{[a-z0-9]+}}*1]
 // CHECK: jmp
 
 // init clause is an expression, not a declaration

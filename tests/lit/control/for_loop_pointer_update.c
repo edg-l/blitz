@@ -1,8 +1,8 @@
 // EXIT: 15
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// pointer-based loop using index
-// CHECK: add
+// pointer-based loop using index; the sum is a three-operand lea
+// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}+{{[a-z0-9]+}}*1]
 // CHECK: jmp
 
 int main() {
