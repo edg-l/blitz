@@ -364,7 +364,20 @@ pub(super) fn linearize(
         // Snapshot class_to_vreg BEFORE restore: this is the block-local view.
         // Later block lowering uses this so classes re-emitted in a block
         // resolve to that block's VReg, not a stale cross-block one.
-        block_class_to_vreg_snapshot[block_idx] = class_to_vreg.clone();
+        //
+        // Only the block's own roots: every question ever asked of a snapshot is
+        // "which VReg carries a class this block's effectful ops or terminator
+        // name", and those classes are exactly `all_roots`. The children the
+        // emission walk gave VRegs to along the way are named by the schedule,
+        // never by the CFG, so copying the whole map here would be a copy of the
+        // function per block.
+        let mut snapshot = ClassVRegMap::new();
+        for &cid in &all_roots {
+            if let Some(vreg) = class_to_vreg.lookup_any(cid) {
+                snapshot.insert_single(cid, vreg);
+            }
+        }
+        block_class_to_vreg_snapshot[block_idx] = snapshot;
 
         // Put back the per-block re-emitted classes, and take the block's own
         // copy of an out-of-scope class back out. The scope carries over to the
