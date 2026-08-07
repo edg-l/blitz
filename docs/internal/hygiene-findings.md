@@ -87,12 +87,21 @@ what makes those programs work: the value reaches the block another way.
 **A probe said it was unreachable and the probe was wrong.** An `eprintln!` in
 both branches printed nothing across lit, the differential harness, the corpus
 and 180 generated programs -- because `run_corpus.sh` redirects the compiler's
-stderr. Scaffolding first, per `CLAUDE.md`.
+stderr. Scaffolding first, per `CLAUDE.md`. A hard error is the probe that
+cannot be swallowed, since it fails the compile the harness reports.
 
-**Fix:** not an error. Find where those two parameters' values actually live and
-record it as `Assignment::Slot`, at which point the branch has something to
-*do* rather than something to skip, and a remaining `None` can be the error it
-should have been. The two programs above are the reproducers.
+**FIXED (`891c2af`), and not the way this entry first proposed.** Tracing the two
+programs showed the destination case is one condition rather than a slot: the
+parameter's class *is* the argument's, so the parameter carries the expression
+the argument already names and the target block resolves that class itself. On
+`pressure-seed128.c` both sides are `ClassId(673)` and `v10 = Iconst(0, I32)` is
+defined in the entry block with no register, because a constant is re-emitted in
+every block that needs it. That is the same identity the slot-routed path tests
+a few lines above. Anything else is now an error naming both classes.
+
+The source case had no such exemption -- a copy needs a source whatever the
+classes are -- and is now a hard error, green across lit, the differential
+harness, the corpus and 600 generated programs.
 
 ## Duplication
 

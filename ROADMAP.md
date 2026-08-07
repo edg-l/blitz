@@ -126,36 +126,25 @@ guesses at, and only then write the second allocator.
 result field is `assignment`. The colouring allocator constructs only
 `Assignment::Reg`, so it changed no emitted code on any corpus.
 
-**Step two, started, with the target now named.** The goal is that a value in a
-slot is a value like any other, so `terminator.rs`'s two silent `continue`s --
-reached when a VReg has neither a register nor a `BlockParamSlotMap` entry, on a
-path whose failure mode is a non-terminating loop -- have something to do rather
-than something to skip.
+**Step two is done (`891c2af`), and the answer was not a slot.** `terminator.rs`
+had two silent `continue`s where a VReg had neither a register nor a
+`BlockParamSlotMap` entry, on a path whose failure mode is a non-terminating
+loop. Tracing the two programs that reach the destination one showed a single
+condition: the parameter's class *is* the argument's, so the parameter carries
+the expression the argument already names and the target block resolves that
+class itself -- on `pressure-seed128.c` both sides are `ClassId(673)` and
+`v10 = Iconst(0, I32)` sits in the entry block with no register, because a
+constant is re-emitted in every block that needs it. Both branches now state
+their condition, and anything else is an error.
 
-**They are not dead code, and that is measured.** Turning both into
-`CompileError` fails two saved corpus programs at `-O1`, both on the destination
-branch:
+`SlotSpilledParamInfo::value_alias` stays where it is regardless: it says
+whether a parameter names the value it carries, which decides whether a back
+edge must store. That is edge identity, not storage.
 
-```
-fixed/pressure-seed128.c   b9  -> 130 p0   VReg(10)  class 673
-fixed/pressure-seed35.c    b69 -> 149 p0   VReg(13)  class 1111
-```
-
-So a block parameter with no register and no side-table entry is a real state
-and the skip is load-bearing: the value reaches the block by some route neither
-map records. **Those two programs are the reproducers, and finding what route
-that is is the next step** -- once it can be named as `Assignment::Slot`, the
-branch does the store and a remaining `None` becomes the error it should be.
-
-(An `eprintln!` probe in both branches printed nothing across every corpus and
-was simply wrong: `run_corpus.sh` redirects the compiler's stderr. Rule out the
-scaffolding first.)
-
-Note what does *not* move: `SlotSpilledParamInfo::value_alias` says whether a
-parameter names the value it carries, which decides whether a back edge must
-store. That is edge identity, not storage, and
-`docs/internal/refactor-roadmap.md`'s section "A back edge is not 'the VRegs are
-equal'" is why it needs care.
+**Step three, not started: make pressure relief something the allocator asks
+for.** This is the one the refactor roadmap named, and it is what actually
+blocks a second allocator -- see the measurement above. Until it lands, any
+allocator inherits relief planned against the colouring allocator's model.
 
 The shape to aim for is every VReg in a slot, operands loaded into scratch
 registers per instruction, results stored back: no interference graph, no
