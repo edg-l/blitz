@@ -183,7 +183,7 @@ ordering is by hours lost, not by effort to build.
       than "spilling failed". The error now carries the top three defining ops
       with counts. Cost of not having had it: most of a session spent on the
       spill loop, which was not the cause.
-- [ ] **Say which register class each VReg is in, in the liveness dump.** There
+- [x] **Say which register class each VReg is in, in the liveness dump.** There
       was no way to see that a value lived in EFLAGS rather than a GPR short of
       joining the `sched` and `liveness` dumps and re-deriving it from the op
       defining each operand. One column would have shown 35 of 196 values in the

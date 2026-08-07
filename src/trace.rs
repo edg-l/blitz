@@ -149,6 +149,7 @@ pub fn init_tracing() {
 use crate::egraph::extract::VReg;
 use crate::regalloc::interference::VRegSet;
 use crate::schedule::scheduler::ScheduledInst;
+use crate::x86::reg::RegClass;
 use std::collections::BTreeMap;
 
 /// Format a schedule with optional barrier group annotations.
@@ -360,21 +361,35 @@ pub fn format_slot_traffic(
 }
 
 /// Format a liveness info's live_at sets.
+///
+/// Every VReg carries its register class, since a value in `Flags` takes no
+/// general register and a value in `XMM` competes with a disjoint budget: a
+/// live set read without the classes says nothing about the pressure it makes.
 pub fn format_liveness(insts: &[ScheduledInst], live_at: &[VRegSet], live_out: &VRegSet) -> String {
     use std::fmt::Write;
+    let classes = crate::regalloc::build_vreg_classes_from_insts(insts);
+    let name = |v: u32| match classes.get(&VReg(v)) {
+        Some(RegClass::GPR) => format!("v{v}:g"),
+        Some(RegClass::XMM) => format!("v{v}:x"),
+        Some(RegClass::Flags) => format!("v{v}:f"),
+        None => format!("v{v}:?"),
+    };
     let mut out = String::new();
     for (i, (inst, live)) in insts.iter().zip(live_at.iter()).enumerate() {
         let mut vregs: Vec<u32> = live.iter().map(|v| v as u32).collect();
         vregs.sort();
+        let live_before: Vec<String> = vregs.into_iter().map(name).collect();
         writeln!(
             out,
-            "  [{i:>3}] v{} = {:?}  live_before={vregs:?}",
-            inst.dst.0, inst.op
+            "  [{i:>3}] {} = {:?}  live_before=[{}]",
+            name(inst.dst.0),
+            inst.op,
+            live_before.join(", ")
         )
         .unwrap();
     }
-    let lo: Vec<usize> = live_out.iter().collect();
-    writeln!(out, "  live_out={lo:?}").unwrap();
+    let lo: Vec<String> = live_out.iter().map(|v| name(v as u32)).collect();
+    writeln!(out, "  live_out=[{}]", lo.join(", ")).unwrap();
     out
 }
 
