@@ -1253,7 +1253,6 @@ pub(super) fn lower_block_pure_ops(
             {
                 match arg_locs.get(*param_idx as usize) {
                     Some(ArgLoc::Stack { offset }) => {
-                        let size = OpSize::from_int_type(ty);
                         let offset = *offset;
                         let addr = if frame_layout.uses_frame_pointer {
                             Addr {
@@ -1272,10 +1271,24 @@ pub(super) fn lower_block_pure_ops(
                                 disp,
                             }
                         };
-                        result.push(MachInst::MovRM {
-                            size,
-                            dst: Operand::Reg(dst_reg),
-                            addr,
+                        // A stack-passed argument is read with the instruction
+                        // its register class addresses: the eight bytes of a
+                        // double are not an `OpSize`, and asking for one is how
+                        // this arm used to reject an F64 parameter outright.
+                        result.push(match ty {
+                            Type::F64 => MachInst::MovsdRM {
+                                dst: Operand::Reg(dst_reg),
+                                addr,
+                            },
+                            Type::F32 => MachInst::MovssRM {
+                                dst: Operand::Reg(dst_reg),
+                                addr,
+                            },
+                            _ => MachInst::MovRM {
+                                size: OpSize::from_int_type(ty),
+                                dst: Operand::Reg(dst_reg),
+                                addr,
+                            },
                         });
                     }
                     Some(ArgLoc::Reg(_)) => {

@@ -466,9 +466,23 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
     let mut stack_args = stack_args;
     stack_args.sort_by_key(|a| Reverse(a.0));
     for (_, src) in stack_args {
-        insts.push(MachInst::Push {
-            src: Operand::Reg(src),
-        });
+        // `push` addresses no XMM register, and a stack argument slot is eight
+        // bytes whatever it holds, so a floating-point argument travels through
+        // the scratch GPR. It is free here for the same reason the copy
+        // sequentialization below can use it: no value is in it.
+        if src.is_xmm() {
+            insts.push(MachInst::MovqFromXmm {
+                dst: Operand::Reg(temp),
+                src: Operand::Reg(src),
+            });
+            insts.push(MachInst::Push {
+                src: Operand::Reg(temp),
+            });
+        } else {
+            insts.push(MachInst::Push {
+                src: Operand::Reg(src),
+            });
+        }
     }
 
     // Collect register-to-register copies.
