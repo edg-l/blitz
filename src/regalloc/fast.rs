@@ -109,7 +109,31 @@ pub fn allocate_fast(
 
         let layout = BlockLayout::new(&schedules);
         let intervals = build_intervals(&schedules, &liveness, &layout, &vreg_classes);
-        let call_points = call_positions(&schedules, &layout);
+        let (call_points, div_points) = clobber_positions(&schedules, &layout);
+
+        // What no store can move, so the scan must never choose it as a victim:
+        // a block parameter is written by a phi copy on the edge and only the
+        // splitter's slot routing can relieve one, a result the hardware pins is
+        // in its register by the instruction's own definition, and a call
+        // argument has to be in its argument register at the call. Demanding one
+        // of these produces a spill that changes nothing and a round that reads
+        // as "did not converge".
+        let mut unspillable: BTreeSet<VReg> = precolored.keys().copied().collect();
+        for params in block_param_vregs_per_block {
+            for v in params.iter() {
+                unspillable.insert(VReg(v as u32));
+            }
+        }
+        for inst in schedules.iter().flatten() {
+            if inst.op.result_in_fixed_regs() {
+                unspillable.insert(inst.dst);
+            }
+        }
+        for insts in &schedules {
+            for v in super::spill::collect_call_arg_vregs(insts) {
+                unspillable.insert(VReg(v as u32));
+            }
+        }
 
         let scan = Scan {
             gpr_order: &gpr_order,
@@ -118,6 +142,8 @@ pub fn allocate_fast(
             precolored: &precolored,
             vreg_classes: &vreg_classes,
             call_points: &call_points,
+            div_points: &div_points,
+            unspillable: &unspillable,
         };
         let outcome = scan.run(&intervals);
 
@@ -138,7 +164,7 @@ pub fn allocate_fast(
             ));
         }
 
-        let new_spills: Vec<usize> = outcome
+        let new_spills: BTreeSet<usize> = outcome
             .to_spill
             .iter()
             .copied()
@@ -157,10 +183,14 @@ pub fn allocate_fast(
             ));
         }
 
-        spilled.extend(new_spills);
+        // Only what this round chose, against schedules that already carry every
+        // earlier round's spill code. Handing over the accumulated set would
+        // spill each of those a second time, and the reloads of a reload are
+        // what a "did not converge" looks like from outside.
+        spilled.extend(new_spills.iter().copied());
         super::spill::insert_spills_global(
             &mut schedules,
-            &spilled,
+            &new_spills,
             slots,
             &mut next_vreg,
             &vreg_classes,
@@ -257,23 +287,32 @@ fn build_intervals(
     intervals
 }
 
-/// Flattened positions of every instruction that clobbers the caller-saved
-/// registers.
-fn call_positions(schedules: &[Vec<ScheduledInst>], layout: &BlockLayout) -> Vec<usize> {
-    use crate::ir::op::{Op, PseudoOp};
-    let mut out = Vec::new();
+/// Flattened positions of the two instruction kinds that take registers out of
+/// the scan's hands: a call clobbers everything caller-saved, and a division
+/// reads RAX and RDX as its dividend whatever its operands wanted.
+fn clobber_positions(
+    schedules: &[Vec<ScheduledInst>],
+    layout: &BlockLayout,
+) -> (Vec<usize>, Vec<usize>) {
+    use crate::ir::op::{MachOp, Op, PseudoOp};
+    let mut calls = Vec::new();
+    let mut divs = Vec::new();
     for (b, insts) in schedules.iter().enumerate() {
         for (i, inst) in insts.iter().enumerate() {
-            if matches!(
-                inst.op,
-                Op::Pseudo(PseudoOp::CallResult(..)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
-            ) {
-                out.push(layout.pos(b, i));
+            match inst.op {
+                Op::Pseudo(PseudoOp::CallResult(..)) | Op::Pseudo(PseudoOp::VoidCallBarrier) => {
+                    calls.push(layout.pos(b, i))
+                }
+                Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..)) => {
+                    divs.push(layout.pos(b, i))
+                }
+                _ => {}
             }
         }
     }
-    out.sort_unstable();
-    out
+    calls.sort_unstable();
+    divs.sort_unstable();
+    (calls, divs)
 }
 
 struct Scan<'a> {
@@ -283,6 +322,8 @@ struct Scan<'a> {
     precolored: &'a BTreeMap<VReg, Reg>,
     vreg_classes: &'a BTreeMap<VReg, RegClass>,
     call_points: &'a [usize],
+    div_points: &'a [usize],
+    unspillable: &'a BTreeSet<VReg>,
 }
 
 struct ScanOutcome {
@@ -291,13 +332,22 @@ struct ScanOutcome {
 }
 
 impl Scan<'_> {
-    /// Does the interval contain a call strictly after its start? A value whose
-    /// register must survive a call has to be callee-saved, and every XMM is
-    /// caller-saved, so an XMM in that position can only be spilled.
+    /// Must this value still be in its register after a call? Strictly after
+    /// its end is what matters -- a value whose last use *is* the call does not
+    /// have to survive it. Every XMM is caller-saved, so an XMM that does have
+    /// to survive one can only be spilled.
     fn crosses_call(&self, iv: &Interval) -> bool {
-        self.call_points
+        self.call_points.iter().any(|&c| c > iv.start && c < iv.end)
+    }
+
+    /// Is this value live anywhere a division reads RAX and RDX as its
+    /// dividend? A divisor sitting in either is the one case lowering asserts
+    /// against, and unlike a call the constraint binds *at* the instruction, so
+    /// a value whose last use is the division is still subject to it.
+    fn meets_div(&self, iv: &Interval) -> bool {
+        self.div_points
             .iter()
-            .any(|&c| c > iv.start && c <= iv.end)
+            .any(|&d| d >= iv.start && d <= iv.end)
     }
 
     fn class_of(&self, v: VReg) -> RegClass {
@@ -339,15 +389,19 @@ impl Scan<'_> {
                 RegClass::Flags => continue,
             };
 
-            if crosses && class == RegClass::XMM {
+            // Every XMM is caller-saved, so one whose value has to survive a
+            // call cannot stay in a register at all.
+            if crosses && class == RegClass::XMM && !self.unspillable.contains(&iv.vreg) {
                 to_spill.push(iv.vreg.0 as usize);
                 continue;
             }
 
-            let choice = pool
-                .iter()
-                .copied()
-                .find(|r| !held.contains(r) && (!crosses || self.callee_saved.contains(r)));
+            let div_bound = class == RegClass::GPR && self.meets_div(iv);
+            let choice = pool.iter().copied().find(|r| {
+                !held.contains(r)
+                    && (!crosses || self.callee_saved.contains(r))
+                    && (!div_bound || (*r != Reg::RAX && *r != Reg::RDX))
+            });
 
             match choice {
                 Some(r) => {
@@ -356,21 +410,27 @@ impl Scan<'_> {
                     active.sort_by_key(|&(end, _, _)| end);
                 }
                 None => {
-                    // Spill whichever of this interval and the furthest-ending
-                    // active one lives longest: the shorter span is the one a
-                    // register buys more for.
+                    // The furthest-ending active value this scan is allowed to
+                    // move. A block parameter, a pinned result and a call
+                    // argument are all excluded: spilling one changes nothing,
+                    // and the round that follows reads as a failure to converge
+                    // rather than as the wall it is.
                     let victim = active
                         .iter()
                         .filter(|&&(_, r, v)| {
                             self.class_of(v) == class
-                                && self.precolored.get(&v).is_none()
+                                && !self.unspillable.contains(&v)
                                 && pool.contains(&r)
                         })
                         .max_by_key(|&&(end, _, _)| end)
                         .copied();
 
+                    // Evict when the victim outlives this interval, and also
+                    // whenever this one cannot be spilled itself -- then the
+                    // register has to come from somewhere, whatever the ends say.
+                    let must_place = self.unspillable.contains(&iv.vreg);
                     match victim {
-                        Some((end, r, v)) if end > iv.end => {
+                        Some((end, r, v)) if end > iv.end || must_place => {
                             to_spill.push(v.0 as usize);
                             active.retain(|&(_, _, av)| av != v);
                             assignment.remove(&v);
