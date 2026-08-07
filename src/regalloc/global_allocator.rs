@@ -279,8 +279,8 @@ fn build_global_interference(
             .iter()
             .map(|_| LivenessInfo {
                 live_at: vec![],
-                live_in: BTreeSet::new(),
-                live_out: BTreeSet::new(),
+                live_in: VRegSet::new(),
+                live_out: VRegSet::new(),
             })
             .collect();
         return Phase2State {
@@ -568,7 +568,7 @@ fn add_clobber_interferences_global(
         let sched = &block_schedules[block_idx];
         let n = liveness.live_at.len();
 
-        let live_at_cp: &BTreeSet<VReg> = if inst_idx < n {
+        let live_at_cp: &VRegSet = if inst_idx < n {
             &liveness.live_at[inst_idx]
         } else {
             &liveness.live_out
@@ -578,7 +578,7 @@ fn add_clobber_interferences_global(
         // clobbered register on purpose. Only those that do not survive the
         // point: an argument live past its call must still interfere.
         let consumed: BTreeSet<usize> = if inst_idx < sched.len() {
-            let live_after: &BTreeSet<VReg> = if inst_idx + 1 < n {
+            let live_after: &VRegSet = if inst_idx + 1 < n {
                 &liveness.live_at[inst_idx + 1]
             } else {
                 &liveness.live_out
@@ -591,8 +591,7 @@ fn add_clobber_interferences_global(
         // Early-out: skip if no VRegs of the target class are live besides the
         // instruction's own operands.
         if config.skip_if_no_live {
-            let has_live = live_at_cp.iter().any(|v| {
-                let idx = v.0 as usize;
+            let has_live = live_at_cp.iter().any(|idx| {
                 idx < graph.num_vregs
                     && graph.reg_class[idx] == config.reg_class
                     && !consumed.contains(&idx)
@@ -620,8 +619,7 @@ fn add_clobber_interferences_global(
 
             phantom_precolors.insert(phantom_idx, color);
 
-            for &live_v in live_at_cp {
-                let live_idx = live_v.0 as usize;
+            for live_idx in live_at_cp {
                 if live_idx < graph.num_vregs
                     && graph.reg_class[live_idx] == config.reg_class
                     && !consumed.contains(&live_idx)
@@ -2106,7 +2104,10 @@ fn choose_spill_candidates(
             .unwrap_or_default();
         let per_inst = crate::regalloc::liveness::compute_liveness(sched, &live_out);
         for (i, inst) in sched.iter().enumerate() {
-            if !per_inst.live_at[i].iter().any(|v| uncolored.contains(v)) {
+            if !per_inst.live_at[i]
+                .iter()
+                .any(|idx| uncolored.contains(&VReg(idx as u32)))
+            {
                 continue;
             }
             let touched: BTreeSet<VReg> = inst
@@ -2117,7 +2118,7 @@ fn choose_spill_candidates(
                 .collect();
             let here: BTreeSet<VReg> = per_inst.live_at[i]
                 .iter()
-                .copied()
+                .map(|idx| VReg(idx as u32))
                 .filter(of_class)
                 .filter(|v| !touched.contains(v) && !ineligible.contains(v))
                 .collect();
@@ -2226,7 +2227,11 @@ fn pressure_peak(
             .unwrap_or_default();
         let liveness = crate::regalloc::liveness::compute_liveness(sched, &live_out);
         for (i, inst) in sched.iter().enumerate() {
-            let live = liveness.live_at[i].iter().filter(of_class).count();
+            let live = liveness.live_at[i]
+                .iter()
+                .map(|idx| VReg(idx as u32))
+                .filter(|v| of_class(&v))
+                .count();
             if best.is_none_or(|(b, _, _, _)| live > b) {
                 let operands = inst.operands.iter().filter(of_class).count();
                 best = Some((live, operands, block_idx, inst));

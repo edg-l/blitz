@@ -3,14 +3,22 @@ use std::collections::BTreeSet;
 use crate::egraph::extract::VReg;
 use crate::schedule::scheduler::ScheduledInst;
 
+use super::interference::VRegSet;
+
+/// The live sets are sorted `Vec`s rather than `BTreeSet`s because the backward
+/// pass materializes one per program point by copying the running set: a block
+/// of `n` instructions with `L` values live pays `n` copies. As a tree that is
+/// `n * L` heap nodes; as a sorted `Vec` it is `n` allocations of `4L` bytes.
+/// The order is ascending either way, so every caller that walks a live set sees
+/// what it saw before.
 pub struct LivenessInfo {
     /// For each program point (instruction index), the set of live VRegs.
     /// `live_at[i]` is the set live *before* instruction `i` executes.
-    pub live_at: Vec<BTreeSet<VReg>>,
+    pub live_at: Vec<VRegSet>,
     /// Live-in set for the block (live before the first instruction).
-    pub live_in: BTreeSet<VReg>,
+    pub live_in: VRegSet,
     /// Live-out set for the block (live after the last instruction).
-    pub live_out: BTreeSet<VReg>,
+    pub live_out: VRegSet,
 }
 
 /// Compute liveness for a single basic block's scheduled instructions.
@@ -27,32 +35,31 @@ pub struct LivenessInfo {
 ///   live_in = live after processing all instructions
 pub fn compute_liveness(insts: &[ScheduledInst], block_live_out: &BTreeSet<VReg>) -> LivenessInfo {
     let n = insts.len();
-    let mut live_at: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); n];
-    let mut live: BTreeSet<VReg> = block_live_out.clone();
+    let mut live_at: Vec<VRegSet> = vec![VRegSet::new(); n];
+    let mut live: VRegSet = block_live_out.iter().map(|v| v.0 as usize).collect();
 
     for i in (0..n).rev() {
         let inst = &insts[i];
 
         // Remove the definition: if this VReg is defined here, it's not live
         // before this instruction (in SSA form, each VReg is defined once).
-        live.remove(&inst.dst);
+        live.remove(inst.dst.0 as usize);
 
         // Add uses: VRegs used by this instruction are live before it.
         for &op in &inst.operands {
-            live.insert(op);
+            live.insert(op.0 as usize);
         }
 
         // live_at[i] = set of VRegs live before instruction i.
-        live_at[i] = std::mem::take(&mut live);
-        live = live_at[i].clone();
+        live_at[i] = live.clone();
     }
 
-    let live_in = live.clone();
+    let live_in = live;
 
     LivenessInfo {
         live_at,
         live_in,
-        live_out: block_live_out.clone(),
+        live_out: block_live_out.iter().map(|v| v.0 as usize).collect(),
     }
 }
 
@@ -109,17 +116,14 @@ mod tests {
         let info = compute_liveness(&insts, &live_out);
 
         // Before inst 2 (add): v0 and v1 must be live.
-        assert!(info.live_at[2].contains(&VReg(0)), "v0 live before inst 2");
-        assert!(info.live_at[2].contains(&VReg(1)), "v1 live before inst 2");
+        assert!(info.live_at[2].contains(0), "v0 live before inst 2");
+        assert!(info.live_at[2].contains(1), "v1 live before inst 2");
 
         // Before inst 3 (use): v2 must be live.
-        assert!(info.live_at[3].contains(&VReg(2)), "v2 live before inst 3");
+        assert!(info.live_at[3].contains(2), "v2 live before inst 3");
 
         // v0 is not live before inst 0 (it's defined there).
-        assert!(
-            !info.live_at[0].contains(&VReg(0)),
-            "v0 not live before its def"
-        );
+        assert!(!info.live_at[0].contains(0), "v0 not live before its def");
 
         // live_in: nothing is live before the block (all defs are inside).
         assert!(
@@ -144,14 +148,14 @@ mod tests {
         let info = compute_liveness(&insts, &live_out);
 
         // v0 should be in live_out.
-        assert!(info.live_out.contains(&VReg(0)));
+        assert!(info.live_out.contains(0));
 
         // v0 is defined at inst 0, so before inst 0 it's not live.
         // But after inst 0 it should be live (since it's in live_out).
         // live_at[1] = live before inst 1: v0 should be here since live_out includes it
         // and nothing kills it after inst 0.
         assert!(
-            info.live_at[1].contains(&VReg(0)),
+            info.live_at[1].contains(0),
             "v0 should be live at inst 1 since it's in live_out"
         );
     }
@@ -171,14 +175,11 @@ mod tests {
 
         // v5 is used in inst 0, so it must be live_in.
         assert!(
-            info.live_in.contains(&VReg(5)),
+            info.live_in.contains(5),
             "v5 (external param) must be in live_in"
         );
 
         // live_at[0] must contain v5.
-        assert!(
-            info.live_at[0].contains(&VReg(5)),
-            "v5 must be live before inst 0"
-        );
+        assert!(info.live_at[0].contains(5), "v5 must be live before inst 0");
     }
 }

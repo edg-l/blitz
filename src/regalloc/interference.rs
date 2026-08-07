@@ -15,6 +15,9 @@ use super::liveness::LivenessInfo;
 /// pass costs. A `BTreeSet` pays an allocation and a tree descent per insert; a
 /// sorted `Vec` pays a binary search and a memmove over a contiguous run, and
 /// stores four bytes per neighbour instead of a node.
+///
+/// `LivenessInfo` holds its per-program-point sets in the same form, for the
+/// same reason: it copies the running live set once per instruction.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct VRegSet {
     elems: Vec<u32>,
@@ -33,6 +36,17 @@ impl VRegSet {
                 self.elems.insert(i, v as u32);
                 true
             }
+        }
+    }
+
+    /// Remove `v`; returns whether it was present.
+    pub fn remove(&mut self, v: usize) -> bool {
+        match self.elems.binary_search(&(v as u32)) {
+            Ok(i) => {
+                self.elems.remove(i);
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -146,7 +160,7 @@ pub fn build_interference_into(
         if dst_idx >= graph.num_vregs {
             continue;
         }
-        let live_after: &BTreeSet<VReg> = if i + 1 < liveness.live_at.len() {
+        let live_after: &VRegSet = if i + 1 < liveness.live_at.len() {
             &liveness.live_at[i + 1]
         } else {
             &liveness.live_out
@@ -155,12 +169,11 @@ pub fn build_interference_into(
             .op
             .two_address_src()
             .and_then(|k| inst.operands.get(k))
-            .filter(|v| !live_after.contains(v))
+            .filter(|v| !live_after.contains(v.0 as usize))
             .filter(|v| inst.operands.iter().filter(|o| o == v).count() == 1)
             .map(|v| v.0 as usize);
         let dst_class = graph.reg_class[dst_idx];
-        for &live_vreg in &liveness.live_at[i] {
-            let live_idx = live_vreg.0 as usize;
+        for live_idx in &liveness.live_at[i] {
             if live_idx < graph.num_vregs
                 && graph.reg_class[live_idx] == dst_class
                 && live_idx != dst_idx
@@ -192,10 +205,7 @@ pub fn build_interference_into(
 ///   a divisor in either register is destroyed mid-instruction.
 ///
 /// `live_after` is the live set at the following program point.
-pub fn dying_clobber_operands(
-    inst: &ScheduledInst,
-    live_after: &BTreeSet<VReg>,
-) -> BTreeSet<usize> {
+pub fn dying_clobber_operands(inst: &ScheduledInst, live_after: &VRegSet) -> BTreeSet<usize> {
     let operands: &[VReg] = match inst.op {
         Op::Pseudo(PseudoOp::CallResult(_, _)) | Op::Pseudo(PseudoOp::VoidCallBarrier) => {
             &inst.operands
@@ -207,7 +217,7 @@ pub fn dying_clobber_operands(
     };
     operands
         .iter()
-        .filter(|v| !live_after.contains(v))
+        .filter(|v| !live_after.contains(v.0 as usize))
         .map(|v| v.0 as usize)
         .collect()
 }
@@ -304,15 +314,13 @@ pub fn build_interference(
         }
         // Also check VRegs that appear in live_at (e.g. live-in from predecessors).
         for live_set in &liveness.live_at {
-            for v in live_set {
-                let idx = v.0 as usize;
+            for idx in live_set {
                 if idx > max_idx {
                     max_idx = idx;
                 }
             }
         }
-        for v in &liveness.live_in {
-            let idx = v.0 as usize;
+        for idx in &liveness.live_in {
             if idx > max_idx {
                 max_idx = idx;
             }
@@ -340,8 +348,8 @@ pub fn build_interference(
     graph
 }
 
-fn add_interferences_in_set(graph: &mut InterferenceGraph, live_set: &BTreeSet<VReg>) {
-    let live: Vec<usize> = live_set.iter().map(|v| v.0 as usize).collect();
+fn add_interferences_in_set(graph: &mut InterferenceGraph, live_set: &VRegSet) {
+    let live: Vec<usize> = live_set.iter().collect();
     for i in 0..live.len() {
         for j in (i + 1)..live.len() {
             let a = live[i];

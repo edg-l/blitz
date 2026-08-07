@@ -147,6 +147,7 @@ pub fn init_tracing() {
 // ── Format helpers for dump points ──────────────────────────────────────────
 
 use crate::egraph::extract::VReg;
+use crate::regalloc::interference::VRegSet;
 use crate::schedule::scheduler::ScheduledInst;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -361,13 +362,13 @@ pub fn format_slot_traffic(
 /// Format a liveness info's live_at sets.
 pub fn format_liveness(
     insts: &[ScheduledInst],
-    live_at: &[BTreeSet<VReg>],
+    live_at: &[VRegSet],
     live_out: &BTreeSet<VReg>,
 ) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     for (i, (inst, live)) in insts.iter().zip(live_at.iter()).enumerate() {
-        let mut vregs: Vec<u32> = live.iter().map(|v| v.0).collect();
+        let mut vregs: Vec<u32> = live.iter().map(|v| v as u32).collect();
         vregs.sort();
         writeln!(
             out,
