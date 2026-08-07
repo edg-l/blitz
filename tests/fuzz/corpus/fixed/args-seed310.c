@@ -1,17 +1,15 @@
-// The -O1 register allocator gets one term of this sum wrong: 79 where 82
-// belongs.
+// A function parameter is in its register before the function's first
+// instruction runs, and `Op::Param` is only the marker that names it.
 //
-// Nothing in the optimization set is responsible. Every pass can be turned off
-// one at a time, or all together, and -O1 still prints 79; forcing the -O0
-// allocator on at -O1 with `BLITZ_PASSES=+fast-regalloc` prints 82. What is
-// left is the colouring allocator, the splitter in front of it, and coalescing.
+// `f0` takes twelve arguments. The splitter spilled the tenth right after its
+// marker, and the copy feeding that spill was given RCX -- which held the
+// fourth argument, whose marker came later in the schedule, so no modelled
+// live range said the register was taken. `p3` then read the tenth argument's
+// value, `(p1 + p3) & 255) << 3` came out 320 instead of 1208, and the wrong
+// arm of the comparison ran.
 //
 // The -O0-vs-O1 oracle could not see this while both levels shared an
-// allocator. It is the first bug the second implementation has found.
-//
-// 237 lines, reduced from gen_c.py seed 310 shape args. `arr[0]` and `arr[6]`
-// have no initializer left but both are written by the loops before the sum
-// reads them -- checked by hand, since reduce.py's guard cannot see it.
+// allocator. It is the first bug the second implementation found.
 //
 // OUTPUT: 82
 extern int printf(char* fmt, int x);

@@ -124,14 +124,15 @@ pub(crate) struct Phase3State {
     alias_map: BTreeMap<u32, u32>,
 }
 
-/// Add the interferences a block's parameters have that their `BlockParam`
+/// Add the interferences a block's parameters have that their marker
 /// instructions do not express.
 ///
-/// Every parameter of a block is written by the phi copies on the edge, before
-/// the block's first instruction runs. A `BlockParam` is only a marker for the
-/// value, and the scheduler puts those markers wherever the dependence order
-/// allows -- so the schedule's own live ranges understate what the parallel copy
-/// has already done, in two ways.
+/// Every parameter of a block holds its register before the block's first
+/// instruction runs -- a block parameter because the phi copies on the edge
+/// wrote it, a function parameter because the caller did. The marker is only a
+/// name for the value, and the scheduler puts markers wherever the dependence
+/// order allows -- so the schedule's own live ranges understate what has
+/// already been placed, in two ways.
 ///
 /// **Between parameters.** Two parameters unused in the block body have disjoint
 /// schedule-level ranges, yet the copy writes both, so they need distinct
@@ -143,8 +144,10 @@ pub(crate) struct Phase3State {
 /// a splitter store/reload pair inserted after the first parameter's marker read
 /// a slot into RAX while RAX held the seventeenth parameter, whose marker came
 /// twelve instructions later. Nothing downstream could see it -- RAX was written
-/// before it was read, and no two *modelled* ranges overlapped.
-fn add_block_param_interferences(
+/// before it was read, and no two *modelled* ranges overlapped. The same shape
+/// with function parameters gave a splitter store its own copy of a value in
+/// RCX, which was the fourth argument, and the callee read the wrong one.
+fn add_param_interferences(
     graph: &mut InterferenceGraph,
     block_param_vregs_per_block: &[VRegSet],
     block_schedules: &[Vec<ScheduledInst>],
@@ -170,34 +173,46 @@ fn add_block_param_interferences(
             graph.adj[b].insert(a);
         }
     };
-    for (bi, params) in block_param_vregs_per_block.iter().enumerate() {
+    let no_params = VRegSet::default();
+    for (bi, sched) in block_schedules.iter().enumerate() {
+        // The block's parameters, from the CFG's record plus the entry block's
+        // function parameters. Only the second comes from the schedule:
+        // `collect_block_param_vregs_per_block` collects `BlockParam` markers
+        // and is the authority on those, while a `Param` marker is the only
+        // place a function parameter is stated.
         let mut seen: BTreeSet<VReg> = BTreeSet::new();
-        let unique: Vec<VReg> = params
+        let unique: Vec<VReg> = block_param_vregs_per_block
+            .get(bi)
+            .unwrap_or(&no_params)
             .iter()
-            .map(|p| resolve(VReg(p as u32)))
+            .map(|p| VReg(p as u32))
+            .chain(
+                sched
+                    .iter()
+                    .filter(|inst| matches!(inst.op, Op::Pure(PureOp::Param(..))))
+                    .map(|inst| inst.dst),
+            )
+            .map(resolve)
             .filter(|&v| seen.insert(v))
             .collect();
+        if unique.is_empty() {
+            continue;
+        }
         for i in 0..unique.len() {
             for j in (i + 1)..unique.len() {
                 interfere(unique[i], unique[j], graph);
             }
         }
 
-        // Everything named before the last `BlockParam` of the block is inside
-        // the parallel copy's shadow. A pseudo-op's `dst` is excluded: it names
-        // no value and takes no register.
-        let Some(sched) = block_schedules.get(bi) else {
-            continue;
-        };
-        let Some(last_marker) = sched
-            .iter()
-            .rposition(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
-        else {
+        // Everything named before the block's last parameter marker is inside
+        // the shadow. A pseudo-op's `dst` is excluded: it names no value and
+        // takes no register.
+        let Some(last_marker) = sched.iter().rposition(|inst| inst.op.is_param_marker()) else {
             continue;
         };
         let mut in_shadow: BTreeSet<VReg> = BTreeSet::new();
         for inst in &sched[..=last_marker] {
-            if !matches!(inst.op, Op::Pure(PureOp::BlockParam(..))) && !inst.op.has_no_result() {
+            if !inst.op.is_param_marker() && !inst.op.has_no_result() {
                 in_shadow.insert(resolve(inst.dst));
             }
             in_shadow.extend(inst.operands.iter().map(|&v| resolve(v)));
@@ -907,7 +922,7 @@ fn run_phase3(
         );
 
     let mut rebuilt = build_global_interference(&post_coalesce_schedules, &rebuild_global_liveness);
-    add_block_param_interferences(
+    add_param_interferences(
         &mut rebuilt.graph,
         &renamed_block_param_vregs,
         &post_coalesce_schedules,
@@ -1690,7 +1705,7 @@ pub fn allocate_global(
         let mut phase2 = build_global_interference(block_schedules, &global_liveness);
         // Pre-coalesce Phase 2 graph: block_params are still distinct VRegs, so no
         // alias resolution needed.
-        add_block_param_interferences(
+        add_param_interferences(
             &mut phase2.graph,
             &block_params_now,
             block_schedules,

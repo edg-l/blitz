@@ -1161,6 +1161,22 @@ impl Op {
         }
     }
 
+    /// Whether this op only *names* a value something else already placed.
+    ///
+    /// A block parameter is written by the phi copies on the edge and a
+    /// function parameter by the caller, so both hold their register before the
+    /// block's first instruction runs. The marker says where the value is
+    /// named, and the scheduler puts it wherever the dependence order allows --
+    /// so the value is live from block entry to its marker and interferes with
+    /// everything the block names over that run, which a backward liveness scan
+    /// starting at the marker does not see.
+    pub fn is_param_marker(&self) -> bool {
+        matches!(
+            self,
+            Op::Pure(PureOp::BlockParam(..)) | Op::Pure(PureOp::Param(..))
+        )
+    }
+
     /// Whether this op defines nothing, so its `dst` names no value.
     ///
     /// The barrier pseudo-ops exist to carry operands into liveness and are

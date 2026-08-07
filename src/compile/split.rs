@@ -179,24 +179,25 @@ fn compute_local_liveness(
         result[i] = live.clone();
     }
 
-    // Every parameter of the block is written by the phi copies on the edge, so
-    // all of them hold registers before the block's first instruction runs. A
-    // `BlockParam` is only a marker for where the value is named, and the
-    // scheduler puts the markers wherever the dependence order allows, so the
-    // backward scan above reads almost nothing as live across the run of markers
-    // -- at exactly the point where a whole parallel copy is resident.
+    // Every parameter of the block holds a register before the block's first
+    // instruction runs -- a block parameter because the phi copies on the edge
+    // wrote it, a function parameter because the caller did. `Op::is_param_marker`
+    // says which ops are only markers for that, and the scheduler puts them
+    // wherever the dependence order allows, so the backward scan above reads
+    // almost nothing as live across the run of markers -- at exactly the point
+    // where a whole parallel copy, or the whole argument list, is resident.
     //
-    // `add_block_param_interferences` asserts the same thing to the colorer.
+    // `add_param_interferences` asserts the same thing to the colorer.
     // Leaving it out here is what let the colorer need a register the splitter
     // had never been asked to free.
     let shadow_end = schedule
         .iter()
-        .rposition(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
+        .rposition(|inst| inst.op.is_param_marker())
         .map_or(0, |i| i + 1);
     if shadow_end > 0 {
         let params: VRegSet = schedule[..shadow_end]
             .iter()
-            .filter(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
+            .filter(|inst| inst.op.is_param_marker())
             .map(|inst| inst.dst)
             .collect();
         for live in result[..shadow_end].iter_mut() {
@@ -270,14 +271,14 @@ fn compute_pressures_only(
 
     // The block's parameters are resident before its first instruction runs;
     // `compute_local_liveness` documents why, and unions them into every point
-    // up to the last `BlockParam` marker.
+    // up to the last parameter marker.
     let shadow_end = schedule
         .iter()
-        .rposition(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
+        .rposition(|inst| inst.op.is_param_marker())
         .map_or(0, |i| i + 1);
     let params: VRegSet = schedule[..shadow_end]
         .iter()
-        .filter(|inst| matches!(inst.op, Op::Pure(PureOp::BlockParam(..))))
+        .filter(|inst| inst.op.is_param_marker())
         .map(|inst| inst.dst)
         .collect();
     // Per class, the parameters of that class: a point in the shadow holds all
