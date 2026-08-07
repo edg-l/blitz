@@ -94,8 +94,17 @@ pub struct CompileOptions {
     pub force_frame_pointer: bool,
     /// Enable Loop-Invariant Code Motion (LICM) before e-graph optimization.
     pub enable_licm: bool,
-    /// Enable Dead Code Elimination (unreachable blocks, constant branches, dead loads).
+    /// Eliminate dead loads. The CFG half of DCE -- constant branch folding and
+    /// unreachable-block removal -- is not gated on this and runs at every level.
     pub enable_dce: bool,
+    /// Allocate registers by linear scan (`regalloc::fast`) instead of the
+    /// Chaitin-Briggs colouring allocator.
+    ///
+    /// Opt-in while it is being brought up: `BLITZ_PASSES=+fast-regalloc`. The
+    /// point of a second allocator is that `-O0` and `-O1` stop sharing one, so
+    /// an allocation bug becomes a disagreement the differential oracle can see
+    /// rather than an answer both levels give.
+    pub enable_fast_regalloc: bool,
     /// Enable intra-block store-to-load and load-to-load forwarding.
     pub enable_store_forwarding: bool,
     /// Enable intra-block dead store elimination.
@@ -177,10 +186,12 @@ impl CompileOptions {
                 "phi-removal" => self.enable_phi_removal = on,
                 "inlining" => self.enable_inlining = on,
                 "peephole" => self.enable_peephole = on,
+                "fast-regalloc" => self.enable_fast_regalloc = on,
                 other => {
                     return Err(format!(
                         "BLITZ_PASSES: unknown pass `{other}`; known: licm, dce, \
-                         store-forwarding, dse, phi-removal, inlining, peephole"
+                         store-forwarding, dse, phi-removal, inlining, peephole, \
+                         fast-regalloc"
                     ));
                 }
             }
@@ -199,6 +210,7 @@ impl CompileOptions {
             force_frame_pointer: false,
             enable_licm: false,
             enable_dce: false,
+            enable_fast_regalloc: false,
             enable_store_forwarding: false,
             enable_dse: false,
             enable_phi_removal: true,
@@ -220,6 +232,7 @@ impl CompileOptions {
             force_frame_pointer: false,
             enable_licm: true,
             enable_dce: true,
+            enable_fast_regalloc: false,
             enable_store_forwarding: true,
             enable_dse: true,
             enable_phi_removal: true,
@@ -1308,18 +1321,32 @@ pub fn compile(
         verify_phi_uses = phi_uses.clone();
         verify_block_params = block_param_vregs_per_block.clone();
         verify_copy_pairs = copy_pairs.clone();
-        let global_result = allocate_global(
-            &block_schedules,
-            &param_vregs,
-            call_arg_precolors,
-            &copy_pairs,
-            &loop_depths,
-            &cfg_succs,
-            &block_param_vregs_per_block,
-            &func.name,
-            opts.force_frame_pointer,
-            &mut slots,
-        )
+        let global_result = if opts.enable_fast_regalloc {
+            crate::regalloc::fast::allocate_fast(
+                &block_schedules,
+                &param_vregs,
+                call_arg_precolors,
+                &phi_uses,
+                &cfg_succs,
+                &block_param_vregs_per_block,
+                &func.name,
+                opts.force_frame_pointer,
+                &mut slots,
+            )
+        } else {
+            allocate_global(
+                &block_schedules,
+                &param_vregs,
+                call_arg_precolors,
+                &copy_pairs,
+                &loop_depths,
+                &cfg_succs,
+                &block_param_vregs_per_block,
+                &func.name,
+                opts.force_frame_pointer,
+                &mut slots,
+            )
+        }
         .map_err(|e| CompileError {
             phase: "regalloc".into(),
             message: e,

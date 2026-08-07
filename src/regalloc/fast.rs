@@ -1,0 +1,427 @@
+//! Linear-scan allocation, for `-O0`.
+//!
+//! The colouring allocator in `global_allocator` is the one that produces good
+//! code, and it is the only one `-O1` uses. This one exists for three reasons
+//! that have nothing to do with the code it emits:
+//!
+//! 1. **It is a second implementation.** `run_diff.sh`'s `-O0`-vs-`-O1` oracle
+//!    is blind to anything equally wrong at both levels, so while both levels
+//!    shared one allocator the component the bug priors rank first was the one
+//!    that comparison could not see. Two allocators make an allocation bug a
+//!    disagreement rather than a shared answer.
+//! 2. **It cannot refuse.** Colouring fails when the chromatic number exceeds
+//!    the register file and spilling cannot bring it down; a program that does
+//!    not compile is a program no oracle can judge. A scan spills whatever does
+//!    not fit and always finishes, so every program gets an answer at one level.
+//! 3. **Locals in frame slots is what debug info describes**, which is the
+//!    shape `-O0` wants once DWARF exists.
+//!
+//! It keeps the same interface as `allocate_global` -- one physical register per
+//! VReg for the whole function -- rather than the per-instruction scratch model
+//! a true "fast" allocator uses. That model cannot be expressed here: everything
+//! downstream of allocation reads `vreg_to_reg`, which has one entry per VReg.
+//! Spilling mints fresh short-lived VRegs for each reload, so the same effect is
+//! reached through the interface that already exists.
+//!
+//! What it deliberately does not do: no interference graph, no coalescing, no
+//! live-range splitting, no rematerialization. It is linear in instructions
+//! after liveness.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::egraph::extract::VReg;
+use crate::schedule::scheduler::ScheduledInst;
+use crate::x86::abi::CALLEE_SAVED;
+use crate::x86::reg::{Reg, RegClass};
+
+use super::coloring::{allocatable_gpr_order, allocatable_xmm_order};
+use super::global_liveness::compute_global_liveness_with_block_params;
+use super::interference::VRegSet;
+use super::slots::SlotAllocator;
+use super::{GlobalRegAllocResult, build_vreg_classes_from_all_blocks};
+
+/// A round that spills nothing new has converged; one that does not is retried.
+/// Each round strictly shortens the intervals it spilled, so this bound is a
+/// backstop against a bug rather than an expected limit.
+const MAX_SPILL_ROUNDS: usize = 8;
+
+/// Where one VReg is live, as a half-open span of the flattened instruction
+/// numbering. Blocks are laid end to end, so a VReg live across a block
+/// boundary spans everything between -- the scan is conservative about holes it
+/// cannot see, which costs registers and never correctness.
+#[derive(Clone, Copy, Debug)]
+struct Interval {
+    vreg: VReg,
+    start: usize,
+    end: usize,
+}
+
+/// Linear-scan allocation over `block_schedules`.
+///
+/// Returns the same shape as `allocate_global`, with `coalesce_aliases` always
+/// empty: nothing here merges VRegs, so no operand needs renaming.
+#[allow(clippy::too_many_arguments)]
+pub fn allocate_fast(
+    block_schedules: &[Vec<ScheduledInst>],
+    param_vregs: &[(VReg, Reg)],
+    call_arg_precolors: Vec<(VReg, Reg)>,
+    phi_uses: &[VRegSet],
+    cfg_succs: &[Vec<usize>],
+    block_param_vregs_per_block: &[VRegSet],
+    func_name: &str,
+    uses_frame_pointer: bool,
+    slots: &mut SlotAllocator,
+) -> Result<GlobalRegAllocResult, String> {
+    let mut schedules: Vec<Vec<ScheduledInst>> = block_schedules.to_vec();
+    let mut next_vreg: u32 = schedules
+        .iter()
+        .flatten()
+        .flat_map(|i| std::iter::once(i.dst.0).chain(i.operands.iter().map(|v| v.0)))
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
+
+    // Precolored VRegs hold a register the ABI named, so the scan may not move
+    // them and may not spill them. A call argument must be in its argument
+    // register at the call; a parameter arrives in one.
+    let mut precolored: BTreeMap<VReg, Reg> = BTreeMap::new();
+    for &(v, r) in param_vregs {
+        precolored.insert(v, r);
+    }
+    for (v, r) in call_arg_precolors {
+        precolored.insert(v, r);
+    }
+
+    let gpr_order = allocatable_gpr_order(uses_frame_pointer);
+    let xmm_order = allocatable_xmm_order();
+    let callee_saved: BTreeSet<Reg> = CALLEE_SAVED.iter().copied().collect();
+
+    let mut spilled: BTreeSet<usize> = BTreeSet::new();
+
+    for round in 0..MAX_SPILL_ROUNDS {
+        let vreg_classes = build_vreg_classes_from_all_blocks(&schedules);
+        let liveness = compute_global_liveness_with_block_params(
+            &schedules,
+            cfg_succs,
+            phi_uses,
+            block_param_vregs_per_block,
+        );
+
+        let layout = BlockLayout::new(&schedules);
+        let intervals = build_intervals(&schedules, &liveness, &layout, &vreg_classes);
+        let call_points = call_positions(&schedules, &layout);
+
+        let scan = Scan {
+            gpr_order: &gpr_order,
+            xmm_order: &xmm_order,
+            callee_saved: &callee_saved,
+            precolored: &precolored,
+            vreg_classes: &vreg_classes,
+            call_points: &call_points,
+        };
+        let outcome = scan.run(&intervals);
+
+        if outcome.to_spill.is_empty() {
+            if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+                eprintln!(
+                    "[regalloc] fast {func_name}: {} vregs assigned after {} spill round(s), {} spilled",
+                    outcome.assignment.len(),
+                    round,
+                    spilled.len()
+                );
+            }
+            return Ok(finish(
+                schedules,
+                outcome.assignment,
+                &callee_saved,
+                param_vregs,
+            ));
+        }
+
+        let new_spills: Vec<usize> = outcome
+            .to_spill
+            .iter()
+            .copied()
+            .filter(|v| !spilled.contains(v))
+            .collect();
+
+        // Nothing new to spill and still not placed: the pressure point is one
+        // instruction whose own operands are what is live there, which spilling
+        // cannot relieve -- the same wall the colouring allocator reports.
+        if new_spills.is_empty() {
+            return Err(format!(
+                "fast regalloc: {} value(s) could not be placed and none is spillable; \
+                 the pressure point is one instruction whose own operands are what is \
+                 live there (in function '{func_name}')",
+                outcome.to_spill.len()
+            ));
+        }
+
+        spilled.extend(new_spills);
+        super::spill::insert_spills_global(
+            &mut schedules,
+            &spilled,
+            slots,
+            &mut next_vreg,
+            &vreg_classes,
+        );
+    }
+
+    Err(format!(
+        "fast regalloc: did not converge in {MAX_SPILL_ROUNDS} spill rounds \
+         (in function '{func_name}')"
+    ))
+}
+
+/// Where each block starts in the flattened numbering.
+struct BlockLayout {
+    /// `base[b]` is the position of block `b`'s first instruction.
+    base: Vec<usize>,
+}
+
+impl BlockLayout {
+    fn new(schedules: &[Vec<ScheduledInst>]) -> Self {
+        let mut base = Vec::with_capacity(schedules.len());
+        let mut pos = 0usize;
+        for insts in schedules {
+            base.push(pos);
+            // One extra position per block, so a value live out of a block ends
+            // strictly after its last instruction and a value live in to the
+            // next starts strictly before that block's first.
+            pos += insts.len() + 1;
+        }
+        BlockLayout { base }
+    }
+
+    fn pos(&self, block: usize, inst: usize) -> usize {
+        self.base[block] + inst
+    }
+
+    fn block_end(&self, block: usize, len: usize) -> usize {
+        self.base[block] + len
+    }
+}
+
+/// The live span of every VReg that needs a register.
+///
+/// Flags-class values are left out entirely: EFLAGS is not in any register file
+/// the scan allocates from, and the colouring allocator gives them no machine
+/// register either.
+fn build_intervals(
+    schedules: &[Vec<ScheduledInst>],
+    liveness: &super::global_liveness::GlobalLiveness,
+    layout: &BlockLayout,
+    vreg_classes: &BTreeMap<VReg, RegClass>,
+) -> Vec<Interval> {
+    let mut span: BTreeMap<VReg, (usize, usize)> = BTreeMap::new();
+
+    let touch = |span: &mut BTreeMap<VReg, (usize, usize)>, v: VReg, at: usize| {
+        if matches!(vreg_classes.get(&v), Some(RegClass::Flags)) {
+            return;
+        }
+        span.entry(v)
+            .and_modify(|e| {
+                e.0 = e.0.min(at);
+                e.1 = e.1.max(at);
+            })
+            .or_insert((at, at));
+    };
+
+    for (b, insts) in schedules.iter().enumerate() {
+        let entry = layout.base[b];
+        let exit = layout.block_end(b, insts.len());
+
+        for v in liveness.live_in[b].iter() {
+            touch(&mut span, VReg(v as u32), entry);
+        }
+        for v in liveness.live_out[b].iter() {
+            touch(&mut span, VReg(v as u32), exit);
+        }
+
+        for (i, inst) in insts.iter().enumerate() {
+            let at = layout.pos(b, i);
+            for &op in &inst.operands {
+                touch(&mut span, op, at);
+            }
+            if !inst.op.has_no_result() {
+                touch(&mut span, inst.dst, at);
+            }
+        }
+    }
+
+    let mut intervals: Vec<Interval> = span
+        .into_iter()
+        .map(|(vreg, (start, end))| Interval { vreg, start, end })
+        .collect();
+    intervals.sort_by_key(|i| (i.start, i.end, i.vreg.0));
+    intervals
+}
+
+/// Flattened positions of every instruction that clobbers the caller-saved
+/// registers.
+fn call_positions(schedules: &[Vec<ScheduledInst>], layout: &BlockLayout) -> Vec<usize> {
+    use crate::ir::op::{Op, PseudoOp};
+    let mut out = Vec::new();
+    for (b, insts) in schedules.iter().enumerate() {
+        for (i, inst) in insts.iter().enumerate() {
+            if matches!(
+                inst.op,
+                Op::Pseudo(PseudoOp::CallResult(..)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
+            ) {
+                out.push(layout.pos(b, i));
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+struct Scan<'a> {
+    gpr_order: &'a [Reg],
+    xmm_order: &'a [Reg],
+    callee_saved: &'a BTreeSet<Reg>,
+    precolored: &'a BTreeMap<VReg, Reg>,
+    vreg_classes: &'a BTreeMap<VReg, RegClass>,
+    call_points: &'a [usize],
+}
+
+struct ScanOutcome {
+    assignment: BTreeMap<VReg, Reg>,
+    to_spill: Vec<usize>,
+}
+
+impl Scan<'_> {
+    /// Does the interval contain a call strictly after its start? A value whose
+    /// register must survive a call has to be callee-saved, and every XMM is
+    /// caller-saved, so an XMM in that position can only be spilled.
+    fn crosses_call(&self, iv: &Interval) -> bool {
+        self.call_points
+            .iter()
+            .any(|&c| c > iv.start && c <= iv.end)
+    }
+
+    fn class_of(&self, v: VReg) -> RegClass {
+        self.vreg_classes.get(&v).copied().unwrap_or(RegClass::GPR)
+    }
+
+    fn run(&self, intervals: &[Interval]) -> ScanOutcome {
+        let mut assignment: BTreeMap<VReg, Reg> = BTreeMap::new();
+        let mut to_spill: Vec<usize> = Vec::new();
+        // Active intervals, each with the register it holds, kept sorted by end
+        // so expiry is a prefix.
+        let mut active: Vec<(usize, Reg, VReg)> = Vec::new();
+
+        for iv in intervals {
+            active.retain(|&(end, _, _)| end >= iv.start);
+
+            let class = self.class_of(iv.vreg);
+            let held: BTreeSet<Reg> = active.iter().map(|&(_, r, _)| r).collect();
+
+            if let Some(&fixed) = self.precolored.get(&iv.vreg) {
+                // The ABI named this register, so whoever else holds it moves.
+                for &(_, r, v) in &active {
+                    if r == fixed && self.precolored.get(&v) != Some(&fixed) {
+                        to_spill.push(v.0 as usize);
+                    }
+                }
+                active.retain(|&(_, r, _)| r != fixed);
+                assignment.insert(iv.vreg, fixed);
+                active.push((iv.end, fixed, iv.vreg));
+                active.sort_by_key(|&(end, _, _)| end);
+                continue;
+            }
+
+            let crosses = self.crosses_call(iv);
+            let pool: &[Reg] = match class {
+                RegClass::GPR => self.gpr_order,
+                RegClass::XMM => self.xmm_order,
+                // Filtered out when the intervals were built.
+                RegClass::Flags => continue,
+            };
+
+            if crosses && class == RegClass::XMM {
+                to_spill.push(iv.vreg.0 as usize);
+                continue;
+            }
+
+            let choice = pool
+                .iter()
+                .copied()
+                .find(|r| !held.contains(r) && (!crosses || self.callee_saved.contains(r)));
+
+            match choice {
+                Some(r) => {
+                    assignment.insert(iv.vreg, r);
+                    active.push((iv.end, r, iv.vreg));
+                    active.sort_by_key(|&(end, _, _)| end);
+                }
+                None => {
+                    // Spill whichever of this interval and the furthest-ending
+                    // active one lives longest: the shorter span is the one a
+                    // register buys more for.
+                    let victim = active
+                        .iter()
+                        .filter(|&&(_, r, v)| {
+                            self.class_of(v) == class
+                                && self.precolored.get(&v).is_none()
+                                && pool.contains(&r)
+                        })
+                        .max_by_key(|&&(end, _, _)| end)
+                        .copied();
+
+                    match victim {
+                        Some((end, r, v)) if end > iv.end => {
+                            to_spill.push(v.0 as usize);
+                            active.retain(|&(_, _, av)| av != v);
+                            assignment.remove(&v);
+                            assignment.insert(iv.vreg, r);
+                            active.push((iv.end, r, iv.vreg));
+                            active.sort_by_key(|&(e, _, _)| e);
+                        }
+                        _ => to_spill.push(iv.vreg.0 as usize),
+                    }
+                }
+            }
+        }
+
+        to_spill.sort_unstable();
+        to_spill.dedup();
+        ScanOutcome {
+            assignment,
+            to_spill,
+        }
+    }
+}
+
+fn finish(
+    schedules: Vec<Vec<ScheduledInst>>,
+    assignment: BTreeMap<VReg, Reg>,
+    callee_saved: &BTreeSet<Reg>,
+    param_vregs: &[(VReg, Reg)],
+) -> GlobalRegAllocResult {
+    let mut used: Vec<Reg> = assignment
+        .values()
+        .copied()
+        .filter(|r| callee_saved.contains(r))
+        .collect();
+    used.sort_by_key(|r| *r as u8);
+    used.dedup();
+
+    // A parameter whose precoloring the scan could not keep needs a mov from
+    // its ABI register at entry. The scan never drops one, so this is empty --
+    // it is reported for the same reason the colouring path reports it, so the
+    // caller has one shape to handle.
+    let unprecolored_params: Vec<(VReg, Reg)> = param_vregs
+        .iter()
+        .filter(|(v, r)| assignment.get(v).is_some_and(|got| got != r))
+        .copied()
+        .collect();
+
+    GlobalRegAllocResult {
+        per_block_insts: schedules,
+        vreg_to_reg: assignment,
+        callee_saved_used: used,
+        unprecolored_params,
+        coalesce_aliases: BTreeMap::new(),
+    }
+}

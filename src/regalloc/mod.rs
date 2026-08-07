@@ -1,6 +1,7 @@
 pub mod allocator;
 pub mod coalesce;
 pub mod coloring;
+pub mod fast;
 pub(crate) mod global_allocator;
 pub mod global_liveness;
 pub mod interference;
