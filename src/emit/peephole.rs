@@ -175,6 +175,7 @@ fn lea_result_dead(insts: &[MachInst], idx: usize) -> bool {
 /// 6. `add rX, -1` -> `dec rX` when flags are dead.
 /// 7. `sub rX, -1` -> `inc rX` when flags are dead.
 /// 8. Delete a LEA whose address the block overwrites before reading.
+/// 9. `lea rX, [rY]` -> `mov rX, rY`.
 pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
     let mut result = Vec::with_capacity(insts.len());
     let mut i = 0;
@@ -184,6 +185,23 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
             // 8. An address computation nothing reads: the load or store that
             // wanted it folded it into its own addressing mode.
             MachInst::Lea { .. } if lea_result_dead(&insts, i) => {
+                i += 1;
+                continue;
+            }
+
+            // 9. An address that is a bare register is a copy of it. The move
+            // runs on any execution port rather than the address unit, and it
+            // is a byte shorter wherever the address needs a SIB byte (an RSP
+            // base) or a zero displacement (an RBP or R13 base), which is
+            // where this shape comes from: the address of a stack object.
+            MachInst::Lea { size, dst, addr }
+                if addr.base.is_some() && addr.index.is_none() && addr.disp == 0 =>
+            {
+                result.push(MachInst::MovRR {
+                    size: *size,
+                    dst: dst.clone(),
+                    src: Operand::Reg(addr.base.expect("base is some")),
+                });
                 i += 1;
                 continue;
             }
@@ -779,6 +797,50 @@ mod tests {
         }
     }
 
+    /// `lea rX, [rY]` and `mov rX, rY` produce the same value, and the move is
+    /// shorter for the stack base this shape comes from.
+    #[test]
+    fn lea_of_a_bare_register_becomes_a_move() {
+        let out = peephole(vec![
+            lea(Reg::RAX, Reg::RSP, 0),
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RDX),
+                src: reg(Reg::RAX),
+            },
+        ]);
+        assert!(matches!(
+            out[0],
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: Operand::Reg(Reg::RAX),
+                src: Operand::Reg(Reg::RSP),
+            }
+        ));
+    }
+
+    /// A displacement is a real addition, and an index is a real address
+    /// computation; neither is a copy.
+    #[test]
+    fn lea_with_a_displacement_or_an_index_is_kept() {
+        let indexed = MachInst::Lea {
+            size: OpSize::S64,
+            dst: reg(Reg::RAX),
+            addr: crate::x86::addr::Addr::new(Some(Reg::RCX), Some(Reg::RDX), 4, 0),
+        };
+        for inst in [lea(Reg::RAX, Reg::RCX, 8), indexed] {
+            let out = peephole(vec![
+                inst,
+                MachInst::MovRR {
+                    size: OpSize::S64,
+                    dst: reg(Reg::RDX),
+                    src: reg(Reg::RAX),
+                },
+            ]);
+            assert!(matches!(out[0], MachInst::Lea { .. }));
+        }
+    }
+
     #[test]
     fn dead_lea_deleted() {
         // The store folded the address into its own operand; nothing reads RAX
@@ -834,7 +896,7 @@ mod tests {
         // A call is where an address is most likely to be an argument already
         // placed in its register; the scan stops rather than guess.
         let insts = vec![
-            lea(Reg::RDI, Reg::RSP, 0),
+            lea(Reg::RDI, Reg::RSP, 8),
             MachInst::CallDirect {
                 target: "f".to_string(),
             },

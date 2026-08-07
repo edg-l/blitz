@@ -7,8 +7,9 @@
 // EXIT: 42
 
 // CHECK-LABEL: # main
-// The StackAddr LEA must appear before any stores to the array.
-// CHECK: lea    {{[a-z0-9]+}},[rsp]
+// The stack address must appear before any stores to the array. It is a copy
+// of RSP, since the array is at offset 0.
+// CHECK: mov    {{[a-z0-9]+}},rsp
 // CHECK: mov    DWORD PTR
 // CHECK: mov    DWORD PTR
 // CHECK: mov    DWORD PTR
