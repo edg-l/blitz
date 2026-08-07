@@ -356,8 +356,15 @@ what makes attribution possible here.
       bugs a disagreement `run_diff.sh` can see rather than an answer both levels
       give. **Treat this as a standing strategy, not the one-off it looks like.**
 - [x] **Enumerate the ABI surface rather than sampling it.** `tests/fuzz/gen_abi.py`
-      walks counts 0..16 x {int, double, mixed} x {leaf, calls printf}: 98
-      programs, 4.7s, the fourth shape of `run_fuzz.sh` rather than a fifth gate.
+      walks counts 0..25 x {int, double, mixed} x {leaf, calls printf}: 152
+      programs, 7.8s, the fourth shape of `run_fuzz.sh` rather than a fifth gate.
+      **The ceiling is past the register file on purpose**: the first run stopped
+      at 16 and both defects it found were at 14 and 15, at the top of the range,
+      which is the signature of a bound hiding something rather than one that has
+      been reached. 17 through 25 are clean at both levels and under
+      `BLITZ_VERIFY=strict` -- 19 integer arguments on the stack -- so the two
+      fixes generalise rather than being off-by-one patches at the sizes that
+      exposed them.
       A failing program *names the argument* -- the callee returns the 1-based
       index of the first one that did not arrive. **Three defects on the first
       run**, none of them reachable from `gen_c.py`, which caps at 12 parameters:

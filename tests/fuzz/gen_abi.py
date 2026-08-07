@@ -6,7 +6,7 @@ functions at random and had never once produced an odd number of *stack*
 arguments underneath a libc call, which is how a stack-misalignment segfault
 survived a corpus of 400 seeds a shape. The space is finite, so it gets walked:
 
-    parameter count 0..16  x  {int, double, mixed}  x  {leaf, calls libc}
+    parameter count 0..25  x  {int, double, mixed}  x  {leaf, calls libc}
 
 Each axis earns its place.
 
@@ -14,8 +14,14 @@ Each axis earns its place.
 number is what the segfault turned on -- SysV wants ``RSP % 16 == 0`` at a
 ``call`` and one ``push`` per stack argument leaves an odd count eight out. Pure
 integers spill from 7 parameters, pure doubles from 9, and interleaved from 13,
-because the two register files are counted separately; 0..16 reaches both
-parities of stack count in all three.
+because the two register files are counted separately.
+
+**The ceiling goes well past the register file on purpose.** The first run of
+this found two defects and both were at the *top* of a range that stopped at 16
+-- a 14-argument call that could not be allocated and 15 parameters that could
+not be coloured -- which is the signature of a bound that is hiding something
+rather than one that has been reached. 0..25 puts up to 19 integer arguments on
+the stack, half again the whole register file.
 
 *Type* decides which file an argument comes from, and interleaving is not the
 same test as either pure form: a mixed signature consumes GPRs and SSE registers
@@ -126,9 +132,10 @@ def main():
     ap.add_argument(
         "--max-params",
         type=int,
-        default=16,
-        help="highest parameter count to emit (default 16, which reaches both "
-        "parities of stack-argument count in all three type kinds)",
+        default=25,
+        help="highest parameter count to emit (default 25: comfortably past the "
+        "register file in every type kind, because the first two defects this "
+        "found were both at the top of a range that stopped at 16)",
     )
     ap.add_argument("--only", help="emit just this stem, e.g. abi_n07_int_call")
     args = ap.parse_args()
