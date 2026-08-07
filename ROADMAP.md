@@ -586,45 +586,6 @@ so the holes stay visible.
       { return; }` is pure, its result list is empty, and all nine calls to it
       were removed -- correctly, and leaving the test asserting nothing about the
       call-point detection it was written for. Its callee now stores.
-- [ ] **EXPERIMENT: do exploration-shaped rules make the e-graph pay?** Every
-      rule blitz has is a *cleanup* rule -- unambiguously better wherever it
-      matches -- which is why saturation converges in two rounds and is worth
-      0.39% (see Decisions). An e-graph earns its keep on *exploration* rules,
-      where which form wins depends on context that is not visible when the rule
-      fires: reassociation, distribute-versus-factor.
-
-      **Commutativity is already one of these and already pays.**
-      `apply_commutativity_rules` puts both operand orders in the class, and
-      `addr_mode.rs` matches positionally -- it reads `children[0]` and
-      `children[1]` and never tries the other way round -- so the commuted node
-      is the only reason an addressing mode can be recognised when the source
-      wrote `i*4 + base`. That is the 109-class `Add | Addr{scale:1} |
-      Addr{scale:4} | X86Lea2 | X86Lea3{scale:4}` shape. So the winnings of the
-      one exploration rule blitz has were already counted, and counted as
-      instruction selection.
-
-      **Constant-multiply decomposition was the second, and it landed.**
-      `x * 12` as `lea; shl` and `x * 7` as `shl; sub`, matching gcc
-      instruction-for-instruction, with `x * 100` correctly left as `imul`
-      because three instructions lose to one. Worth `-1.1%` cycles on
-      `array_stride`. **It reads as a `+1.8%` regression on every
-      instruction-counting column**, which is what forced the Goal onto cycles;
-      see there. The rule is the reason that argument has a number attached.
-
-      **Blitz is in a regime the published data does not cover.** Cranelift
-      measured the multi-alternative machinery at ~0.1% and attributed it partly
-      to compiling Wasm another compiler had already optimized; blitz compiles
-      unoptimized C from tinyc, and its classes are 2.009 nodes against their
-      1.13. Whether that extra material is reachable by exploration rules is an
-      open question, and blitz is unusually well set up to answer it: one
-      target, `run_perf.sh` on the `live` corpus for the number, and the
-      differential harness to catch a rule that is wrong.
-
-      **Run it as an experiment with a number, not as an assumption.** Write a
-      handful of exploration rules, measure `run_perf.sh` on `live` before and after,
-      and record the result here either way. A negative result is worth as much
-      as a positive one and stops a third attempt.
-
 ### P2 -- x86-64 specialization (the differentiator)
 
 This is where single-target focus is supposed to pay off. LLVM has ~10x the
@@ -800,6 +761,46 @@ seconds -- what the other harnesses already cost.
       `compile/mod.rs` 1865. A rule set being long is fine.
 
 ## Decisions worth not relitigating
+
+- **Exploration-shaped rules do not pay here, and the experiment has a number.**
+  Written, measured, reverted. Two rules, both exact in wrapping arithmetic so
+  neither needed the `nsw`/`nuw` flags: **distribution**
+  `Mul(a, Add(b, c)) -> Add(Mul(a, b), Mul(a, c))`, the direction
+  `distributive.rs` deliberately omits, and **reassociation**
+  `Add(Add(a, b), c) -> Add(a, Add(b, c))`.
+
+  | measure | result |
+  | --- | --- |
+  | cycles, geometric mean over 24 `live` kernels | **`+1.45%`, worse** |
+  | kernels past the `~1%` noise floor, better | **1 of 24** (`funnel_mix`, `-1.2%`) |
+  | kernels past it, worse | 4, two of them badly: `float_convert` `+19.1%`, `struct_fields` `+17.3%` |
+  | `bench` instructions | 4 of 7 changed rows worse; `matmul` and `loop_nest` improve at `-6.7%` and `-6.4%` *copies* |
+  | compile time over `bench` | 194ms to 226ms, `+16.5%` |
+  | correctness | 348/348 differential with the `cc` oracle clean, so the rules are sound |
+
+  **Two mechanisms, and the first one is the more interesting.**
+
+  1. **They do not saturate.** Reassociating an n-term chain produces a grouping
+     that is itself reassociable, so `changed` comes back true every round and the
+     saturation loop runs its full 16 iterations over a graph that grows each
+     time. Before the caller was changed to explore *once*, 4 of the 15 `bench`
+     kernels did not finish compiling in 15 seconds. The class ceiling cannot
+     brake it: `max_classes` is 500_000 and a kernel has a few hundred classes, so
+     the guard is never reached while the CPU is. **So the equality-saturation
+     framing does not even apply to the rules it is supposed to be for** -- the
+     alternatives have to be *present*, which is one pass, not a fixpoint.
+  2. **The cost model cannot price what they offer.** It prices nodes, and the
+     distributed form's cost is in *register pressure* -- more values live at once
+     -- which no per-node cost can see. `struct_fields` and `float_convert` are
+     both cases where extraction took the distributed form and the allocator paid
+     for it, `+10.1%` and `+1.2%` instructions for `+17%` and `+19%` cycles.
+
+  **What would have to change first**: `P2`'s cost model item, since a cost that
+  cannot see pressure cannot choose between these forms. Do not write more
+  exploration rules until it can. The two that already pay -- commutativity and
+  constant-multiply decomposition -- both offer alternatives whose cost *is*
+  visible per node, which is now the distinguishing property rather than a
+  coincidence.
 
 - **A register-pressure check on the inliner is measured out, after four
   models.** The case where refusing an inline helps and the cases where it hurts
