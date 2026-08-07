@@ -374,7 +374,7 @@ pub(super) fn linearize(
         let mut snapshot = ClassVRegMap::new();
         for &cid in &all_roots {
             if let Some(vreg) = class_to_vreg.lookup_any(cid) {
-                snapshot.insert_single(cid, vreg);
+                snapshot.insert_full_range_shared(cid, vreg);
             }
         }
         block_class_to_vreg_snapshot[block_idx] = snapshot;

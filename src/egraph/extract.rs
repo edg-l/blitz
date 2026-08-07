@@ -35,8 +35,11 @@ fn nests(inner: &Segment, outer: &Segment) -> bool {
 /// splitter runs all classes have a single full-range segment spanning
 /// `BLOCK_ENTRY(0)..=BLOCK_EXIT(last_block)`.
 ///
-/// An eagerly-maintained inverse index (`vreg_to_class_segs`) allows O(log n)
-/// reverse lookup `vreg_to_class(vreg, point) -> Option<ClassId>`.
+/// An eagerly-maintained inverse index (`vreg_to_class_segs`) allows O(1)
+/// reverse lookup `vreg_to_class(vreg, point) -> Option<ClassId>`. VRegs are
+/// minted as consecutive indices, so it is keyed by position rather than by a
+/// tree: linearization moves a class in and out of the map once per block whose
+/// emitter's scope changes, and each such move touched the index too.
 ///
 /// `split_generation` is bumped by `apply_plan_to` (Phase 5) whenever splitter
 /// output is committed. Consumers that must run AFTER the splitter can assert
@@ -45,8 +48,8 @@ fn nests(inner: &Segment, outer: &Segment) -> bool {
 pub struct ClassVRegMap {
     /// Forward map: class -> ordered segments.
     segments: BTreeMap<ClassId, SmallVec<[Segment; 2]>>,
-    /// Inverse map: vreg -> (class, start, end). One entry per VReg.
-    vreg_to_class_segs: BTreeMap<VReg, (ClassId, ProgramPoint, ProgramPoint)>,
+    /// Inverse map: vreg -> (class, start, end), indexed by `VReg::0`.
+    vreg_to_class_segs: Vec<Option<(ClassId, ProgramPoint, ProgramPoint)>>,
     /// Bumped by `apply_plan_to` when splitter output is committed.
     pub(crate) split_generation: u32,
 }
@@ -55,8 +58,35 @@ impl ClassVRegMap {
     pub fn new() -> Self {
         ClassVRegMap {
             segments: BTreeMap::new(),
-            vreg_to_class_segs: BTreeMap::new(),
+            vreg_to_class_segs: Vec::new(),
             split_generation: 0,
+        }
+    }
+
+    /// The inverse index's entry for `vreg`, or `None` when no class claims it.
+    fn inverse(&self, vreg: VReg) -> Option<(ClassId, ProgramPoint, ProgramPoint)> {
+        *self.vreg_to_class_segs.get(vreg.0 as usize)?
+    }
+
+    /// Claim `vreg` for `class` over `[start, end]` in the inverse index.
+    fn claim_inverse(
+        &mut self,
+        vreg: VReg,
+        class: ClassId,
+        start: ProgramPoint,
+        end: ProgramPoint,
+    ) {
+        let idx = vreg.0 as usize;
+        if idx >= self.vreg_to_class_segs.len() {
+            self.vreg_to_class_segs.resize(idx + 1, None);
+        }
+        self.vreg_to_class_segs[idx] = Some((class, start, end));
+    }
+
+    /// Drop `vreg`'s entry from the inverse index.
+    fn release_inverse(&mut self, vreg: VReg) {
+        if let Some(slot) = self.vreg_to_class_segs.get_mut(vreg.0 as usize) {
+            *slot = None;
         }
     }
 
@@ -87,15 +117,14 @@ impl ClassVRegMap {
         end: ProgramPoint,
     ) {
         debug_assert!(
-            !self.vreg_to_class_segs.contains_key(&vreg)
-                || self.vreg_to_class_segs[&vreg].0 == class,
+            self.inverse(vreg).is_none_or(|(c, ..)| c == class),
             "VReg {vreg:?} already inserted under a different class"
         );
         self.segments
             .entry(class)
             .or_default()
             .push(Segment { vreg, start, end });
-        self.vreg_to_class_segs.insert(vreg, (class, start, end));
+        self.claim_inverse(vreg, class, start, end);
     }
 
     /// Insert a segment without claiming `vreg` for `class` in the inverse index.
@@ -107,6 +136,21 @@ impl ClassVRegMap {
     /// exclusivity it asserts is worth keeping everywhere else -- so such a map
     /// carries only the forward direction: `vreg_to_class` sees nothing of these
     /// segments.
+    /// Insert a full-range segment for `class` -> `vreg`, forward direction only.
+    ///
+    /// The shape a per-block snapshot wants: it answers `lookup` and nothing
+    /// else, and the inverse index is a vector as wide as the highest VReg the
+    /// function has minted, which a map holding a handful of classes should not
+    /// be paying for.
+    pub fn insert_full_range_shared(&mut self, class: ClassId, vreg: VReg) {
+        let start = ProgramPoint::block_entry(0);
+        let end = ProgramPoint {
+            block: u32::MAX,
+            inst: u32::MAX,
+        };
+        self.insert_segment_shared(class, vreg, start, end);
+    }
+
     pub fn insert_segment_shared(
         &mut self,
         class: ClassId,
@@ -129,19 +173,20 @@ impl ClassVRegMap {
         // linearize's scope restore calls this once per class per block, so each
         // extra descent of the tree is paid block-count times.
         let segs = self.segments.entry(class).or_default();
-        for seg in segs.drain(..) {
-            self.vreg_to_class_segs.remove(&seg.vreg);
-        }
+        let released: SmallVec<[VReg; 2]> = segs.drain(..).map(|seg| seg.vreg).collect();
         let start = ProgramPoint::block_entry(0);
         let end = ProgramPoint {
             block: u32::MAX,
             inst: u32::MAX,
         };
         segs.push(Segment { vreg, start, end });
-        // The insert overwrites whatever class previously claimed `vreg`:
+        for released in released {
+            self.release_inverse(released);
+        }
+        // The claim overwrites whatever class previously held `vreg`:
         // insert_single is an explicit overwrite and may legitimately move a
         // VReg to a new class.
-        self.vreg_to_class_segs.insert(vreg, (class, start, end));
+        self.claim_inverse(vreg, class, start, end);
     }
 
     // ── Lookup ───────────────────────────────────────────────────────────────
@@ -245,7 +290,7 @@ impl ClassVRegMap {
     ///
     /// Uses the eagerly-maintained inverse index for O(log n) lookup.
     pub fn vreg_to_class(&self, vreg: VReg, point: ProgramPoint) -> Option<ClassId> {
-        let &(class, start, end) = self.vreg_to_class_segs.get(&vreg)?;
+        let (class, start, end) = self.inverse(vreg)?;
         if start <= point && point <= end {
             Some(class)
         } else {
@@ -262,12 +307,11 @@ impl ClassVRegMap {
     /// After this call, `lookup(class, p)` returns `None` for any `p < new_start`
     /// and `vreg_to_class(vreg, p)` also returns `None` for `p < new_start`.
     pub fn truncate_segment_start(&mut self, vreg: VReg, new_start: ProgramPoint) {
-        let Some(&(class, _old_start, end)) = self.vreg_to_class_segs.get(&vreg) else {
+        let Some((class, _old_start, end)) = self.inverse(vreg) else {
             return;
         };
         // Update inverse index.
-        self.vreg_to_class_segs
-            .insert(vreg, (class, new_start, end));
+        self.claim_inverse(vreg, class, new_start, end);
         // Update forward segments.
         if let Some(segs) = self.segments.get_mut(&class) {
             for seg in segs.iter_mut() {
@@ -285,12 +329,11 @@ impl ClassVRegMap {
     /// that `class_to_vreg.lookup(class, block_exit)` no longer returns the
     /// original VReg, allowing a reload VReg's segment to cover the terminator point.
     pub fn truncate_segment_end(&mut self, vreg: VReg, new_end: ProgramPoint) {
-        let Some(&(class, start, _old_end)) = self.vreg_to_class_segs.get(&vreg) else {
+        let Some((class, start, _old_end)) = self.inverse(vreg) else {
             return;
         };
         // Update inverse index.
-        self.vreg_to_class_segs
-            .insert(vreg, (class, start, new_end));
+        self.claim_inverse(vreg, class, start, new_end);
         // Update forward segments.
         if let Some(segs) = self.segments.get_mut(&class) {
             for seg in segs.iter_mut() {
@@ -308,7 +351,7 @@ impl ClassVRegMap {
         let segs = self.segments.remove(&class)?;
         let first_vreg = segs.first().map(|s| s.vreg);
         for seg in segs.iter() {
-            self.vreg_to_class_segs.remove(&seg.vreg);
+            self.release_inverse(seg.vreg);
         }
         first_vreg
     }
