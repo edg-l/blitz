@@ -366,6 +366,18 @@ isel patterns; we should beat it on the ones we implement.
       case is worth a further -1.4pp on `lit` and `fuzz` and -0.13pp on `bench`.
       It comes back when the credit can be made honest -- it is owed only where
       the constant has a single use, and the e-graph has no parents map to ask.
+- [x] **Store of an immediate.** `mov rX, k; mov [addr], rX` writes the constant
+      twice, once into a register and once into memory. It is a peephole rather
+      than an isel rule, for the same reason the 3-operand `lea` is: whether the
+      register carries the constant anywhere else is the allocator's answer, not
+      the cost model's, and `Iconst` costs 0.0 so extraction cannot see the `mov`
+      at all. The register must die at the store and must not be part of the
+      address; the block-local scan is conservative at a branch, a call or the
+      end of the block, so a constant stored last in a block keeps its register.
+      On `lit` 18 rows lose 1-7 instructions each (-10.7% insts / -3.0% bytes on
+      `arrays/param_decay_bracket.c`, -18.8%/-4.9% on
+      `control/constant_index_stores_then_call.c`) and on `fuzz` 3 rows; `bench`
+      and `live` are unchanged, since neither stores a constant in a loop.
 - [ ] **Bit instructions**: `popcnt`, `bsr`/`bsf`, `tzcnt`/`lzcnt`, `bswap`, and
       `bt` itself -- the read form, whose result is a flag and so needs the
       compare seam rather than a value class.

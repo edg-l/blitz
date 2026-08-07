@@ -78,6 +78,12 @@ pub enum MachInst {
         addr: Addr,
         src: Operand,
     },
+    /// Store of an immediate: `[addr] = imm`
+    MovMI {
+        size: OpSize,
+        addr: Addr,
+        imm: i32,
+    },
 
     // ── ALU reg-reg ───────────────────────────────────────────────────────────
     AddRR {
@@ -558,6 +564,7 @@ impl MachInst {
     pub fn mem_store_addr(&self) -> Option<&Addr> {
         match self {
             MachInst::MovMR { addr, .. }
+            | MachInst::MovMI { addr, .. }
             | MachInst::MovsdMR { addr, .. }
             | MachInst::MovssMR { addr, .. } => Some(addr),
             _ => None,
@@ -641,6 +648,7 @@ impl MachInst {
             MachInst::MovssRM { dst, .. } => collect(&[dst]),
             MachInst::AddRM { dst, .. } => collect(&[dst]),
             MachInst::MovMR { .. } => Vec::new(),
+            MachInst::MovMI { .. } => Vec::new(),
             MachInst::MovsdMR { .. } => Vec::new(),
             MachInst::MovssMR { .. } => Vec::new(),
             MachInst::Push { src: _ } => Vec::new(),
@@ -767,6 +775,7 @@ impl MachInst {
                 v.extend(collect(&[src]));
                 v
             }
+            MachInst::MovMI { addr, .. } => addr_regs(addr),
             MachInst::MovsdMR { addr, src, .. } => {
                 let mut v = addr_regs(addr);
                 v.extend(collect(&[src]));

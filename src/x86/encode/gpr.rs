@@ -71,6 +71,24 @@ impl Encoder {
         self.emit_addr(s, addr);
     }
 
+    /// MOV r/m, imm  (store an immediate to memory).
+    ///
+    /// The immediate is sign-extended to the operand size, so a 64-bit store
+    /// takes only what fits in `imm32`; the caller checks that.
+    pub fn encode_mov_mi(&mut self, size: OpSize, addr: &Addr, imm: i32) {
+        let idx = addr.index.map_or(0u8, |r| r.hw_enc());
+        let base = addr.base.map_or(0u8, |r| r.hw_enc());
+        self.emit_prefix_and_rex(size, 0, idx, base);
+        let opcode = if size == OpSize::S8 { 0xC6 } else { 0xC7 };
+        self.emit_byte(opcode);
+        self.emit_addr(0, addr);
+        match size {
+            OpSize::S8 => self.emit_byte(imm as u8),
+            OpSize::S16 => self.emit_le16(imm as u16),
+            OpSize::S32 | OpSize::S64 => self.emit_le32(imm),
+        }
+    }
+
     // ── ALU helpers ───────────────────────────────────────────────────────
 
     /// Encode a reg-reg ALU op.

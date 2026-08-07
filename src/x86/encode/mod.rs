@@ -412,6 +412,9 @@ impl Encoder {
             MachInst::MovMR { size, addr, src } => {
                 self.encode_mov_mr(*size, addr, Self::expect_reg(src));
             }
+            MachInst::MovMI { size, addr, imm } => {
+                self.encode_mov_mi(*size, addr, *imm);
+            }
             MachInst::AddRR { size, dst, src } => {
                 self.encode_add_rr(*size, Self::expect_reg(dst), Self::expect_reg(src));
             }

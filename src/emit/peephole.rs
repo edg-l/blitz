@@ -148,8 +148,17 @@ fn def_dead(insts: &[MachInst], idx: usize) -> bool {
     if writes_flags(&insts[idx]) && !flags_dead_after(insts, idx) {
         return false;
     }
-    let dst = &dst;
-    for inst in &insts[idx + 1..] {
+    reg_dead_from(insts, idx + 1, dst)
+}
+
+/// Whether `reg` is dead from `start` on: overwritten outright before anything
+/// reads it, within this block.
+///
+/// The scan stops at a branch, a call or the end of the block, all of which can
+/// reach a reader this slice does not contain, so a register still live at any
+/// of them is reported as live.
+fn reg_dead_from(insts: &[MachInst], start: usize, reg: Reg) -> bool {
+    for inst in &insts[start..] {
         if matches!(
             inst,
             MachInst::CallDirect { .. }
@@ -160,10 +169,10 @@ fn def_dead(insts: &[MachInst], idx: usize) -> bool {
         ) {
             return false;
         }
-        if inst.uses().contains(dst) {
+        if inst.uses().contains(&reg) {
             return false;
         }
-        if kills_reg(inst) == Some(*dst) {
+        if kills_reg(inst) == Some(reg) {
             return true;
         }
     }
@@ -249,6 +258,49 @@ fn copy_add_to_lea(mov: &MachInst, add: &MachInst) -> Option<MachInst> {
     })
 }
 
+/// The single store that a constant materialized into a register and then
+/// stored is, if the register exists only to carry it there.
+///
+/// `mov rX, k; mov [addr], rX` writes the constant twice: once into a register
+/// and once into memory. x86 stores an immediate directly, so the pair is one
+/// instruction and one fewer register live across the store. The immediate is
+/// sign-extended to the operand size, so a 64-bit store takes only a constant
+/// that fits in `imm32`; a wider one still needs the register.
+///
+/// The register must die at the store -- anything reading it afterwards needs
+/// the value the `mov` put there -- and must not be part of the address, which
+/// the store reads before it writes.
+fn const_store_to_imm(mov: &MachInst, store: &MachInst, dead_after: bool) -> Option<MachInst> {
+    let MachInst::MovRI {
+        size: mov_size,
+        dst: Operand::Reg(r),
+        imm,
+    } = mov
+    else {
+        return None;
+    };
+    let MachInst::MovMR {
+        size,
+        addr,
+        src: Operand::Reg(src),
+    } = store
+    else {
+        return None;
+    };
+    if src != r || size != mov_size || matches!(r, Reg::RSP | Reg::RBP) || !dead_after {
+        return None;
+    }
+    if addr.base == Some(*r) || addr.index == Some(*r) {
+        return None;
+    }
+    let imm = i32::try_from(*imm).ok()?;
+    Some(MachInst::MovMI {
+        size: *size,
+        addr: addr.clone(),
+        imm,
+    })
+}
+
 /// Emit `inst`, unless it is a 64-bit move of a register to itself.
 ///
 /// Such a move is architecturally a no-op, and it reaches here two ways: it can
@@ -291,6 +343,8 @@ fn push_inst(out: &mut Vec<MachInst>, inst: MachInst) {
 /// 9. `lea rX, [rY]` -> `mov rX, rY`.
 /// 10. `mov rD, rS; add rD, rT` -> `lea rD, [rS+rT]` when flags are dead, and
 ///     the same for `add rD, imm` / `sub rD, imm` / `add rD, rD` / `shl rD, 1`.
+/// 11. `mov rX, k; mov [addr], rX` -> `mov [addr], k` where nothing else reads
+///     the register the constant was materialized into.
 pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
     let mut result = Vec::with_capacity(insts.len());
     let mut i = 0;
@@ -353,6 +407,29 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
                 push_inst(
                     &mut result,
                     copy_add_to_lea(&insts[i], &insts[i + 1]).expect("the guard just built it"),
+                );
+                i += 2;
+                continue;
+            }
+
+            // 11. `mov rX, k; mov [addr], rX` -> `mov [addr], k` where the
+            // register carried the constant nowhere else. See
+            // `const_store_to_imm`.
+            MachInst::MovRI {
+                dst: Operand::Reg(r),
+                ..
+            } if i + 1 < insts.len()
+                && const_store_to_imm(
+                    &insts[i],
+                    &insts[i + 1],
+                    reg_dead_from(&insts, i + 2, *r),
+                )
+                .is_some() =>
+            {
+                push_inst(
+                    &mut result,
+                    const_store_to_imm(&insts[i], &insts[i + 1], true)
+                        .expect("the guard just built it"),
                 );
                 i += 2;
                 continue;
