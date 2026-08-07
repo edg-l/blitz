@@ -56,7 +56,12 @@ fn writes_flags(inst: &MachInst) -> bool {
 /// Scans forward from `idx + 1`:
 /// - If a flag-reading instruction is encountered first, flags are live (returns false).
 /// - If a flag-writing instruction is encountered first, the old flags are dead (returns true).
-/// - At the end of the slice, flags are considered dead (conservative: block boundary).
+/// - At the end of the slice, flags are dead: the slice ends at the block's own
+///   boundary, and no flags value crosses one. Linearization re-emits every
+///   `Type::Flags` class (and every division pair, whose halves live in RAX and
+///   RDX) in each block that names it, so a successor's `jcc` reads a comparison
+///   that successor emitted, never this block's. A block ending in an
+///   unconditional jump reaches this case whenever its tail is only phi copies.
 pub fn flags_dead_after(insts: &[MachInst], idx: usize) -> bool {
     // Jmp is a terminator; treat Jcc/Cmov/Setcc as flag readers.
     // Don't count Jmp itself as a flag reader for this analysis.
@@ -71,7 +76,8 @@ pub fn flags_dead_after(insts: &[MachInst], idx: usize) -> bool {
             _ => {}
         }
     }
-    // Reached end of block: no flag reader found.
+    // Reached the end of the block: no flag reader found, and none follows in a
+    // successor, since no flags value crosses a block boundary.
     true
 }
 
@@ -812,6 +818,26 @@ mod tests {
             },
         ];
         assert!(!flags_dead_after(&insts, 0));
+    }
+
+    #[test]
+    fn flags_dead_at_end_of_block() {
+        // A block whose tail is phi copies and an unconditional jump: the scan
+        // runs off the end, and the flags are dead because none crosses the edge.
+        let insts = vec![
+            MachInst::AddRI {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                imm: 1,
+            },
+            MachInst::MovRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RCX),
+                src: reg(Reg::RDX),
+            },
+            MachInst::Jmp { target: 0 },
+        ];
+        assert!(flags_dead_after(&insts, 0));
     }
 
     #[test]
