@@ -51,8 +51,6 @@
 //! built (Phase 3 rebuilds after coalescing), so the final graph fed into Phase
 //! 4 is still chordal.
 
-#![allow(dead_code, unused_variables)]
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
@@ -108,9 +106,6 @@ pub(crate) struct Phase3State {
     /// This is the graph handed to Phase 4 coloring.
     graph: InterferenceGraph,
 
-    /// Post-rebuild per-block liveness (recomputed on post-coalesce schedules).
-    per_block_liveness: Vec<LivenessInfo>,
-
     /// Merged precoloring map: VReg index -> color. Covers param precolors,
     /// shift/div precolors, and all three phantom precolor sets.
     pre_coloring_colors: BTreeMap<usize, u32>,
@@ -119,9 +114,6 @@ pub(crate) struct Phase3State {
     /// phantom interferes with the same color. The lowering must emit a mov
     /// from the ABI register to the allocated register at function entry.
     unprecolored_params: Vec<(VReg, Reg)>,
-
-    /// Shared next_vreg counter after Phase 3 phantom injection.
-    next_vreg: u32,
 
     /// Coalescing alias map: `from_idx -> into_idx`. When two VRegs are coalesced,
     /// the "from" VReg no longer exists in the post-coalesce schedules; its uses
@@ -823,9 +815,6 @@ fn run_phase3(
         build_function_wide_precoloring(param_vregs, &block_schedules, call_arg_precolors);
     let mut param_vreg_to_reg: BTreeMap<VReg, Reg> = precolors.iter().copied().collect();
 
-    // Collect call and div program points.
-    let (call_points, div_points) = collect_call_div_points(&block_schedules);
-
     // Coalesce on the PRE-phantom graph from Phase 2, once for the function.
     //
     // `coalesce_now` is what makes "once" true. The spill loop runs this phase
@@ -980,37 +969,23 @@ fn run_phase3(
     Phase3State {
         per_block_insts: post_coalesce_schedules,
         graph: graph_with_phantoms,
-        per_block_liveness: rebuilt.per_block_liveness,
         pre_coloring_colors,
         unprecolored_params,
-        next_vreg,
         alias_map,
     }
 }
 
 // ── Phase 4: Global coloring and mapping ─────────────────────────────────────
 
-/// Result of Phase 4: color map, vreg-to-reg assignment, callee-saved list,
-/// and per-class overshoot counts.
-///
-/// `gpr_overshoot` and `xmm_overshoot` are non-zero when the greedy coloring
-/// exceeded the available register budget for that class. Phase 5 consumes
-/// these counts to drive iterative spill selection. Phase 4 itself does NOT
-/// spill — it always returns successfully.
+/// Result of Phase 4: the VReg-to-register assignment, what the coloring could
+/// not place, and the per-class overshoot the spill loop reads.
 pub(crate) struct Phase4State {
-    /// Color map produced by greedy coloring: VReg index -> color.
-    pub color_map: BTreeMap<usize, u32>,
-
     /// Final function-wide VReg -> physical register assignment.
     ///
     /// Contains only real VRegs (those appearing as `dst` or `operands` in
     /// `per_block_insts`). Phantom VRegs injected by Phase 3 clobber injection
     /// are excluded.
     pub vreg_to_reg: BTreeMap<VReg, Reg>,
-
-    /// Callee-saved registers actually used by the coloring. The function
-    /// prologue/epilogue must push/pop these.
-    pub callee_saved_used: Vec<Reg>,
 
     /// Number of GPR colors that exceeded `available_gpr_colors(uses_frame_pointer)`.
     /// Zero when the GPR coloring fits within the available register budget.
@@ -1096,14 +1071,6 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
         }
     }
     let coloring = coloring;
-
-    // Build a flat color map: VReg index -> color (from the ColoringResult vec).
-    let color_map: BTreeMap<usize, u32> = coloring
-        .colors
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &c)| c.map(|color| (idx, color)))
-        .collect();
 
     // Per-class chromatic numbers and overshoot counts.
     //
@@ -1279,9 +1246,7 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
     });
 
     Phase4State {
-        color_map,
         vreg_to_reg,
-        callee_saved_used,
         over_budget,
         gpr_overshoot,
         xmm_overshoot,
@@ -1292,34 +1257,6 @@ pub(crate) fn run_phase4(phase3: Phase3State, uses_frame_pointer: bool) -> Phase
 }
 
 // ── Phase 5: Register assignment ─────────────────────────────────────────────
-
-/// Context carried from Phase 3 for graph rebuilding inside phase 5.
-///
-/// The spill loop re-runs the interference-graph build + phantom injection per
-/// round without re-running coalescing (coalesce once, spill-loop iterates
-/// coloring only per the plan).
-pub(crate) struct Phase5Context {
-    /// CFG successors per block (block index -> successor block indices).
-    cfg_succs: Vec<Vec<usize>>,
-    /// Per-block phi uses (VRegs referenced by terminators).
-    phi_uses: Vec<VRegSet>,
-    /// Per-block sets of VRegs that are block parameters (phi destinations).
-    block_param_vregs_per_block: Vec<VRegSet>,
-    /// Function parameter VRegs with their ABI physical registers.
-    param_vregs: Vec<(VReg, Reg)>,
-    /// Call-argument precolors (computed before effectful-op operand sorting).
-    call_arg_precolors: Vec<(VReg, Reg)>,
-    /// Copy pairs for reference (not re-coalesced).
-    copy_pairs: Vec<(VReg, VReg)>,
-    /// Loop depths per VReg (for spill scoring).
-    loop_depths: BTreeMap<VReg, u32>,
-    /// Whether the frame pointer (RBP) is in use (shrinks GPR budget by 1).
-    uses_frame_pointer: bool,
-    /// Function name for debug tracing.
-    func_name: String,
-    /// Coalescing alias map: `alias_map[from] = into` (post-coalesce VReg renaming).
-    alias_map: BTreeMap<u32, u32>,
-}
 
 /// Transitively resolve every chain in a raw alias map (`from -> into`) to
 /// produce `VReg -> canonical_VReg` entries. The result keeps only mappings
@@ -1387,13 +1324,11 @@ fn build_transitive_alias_map(raw: &BTreeMap<u32, u32>) -> BTreeMap<VReg, VReg> 
 /// from zero would name cells those passes already hold.
 pub(crate) fn run_phase5(
     phase4: Phase4State,
-    ctx: Phase5Context,
+    func_name: &str,
+    accumulated_aliases: &BTreeMap<u32, u32>,
     slots: &mut SlotAllocator,
 ) -> Result<GlobalRegAllocResult, String> {
     use crate::x86::abi::CALLEE_SAVED;
-
-    let uses_frame_pointer = ctx.uses_frame_pointer;
-    let func_name = &ctx.func_name;
 
     // Check if Phase 4 already converged (no spilling needed).
     if phase4.gpr_overshoot == 0 && phase4.xmm_overshoot == 0 {
@@ -1409,7 +1344,11 @@ pub(crate) fn run_phase5(
             .collect::<BTreeSet<Reg>>()
             .into_iter()
             .collect();
-        let coalesce_aliases = build_transitive_alias_map(&phase4.alias_map);
+        // Every round's aliases, not the converging round's. Only the first
+        // round coalesces, so a function needing two would otherwise report none
+        // and leave every stale `class_to_vreg` entry pointing at a VReg that no
+        // longer exists.
+        let coalesce_aliases = build_transitive_alias_map(accumulated_aliases);
         return Ok(GlobalRegAllocResult {
             per_block_insts: phase4.per_block_insts,
             assignment: phase4
@@ -1582,55 +1521,6 @@ fn two_address_hints(per_block_insts: &[Vec<ScheduledInst>]) -> super::coloring:
         }
     }
     hints
-}
-
-/// Compute (gpr_overshoot, xmm_overshoot) from graph and precoloring.
-fn compute_overshoot(
-    graph: &InterferenceGraph,
-    pre_coloring_colors: &BTreeMap<usize, u32>,
-    gpr_budget: u32,
-    xmm_budget: u32,
-) -> (u32, u32) {
-    use super::coloring::{greedy_color, mcs_ordering};
-    let ordering = mcs_ordering(graph);
-    // No hints: this asks how many colours the graph needs, and a hint changes
-    // which colouring is chosen rather than how many colours exist.
-    let coloring = greedy_color(graph, &ordering, pre_coloring_colors, &BTreeMap::new());
-    compute_overshoot_from_coloring(graph, &coloring, gpr_budget, xmm_budget)
-}
-
-/// Compute (gpr_overshoot, xmm_overshoot) from an existing coloring result.
-fn compute_overshoot_from_coloring(
-    graph: &InterferenceGraph,
-    coloring: &super::coloring::ColoringResult,
-    gpr_budget: u32,
-    xmm_budget: u32,
-) -> (u32, u32) {
-    let mut gpr_max: Option<u32> = None;
-    let mut xmm_max: Option<u32> = None;
-
-    for (idx, &color_opt) in coloring.colors.iter().enumerate() {
-        let Some(color) = color_opt else { continue };
-        if idx >= graph.num_vregs {
-            continue;
-        }
-        match graph.reg_class[idx] {
-            RegClass::GPR => {
-                gpr_max = Some(gpr_max.map_or(color, |m| m.max(color)));
-            }
-            RegClass::XMM => {
-                xmm_max = Some(xmm_max.map_or(color, |m| m.max(color)));
-            }
-            RegClass::Flags => {}
-        }
-    }
-
-    let gpr_chromatic = gpr_max.map_or(0, |m| m + 1);
-    let xmm_chromatic = xmm_max.map_or(0, |m| m + 1);
-    (
-        gpr_chromatic.saturating_sub(gpr_budget),
-        xmm_chromatic.saturating_sub(xmm_budget),
-    )
 }
 
 /// Allocate physical registers for a whole function using a function-scope
@@ -1855,22 +1745,8 @@ pub fn allocate_global(
             }
         }
 
-        // Phase 5: global spilling.
-        let ctx = Phase5Context {
-            cfg_succs: cfg_succs.to_vec(),
-            phi_uses: phi_uses.to_vec(),
-            block_param_vregs_per_block: block_params_now.clone(),
-            param_vregs: param_vregs.to_vec(),
-            call_arg_precolors: call_arg_precolors.clone(),
-            copy_pairs: copy_pairs.to_vec(),
-            loop_depths: loop_depths.clone(),
-            uses_frame_pointer,
-            func_name: func_name.to_string(),
-            alias_map,
-        };
-
         if phase4.gpr_overshoot == 0 && phase4.xmm_overshoot == 0 {
-            return run_phase5(phase4, ctx, slots);
+            return run_phase5(phase4, func_name, &alias_map, slots);
         }
 
         // Spill and try again. A block parameter is not a candidate: its value
@@ -3055,23 +2931,25 @@ mod tests {
         );
         let phase4 = run_phase4(phase3, true);
 
+        // Read off the assignment, which is what `run_phase5` does to build the
+        // list the prologue preserves. Asking the assignment rather than a field
+        // means the property is checked against what the allocator decided.
+        use crate::x86::abi::CALLEE_SAVED;
+        let callee_saved_used: Vec<Reg> = phase4
+            .vreg_to_reg
+            .values()
+            .copied()
+            .filter(|r| CALLEE_SAVED.contains(r))
+            .collect();
+
         // With 10 simultaneously live values and 9 caller-saved GPRs (excl. RSP),
         // at least one value must land in a callee-saved register.
         assert!(
-            !phase4.callee_saved_used.is_empty(),
+            !callee_saved_used.is_empty(),
             "10 simultaneously live GPRs must force at least one callee-saved register, \
-             got callee_saved_used = {:?}",
-            phase4.callee_saved_used
+             got assignment = {:?}",
+            phase4.vreg_to_reg
         );
-
-        // Confirm all callee-saved entries are genuine callee-saved regs.
-        use crate::x86::abi::CALLEE_SAVED;
-        for &r in &phase4.callee_saved_used {
-            assert!(
-                CALLEE_SAVED.contains(&r),
-                "callee_saved_used contains {r:?} which is not in CALLEE_SAVED"
-            );
-        }
     }
 
     // ── Phase 5 unit tests ────────────────────────────────────────────────────
