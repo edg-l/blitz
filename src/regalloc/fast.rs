@@ -524,6 +524,10 @@ fn expand(
         taken.insert(Reg::RDX);
     }
 
+    // The registers earlier operands of this instruction have committed to.
+    // `taken` cannot answer that: it is seeded with every operand's colour up
+    // front, so that a scratch does not land on one an operand still needs.
+    let mut committed: BTreeSet<Reg> = BTreeSet::new();
     let mut operands: Vec<VReg> = Vec::with_capacity(inst.operands.len());
     for (idx, &op) in inst.operands.iter().enumerate() {
         // Flags stay where the comparison left them. Nothing this pass inserts
@@ -545,11 +549,24 @@ fn expand(
         // dividend's load targets RAX and the divisor's may target neither. A
         // call argument must be in its argument register where the call reads
         // it, so its load targets that rather than a scratch.
-        let reg = match frame.precolored.get(&op) {
+        // A call argument's colour is a hint, not a constraint: `setup_call_args`
+        // moves each argument from wherever its operand landed into the ABI
+        // register for its position, so the only thing that has to hold here is
+        // that no two operands share a register. Two can carry the same colour --
+        // the same value passed twice, or a value that is also another call's
+        // argument at a different position, since the map is keyed by value and
+        // the last writer wins.
+        let colour = frame
+            .precolored
+            .get(&op)
+            .copied()
+            .filter(|r| calls && !committed.contains(r));
+        let reg = match colour {
             _ if division && idx == 0 => Reg::RAX,
-            Some(&r) if calls => r,
-            _ => ctx.pick(class, &taken, &inst.op)?,
+            Some(r) => r,
+            None => ctx.pick(class, &taken, &inst.op)?,
         };
+        committed.insert(reg);
         taken.insert(reg);
         let tmp = frame.fresh_like(op);
         frame.assignment.insert(tmp, Assignment::Reg(reg));
