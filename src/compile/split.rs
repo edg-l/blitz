@@ -79,6 +79,7 @@ pub struct SlotSpilledParamInfo {
 }
 
 /// Output of `plan_splits`: new instructions to insert and new segments to add.
+#[derive(Default)]
 pub struct SplitPlan {
     /// For each block: instructions to insert at specific positions.
     /// Each entry is `(insert_before_inst_idx, instruction)`.

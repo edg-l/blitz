@@ -141,10 +141,25 @@ their condition, and anything else is an error.
 whether a parameter names the value it carries, which decides whether a back
 edge must store. That is edge identity, not storage.
 
-**Step three, not started: make pressure relief something the allocator asks
-for.** This is the one the refactor roadmap named, and it is what actually
-blocks a second allocator -- see the measurement above. Until it lands, any
-allocator inherits relief planned against the colouring allocator's model.
+**Step three is in.** The split loop now stops when the *allocator* fits rather
+than when the splitter runs out of ideas: from round 1 each iteration colours
+with the allocator's own spill loop switched off, and a round that fits ends the
+loop and is the allocation. Relief is what the colouring could not do without.
+
+It pays on both axes -- `-0.68%` instructions, `-1.42%` reloads and `-0.49%`
+spills over 39 changed rows, and `big.c` at `-O1` goes 250.2ms to 242.5ms,
+because the rounds it stops paying for cost more than the probe does.
+
+**Probing round 0 is worthless and measurably so.** On a chordal interference
+graph the chromatic number is the maximum clique, so a non-empty plan means
+pressure already exceeds the budget and the colouring cannot fit, while an empty
+plan ends the loop with nothing split. Round 0's colouring is a full allocation
+spent on a foregone conclusion either way: probing from round 0 costs 294.4ms
+against 242.5ms for the same result, and probing *only* at round 0 reaches
+302.6ms while capturing a sixth of the improvement.
+
+What is left of item 1 is the allocator itself, and its case is now narrower --
+see the note under the heading.
 
 The shape to aim for is every VReg in a slot, operands loaded into scratch
 registers per instruction, results stored back: no interference graph, no

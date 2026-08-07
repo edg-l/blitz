@@ -1323,6 +1323,13 @@ fn build_transitive_alias_map(raw: &BTreeMap<u32, u32>) -> BTreeMap<VReg, VReg> 
 /// potential future use by Phase 6, but no XMM forced-slot step is performed
 /// here.
 ///
+/// `spill_rounds` bounds the allocator's own spill loop. `MAX_GLOBAL_SPILL_ROUNDS`
+/// is the working value; **zero makes this a probe** -- colour once and report
+/// whether it fits, without spilling anything. That is what lets the caller
+/// relieve pressure with the splitter first, which places a value better than
+/// this loop does, and fall back to spilling here only when the splitter has
+/// nothing left to offer.
+///
 /// `slots` is the function's slot allocator, shared with the passes that spilled
 /// before this one. A spill loop here takes its slots from it: numbering its own
 /// from zero would name cells those passes already hold.
@@ -1565,6 +1572,7 @@ pub fn allocate_global(
     func_name: &str,
     uses_frame_pointer: bool,
     slots: &mut SlotAllocator,
+    spill_rounds: usize,
 ) -> Result<GlobalRegAllocResult, String> {
     let mut schedules: Vec<Vec<ScheduledInst>> = block_schedules.to_vec();
     let mut spill_next_vreg: u32 = schedules
@@ -1614,7 +1622,7 @@ pub fn allocate_global(
     // a repeated destination, one value short.
     let mut block_params_now: Vec<VRegSet> = block_param_vregs_per_block.to_vec();
 
-    for round in 0..=MAX_GLOBAL_SPILL_ROUNDS {
+    for round in 0..=spill_rounds {
         let block_schedules: &[Vec<ScheduledInst>] = &schedules;
 
         // What each terminator consumes, off the schedules this round colors.
@@ -1791,7 +1799,7 @@ pub fn allocate_global(
         // so the next round faces a strictly smaller problem. What cannot make
         // progress is a round that raises the overshoot.
         let no_progress = prev_overshoot.is_some_and(|prev| overshoot > prev);
-        if round == MAX_GLOBAL_SPILL_ROUNDS || candidates.is_empty() || no_progress {
+        if round == spill_rounds || candidates.is_empty() || no_progress {
             let why = if no_progress {
                 "spilling did not reduce it, so every value live at the pressure \
                  point is one the instruction there reads or one no store can move"
@@ -2195,7 +2203,7 @@ fn pressure_peak(
 /// use, so pressure at the point that overflowed strictly falls; the limit is a
 /// backstop against a shape that does not converge, not a budget the allocator
 /// is expected to use.
-const MAX_GLOBAL_SPILL_ROUNDS: usize = 10;
+pub const MAX_GLOBAL_SPILL_ROUNDS: usize = 10;
 
 #[cfg(test)]
 mod tests {
@@ -2957,6 +2965,7 @@ mod tests {
             "test_fn",
             uses_frame_pointer,
             slots,
+            MAX_GLOBAL_SPILL_ROUNDS,
         )
         .expect("allocate_global should succeed")
     }
@@ -3146,6 +3155,7 @@ mod tests {
             "test_many_args",
             false,
             &mut SlotAllocator::new(),
+            MAX_GLOBAL_SPILL_ROUNDS,
         )
         .expect("allocate_global must succeed with 8 call args (6 precolored, 2 unprecolored)");
 
@@ -3295,6 +3305,7 @@ mod tests {
             "three_phi_params",
             false,
             &mut SlotAllocator::new(),
+            MAX_GLOBAL_SPILL_ROUNDS,
         )
         .expect("allocate_global must succeed");
 

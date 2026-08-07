@@ -12,7 +12,7 @@ pub mod spill;
 pub mod vregset;
 
 pub use allocator::RegAllocResult;
-pub use global_allocator::allocate_global;
+pub use global_allocator::{MAX_GLOBAL_SPILL_ROUNDS, allocate_global};
 pub use slots::{SlotAllocator, SlotOwner};
 pub use vregset::VRegSet;
 

@@ -725,6 +725,56 @@ pub(super) fn compute_loop_depths(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/// The block-parameter VRegs the allocator must treat as written at block entry.
+///
+/// Three sources, and the order matters. `collect_block_param_vregs_per_block`
+/// finds a parameter only where a `ClassVRegMap` segment still covers the block
+/// entry; `lower_terminator` falls back to the block's own `param_vregs`, so a
+/// parameter the splitter truncated is a parameter there and not one here, and
+/// the allocator would draw no interference edge to its siblings -- leaving
+/// coalescing free to merge two parameters of one block into one register, so
+/// both phi copies target it and the second overwrites the first.
+///
+/// Slot-routed parameters then come back out. They have no register at all:
+/// predecessors store them and uses load them, so listing one would make the
+/// allocator treat it as live-in, extend its range to every predecessor's exit
+/// and produce reloads for a value already in a slot.
+pub(super) fn collect_alloc_block_params(
+    func: &Function,
+    egraph: &EGraph,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
+    class_to_vreg: &ClassVRegMap,
+    slot_spilled_params: &super::split::BlockParamSlotMap,
+    block_id_to_idx: &BTreeMap<BlockId, usize>,
+) -> Vec<crate::regalloc::interference::VRegSet> {
+    let mut out = crate::regalloc::global_liveness::collect_block_param_vregs_per_block(
+        func,
+        egraph,
+        block_param_map,
+        class_to_vreg,
+    );
+
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        for (pidx, vreg) in block.param_vregs.iter().enumerate() {
+            let Some(&vreg) = vreg.as_ref() else { continue };
+            if slot_spilled_params.contains_key(&(block.id, pidx as u32)) {
+                continue;
+            }
+            out[block_idx].insert(vreg.0 as usize);
+        }
+    }
+
+    for (&(bid, pidx), info) in slot_spilled_params {
+        let block_idx = block_id_to_idx[&bid];
+        out[block_idx].remove(info.vreg.0 as usize);
+        if let Some(own) = func.blocks[block_idx].param_vreg(pidx) {
+            out[block_idx].remove(own.0 as usize);
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -46,8 +46,9 @@ pub(crate) mod cfg;
 mod linearize;
 mod phi_removal;
 use cfg::{
-    collect_externals, collect_roots, commit_block_param_vregs, commit_effectful_vregs,
-    commit_terminator_arg_vregs, compute_copy_pairs_from_schedules, compute_loop_depths,
+    collect_alloc_block_params, collect_externals, collect_roots, commit_block_param_vregs,
+    commit_effectful_vregs, commit_terminator_arg_vregs, compute_copy_pairs_from_schedules,
+    compute_loop_depths,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -519,6 +520,15 @@ pub(super) fn run_ir_passes(
 }
 
 // ── compile() ────────────────────────────────────────────────────────────────
+
+/// What `allocate_global` needs derived from the current schedules: the block
+/// parameters it must treat as written at block entry, and coalescing's copy
+/// pairs. The probe computes both, and the round that fits hands them on rather
+/// than having them derived a second time over the same schedules.
+type AllocInputs = (
+    Vec<crate::regalloc::interference::VRegSet>,
+    Vec<(VReg, VReg)>,
+);
 
 /// Compile a single function to an object file.
 ///
@@ -992,14 +1002,83 @@ pub fn compile(
 
         // Pressure-driven splitter.
         // CRITICAL ORDER: apply_plan_to must run BEFORE collect_block_param_vregs_per_block.
-        // The splitter may truncate segments, which affects what block params are found.
-        // One round of splitting only lowers pressure at the points it looked
-        // at, and the reloads it inserts are themselves live somewhere. Re-plan
-        // against the rewritten schedules until no overshoot is left or a round
-        // finds nothing to do -- a single pass leaves the allocator facing an
-        // overshoot it can only report as a failure.
+        //
+        // The loop stops when the *allocator* fits, not when the splitter runs
+        // out of ideas.
+        //
+        // From the second round on, each iteration colours first with the
+        // allocator's own spill loop switched off. A round that fits ends the
+        // loop and its result is the allocation. This is what stops the splitter
+        // relieving pressure the colouring did not need relieved: one round
+        // lowers pressure at the points it looked at, and the reloads it inserts
+        // are live somewhere themselves, so the next round finds more to do --
+        // for as long as anyone keeps asking it.
+        //
+        // The probe starts at round 1 because round 0 cannot tell anyone
+        // anything. On a chordal interference graph the chromatic number is the
+        // maximum clique, so a plan that is non-empty means pressure already
+        // exceeds the budget and the colouring cannot fit; a plan that is empty
+        // ends the loop without splitting anything. Either way round 0's
+        // colouring is a full allocation spent on a foregone conclusion, and
+        // skipping it is worth more than the rounds it would have saved.
+        //
+        // The probe keeps the allocator's spill loop as the last resort rather
+        // than the first: the splitter places a value better, so relief is asked
+        // of it while it still has something to offer, and only a loop that ends
+        // with no fitting round falls through to spilling inside the allocator.
+        //
+        // Commit an empty plan so the class map records that the splitter has
+        // been given its chance. `collect_block_param_vregs_per_block` asserts
+        // on `split_generation > 0` to catch a caller reading block parameters
+        // between planning and committing, where the plan's truncations are
+        // decided but not yet in the map. Reading them before anything is
+        // planned is a different thing and is what the probe does.
+        split::apply_plan_to(
+            &mut block_schedules,
+            &mut class_to_vreg,
+            &mut next_vreg,
+            split::SplitPlan::default(),
+        );
+
+        let mut probed: Option<crate::regalloc::GlobalRegAllocResult> = None;
+        let mut probed_inputs: Option<AllocInputs> = None;
         for _round in 0..split::MAX_SPLIT_ROUNDS {
             use crate::regalloc::coloring::{AVAILABLE_XMM_COLORS, available_gpr_colors};
+
+            if _round > 0 && !opts.enable_fast_regalloc {
+                let bp = collect_alloc_block_params(
+                    func,
+                    &egraph,
+                    &block_param_map,
+                    &class_to_vreg,
+                    &slot_spilled_params,
+                    &block_id_to_idx,
+                );
+                let cp = compute_copy_pairs_from_schedules(
+                    func,
+                    &block_schedules,
+                    &egraph,
+                    &class_to_vreg,
+                    &block_param_map,
+                );
+                if let Ok(result) = allocate_global(
+                    &block_schedules,
+                    &param_vregs,
+                    call_arg_precolors.clone(),
+                    &cp,
+                    &loop_depths,
+                    &cfg_succs,
+                    &bp,
+                    &func.name,
+                    opts.force_frame_pointer,
+                    &mut slots,
+                    0,
+                ) {
+                    probed = Some(result);
+                    probed_inputs = Some((bp, cp));
+                    break;
+                }
+            }
 
             let gpr_budget = available_gpr_colors(opts.force_frame_pointer);
             let xmm_budget = AVAILABLE_XMM_COLORS;
@@ -1257,48 +1336,23 @@ pub fn compile(
 
         // Step 3: Determine block params per block (passed to allocate_global).
         // CRITICAL ORDER: must run AFTER apply_plan_to (splitter output committed).
-        let mut block_param_vregs_per_block =
-            crate::regalloc::global_liveness::collect_block_param_vregs_per_block(
+        //
+        // Reuse what the probe already computed when it fitted: recomputing them
+        // over the same schedules answers the same question twice.
+        let (probe_bp, probe_cp) = match probed_inputs {
+            Some((bp, cp)) => (Some(bp), Some(cp)),
+            None => (None, None),
+        };
+        let block_param_vregs_per_block = probe_bp.unwrap_or_else(|| {
+            collect_alloc_block_params(
                 func,
                 &egraph,
                 &block_param_map,
                 &class_to_vreg,
-            );
-
-        // And what linearization recorded, for every param the class map cannot
-        // name. `collect_block_param_vregs_per_block` finds a param only where a
-        // segment still covers the block entry, but `lower_terminator` falls back
-        // to `block_param_vregs`, so a param the splitter truncated is a param
-        // there and not one here. The allocator then never learns it is written
-        // at block entry: it draws no interference edge to its siblings, and
-        // coalescing is free to merge two parameters of one block into a single
-        // register. Both phi copies then target that register and the second
-        // overwrites the first.
-        for (block_idx, block) in func.blocks.iter().enumerate() {
-            for (pidx, vreg) in block.param_vregs.iter().enumerate() {
-                let Some(&vreg) = vreg.as_ref() else { continue };
-                if slot_spilled_params.contains_key(&(block.id, pidx as u32)) {
-                    continue;
-                }
-                block_param_vregs_per_block[block_idx].insert(vreg.0 as usize);
-            }
-        }
-
-        // Remove slot-spilled params from block_param_vregs_per_block.
-        // Slot-spilled params have no register: they are written via slot stores
-        // by predecessor terminators and loaded on use. Adding them to
-        // block_param_vregs_per_block would cause the allocator to treat them as
-        // live-in (requiring a register at block entry), extending their live range
-        // to all predecessors' exits and triggering spurious reloads.
-        if !slot_spilled_params.is_empty() {
-            for (&(bid, pidx), info) in &slot_spilled_params {
-                let block_idx = block_id_to_idx[&bid];
-                block_param_vregs_per_block[block_idx].remove(info.vreg.0 as usize);
-                if let Some(own) = func.blocks[block_idx].param_vreg(pidx) {
-                    block_param_vregs_per_block[block_idx].remove(own.0 as usize);
-                }
-            }
-        }
+                &slot_spilled_params,
+                &block_id_to_idx,
+            )
+        });
 
         // Coalescing's copy pairs, read off the final schedules. Resolving each
         // argument's class through the function-wide map answers a per-block
@@ -1310,18 +1364,22 @@ pub fn compile(
         //
         // CRITICAL ORDER: after the splitter, so an argument it routed through a
         // stack slot -- which has no operand and no copy -- contributes no pair.
-        let copy_pairs = compute_copy_pairs_from_schedules(
-            func,
-            &block_schedules,
-            &egraph,
-            &class_to_vreg,
-            &block_param_map,
-        );
+        let copy_pairs = probe_cp.unwrap_or_else(|| {
+            compute_copy_pairs_from_schedules(
+                func,
+                &block_schedules,
+                &egraph,
+                &class_to_vreg,
+                &block_param_map,
+            )
+        });
 
         verify_phi_uses = phi_uses.clone();
         verify_block_params = block_param_vregs_per_block.clone();
         verify_copy_pairs = copy_pairs.clone();
-        let global_result = if opts.enable_fast_regalloc {
+        let global_result = if let Some(result) = probed {
+            Ok(result)
+        } else if opts.enable_fast_regalloc {
             crate::regalloc::fast::allocate_fast(
                 &block_schedules,
                 &param_vregs,
@@ -1345,6 +1403,7 @@ pub fn compile(
                 &func.name,
                 opts.force_frame_pointer,
                 &mut slots,
+                crate::regalloc::MAX_GLOBAL_SPILL_ROUNDS,
             )
         }
         .map_err(|e| CompileError {
