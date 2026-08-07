@@ -17,7 +17,7 @@ early_exit.c	O1	127	460	1	7
 float_convert.c	O0	60	243	2	2
 float_convert.c	O1	55	231	2	2
 float_reduce.c	O0	103	411	4	4
-float_reduce.c	O1	89	358	4	4
+float_reduce.c	O1	88	357	4	4
 funnel_mix.c	O0	106	387	0	0
 funnel_mix.c	O1	88	324	0	0
 hash_mix.c	O0	118	374	0	0

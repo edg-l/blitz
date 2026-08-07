@@ -174,6 +174,13 @@ fn lea_result_dead(insts: &[MachInst], idx: usize) -> bool {
 /// the address unit as long as the address is base-plus-index or
 /// base-plus-displacement. What it does not do is write EFLAGS, so the fold is
 /// only available where nothing reads them.
+///
+/// Doubling is the same shape written three ways -- `add dst, dst`, `shl dst, 1`
+/// and an add of the source to itself -- and all of them become `[s + s*1]`.
+/// Higher shifts do not: `[s*4]` has no base, so the address needs a SIB byte
+/// and a `disp32` and grows the pair by two bytes, and an index-only address is
+/// the slow three-cycle `lea` on Intel rather than the one-cycle base-plus-index
+/// form. The fold stops at a scale of one for that reason.
 fn copy_add_to_lea(mov: &MachInst, add: &MachInst) -> Option<MachInst> {
     let MachInst::MovRR {
         size,
@@ -188,6 +195,9 @@ fn copy_add_to_lea(mov: &MachInst, add: &MachInst) -> Option<MachInst> {
     if !matches!(size, OpSize::S32 | OpSize::S64) {
         return None;
     }
+    // `s + s*1`, which RSP cannot express: it is the one register an address
+    // cannot index by, and here it would have to be the index.
+    let double = |s: Reg| (s != Reg::RSP).then(|| Addr::new(Some(s), Some(s), 1, 0));
     let addr = match add {
         MachInst::AddRR {
             size: add_size,
@@ -202,6 +212,18 @@ fn copy_add_to_lea(mov: &MachInst, add: &MachInst) -> Option<MachInst> {
             let (base, index) = if *t == Reg::RSP { (*t, *s) } else { (*s, *t) };
             Addr::new(Some(base), Some(index), 1, 0)
         }
+        // The addend is the copy's own destination, which still holds the
+        // source: the pair doubles it.
+        MachInst::AddRR {
+            size: add_size,
+            dst: Operand::Reg(add_dst),
+            src: Operand::Reg(t),
+        } if add_size == size && add_dst == d && t == d => double(*s)?,
+        MachInst::ShlRI {
+            size: shl_size,
+            dst: Operand::Reg(shl_dst),
+            imm: 1,
+        } if shl_size == size && shl_dst == d => double(*s)?,
         MachInst::AddRI {
             size: add_size,
             dst: Operand::Reg(add_dst),
@@ -235,7 +257,7 @@ fn copy_add_to_lea(mov: &MachInst, add: &MachInst) -> Option<MachInst> {
 /// 8. Delete a LEA whose address the block overwrites before reading.
 /// 9. `lea rX, [rY]` -> `mov rX, rY`.
 /// 10. `mov rD, rS; add rD, rT` -> `lea rD, [rS+rT]` when flags are dead, and
-///     the same for `add rD, imm` / `sub rD, imm`.
+///     the same for `add rD, imm` / `sub rD, imm` / `add rD, rD` / `shl rD, 1`.
 pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
     let mut result = Vec::with_capacity(insts.len());
     let mut i = 0;
@@ -1076,10 +1098,9 @@ mod tests {
         assert!(matches!(out[1], MachInst::AddRR { .. }));
     }
 
-    /// The copy has already overwritten the addend, so there is no address that
-    /// computes the same sum.
+    /// The addend the copy overwrote holds the source, so the pair doubles it.
     #[test]
-    fn an_add_of_the_copys_own_destination_is_kept() {
+    fn an_add_of_the_copys_own_destination_doubles_the_source() {
         let out = peephole(vec![
             mov(Reg::RAX, Reg::RDI),
             MachInst::AddRR {
@@ -1088,8 +1109,51 @@ mod tests {
                 src: reg(Reg::RAX),
             },
         ]);
+        assert_eq!(out.len(), 1);
+        let MachInst::Lea { addr, .. } = &out[0] else {
+            panic!("expected a lea, got {:?}", out[0]);
+        };
+        assert_eq!(
+            (addr.base, addr.index, addr.scale, addr.disp),
+            (Some(Reg::RDI), Some(Reg::RDI), 1, 0)
+        );
+    }
+
+    /// A shift by one is the same doubling written differently.
+    #[test]
+    fn a_copy_and_a_shift_by_one_become_a_doubling_lea() {
+        let out = peephole(vec![
+            mov(Reg::RAX, Reg::RDI),
+            MachInst::ShlRI {
+                size: OpSize::S32,
+                dst: reg(Reg::RAX),
+                imm: 1,
+            },
+        ]);
+        assert_eq!(out.len(), 1);
+        let MachInst::Lea { addr, .. } = &out[0] else {
+            panic!("expected a lea, got {:?}", out[0]);
+        };
+        assert_eq!(
+            (addr.base, addr.index, addr.scale, addr.disp),
+            (Some(Reg::RDI), Some(Reg::RDI), 1, 0)
+        );
+    }
+
+    /// A wider shift would need an index-only address: a `disp32` the pair does
+    /// not pay for, and the slow form of `lea`.
+    #[test]
+    fn a_copy_and_a_shift_by_two_is_kept() {
+        let out = peephole(vec![
+            mov(Reg::RAX, Reg::RDI),
+            MachInst::ShlRI {
+                size: OpSize::S32,
+                dst: reg(Reg::RAX),
+                imm: 2,
+            },
+        ]);
         assert_eq!(out.len(), 2);
-        assert!(matches!(out[1], MachInst::AddRR { .. }));
+        assert!(matches!(out[1], MachInst::ShlRI { .. }));
     }
 
     /// RSP cannot be an index, so it takes the base position.
