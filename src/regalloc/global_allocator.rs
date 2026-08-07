@@ -1937,6 +1937,7 @@ pub fn allocate_global(
                 class,
             )
             .unwrap_or_else(|| "no instructions".to_string());
+            let defs = over_budget_defs(&phase4.over_budget, &phase4.per_block_insts);
             // Which values could not be placed, and what defines them. A count
             // says the loop failed; this says what it failed on, which is the
             // difference between "the program is genuinely too wide here" and
@@ -1965,8 +1966,8 @@ pub fn allocate_global(
             return Err(format!(
                 "global regalloc: register pressure overshoot for function '{func_name}' \
                  after {round} spill round(s): {why} (gpr_overshoot={}, xmm_overshoot={}, \
-                 over-budget VRegs={}, of which spillable={}, spill slots committed={}); \
-                 {peak}",
+                 over-budget VRegs={} defined by {defs}, of which spillable={}, \
+                 spill slots committed={}); {peak}",
                 phase4.gpr_overshoot,
                 phase4.xmm_overshoot,
                 phase4.over_budget.len(),
@@ -2211,6 +2212,63 @@ fn choose_spill_candidates(
     chosen
 }
 
+/// An op's variant path without its payload: `Pure(Iconst(5, I32))` reads as
+/// `Pure(Iconst)`, so every value defined by the same kind of op groups under
+/// one name.
+fn op_kind(op: &Op) -> String {
+    let debug = format!("{op:?}");
+    let mut kind = String::new();
+    let mut open = 0usize;
+    for c in debug.chars() {
+        if c == '(' {
+            if open == 1 {
+                break;
+            }
+            open += 1;
+            kind.push(c);
+        } else if c.is_alphanumeric() || c == '_' {
+            kind.push(c);
+        } else {
+            break;
+        }
+    }
+    for _ in 0..open {
+        kind.push(')');
+    }
+    kind
+}
+
+/// The three kinds of op that define the most over-budget VRegs, with counts.
+///
+/// The count alone says the coloring failed; this says what it failed on.
+/// `Pure(BlockParam)x21` is the block-parameter wall, which only the splitter
+/// can relieve, and reads nothing like a spill loop that kept choosing values
+/// that do not help.
+fn over_budget_defs(over_budget: &[VReg], per_block_insts: &[Vec<ScheduledInst>]) -> String {
+    if over_budget.is_empty() {
+        return "nothing".to_string();
+    }
+    let mut defs: BTreeMap<VReg, &Op> = BTreeMap::new();
+    for inst in per_block_insts.iter().flatten() {
+        defs.entry(inst.dst).or_insert(&inst.op);
+    }
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for v in over_budget {
+        let kind = defs
+            .get(v)
+            .map_or_else(|| "NoDef".to_string(), |op| op_kind(op));
+        *counts.entry(kind).or_default() += 1;
+    }
+    let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked
+        .iter()
+        .take(3)
+        .map(|(kind, n)| format!("{kind}x{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Where the most values of one class are live at once, and what instruction is
 /// there.
 ///
@@ -2312,6 +2370,41 @@ mod tests {
             dst: VReg(dst),
             operands: vec![VReg(a), VReg(b)],
         }
+    }
+
+    #[test]
+    fn op_kind_drops_the_payload() {
+        assert_eq!(
+            op_kind(&Op::Pure(PureOp::Iconst(5, Type::I64))),
+            "Pure(Iconst)"
+        );
+        assert_eq!(
+            op_kind(&Op::Pure(PureOp::BlockParam(0, 0, Type::I64))),
+            "Pure(BlockParam)"
+        );
+        assert_eq!(op_kind(&Op::Mach(MachOp::X86Add)), "Mach(X86Add)");
+    }
+
+    #[test]
+    fn over_budget_defs_ranks_by_count() {
+        let insts = vec![vec![
+            iconst_inst(0),
+            iconst_inst(1),
+            add_inst(2, 0, 1),
+            add_inst(3, 0, 1),
+            add_inst(4, 0, 1),
+        ]];
+        let over: Vec<VReg> = (0..5).map(VReg).collect();
+        assert_eq!(
+            over_budget_defs(&over, &insts),
+            "Mach(X86Add)x3, Pure(Iconst)x2"
+        );
+    }
+
+    #[test]
+    fn over_budget_defs_names_undefined_vregs() {
+        assert_eq!(over_budget_defs(&[], &[]), "nothing");
+        assert_eq!(over_budget_defs(&[VReg(9)], &[]), "NoDefx1");
     }
 
     fn empty_phi_uses(n: usize) -> Vec<VRegSet> {
