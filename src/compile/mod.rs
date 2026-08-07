@@ -29,7 +29,9 @@ use crate::regalloc::allocate_global;
 use crate::regalloc::allocator::RegAllocResult;
 use crate::regalloc::slots::SlotAllocator;
 use crate::schedule::scheduler::{ScheduleDag, ScheduledInst, schedule};
-use crate::x86::abi::{compute_frame_layout, emit_epilogue, emit_prologue};
+use crate::x86::abi::{
+    SCRATCH_GPR, compute_frame_layout, emit_epilogue, emit_prologue, sequentialize_copies,
+};
 use crate::x86::encode::{Encoder, inst_size};
 use crate::x86::inst::{LabelId, MachInst};
 use crate::x86::reg::Reg;
@@ -525,6 +527,37 @@ pub(super) fn run_ir_passes(
 }
 
 // ── compile() ────────────────────────────────────────────────────────────────
+
+/// Order the moves that relocate incoming arguments to the registers the
+/// allocator chose for them.
+///
+/// These are one *parallel* copy, not a sequence. Every parameter is already in
+/// its ABI register before the function's first instruction runs, so a move
+/// writing one parameter's destination can be reading another's source: with
+/// arguments in RDI..R9, `mov rcx, rdi` destroys the fourth argument before the
+/// move that reads it, and the parameter silently takes the first one's value.
+/// `sequentialize_copies` orders them and breaks cycles through `SCRATCH_GPR`,
+/// which is the same treatment `setup_call_args` gives the caller's side of the
+/// same problem. It drops self-copies, so a parameter already in its register
+/// costs nothing here.
+///
+/// `S64` for the same reason the call side uses it: SysV makes the caller
+/// extend a sub-word argument to the full register, so a narrower move would
+/// leave the high bits of a value the callee may widen.
+fn emit_entry_param_copies(copies: &[(Reg, Reg)]) -> Vec<MachInst> {
+    // The two lists that feed this overlap -- a parameter reached by the
+    // schedule walk can also be in `unprecolored_params` -- and naming one
+    // copy twice is still one copy. Removing the duplicates here is what keeps
+    // `sequentialize_copies`'s repeated-destination assertion meaning what it
+    // says: two *different* values would land in one register.
+    let mut copies = copies.to_vec();
+    copies.sort_unstable();
+    copies.dedup();
+    sequentialize_copies(&copies, SCRATCH_GPR)
+        .into_iter()
+        .map(|(src, dst)| crate::emit::phi_elim::copy_inst(src, dst, crate::x86::inst::OpSize::S64))
+        .collect()
+}
 
 /// What `allocate_global` needs derived from the current schedules: the block
 /// parameters it must treat as written at block entry, and coalescing's copy
@@ -1402,6 +1435,7 @@ pub fn compile(
                 &block_param_vregs_per_block,
                 &func.name,
                 opts.force_frame_pointer,
+                &func_arg_locs,
                 &mut slots,
                 &mut vreg_types,
             )
@@ -1583,10 +1617,14 @@ pub fn compile(
 
         let mut all_insts: Vec<MachInst> = Vec::new();
 
-        // Emit movs for register params not precolored (live across a call
-        // that clobbers their ABI register). Must be at the very start of
+        // Move register parameters from their ABI registers to the registers
+        // the allocator chose for them. Both sources feed one list: the params
+        // whose precoloring lowering itself declined, and the ones
+        // `merge_precolorings_global` dropped because they are live across a
+        // call that clobbers their ABI register. Must be at the very start of
         // the function, before any call arg setup.
         let arg_locs = &func_arg_locs;
+        let mut entry_copies: Vec<(Reg, Reg)> = Vec::new();
         for inst in rewritten.iter() {
             if let Op::Pure(PureOp::Param(param_idx, _)) = &inst.op
                 && !param_vreg_set.contains(&inst.dst)
@@ -1597,19 +1635,10 @@ pub fn compile(
                     .get(&inst.dst)
                     .copied()
                     .and_then(crate::regalloc::Assignment::reg)
-                && dst_reg != *abi_reg
             {
-                all_insts.push(MachInst::MovRR {
-                    size: crate::x86::inst::OpSize::S64,
-                    src: crate::x86::inst::Operand::Reg(*abi_reg),
-                    dst: crate::x86::inst::Operand::Reg(dst_reg),
-                });
+                entry_copies.push((*abi_reg, dst_reg));
             }
         }
-        // Emit entry movs for unprecolored params from the global
-        // allocator. Only in the entry block; these are params whose ABI
-        // precoloring was dropped by merge_precolorings_global because they
-        // are live across a call that clobbers their ABI register.
         if block_idx == rpo_order[0] {
             for &(param_vreg, abi_reg) in &regalloc_result.unprecolored_params {
                 if let Some(dst_reg) = regalloc_result
@@ -1617,23 +1646,12 @@ pub fn compile(
                     .get(&param_vreg)
                     .copied()
                     .and_then(crate::regalloc::Assignment::reg)
-                    && dst_reg != abi_reg
                 {
-                    if abi_reg.is_xmm() {
-                        all_insts.push(MachInst::MovsdRR {
-                            dst: crate::x86::inst::Operand::Reg(dst_reg),
-                            src: crate::x86::inst::Operand::Reg(abi_reg),
-                        });
-                    } else {
-                        all_insts.push(MachInst::MovRR {
-                            size: crate::x86::inst::OpSize::S64,
-                            src: crate::x86::inst::Operand::Reg(abi_reg),
-                            dst: crate::x86::inst::Operand::Reg(dst_reg),
-                        });
-                    }
+                    entry_copies.push((abi_reg, dst_reg));
                 }
             }
         }
+        all_insts.extend(emit_entry_param_copies(&entry_copies));
 
         // Emit in schedule order.
         //

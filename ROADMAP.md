@@ -51,13 +51,46 @@ frame slots at fixed offsets is what debug info describes.
 
 ## Start here
 
-Ordered. Each says what it is, why it is placed there, and what would tell you
-it is done. **Items 1 and 2 are closed; item 3 is the open one**, and the two
-correctness holes at the top of P0 come before it. The closed entries stay
-because what they measured is the reason the next attempt should not start where
-they did.
+**`P0`..`P4` under Priorities is the only numbering in this document.** This
+section is the queue: what to pick up next, in order, each entry naming its tier
+rather than restating it. Take them top to bottom.
 
-### 1. ~~Finish the `-O0` allocator~~ -- closed
+- **`verify_register_sharing` at `-O1`** -- `P0` Correctness. Flags 1 of 450
+  generated programs and holds `BLITZ_VERIFY` red on purpose, at both `1` and
+  `strict`. It has no behavioural symptom, so no oracle can hold it. Done when
+  that gate is green, or when the check is deleted with the reason written down.
+- **Enumerate the ABI surface** -- `P0` Correctness. The generator has never
+  emitted an odd stack-argument count, which is how a segfault survived in a
+  corpus of 400 seeds a shape. Arg counts 0..14 x {int, double, mixed} x {leaf,
+  calls libc} is finite; be done with it.
+- **Give the inliner a pressure check, as LICM has** -- `P1`, first entry. Done
+  when `-O1` beats `-O0` on all 15 `bench` kernels. **Re-measure before
+  starting**: the figure behind it is from 2026-08-06 and a lot of codegen has
+  moved since.
+
+After those, `P1` is ordered by measured impact. **`P2` is where the
+single-target thesis pays off**, though half of it is unreachable until tinyc
+grows builtins -- see the note there.
+
+**One reordering worth stating outright.** `P2`'s constant cost model belongs
+above most of `P1`: it unblocks three isel items at once, the missing structure
+is a parents map in the e-graph, and the payoff is measured. The temptation is
+to start on GVN or loop strength reduction because they are the recognizable
+names, and neither is where this backend is currently losing -- `P1`'s own
+copies item says the whole remaining instruction gap to gcc is copies.
+
+**Do not start in the register allocator, the splitter, or the block-parameter
+machinery without reading `docs/internal/refactor-roadmap.md` first.** It is
+finished as work and is now the record of what eleven steps measured --
+including the predictions that were wrong, which is what stops the next attempt
+repeating them.
+
+## Closed, and what they measured
+
+These stay because what they measured is the reason the next attempt should not
+start where they did.
+
+### ~~Finish the `-O0` allocator~~
 
 **It is the `-O0` default** (`regalloc::fast`) and it is correct.
 `BLITZ_PASSES=-fast-regalloc` puts `-O0` back on the colouring path, and
@@ -114,7 +147,7 @@ every cross-block value first is worse (refusals 55 to 67), because spilling
 converts a spillable value into reloads and a reload cannot be spilled in turn,
 so the pressure is relabelled rather than removed.
 
-### 2. ~~The last capacity failure~~ -- closed
+### ~~The last capacity failure~~
 
 `args` seed 88 compiles, and **200 seeds a shape is clean on all three for the
 first time**: `mixed` 200/200, `args` 200/200, `pressure` 200/200. (At 400
@@ -131,48 +164,21 @@ place, and left the spill loop to fail on them. Giving a division the same
 treatment as a call costs `+0.67%` instructions and `+0.93%` bytes over 107
 changed rows, and `live` does not move at all.
 
-**This is the shape item 1's step three is about**, arrived at from the other
-end: a pre-pass relieving pressure against a different graph than the allocator
-enforces. It was under-relieving here rather than over-relieving.
-
-### 3. Give the inliner a pressure check, as LICM has
-
-**Re-measure before starting: this was last measured 2026-08-06 and a lot of
-codegen has moved since.** As of then, `-O1` emitted worse code than `-O0` on 7
-of the 15 `bench` kernels; LICM was 60% of that and is now budgeted, and the
-rest was inlining, which decides without looking at pressure in exactly the same
-way. `BLITZ_PASSES=-inlining` took `bench` instructions 2637 to 2422 and reloads
-377 to 247. The fix has the same shape as `licm::within_budget`.
-
-Done when `-O1` beats `-O0` on all 15 kernels.
-
-After those, the P1 list below is ordered by measured impact. **`P2` is where
-the single-target thesis pays off**, though half of it is unreachable until
-tinyc grows builtins -- see the note there.
-
-**One reordering worth stating outright.** P2's constant cost model belongs
-above most of P1: it unblocks three isel items at once, the missing structure is
-a parents map in the e-graph, and the payoff is measured. The temptation is to
-start on GVN or loop strength reduction because they are the recognizable names,
-and neither is where this backend is currently losing -- P1's own copies item
-says the whole remaining instruction gap to gcc is copies.
-
-**Do not start in the register allocator, the splitter, or the block-parameter
-machinery without reading `docs/internal/refactor-roadmap.md` first.** It is
-finished as work and is now the record of what eleven steps measured --
-including the predictions that were wrong, which is what stops the next attempt
-repeating them.
+**This is the same shape as the `-O0` allocator's third step**, arrived at from
+the other end: a pre-pass relieving pressure against a different graph than the
+allocator enforces. It was under-relieving here rather than over-relieving.
 
 ## Current state (2026-08-07)
 
-- 1010 Rust tests + 546 lit tests, all green. `cargo fmt` clean, `cargo clippy
+- 1010 Rust tests + 552 lit tests, all green. `cargo fmt` clean, `cargo clippy
   --all-targets` clean, zero build warnings, zero rustdoc warnings.
-- `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
-- `bash tests/lit/run_diff.sh`: 335 compared `-O0`-vs-`-O1` and against a
+- `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites but for
+  `verify_register_sharing_xmm12.c`, which is red on purpose -- see Known bugs.
+- `bash tests/lit/run_diff.sh`: 337 compared `-O0`-vs-`-O1` and against a
   reference compiler; no skips, no differences under gcc or clang.
 - **`-O0` is on `regalloc::fast` and both levels are correct.** Everything below
   is `-O1` unless it says otherwise.
-- `bash tests/fuzz/run_corpus.sh`: 16 `fixed` programs, all passing at both
+- `bash tests/fuzz/run_corpus.sh`: 17 `fixed` programs, all passing at both
   levels, and nothing open.
 - Generated programs: `mixed` 400/400, `args` 400/400, `pressure` 400/400, which
   is what `run_fuzz.sh` now sweeps by default. **The width is what makes it a
@@ -235,23 +241,40 @@ what makes attribution possible here.
 
 **Open correctness work, before any diagnostic.**
 
-- [ ] **An odd number of stack arguments misaligns the stack.** SysV wants
+- [x] **An odd number of stack arguments misaligned the stack.** SysV wants
       `RSP % 16 == 0` at a `call` and `setup_call_args` emits one `push` per
-      stack argument, so seven integer arguments leave the callee eight out and
-      its own call into libc faults. Even counts survive by luck, which is why
+      stack argument, so seven integer arguments left the callee eight out and
+      its own call into libc faulted. Even counts survived by luck, which is why
       nothing caught it: the generator's `args` shape and every corpus program
-      land on even counts. `corpus/open/stack_arg_alignment.c`, both levels, and
-      older than the `-O0` allocator. **This was filed under P4** as an unblock;
-      a segfault is not an unblock.
+      land on even counts. `abi::stack_arg_bytes` now owns the number the setup
+      and the cleanup both move RSP by, padding an odd count. Costs one `sub` per
+      such call site -- 50 rows of `lit` and `fuzz` at +0.0% to +0.4%, with
+      `bench` and `live` unmoved. `corpus/fixed/stack_arg_alignment.c` and
+      `lit/functions/stack_arg_alignment_odd.c`.
+- [x] **Entry parameter moves were a sequence, not a parallel copy.** A
+      parameter in a caller-saved register gets no pre-coloring when its block
+      contains a call (`precolor::assign_param_vregs_from_map`), so it arrives by
+      an entry move instead -- and the two lists of those moves were emitted in
+      order, letting `mov rcx, rdi` destroy the fourth argument before the move
+      that reads it. Six arguments summed to `a+b+c+a+c+f`. The same shape at
+      `-O0` gave every parameter the first free register, since `pick` starts
+      from an empty `taken` at each instruction, and stored one value into all
+      six slots. Both are now the one fact they always were: a parameter is in
+      its argument register before the function's first instruction runs.
+      `lit/regalloc/entry_param_parallel_copy.c`. **Found by reading the values
+      out of a program the segfault above was hiding** -- 546 lit tests, 335
+      differential comparisons and 400 seeds a shape were all green while a
+      six-argument function that calls anything computed the wrong sum.
 - [ ] **`assign_args` `unreachable!()`s on a struct** (`src/x86/abi.rs`). Same
       tier mistake: the frontend cannot produce one today, so it reads as a
       feature gap, but the failure mode is a panic rather than a diagnostic.
 - [ ] **The allocator's liveness disagrees with the emitted code's**, at `-O1`.
+      *Start here points at this one.*
       `verify_register_sharing` flags 1 of 450 generated programs; `-O0` is
       clean since the argument-colour fix. The reproducer is checked in as
       `tests/lit/regalloc/verify_register_sharing_xmm12.c`, which passes the
-      plain lit run and fails `BLITZ_VERIFY=strict bash tests/lit/run_tests.sh`
-      -- **that gate is red on purpose until this is resolved**. It has no
+      plain lit run and fails `BLITZ_VERIFY=1` and `=strict` alike
+      -- **those gates are red on purpose until this is resolved**. It has no
       behavioural symptom, so no oracle and no corpus entry can hold it.
       `build_interference_into` adds an edge for every simultaneously-live pair,
       so two VRegs can only share a register if the allocator's liveness never
@@ -332,6 +355,15 @@ so the holes stay visible.
 
 ### P1 -- Optimizer gaps with the largest measured impact
 
+- [ ] **Give the inliner a pressure check, as LICM has.** *Start here points at
+      this one.* **Re-measure before starting: this was last measured 2026-08-06
+      and a lot of codegen has moved since.** As of then, `-O1` emitted worse
+      code than `-O0` on 7 of the 15 `bench` kernels; LICM was 60% of that and
+      is now budgeted, and the rest was inlining, which decides without looking
+      at pressure in exactly the same way. `BLITZ_PASSES=-inlining` took `bench`
+      instructions 2637 to 2422 and reloads 377 to 247. The fix has the same
+      shape as `licm::within_budget`. Done when `-O1` beats `-O0` on all 15
+      kernels.
 - [ ] **Copies are still a third of what blitz emits.** Measured over the 15
       `bench` kernels: blitz 805 register-to-register moves in 2613
       instructions, against `gcc -O2`'s 345 in 2226 and `clang -O2`'s 214 in
@@ -513,23 +545,25 @@ without taking it is picking up work that cannot land.
 
 ## Known bugs
 
-**No wrong answers, two open holes.** At 400 seeds a shape `mixed`, `args` and
-`pressure` are all 400/400 and the saved corpus is 16 `fixed` passing, so no
+**No wrong answers, one open hole.** At 400 seeds a shape `mixed`, `args` and
+`pressure` are all 400/400 and the saved corpus is 17 `fixed` passing, so no
 generated or saved program computes a wrong value at either level. What is open
 is not reachable from the generator:
 
-- **An odd number of stack arguments segfaults**, both levels, older than the
-  `-O0` allocator. `corpus/open/stack_arg_alignment.c`, and P0 above.
 - **`verify_register_sharing` flags a `-O1` allocation**, reproduced by
   `tests/lit/regalloc/verify_register_sharing_xmm12.c`. It passes the plain lit
-  run and fails `BLITZ_VERIFY=strict bash tests/lit/run_tests.sh`, so **that
-  gate is red on purpose**; the bug has no behavioural symptom, so putting it
-  inside a run that already happens is the only way to hold it, and no corpus
-  entry can.
+  run and fails under `BLITZ_VERIFY`, so **that gate is red on purpose**; the
+  bug has no behavioural symptom, so putting it inside a run that already
+  happens is the only way to hold it, and no corpus entry can.
 
-The last *wrong-value* bug, an `-O1` allocation bug the `-O0` allocator's
-arrival made visible, closed when `Op::Param` got the shadow `Op::BlockParam`
-already had -- see item 1 of Start here.
+**A green corpus is evidence about the shapes the corpus has.** The last two
+wrong-value bugs were both in six-plus-argument functions that call something,
+and the whole gate set -- 546 lit tests, 335 differential comparisons, 400 seeds
+a shape -- was green while such a function summed its arguments to
+`a+b+c+a+c+f`. One of them was *behind* a segfault: the misaligned stack killed
+the program before its buffered output could disagree with anything, and the
+wrong values only became visible once the crash was fixed. **Fix the crash
+first, then re-read the output** -- a program that dies has not passed.
 
 **Re-measure rather than trust that.** Entries have left this list without
 anyone fixing them, and one went the other way -- a capacity failure that a fold

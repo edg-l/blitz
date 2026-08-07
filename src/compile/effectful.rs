@@ -6,7 +6,9 @@ use crate::ir::effectful::EffectfulOp;
 use crate::ir::function::Function;
 use crate::ir::op::{Op, PseudoOp, PureOp};
 use crate::regalloc::allocator::RegAllocResult;
-use crate::x86::abi::{ArgLoc, FP_RETURN_REG, GPR_RETURN_REG, assign_args, setup_call_args};
+use crate::x86::abi::{
+    ArgLoc, FP_RETURN_REG, GPR_RETURN_REG, assign_args, setup_call_args, stack_arg_bytes,
+};
 use crate::x86::addr::Addr;
 use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
@@ -407,12 +409,7 @@ pub(super) fn lower_effectful_op(
 
             let mut insts = setup_call_args(arg_tys, &arg_regs, Reg::R11);
 
-            // Count stack args so we can clean up RSP after the call.
             let locs = assign_args(arg_tys);
-            let n_stack = locs
-                .iter()
-                .filter(|l| matches!(l, ArgLoc::Stack { .. }))
-                .count();
 
             // SysV AMD64: AL holds the number of vector registers used to pass
             // arguments. A variadic callee branches on it to decide whether to
@@ -439,12 +436,13 @@ pub(super) fn lower_effectful_op(
                 target: callee.clone(),
             });
 
-            // Clean up stack arguments after the call.
-            if n_stack > 0 {
+            // Clean up stack arguments after the call, alignment padding and all.
+            let stack_bytes = stack_arg_bytes(arg_tys);
+            if stack_bytes > 0 {
                 insts.push(MachInst::AddRI {
                     size: OpSize::S64,
                     dst: Operand::Reg(Reg::RSP),
-                    imm: (n_stack as i32) * 8,
+                    imm: stack_bytes,
                 });
             }
 

@@ -7,8 +7,16 @@
 // Even counts happen to survive, which is why nothing has caught this: the
 // generator's `args` shape and every corpus program land on even counts.
 //
-// Segfaults at both levels, so the -O0-vs-O1 leg agrees and only the reference
-// compiler sees it.
+// Segfaulted at both levels, so the -O0-vs-O1 leg agreed and only the reference
+// compiler saw it.
+//
+// It was hiding a second bug, and that is the more useful half of this program.
+// stdout is fully buffered to a pipe, so the crash in `seven` threw away what
+// `six` had already printed -- and `six` was printing 36 where 21 belongs. Every
+// one of these functions has more than three parameters and calls something, so
+// none of their parameters is pre-colored, and the entry moves that place them
+// in their allocated registers were emitted as a sequence rather than a parallel
+// copy. A program that dies has not passed: fix the crash, then read the output.
 //
 // OUTPUT: 21.000000
 // OUTPUT: 28.000000

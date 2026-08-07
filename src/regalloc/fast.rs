@@ -22,8 +22,8 @@
 //! *fresh* VReg per use is how one value occupies different registers at
 //! different points without the map having to say so. A previous attempt kept
 //! whole live ranges and one register each, and could not place a function
-//! whose block parameters outnumbered what was left -- see ROADMAP item 1 for
-//! what that ruled out.
+//! whose block parameters outnumbered what was left -- `ROADMAP.md`'s closed
+//! `-O0` allocator entry has what that ruled out.
 //!
 //! **What it does not do**: no interference graph, no liveness, no coalescing,
 //! no splitting, no rematerialization. One pass over the instructions. It does
@@ -59,7 +59,7 @@ use crate::egraph::extract::VReg;
 use crate::ir::Type;
 use crate::ir::op::{MachOp, Op, PseudoOp, PureOp};
 use crate::schedule::scheduler::ScheduledInst;
-use crate::x86::abi::CALLEE_SAVED;
+use crate::x86::abi::{ArgLoc, CALLEE_SAVED};
 use crate::x86::reg::{Reg, RegClass};
 
 use super::coloring::{allocatable_gpr_order, allocatable_xmm_order};
@@ -116,6 +116,7 @@ pub fn allocate_fast(
     block_param_vregs_per_block: &[VRegSet],
     func_name: &str,
     uses_frame_pointer: bool,
+    arg_locs: &[ArgLoc],
     slots: &mut SlotAllocator,
     vreg_types: &mut BTreeMap<VReg, Type>,
 ) -> Result<GlobalRegAllocResult, String> {
@@ -180,6 +181,7 @@ pub fn allocate_fast(
         classes: &classes,
         gpr_pool: allocatable_gpr_order(uses_frame_pointer),
         xmm_pool: allocatable_xmm_order(),
+        arg_locs,
         func_name,
     };
 
@@ -202,7 +204,17 @@ pub fn allocate_fast(
             }
         }
         let mut block: Vec<ScheduledInst> = Vec::with_capacity(insts.len() * 3);
-        for inst in insts {
+        // The parameters first, whatever order the schedule put their markers
+        // in. A marker's position is not its value's position: every argument
+        // register is caller-saved, so a call standing between the function's
+        // entry and a marker takes that parameter with it. Storing them all
+        // before anything else runs costs nothing, since a marker reads no
+        // operand and so depends on nothing in the block.
+        let is_param = |i: &ScheduledInst| matches!(i.op, Op::Pure(PureOp::Param(..)));
+        for inst in insts.iter().filter(|i| is_param(i)) {
+            expand(inst, &mut block, &mut frame, &ctx)?;
+        }
+        for inst in insts.iter().filter(|i| !is_param(i)) {
             if !returns && matches!(inst.op, Op::Pseudo(PseudoOp::TerminatorArgs(_))) {
                 pass_through_terminator_args(
                     inst,
@@ -265,6 +277,8 @@ struct Ctx<'a> {
     classes: &'a BTreeMap<VReg, RegClass>,
     gpr_pool: Vec<Reg>,
     xmm_pool: Vec<Reg>,
+    /// Where the caller left each parameter.
+    arg_locs: &'a [ArgLoc],
     /// Named by every error this pass can return.
     func_name: &'a str,
 }
@@ -491,6 +505,37 @@ fn expand(
     // A projection defines nothing either: its slot is the one its producer
     // stored that half into.
     if ctx.pairs.projections.contains(&inst.dst) {
+        return Ok(());
+    }
+
+    // A register-passed parameter is already in its argument register before
+    // the function's first instruction runs, so the store to its slot reads
+    // that register and the parameter needs none of its own. Giving it a
+    // scratch instead is what let every parameter of a six-argument function
+    // share one: `pick` starts from an empty `taken` at each instruction, so
+    // each marker in turn was handed the same first free register, and the six
+    // stores then wrote one value into six slots. A stack-passed parameter is
+    // not covered here -- lowering emits a load from the caller's frame at the
+    // marker, which does need a register to land in.
+    if let Op::Pure(PureOp::Param(param_idx, _)) = &inst.op
+        && let Some(ArgLoc::Reg(abi_reg)) = ctx.arg_locs.get(*param_idx as usize)
+    {
+        let class = ctx.class_of(inst.dst);
+        let tmp = frame.fresh_like(inst.dst);
+        frame.assignment.insert(tmp, Assignment::Reg(*abi_reg));
+        out.push(ScheduledInst {
+            op: inst.op.clone(),
+            dst: tmp,
+            operands: vec![],
+        });
+        if let Some(&slot) = frame.slot.get(&inst.dst) {
+            let sink = frame.fresh_sink();
+            out.push(ScheduledInst {
+                op: store_op(class, slot),
+                dst: sink,
+                operands: vec![tmp],
+            });
+        }
         return Ok(());
     }
 

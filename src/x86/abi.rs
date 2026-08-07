@@ -134,6 +134,23 @@ pub fn assign_args(param_types: &[Type]) -> Vec<ArgLoc> {
     locs
 }
 
+/// Bytes RSP moves to pass a call's stack arguments, padded to keep
+/// `RSP % 16 == 0` at the `call`.
+///
+/// SystemV AMD64 (§3.2.2) requires the stack 16-byte aligned at the call, and
+/// the frame layout below already establishes that for the body, so an odd
+/// number of stack arguments is the only thing that can break it: each is one
+/// `push`. The padding is part of the same number as the arguments because the
+/// setup and the cleanup after the `call` have to move RSP by the same amount,
+/// and deriving that twice is how the two come to disagree.
+pub fn stack_arg_bytes(param_types: &[Type]) -> i32 {
+    let n_stack = assign_args(param_types)
+        .iter()
+        .filter(|l| matches!(l, ArgLoc::Stack { .. }))
+        .count() as i32;
+    (n_stack + n_stack % 2) * 8
+}
+
 // ── 8.3 Stack frame layout ────────────────────────────────────────────────────
 
 /// Describes the stack frame layout for a function.
@@ -465,6 +482,19 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
     // Sort descending by offset (rightmost = highest offset pushed first).
     let mut stack_args = stack_args;
     stack_args.sort_by_key(|a| Reverse(a.0));
+
+    // An odd number of pushes would leave RSP eight out at the `call`. The pad
+    // goes below the arguments, so their offsets from RSP at the call are the
+    // ones the callee reads.
+    let pad = stack_arg_bytes(arg_types) - stack_args.len() as i32 * 8;
+    if pad > 0 {
+        insts.push(MachInst::SubRI {
+            size: OpSize::S64,
+            dst: Operand::Reg(Reg::RSP),
+            imm: pad,
+        });
+    }
+
     for (_, src) in stack_args {
         // `push` addresses no XMM register, and a stack argument slot is eight
         // bytes whatever it holds, so a floating-point argument travels through
