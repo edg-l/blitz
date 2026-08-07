@@ -104,7 +104,7 @@
 //
 // OUTPUT: -4
 // EXIT: 0
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 int f0(double p0, int p1, double p2, double p3, double p4, int p5, int p6, double p7) {
     return 99;
 }

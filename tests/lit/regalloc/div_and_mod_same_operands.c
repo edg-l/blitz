@@ -32,7 +32,7 @@
 // OUTPUT: 3
 // OUTPUT: 3
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int opaque(int x) { return x; }
 

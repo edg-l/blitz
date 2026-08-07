@@ -24,7 +24,7 @@
 // OUTPUT: 495
 // OUTPUT: 473
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int opaque(int x) { return x; }
 

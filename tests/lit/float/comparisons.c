@@ -5,7 +5,7 @@
 // OUTPUT: le_eq: 1
 // OUTPUT: ge_eq: 1
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 int check_eq(double a, double b) {

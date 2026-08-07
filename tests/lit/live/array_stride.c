@@ -10,7 +10,7 @@
 // OUTPUT: 783104
 // EXIT: 0
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int main(int argc, char** argv) {
     int arr[512];

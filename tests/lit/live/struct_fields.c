@@ -8,7 +8,7 @@
 // OUTPUT: 217736
 // EXIT: 0
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 struct Rec {
     int a;

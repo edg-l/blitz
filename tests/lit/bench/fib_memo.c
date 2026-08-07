@@ -12,7 +12,7 @@
 // EXIT: 0
 
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int fib_rec(int n) {
     if (n <= 1) {

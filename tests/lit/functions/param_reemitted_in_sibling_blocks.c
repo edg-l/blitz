@@ -21,7 +21,7 @@
 //
 // OUTPUT: -14
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 double f1(double p0, int p1, double p2) {
     if (p1 > 0) {

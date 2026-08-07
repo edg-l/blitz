@@ -20,7 +20,7 @@
 // FLAGS: -O1
 // OUTPUT: 150
 // EXIT: 0
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 double f0(double p0, int p1, int p2, int p3, double p4, int p5, int p6, int p7, double p8) {
     return (((49 * p7) & 63) * 29.0);
 }

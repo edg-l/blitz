@@ -686,6 +686,21 @@ impl FunctionBuilder {
     /// Emit a call to `func` with the given `args`. Returns Values for each
     /// return type.
     pub fn call(&mut self, func: &str, args: &[Value], ret_tys: &[Type]) -> Vec<Value> {
+        self.call_maybe_variadic(func, args, ret_tys, false)
+    }
+
+    /// `call`, for a callee declared with a trailing `...`.
+    pub fn call_variadic(&mut self, func: &str, args: &[Value], ret_tys: &[Type]) -> Vec<Value> {
+        self.call_maybe_variadic(func, args, ret_tys, true)
+    }
+
+    fn call_maybe_variadic(
+        &mut self,
+        func: &str,
+        args: &[Value],
+        ret_tys: &[Type],
+        variadic: bool,
+    ) -> Vec<Value> {
         // Pre-compute UIDs for CallResult nodes before any closures capture &mut self.
         let uid_base = self.next_uid;
         self.next_uid += ret_tys.len() as u32;
@@ -722,6 +737,7 @@ impl FunctionBuilder {
                 .iter()
                 .map(|&c| EffOperand::Class(c))
                 .collect(),
+            variadic,
         });
         ret_vals
     }

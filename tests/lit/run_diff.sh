@@ -90,7 +90,7 @@ build_and_run() {
 # writing status to $WORK/status.cc and stdout to $WORK/out.cc.
 #
 # -w because lit tests redeclare library functions with tinyc-compatible
-# prototypes (`extern int printf(char* fmt, double x);`), which the reference
+# prototypes (`extern int printf(char* fmt, ...);`), which the reference
 # warns about but compiles correctly.
 build_and_run_cc() {
     _file="$1"

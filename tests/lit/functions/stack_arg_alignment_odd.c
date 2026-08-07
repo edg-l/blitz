@@ -10,7 +10,7 @@
 // seven and nine arguments here, either side of the eight-argument shape that
 // works whether or not the padding exists.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 int seven(int a, int b, int c, int d, int e, int f, int g) {

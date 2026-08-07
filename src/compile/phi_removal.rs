@@ -505,6 +505,7 @@ mod tests {
             arg_tys: vec![],
             ret_tys: vec![Type::I64; results],
             results: vec![EffOperand::Class(ClassId(2)); results],
+            variadic: false,
         }
     }
 

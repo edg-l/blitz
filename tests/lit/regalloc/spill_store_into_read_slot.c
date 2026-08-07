@@ -52,7 +52,7 @@
 //
 // OUTPUT: 83
 // EXIT: 0
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 double f0(int p0, int p1, double p2, int p3, double p4, double p5, double p6, int p7, double p8, double p9, int p10, int p11) {
     return -21.0;
 }

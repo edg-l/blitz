@@ -8,7 +8,7 @@
 // EXIT: 0
 
 
-extern int printf(char* fmt, unsigned int x);
+extern int printf(char* fmt, ...);
 
 unsigned int crc32_byte(unsigned int crc, unsigned int byte) {
     crc = crc ^ byte;

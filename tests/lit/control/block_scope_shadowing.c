@@ -10,7 +10,7 @@
 // The second loop checks the other half of the rule -- that the outer binding
 // comes back after the block, rather than staying displaced.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int main(int argc, char** argv) {
     int total = 0;

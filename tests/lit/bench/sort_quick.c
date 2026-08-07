@@ -11,7 +11,7 @@
 // EXIT: 0
 
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int partition(int* arr, int lo, int hi) {
     int pivot = arr[hi];

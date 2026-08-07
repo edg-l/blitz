@@ -2,7 +2,7 @@
 // OUTPUT: product: 17.500000
 // OUTPUT: mixed: 15.700000
 
-extern int printf(char* fmt, double x);
+extern int printf(char* fmt, ...);
 
 double add_doubles(double a, double b) {
     return a + b;

@@ -2,7 +2,7 @@
 // OUTPUT: sum = 21
 
 // 6 args uses all integer arg registers (rdi, rsi, rdx, rcx, r8, r9)
-extern int printf(char* fmt, int a);
+extern int printf(char* fmt, ...);
 
 int sum6(int a, int b, int c, int d, int e, int f) {
     return a + b + c + d + e + f;

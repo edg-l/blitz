@@ -14,7 +14,7 @@
 // OUTPUT: big: 5000000000.000000
 // EXIT: 0
 
-extern int printf(char* fmt, double x);
+extern int printf(char* fmt, ...);
 
 double from_long(long n) {
     return n;

@@ -5,7 +5,7 @@
 // Test constant branch folding: if(1) folds to unconditional jump,
 // eliminating the else block entirely.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int main() {
     if (1) {

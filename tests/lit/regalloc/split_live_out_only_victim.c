@@ -18,7 +18,7 @@
 // FLAGS: -O0
 // OUTPUT: 123
 // EXIT: 0
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 double f0(double p0, int p1, double p2, double p3, double p4, double p5, double p6, int p7, int p8, int p9, int p10, double p11) {
     if ((((p8 & 1023) | 801) > (p1 - 12))) {
         for (int i37 = 0; i37 < 3; i37++) {

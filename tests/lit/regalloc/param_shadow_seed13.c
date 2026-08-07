@@ -24,7 +24,7 @@
 // Doubles hold integral values and use only + - *, so every result is
 // exact and no reference compiler can legally disagree.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 double f0(double p0, int p1, int p2, int p3, int p4, double p5, int p6) {
     for (int i70 = 0; i70 < 6; i70++) {

@@ -14,7 +14,7 @@
 // Both are the same fact from two sides: every parameter is already in its
 // argument register before the function's first instruction runs.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 int six(int a, int b, int c, int d, int e, int f) {

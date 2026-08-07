@@ -9,7 +9,7 @@
 // the pair the outer block emitted -- projecting it there reads whichever
 // register that block last wrote, never the quotient.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 int id(int x) { return x; }

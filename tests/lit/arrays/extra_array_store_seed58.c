@@ -30,7 +30,7 @@
 //
 // EXIT: 0
 // OUTPUT: 666
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 double f0(double p0, int p1, double p2, int p3, int p4, double p5, int p6, double p7, double p8) {
     for (int i17 = 0; i17 < 4; i17++) {
         if ((p6 <= -83)) {

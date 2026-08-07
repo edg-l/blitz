@@ -13,7 +13,7 @@
 // OUTPUT: 75425723
 // EXIT: 0
 
-extern int printf(char* fmt, unsigned int x);
+extern int printf(char* fmt, ...);
 
 int main(int argc, char** argv) {
     unsigned int buf[64];

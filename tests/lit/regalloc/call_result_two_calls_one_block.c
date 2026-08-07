@@ -29,7 +29,7 @@
 // EXIT: 0
 // OUTPUT: 87
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 int f0(int p0, int p1, double p2, double p3, int p4, int p5, double p6, int p7, int p8) {
     if ((((p4 & 1023) ^ 287) == p1)) {
         if ((p1 <= p8)) {

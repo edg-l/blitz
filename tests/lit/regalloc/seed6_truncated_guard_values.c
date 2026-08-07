@@ -15,7 +15,7 @@
 //
 // EXIT: 226
 //
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int f0(double p0, double p1, double p2, double p3, int p4, int p5, int p6) {
     for (int i9 = 0; i9 < 1; i9++) {

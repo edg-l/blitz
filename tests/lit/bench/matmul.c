@@ -9,7 +9,7 @@
 // EXIT: 0
 
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int main() {
     int a[24][24];

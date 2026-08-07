@@ -917,7 +917,11 @@ impl<'b> FnCtx<'b> {
         }
 
         let ret_ir_tys: Vec<Type> = ret_type.to_ir_type().map(|t| vec![t]).unwrap_or_default();
-        let results = self.builder.call(name, &arg_vals, &ret_ir_tys);
+        let results = if variadic {
+            self.builder.call_variadic(name, &arg_vals, &ret_ir_tys)
+        } else {
+            self.builder.call(name, &arg_vals, &ret_ir_tys)
+        };
 
         if ret_type == CType::Void {
             let dummy = self.builder.iconst(0, Type::I32);

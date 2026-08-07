@@ -8,7 +8,7 @@
 // OUTPUT: 565296
 // EXIT: 0
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 int mix(int a, int b, int c) {

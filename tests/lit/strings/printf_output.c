@@ -3,7 +3,7 @@
 // OUTPUT: y = 20
 // OUTPUT: sum = 30
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 int main() {
     int x = 10;
     int y = 20;

@@ -3,7 +3,7 @@
 // OUTPUT: abs(3) = 3
 // OUTPUT: abs(0) = 0
 
-extern int printf(char* fmt, int a, int b);
+extern int printf(char* fmt, ...);
 
 int my_abs(int x) {
     return x > 0 ? x : 0 - x;

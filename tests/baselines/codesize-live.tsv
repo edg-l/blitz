@@ -10,8 +10,8 @@ branchy_filter.c	O0	529	3515	188	215
 branchy_filter.c	O1	237	793	10	24
 byte_copy.c	O0	932	6433	331	400
 byte_copy.c	O1	332	1713	52	90
-call_hot.c	O0	228	1188	65	78
-call_hot.c	O1	93	331	5	16
+call_hot.c	O0	227	1186	65	78
+call_hot.c	O1	92	329	5	16
 early_exit.c	O0	569	3700	196	222
 early_exit.c	O1	235	906	21	45
 float_convert.c	O0	235	1393	68	79

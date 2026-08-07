@@ -171,8 +171,10 @@ impl RemapContext {
                 arg_tys,
                 ret_tys,
                 results,
+                variadic,
             } => EffectfulOp::Call {
                 func: func.clone(),
+                variadic: *variadic,
                 args: args
                     .iter()
                     .map(|a| EffOperand::Class(self.remap_class_id(a.class())))

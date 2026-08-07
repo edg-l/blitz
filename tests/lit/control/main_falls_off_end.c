@@ -21,7 +21,7 @@
 // falling off the end of `main` is legal.
 //
 // EXIT: 0
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 double f0(int p0, int p1, double p2, int p3, double p4, double p5, int p6) {
     return -22.0;
 }

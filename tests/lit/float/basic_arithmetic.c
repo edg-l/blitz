@@ -3,7 +3,7 @@
 // OUTPUT: 7.000000
 // OUTPUT: 1.750000
 
-extern int printf(char* fmt, double x);
+extern int printf(char* fmt, ...);
 int main() {
     double a = 3.5;
     double b = 2.0;

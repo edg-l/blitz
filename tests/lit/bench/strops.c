@@ -11,7 +11,7 @@
 // EXIT: 0
 
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int my_strlen(char* s) {
     int n = 0;

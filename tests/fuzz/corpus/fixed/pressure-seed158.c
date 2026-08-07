@@ -8,7 +8,7 @@
 // Doubles hold integral values and use only + - *, so every result is
 // exact and no reference compiler can legally disagree.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int f0(int p0, int p1, double p2, double p3, int p4, int p5, int p6, int p7, double p8, int p9, double p10, int p11) {
     if ((p5 >= ((65 & 1023) & 790))) {

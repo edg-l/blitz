@@ -3,7 +3,7 @@
 // OUTPUT: small: 0.000001
 // OUTPUT: div_large: 0.500000
 
-extern int printf(char* fmt, double x);
+extern int printf(char* fmt, ...);
 
 int main() {
     double a = 3.5;

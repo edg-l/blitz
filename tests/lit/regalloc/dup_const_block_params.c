@@ -17,7 +17,7 @@
 //
 // OUTPUT: -780
 // EXIT: 0
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 double f0(int p0, double p1, double p2, int p3, int p4, int p5, double p6) {
     if ((((p5 & 255) << 4) <= p0)) {
         if ((p0 <= p0)) {

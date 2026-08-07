@@ -4,7 +4,7 @@
 // OUTPUT: counter = 15
 // OUTPUT: counter = 30
 
-extern int printf(char* fmt, int a);
+extern int printf(char* fmt, ...);
 
 int counter = 0;
 

@@ -19,7 +19,7 @@
 // OUTPUT: 87654321
 // OUTPUT: 616173
 // EXIT: 0
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 double ten_doubles(double a, double b, double c, double d, double e, double f,

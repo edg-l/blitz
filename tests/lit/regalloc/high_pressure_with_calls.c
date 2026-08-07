@@ -15,7 +15,7 @@
 //
 // OUTPUT: 88
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 int helper(int x) {

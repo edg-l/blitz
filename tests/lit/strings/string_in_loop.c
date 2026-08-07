@@ -5,7 +5,7 @@
 // CHECK: lea
 // CHECK: call
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 int main() {
     for (int i = 0; i < 3; i = i + 1) {
         printf("i=%d\n", i);

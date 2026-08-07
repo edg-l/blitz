@@ -14,7 +14,7 @@
 // OUTPUT: 15.000000
 // EXIT: 0
 
-extern int printf(char* fmt, double x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 double add_one(double x) {

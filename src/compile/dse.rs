@@ -262,6 +262,7 @@ mod tests {
                 arg_tys: vec![],
                 ret_tys: vec![],
                 results: vec![],
+                variadic: false,
             },
             EffectfulOp::Store {
                 addr: EffOperand::Class(s0),

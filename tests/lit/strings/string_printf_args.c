@@ -6,7 +6,7 @@
 // call to printf
 // CHECK: call
 
-extern int printf(char* fmt, int a, int b, int c);
+extern int printf(char* fmt, ...);
 int main() {
     printf("%d + %d = %d\n", 10, 20, 30);
     return 0;

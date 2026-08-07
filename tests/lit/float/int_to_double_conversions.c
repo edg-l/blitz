@@ -19,7 +19,7 @@
 // OUTPUT: from_long: 5000000000.000000
 // EXIT: 0
 
-extern int printf(char* fmt, double x);
+extern int printf(char* fmt, ...);
 
 double from_param(int n) {
     return n;

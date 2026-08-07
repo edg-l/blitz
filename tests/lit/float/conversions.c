@@ -3,7 +3,7 @@
 // OUTPUT: mixed_add: 15.000000
 // OUTPUT: float_to_double: 1.250000
 
-extern int printf(char* fmt, double x);
+extern int printf(char* fmt, ...);
 
 int main() {
     int i = 42;

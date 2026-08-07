@@ -15,7 +15,7 @@
 // OUTPUT: 65
 // EXIT: 0
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 int compute(int n) {

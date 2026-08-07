@@ -231,6 +231,14 @@ pub enum EffectfulOp {
         arg_tys: Vec<Type>,
         ret_tys: Vec<Type>,
         results: Vec<EffOperand>,
+        /// The callee was declared with a trailing `...`.
+        ///
+        /// SysV passes the count of vector argument registers in AL and a
+        /// variadic callee branches on it, so only these calls have to set it.
+        /// A caller that does not know cannot leave it out: the callee reads AL
+        /// whatever the prototype said, so a fixed declaration of a function
+        /// that is really variadic must be corrected rather than trusted.
+        variadic: bool,
     },
 
     /// Conditional branch to `bb_true` or `bb_false` depending on flags.

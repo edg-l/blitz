@@ -10,7 +10,7 @@
 // EXIT: 0
 
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int popcount_naive(unsigned int v) {
     int n = 0;

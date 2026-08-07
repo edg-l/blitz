@@ -16,7 +16,7 @@
 //
 // `argc` keeps the second group off the folding path, so both are covered.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int main(int argc, char** argv) {
     unsigned int folded = 4294967295u;

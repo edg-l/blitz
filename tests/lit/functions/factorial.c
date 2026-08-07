@@ -16,7 +16,7 @@
 // CHECK: call
 // CHECK-LABEL: # main
 
-extern int printf(char* fmt, int a, int b);
+extern int printf(char* fmt, ...);
 
 int factorial(int n) {
     if (n <= 1) {

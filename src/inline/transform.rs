@@ -249,8 +249,10 @@ fn substitute_class_ids(op: &EffectfulOp, subst: &[(ClassId, ClassId)]) -> Effec
             arg_tys,
             ret_tys,
             results,
+            variadic,
         } => EffectfulOp::Call {
             func: func.clone(),
+            variadic: *variadic,
             args: args
                 .iter()
                 .map(|a| EffOperand::Class(sub(a.class())))

@@ -28,7 +28,7 @@
 // Doubles hold integral values and use only + - *, so every result is
 // exact and no reference compiler can legally disagree.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int f0(double p0, int p1, double p2, double p3, int p4, double p5, double p6, int p7, int p8) {
     p4 = ((((p1 & 1023) | 541) & 255) << 2);

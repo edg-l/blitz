@@ -33,7 +33,7 @@
 // EXIT: 0
 // OUTPUT: 101
 // FLAGS: -O0
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 double f0(double p0, double p1, double p2, int p3, double p4, int p5, int p6) {
     return (((p3 & 1023) & 768) & 63);
 }

@@ -4,7 +4,7 @@
 
 extern int counter;
 extern void increment();
-extern int printf(char *fmt, int x);
+extern int printf(char* fmt, ...);
 
 int main() {
     increment();

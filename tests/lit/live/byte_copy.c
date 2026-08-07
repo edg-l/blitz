@@ -16,7 +16,7 @@
 // OUTPUT: 324480
 // EXIT: 0
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int main(int argc, char** argv) {
     unsigned char src[256];

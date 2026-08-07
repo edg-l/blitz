@@ -8,7 +8,7 @@
 // Doubles hold integral values and use only + - *, so every result is
 // exact and no reference compiler can legally disagree.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 double f0(int p0, double p1, double p2, double p3, double p4, double p5, int p6, int p7) {
     if (((p7 + 25) == (p6 * p6))) {

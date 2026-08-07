@@ -1,7 +1,7 @@
 // EXIT: 0
 // OUTPUT: fib(20) = 6765
 
-extern int printf(char* fmt, int a);
+extern int printf(char* fmt, ...);
 
 int fib(int n) {
     if (n <= 1) {

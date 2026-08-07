@@ -11,7 +11,7 @@
 // EXIT: 0
 
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int probe(int* keys, int mask, int key) {
     // Unsigned so the multiply wraps rather than overflowing a signed int.

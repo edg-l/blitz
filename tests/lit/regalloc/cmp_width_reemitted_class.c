@@ -30,7 +30,7 @@
 //
 // EXIT: 0
 // OUTPUT: 5
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 int main() {
     int x = 5;
     int v2 = 14;

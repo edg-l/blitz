@@ -915,6 +915,7 @@ mod tests {
                 arg_tys: vec![Type::I64; 3],
                 ret_tys: vec![],
                 results: vec![],
+                variadic: false,
             }),
             3,
         );
@@ -979,6 +980,7 @@ mod tests {
                 arg_tys: vec![],
                 ret_tys: vec![],
                 results: vec![],
+                variadic: false,
             }],
         );
         assert!(operands_of(&schedule, PseudoOp::VoidCallBarrier).is_empty());
@@ -1000,6 +1002,7 @@ mod tests {
                 arg_tys: vec![Type::I64; 2],
                 ret_tys: vec![Type::I64],
                 results: vec![committed(2)],
+                variadic: false,
             }],
         );
         assert_eq!(

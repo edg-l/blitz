@@ -590,14 +590,12 @@ without taking it is picking up work that cannot land.
 
 ### P4 -- Unblocks only if they gate measurement
 
-- [ ] **Tell the backend which calls are variadic.** tinyc prototypes carry
-      `...` now, but `EffectfulOp::Call` does not, so `mov al, N` is emitted at
-      every call site including the fixed ones. Two bytes per call, and the
-      only reason AL is unconditional. The callee's half is a different matter:
-      SysV's 176-byte register save area needs the IR to name argument
-      registers that are not declared parameters, which is one new pseudo-op --
-      and `va_arg` needs a *type* at the use site, so it needs builtins, which
-      is the wall half of P2 is already behind.
+- [ ] **Variadic function *definitions*.** The caller's half is done. The
+      callee's needs one new pseudo-op -- SysV's 176-byte register save area
+      has to name argument registers that are not declared parameters, which
+      `Op::Param` cannot express -- and `va_arg` needs a *type* at the use
+      site, so it needs builtins, which is the wall half of P2 is behind.
+      Declaring one is a parse error until then.
 - [ ] Switch/case + dense jump-table lowering (frontend + backend).
 - [x] `>6` int / `>8` float args via stack, callee read side. A stack-passed
       double is read with `movsd`, not a `mov` of an `OpSize`, and the caller

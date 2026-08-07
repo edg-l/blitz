@@ -17,7 +17,7 @@
 // CHECK: call
 // CHECK-LABEL: # main
 
-extern int printf(char* fmt, int a, int b);
+extern int printf(char* fmt, ...);
 
 int fib(int n) {
     if (n <= 1) {

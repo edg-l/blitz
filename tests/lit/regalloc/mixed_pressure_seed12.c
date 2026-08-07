@@ -19,7 +19,7 @@
 // Doubles hold integral values and use only + - *, so every result is
 // exact and no reference compiler can legally disagree.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int f0(int p0, int p1, double p2, double p3, double p4, int p5, int p6, int p7, int p8, double p9, int p10, double p11) {
     if ((p6 > p5)) {

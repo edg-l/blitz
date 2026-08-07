@@ -19,7 +19,7 @@
 // OUTPUT: -7
 // OUTPUT: 5
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int opaque(int x) { return x; }
 

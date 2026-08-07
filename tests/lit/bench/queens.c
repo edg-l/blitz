@@ -8,7 +8,7 @@
 // EXIT: 0
 
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int place(int row, int n, int* cols, int* diag1, int* diag2) {
     if (row == n) {

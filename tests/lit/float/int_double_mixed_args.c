@@ -9,7 +9,7 @@
 // OUTPUT: mixed: 15.700000
 // EXIT: 0
 
-extern int printf(char* fmt, double x);
+extern int printf(char* fmt, ...);
 
 double mixed(int n, double x) {
     return n + x;

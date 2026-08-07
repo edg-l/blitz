@@ -387,6 +387,7 @@ pub(super) fn lower_effectful_op(
             arg_tys,
             ret_tys,
             results,
+            variadic,
         } => {
             // After spilling, the original arg vregs may share a register
             // (their defs are short-lived after the spill store). The actual
@@ -416,24 +417,26 @@ pub(super) fn lower_effectful_op(
             // spill XMM0-7 into its register save area, so a stale AL of zero
             // makes `printf("%f", x)` read a save area that was never written.
             //
-            // Blitz cannot tell a variadic callee from a fixed one: nothing on
-            // `EffectfulOp::Call` says so. tinyc knows -- its prototypes carry
-            // `...` since variadic calls landed -- and does not pass it on, so
-            // AL is set on every call. A non-variadic callee ignores it, and AL
-            // is caller-saved, so this costs 2 bytes and clobbers nothing live.
-            // Plumbing the flag through would save those 2 bytes per fixed
-            // call. `mov` is deliberate:
+            // Only for a callee declared `...`. A fixed callee never reads AL,
+            // and setting it on every call was 2.18% of the instructions blitz
+            // emitted. The declaration is load-bearing rather than advisory:
+            // real `printf` reads AL whatever a prototype claims, so declaring
+            // a variadic function with a fixed signature and passing it a
+            // double reads a register save area that was never written.
+            // `mov` is deliberate:
             // `xor al, al` would be shorter for the zero case but writes
             // EFLAGS, which may be live across the argument setup.
-            let n_xmm_args = locs
-                .iter()
-                .filter(|l| matches!(l, ArgLoc::Reg(r) if r.is_xmm()))
-                .count();
-            insts.push(MachInst::MovRI {
-                size: OpSize::S8,
-                dst: Operand::Reg(Reg::RAX),
-                imm: n_xmm_args as i64,
-            });
+            if *variadic {
+                let n_xmm_args = locs
+                    .iter()
+                    .filter(|l| matches!(l, ArgLoc::Reg(r) if r.is_xmm()))
+                    .count();
+                insts.push(MachInst::MovRI {
+                    size: OpSize::S8,
+                    dst: Operand::Reg(Reg::RAX),
+                    imm: n_xmm_args as i64,
+                });
+            }
 
             insts.push(MachInst::CallDirect {
                 target: callee.clone(),

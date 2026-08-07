@@ -12,7 +12,7 @@
 // OUTPUT: 13.750000
 // EXIT: 0
 
-extern int printf(char* fmt, double x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 double scale(double x) {

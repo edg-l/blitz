@@ -21,7 +21,7 @@
 // OUTPUT: 20
 // EXIT: 0
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int probe(int* keys, int mask, int key) {
     unsigned int h = ((unsigned int)key * 2654435761) & (unsigned int)mask;

@@ -3,7 +3,7 @@
 // OUTPUT: sum = 150
 // OUTPUT: count = 5
 
-extern int printf(char* fmt, int a);
+extern int printf(char* fmt, ...);
 extern int puts(char* s);
 extern char* malloc(int size);
 

@@ -242,6 +242,7 @@ impl Verifier<'_> {
                 arg_tys,
                 ret_tys,
                 results,
+                variadic: _,
             } => {
                 if args.len() != arg_tys.len() {
                     self.error(format!(
@@ -622,6 +623,7 @@ mod tests {
             arg_tys: vec![Type::I64],
             ret_tys: vec![],
             results: vec![],
+            variadic: false,
         };
         func.blocks[0].ops.insert(0, call);
         let errors = verify_function(&func, &egraph);

@@ -21,7 +21,7 @@
 // OUTPUT: 21.000000
 // OUTPUT: 28.000000
 // OUTPUT: 36.000000
-extern int printf(char* fmt, double x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 double six(int a, int b, int c, int d, int e, int f) {

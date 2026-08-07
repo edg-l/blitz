@@ -554,7 +554,7 @@ def build(seed, shape, n_int, n_dbl, scale=1.0):
         "// Doubles hold integral values and use only + - *, so every result is",
         "// exact and no reference compiler can legally disagree.",
         "",
-        "extern int printf(char* fmt, int x);",
+        "extern int printf(char* fmt, ...);",
         "",
     ]
     lines += [f.render() + "\n" for f in g.funcs]

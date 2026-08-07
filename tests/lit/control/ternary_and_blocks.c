@@ -9,7 +9,7 @@
 // A bare `{ ... }` was not a statement at all, which is also the only way to
 // write a scope that is not a loop or an `if`.
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 __attribute__((noinline))
 int pick(int x) {

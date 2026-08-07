@@ -296,6 +296,7 @@ mod tests {
                 arg_tys: vec![],
                 ret_tys: vec![],
                 results: vec![],
+                variadic: false,
             },
             EffectfulOp::Load {
                 addr: EffOperand::Class(s0),

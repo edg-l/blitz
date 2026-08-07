@@ -23,7 +23,7 @@
 // 127 lines, from gen_c.py seed 4.
 //
 // OUTPUT: 303
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int f0(int p0, int p1, double p2, double p3, double p4, double p5, int p6, double p7, double p8, double p9, double p10, double p11) {
     if ((p1 > p6)) {

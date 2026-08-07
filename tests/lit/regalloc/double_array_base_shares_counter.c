@@ -25,7 +25,7 @@
 // OUTPUT: 28
 // EXIT: 0
 
-extern int printf(char* fmt, int x);
+extern int printf(char* fmt, ...);
 
 int main() {
     double x[8];

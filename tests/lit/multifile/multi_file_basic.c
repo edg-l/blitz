@@ -5,7 +5,7 @@
 
 extern int add(int a, int b);
 extern int multiply(int a, int b);
-extern int printf(char *fmt, int x);
+extern int printf(char* fmt, ...);
 
 int main() {
     printf("%d\n", add(3, 4));

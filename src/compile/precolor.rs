@@ -145,6 +145,7 @@ mod tests {
             arg_tys: vec![Type::I64; arg_count as usize],
             ret_tys: vec![if float_ret { Type::F64 } else { Type::I64 }],
             results: vec![operand(100)],
+            variadic: false,
         }
     }
 
