@@ -303,6 +303,15 @@ fn const_store_to_imm(mov: &MachInst, store: &MachInst, dead_after: bool) -> Opt
     })
 }
 
+/// Whether `inst` loads exactly the bytes a store of `size` to `addr` wrote:
+/// same width, same address expression.
+fn reloads_stored_bytes(inst: &MachInst, size: OpSize, addr: &Addr) -> bool {
+    matches!(
+        inst,
+        MachInst::MovRM { size: s2, dst: _, addr: a2 } if *s2 == size && a2 == addr
+    )
+}
+
 /// Emit `inst`, unless it is a 64-bit move of a register to itself.
 ///
 /// Such a move is architecturally a no-op, and it reaches here two ways: it can
@@ -347,6 +356,7 @@ fn push_inst(out: &mut Vec<MachInst>, inst: MachInst) {
 ///     the same for `add rD, imm` / `sub rD, imm` / `add rD, rD` / `shl rD, 1`.
 /// 11. `mov rX, k; mov [addr], rX` -> `mov [addr], k` where nothing else reads
 ///     the register the constant was materialized into.
+/// 12. `mov [addr], k; mov rY, [addr]` -> `mov [addr], k; mov rY, k`.
 ///
 /// `tail` is what the block's terminator lowered to, up to its first label: the
 /// phi copies on the outgoing edge and the branch itself. Only the forward scans
@@ -532,12 +542,7 @@ pub fn peephole(insts: Vec<MachInst>, tail: &[MachInst]) -> Vec<MachInst> {
             // 8. Store-load forwarding: mov [addr], rX; mov rY, [addr] -> mov [addr], rX; mov rY, rX.
             // Same size, same address. Avoids the redundant memory round-trip.
             MachInst::MovMR { size, addr, src }
-                if i + 1 < body_len
-                    && matches!(
-                        &insts[i + 1],
-                        MachInst::MovRM { size: s2, dst: _, addr: a2 }
-                        if s2 == size && a2 == addr
-                    ) =>
+                if i + 1 < body_len && reloads_stored_bytes(&insts[i + 1], *size, addr) =>
             {
                 push_inst(&mut result, insts[i].clone());
                 // Replace the load with a reg-reg move.
@@ -548,6 +553,29 @@ pub fn peephole(insts: Vec<MachInst>, tail: &[MachInst]) -> Vec<MachInst> {
                             size: *s2,
                             dst: dst.clone(),
                             src: src.clone(),
+                        },
+                    );
+                }
+                i += 2;
+                continue;
+            }
+
+            // 12. The same forwarding through a stored immediate:
+            // `mov [addr], k; mov rY, [addr]` -> `mov [addr], k; mov rY, k`.
+            // At every size a `mov rY, k` writes the bytes of `rY` that a load
+            // of the stored bytes would: both zero-extend at 32 bits and both
+            // leave the upper bits alone below that.
+            MachInst::MovMI { size, addr, imm }
+                if i + 1 < body_len && reloads_stored_bytes(&insts[i + 1], *size, addr) =>
+            {
+                push_inst(&mut result, insts[i].clone());
+                if let MachInst::MovRM { size: s2, dst, .. } = &insts[i + 1] {
+                    push_inst(
+                        &mut result,
+                        MachInst::MovRI {
+                            size: *s2,
+                            dst: dst.clone(),
+                            imm: i64::from(*imm),
                         },
                     );
                 }
@@ -970,6 +998,56 @@ mod tests {
                 src: reg(Reg::RAX),
             }
         );
+    }
+
+    #[test]
+    fn store_load_forwarding_through_a_stored_immediate() {
+        use crate::x86::addr::Addr;
+        let addr = Addr::new(Some(Reg::RSP), None, 1, 8);
+        let insts = vec![
+            MachInst::MovMI {
+                size: OpSize::S32,
+                addr: addr.clone(),
+                imm: 11,
+            },
+            MachInst::MovRM {
+                size: OpSize::S32,
+                dst: reg(Reg::RCX),
+                addr: addr.clone(),
+            },
+        ];
+        let out = peephole(insts, &[]);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], MachInst::MovMI { imm: 11, .. }));
+        assert_eq!(
+            out[1],
+            MachInst::MovRI {
+                size: OpSize::S32,
+                dst: reg(Reg::RCX),
+                imm: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn store_immediate_load_different_size_not_forwarded() {
+        use crate::x86::addr::Addr;
+        let addr = Addr::new(Some(Reg::RSP), None, 1, 0);
+        let insts = vec![
+            MachInst::MovMI {
+                size: OpSize::S32,
+                addr: addr.clone(),
+                imm: 7,
+            },
+            MachInst::MovRM {
+                size: OpSize::S64,
+                dst: reg(Reg::RCX),
+                addr: addr.clone(),
+            },
+        ];
+        let out = peephole(insts, &[]);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[1], MachInst::MovRM { .. }));
     }
 
     #[test]
