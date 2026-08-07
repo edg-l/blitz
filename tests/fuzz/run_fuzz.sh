@@ -11,20 +11,32 @@
 # Usage:
 #   bash tests/fuzz/run_fuzz.sh [count] [shape]
 #
-#   count   number of programs (default 20)
-#   shape   mixed | args | pressure  (default mixed)
+#   count   number of programs per shape (default 400)
+#   shape   mixed | args | pressure | all  (default all)
+#
+# THE WIDTH IS THE POINT. A narrow sweep is not a cheaper version of this check,
+# it is a different and much weaker one: at 30 seeds a shape all three shapes
+# were green while seven programs miscompiled, and the -O1 allocator bug in
+# corpus/fixed/args-seed310.c is at seed 310 and appears in one shape only.
+# Every default here is measured rather than chosen -- 400 seeds is 51s for
+# `args`, 49s for `mixed` and 64s for `pressure`, so the whole sweep is under
+# three minutes, which is what the other harnesses cost.
 #
 # Failing programs are left in the work directory and the path is printed. Save
 # one into tests/fuzz/corpus/ to make it part of the seconds-long regression
-# check; a 200-seed sweep is minutes and is not run between every change.
+# check.
 #
 # Honors BLITZ_VERIFY, CC, and COMPILE_TIMEOUT (seconds per compile before it is
 # reported as a hang; default 60).
 #
-# Set RESULTS=<path> to also write one machine-readable line per seed and level:
+# Set RESULTS=<path> to also write one machine-readable line per program and
+# level:
 #
-#   <seed> <level> pass
-#   <seed> <level> fail <kind>
+#   <shape>-<seed> <level> pass
+#   <shape>-<seed> <level> fail <kind>
+#
+# The shape is part of the key because one sweep covers all three and seed 1 is
+# a different program in each.
 #
 # with kind one of no-compile, hang, exit-nonzero, wrong-predicted, wrong-cc, or
 # levels-disagree (recorded against level `both`). compare_ref.sh joins two of
@@ -42,8 +54,8 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PROFILE="${PROFILE:-checked}"
 TINYC="${TINYC:-$ROOT/target/$PROFILE/tinyc}"
 CC="${CC:-cc}"
-COUNT="${1:-20}"
-SHAPE="${2:-mixed}"
+COUNT="${1:-400}"
+SHAPE="${2:-all}"
 # Seconds any single compile may take before it counts as a hang.
 COMPILE_TIMEOUT="${COMPILE_TIMEOUT:-60}"
 
@@ -60,35 +72,46 @@ if [ -n "$RESULTS" ]; then
     : > "$RESULTS"
 fi
 
-pass=0
-fail=0
-skip=0
+if [ "$SHAPE" = all ]; then
+    SHAPES="mixed args pressure"
+else
+    SHAPES="$SHAPE"
+fi
 
-seed=1
-while [ "$seed" -le "$COUNT" ]; do
-    src="$WORK/p$seed.c"
-    if ! python3 "$SCRIPT_DIR/gen_c.py" --seed "$seed" --shape "$SHAPE" --out "$src" 2>/dev/null; then
-        skip=$((skip + 1))
+total_fail=0
+
+for shape in $SHAPES; do
+    pass=0
+    fail=0
+    skip=0
+
+    seed=1
+    while [ "$seed" -le "$COUNT" ]; do
+        src="$WORK/p$shape$seed.c"
+        if ! python3 "$SCRIPT_DIR/gen_c.py" --seed "$seed" --shape "$shape" --out "$src" 2>/dev/null; then
+            skip=$((skip + 1))
+            seed=$((seed + 1))
+            continue
+        fi
+
+        st=0
+        check_program "$shape-$seed" "$shape seed $seed" "$src" || st=$?
+        case "$st" in
+            0) pass=$((pass + 1)); printf "." ;;
+            2) skip=$((skip + 1)) ;;
+            *) fail=$((fail + 1)) ;;
+        esac
         seed=$((seed + 1))
-        continue
-    fi
+    done
 
-    st=0
-    check_program "$seed" "seed $seed" "$src" || st=$?
-    case "$st" in
-        0) pass=$((pass + 1)); printf "." ;;
-        2) skip=$((skip + 1)) ;;
-        *) fail=$((fail + 1)) ;;
-    esac
-    seed=$((seed + 1))
+    printf "\n\n%s programs (%s): %d passed, %d failed, %d ungeneratable\n" \
+        "$COUNT" "$shape" "$pass" "$fail" "$skip"
+    total_fail=$((total_fail + fail))
 done
 
-printf "\n\n%s programs (%s): %d passed, %d failed, %d ungeneratable\n" \
-    "$COUNT" "$SHAPE" "$pass" "$fail" "$skip"
-
-if [ "$fail" -eq 0 ]; then
+if [ "$total_fail" -eq 0 ]; then
     rm -rf "$WORK"
 else
     echo "failing programs kept in $WORK"
 fi
-[ "$fail" -eq 0 ]
+[ "$total_fail" -eq 0 ]
