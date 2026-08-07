@@ -315,7 +315,23 @@ impl Parser {
             // Extern function declaration: extern <type> <name>(<params>);
             self.expect(Token::LParen)?;
             let mut params = Vec::new();
+            let mut variadic = false;
             while !self.at(Token::RParen) {
+                if self.at(Token::Ellipsis) {
+                    self.advance();
+                    variadic = true;
+                    // `...` is the last thing in the list, and C89 wants a
+                    // named parameter before it for `va_start` to work from.
+                    if params.is_empty() {
+                        let sp = *self.span();
+                        return Err(TinyErr {
+                            line: sp.line,
+                            col: sp.col,
+                            msg: "'...' needs at least one parameter before it".into(),
+                        });
+                    }
+                    break;
+                }
                 let mut param_type = self.parse_type()?;
                 // Optional parameter name -- discard if present
                 if let Token::Ident(_) = self.peek() {
@@ -336,6 +352,7 @@ impl Parser {
                 name,
                 return_type: ty,
                 params,
+                variadic,
                 span: extern_span,
             }))
         } else {
@@ -385,7 +402,21 @@ impl Parser {
 
         self.expect(Token::LParen)?;
         let mut params = Vec::new();
+        let mut variadic = false;
         while !self.at(Token::RParen) {
+            if self.at(Token::Ellipsis) {
+                self.advance();
+                variadic = true;
+                if params.is_empty() {
+                    let sp = *self.span();
+                    return Err(TinyErr {
+                        line: sp.line,
+                        col: sp.col,
+                        msg: "'...' needs at least one parameter before it".into(),
+                    });
+                }
+                break;
+            }
             let mut param_type = self.parse_type()?;
             let param_name = self.expect_ident("parameter name")?;
             // Parse array dimensions and decay to pointer
@@ -407,10 +438,20 @@ impl Parser {
                 name,
                 return_type,
                 params: param_types,
+                variadic,
                 span: fn_span,
             }));
         }
 
+        // Only the caller's half is implemented. Naming the callee-side gap
+        // here beats compiling a body whose `...` arguments it cannot read.
+        if variadic {
+            return Err(TinyErr {
+                line: fn_span.line,
+                col: fn_span.col,
+                msg: "variadic function definitions are not supported".into(),
+            });
+        }
         let body = self.parse_block()?;
         Ok(FnOrForward::Fn(FnDef {
             name,

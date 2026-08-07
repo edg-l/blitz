@@ -841,13 +841,25 @@ impl<'b> FnCtx<'b> {
         args: &[SpannedExpr],
         call_span: Span,
     ) -> Result<(Value, CType), TinyErr> {
-        let (ret_type, param_types) = self
+        let (ret_type, param_types, variadic) = self
             .fn_signatures
             .get(name)
-            .map(|(r, p)| (r.clone(), p.clone()))
+            .map(|sig| (sig.ret.clone(), sig.params.clone(), sig.variadic))
             .ok_or_else(|| err(call_span, format!("undefined function '{name}'")))?;
 
-        if args.len() != param_types.len() {
+        if variadic {
+            if args.len() < param_types.len() {
+                return Err(err(
+                    call_span,
+                    format!(
+                        "function '{}' expects at least {} argument(s), got {}",
+                        name,
+                        param_types.len(),
+                        args.len()
+                    ),
+                ));
+            }
+        } else if args.len() != param_types.len() {
             return Err(err(
                 call_span,
                 format!(
@@ -861,7 +873,29 @@ impl<'b> FnCtx<'b> {
 
         let mut arg_vals: Vec<Value> = Vec::new();
         for (i, arg_expr) in args.iter().enumerate() {
-            let param_ty = &param_types[i];
+            // Past the declared parameters there is no type to convert to, so
+            // C17 6.5.2.2p7's default argument promotions apply instead: the
+            // integer promotions, and `float` to `double`. An array has already
+            // decayed at parse time.
+            let Some(param_ty) = param_types.get(i) else {
+                let (arg_val, arg_ty) = self.compile_expr(arg_expr)?;
+                if arg_ty.is_struct() {
+                    return Err(err(
+                        call_span,
+                        format!(
+                            "passing a struct through '{name}''s variadic tail is not supported"
+                        ),
+                    ));
+                }
+                let (arg_val, arg_ty) = self.emit_promote(arg_val, &arg_ty);
+                let promoted = if arg_ty == CType::Float {
+                    self.emit_convert(arg_val, &arg_ty, &CType::Double)
+                } else {
+                    arg_val
+                };
+                arg_vals.push(promoted);
+                continue;
+            };
             if let Some(sn) = param_ty.struct_name() {
                 let struct_name = sn.to_owned();
                 let layout = self

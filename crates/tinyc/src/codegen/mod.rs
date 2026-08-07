@@ -31,12 +31,23 @@ pub struct Codegen {
     pub extern_globals: Vec<String>,
 }
 
+/// A callee's declared interface, as the call site needs to see it.
+///
+/// A named struct rather than a tuple because the third field changes what the
+/// first two mean: past `params.len()` a variadic call has no declared type to
+/// convert to, and the default argument promotions apply instead.
+pub(super) struct FnSig {
+    pub(super) ret: CType,
+    pub(super) params: Vec<CType>,
+    pub(super) variadic: bool,
+}
+
 impl Codegen {
     pub fn generate(program: &Program) -> Result<Codegen, TinyErr> {
         let struct_registry = build_struct_registry(&program.struct_defs)?;
 
         // Pre-scan all function signatures before codegen.
-        let mut fn_signatures: HashMap<String, (CType, Vec<CType>)> = HashMap::new();
+        let mut fn_signatures: HashMap<String, FnSig> = HashMap::new();
 
         // Register extern declarations so they are callable with type-checking.
         for ext in &program.extern_decls {
@@ -54,7 +65,11 @@ impl Codegen {
             }
             fn_signatures.insert(
                 ext.name.clone(),
-                (ext.return_type.clone(), ext.params.clone()),
+                FnSig {
+                    ret: ext.return_type.clone(),
+                    params: ext.params.clone(),
+                    variadic: ext.variadic,
+                },
             );
         }
 
@@ -67,7 +82,15 @@ impl Codegen {
                 ));
             }
             let param_types: Vec<CType> = func.params.iter().map(|(ty, _)| ty.clone()).collect();
-            fn_signatures.insert(func.name.clone(), (func.return_type.clone(), param_types));
+            fn_signatures.insert(
+                func.name.clone(),
+                FnSig {
+                    ret: func.return_type.clone(),
+                    params: param_types,
+                    // A definition with `...` is rejected in the parser.
+                    variadic: false,
+                },
+            );
         }
 
         let mut functions = Vec::new();
@@ -162,7 +185,7 @@ pub(super) struct FnCtx<'b> {
     pub(super) stack_slots: HashMap<String, (StackSlot, CType)>,
     pub(super) addressed_vars: HashSet<String>,
     pub(super) fn_return_type: CType,
-    pub(super) fn_signatures: &'b HashMap<String, (CType, Vec<CType>)>,
+    pub(super) fn_signatures: &'b HashMap<String, FnSig>,
     pub(super) struct_registry: &'b StructRegistry,
     pub(super) global_types: &'b HashMap<String, CType>,
     pub(super) loop_stack: Vec<LoopContext>,
@@ -175,7 +198,7 @@ impl<'b> FnCtx<'b> {
     pub(super) fn new(
         builder: &'b mut FunctionBuilder,
         fn_return_type: CType,
-        fn_signatures: &'b HashMap<String, (CType, Vec<CType>)>,
+        fn_signatures: &'b HashMap<String, FnSig>,
         addressed_vars: HashSet<String>,
         struct_registry: &'b StructRegistry,
         global_types: &'b HashMap<String, CType>,

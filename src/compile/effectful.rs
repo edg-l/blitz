@@ -416,10 +416,13 @@ pub(super) fn lower_effectful_op(
             // spill XMM0-7 into its register save area, so a stale AL of zero
             // makes `printf("%f", x)` read a save area that was never written.
             //
-            // Blitz cannot tell a variadic callee from a fixed one -- tinyc
-            // prototypes carry no `...` -- so set AL on every call. A
-            // non-variadic callee ignores it, and AL is caller-saved, so this
-            // costs 2 bytes and clobbers nothing live. `mov` is deliberate:
+            // Blitz cannot tell a variadic callee from a fixed one: nothing on
+            // `EffectfulOp::Call` says so. tinyc knows -- its prototypes carry
+            // `...` since variadic calls landed -- and does not pass it on, so
+            // AL is set on every call. A non-variadic callee ignores it, and AL
+            // is caller-saved, so this costs 2 bytes and clobbers nothing live.
+            // Plumbing the flag through would save those 2 bytes per fixed
+            // call. `mov` is deliberate:
             // `xor al, al` would be shorter for the zero case but writes
             // EFLAGS, which may be live across the argument setup.
             let n_xmm_args = locs

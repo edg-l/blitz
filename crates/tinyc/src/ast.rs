@@ -220,6 +220,9 @@ pub struct ExternDecl {
     pub name: String,
     pub return_type: CType,
     pub params: Vec<CType>,
+    /// Declared with a trailing `...`. Only the caller's half is supported:
+    /// defining a variadic function is a parse error.
+    pub variadic: bool,
     pub span: Span,
 }
 

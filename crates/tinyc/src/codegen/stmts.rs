@@ -15,7 +15,7 @@ use super::{FnCtx, LoopContext, err};
 
 pub(super) fn compile_fn(
     fn_def: &FnDef,
-    fn_sigs: &HashMap<String, (CType, Vec<CType>)>,
+    fn_sigs: &HashMap<String, super::FnSig>,
     struct_registry: &StructRegistry,
     global_types: &HashMap<String, CType>,
     rodata: &mut Vec<blitz::emit::object::GlobalInfo>,

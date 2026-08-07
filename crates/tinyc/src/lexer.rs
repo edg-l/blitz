@@ -69,6 +69,7 @@ pub enum Token {
     // Struct
     Struct,
     Dot,
+    Ellipsis,
     Arrow,
     // Punctuation
     Question,
@@ -293,8 +294,15 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                 Token::Semi
             }
             '.' => {
+                // `...` first: the float-literal lookahead below would take the
+                // second dot for the start of `.5`.
+                if pos + 2 < chars.len() && chars[pos + 1] == '.' && chars[pos + 2] == '.' {
+                    pos += 3;
+                    col += 3;
+                    Token::Ellipsis
+                }
                 // Check if this is a float literal starting with '.' (e.g. `.5`)
-                if pos + 1 < chars.len() && chars[pos + 1].is_ascii_digit() {
+                else if pos + 1 < chars.len() && chars[pos + 1].is_ascii_digit() {
                     // Parse as float literal starting with '.'
                     let start = pos;
                     pos += 1; // consume '.'

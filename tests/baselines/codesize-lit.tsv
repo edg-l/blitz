@@ -362,6 +362,8 @@ functions/three_args.c	O0	31	132	9	9
 functions/three_args.c	O1	2	6	0	0
 functions/two_args.c	O0	21	91	6	6
 functions/two_args.c	O1	2	6	0	0
+functions/variadic_call.c	O0	226	1203	44	62
+functions/variadic_call.c	O1	138	578	6	23
 functions/void_call_multi_arg.c	O0	83	368	15	24
 functions/void_call_multi_arg.c	O1	41	188	0	0
 functions/void_function.c	O0	8	35	1	1
