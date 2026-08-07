@@ -798,8 +798,12 @@ fn apply_splits_for_overshoot(
 /// `loop_depths` maps VReg -> loop nesting depth (from `compute_loop_depths`).
 /// `slots` is the function's slot allocator: every slot this plan spills to comes
 /// from it, so the numbers cannot collide with another pass's.
+///
+/// `dom` is the function's dominator tree, supplied by the caller because the
+/// splitter rewrites schedules rather than blocks: the tree is the same in every
+/// round, so deriving it here would rebuild an unchanged answer a dozen times.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_splits(
+pub(super) fn plan_splits(
     block_schedules: &[Vec<ScheduledInst>],
     class_to_vreg: &ClassVRegMap,
     extraction: &ExtractionResult,
@@ -812,6 +816,7 @@ pub fn plan_splits(
     slots: &mut SlotAllocator,
     loop_depths: &BTreeMap<VReg, u32>,
     func: &Function,
+    dom: &super::cfg::DomOrder,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     already_slot_spilled: &BlockParamSlotMap,
 ) -> SplitPlan {
@@ -855,6 +860,7 @@ pub fn plan_splits(
     // generic pressure paths cannot express, so whatever this plans has to win.
     detect_blockparam_slot_routing(
         func,
+        dom,
         egraph,
         block_param_map,
         block_schedules,
@@ -1257,6 +1263,7 @@ fn find_block_param_vreg(
 #[allow(clippy::too_many_arguments)]
 fn detect_blockparam_slot_routing(
     func: &Function,
+    dom: &super::cfg::DomOrder,
     egraph: &EGraph,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     block_schedules: &[Vec<ScheduledInst>],
@@ -1429,12 +1436,10 @@ fn detect_blockparam_slot_routing(
     // blocks' parameters can share a class and hold different values at their
     // respective entries, and one cell cannot carry both. So every position a
     // group names has to belong to one block.
-    let rpo = super::cfg::compute_rpo(func);
-    let idom = super::cfg::compute_idom(func, &rpo);
+    //
     // `routable` asks about dominance once per candidate per over-budget point,
-    // and walking the immediate-dominator chain for each is thousands of steps
-    // on a function whose blocks form a long chain.
-    let dom = super::cfg::DomOrder::new(&idom);
+    // and walking the immediate-dominator chain for each is thousands of steps on
+    // a function whose blocks form a long chain, so `dom` answers by interval.
     let routable = |vreg: VReg, group: &ParamGroup| {
         if !group.positions.iter().all(|p| p.0 == group.positions[0].0) {
             return false;
@@ -2281,6 +2286,11 @@ mod tests {
     use std::cmp::Reverse;
     use std::collections::{BTreeMap, BTreeSet};
 
+    fn dom_order(func: &Function) -> super::super::cfg::DomOrder {
+        let rpo = super::super::cfg::compute_rpo(func);
+        super::super::cfg::DomOrder::new(&super::super::cfg::compute_idom(func, &rpo))
+    }
+
     fn fconst_inst(dst: u32, val: f64) -> ScheduledInst {
         ScheduledInst {
             op: Op::Pure(PureOp::Fconst(val.to_bits(), Type::F64)),
@@ -2357,6 +2367,7 @@ mod tests {
             &mut SlotAllocator::new(),
             &loop_depths,
             &func,
+            &dom_order(&func),
             &egraph.block_param_classes(),
             &BlockParamSlotMap::new(),
         );
@@ -2407,6 +2418,7 @@ mod tests {
             &mut SlotAllocator::new(),
             &loop_depths,
             &func,
+            &dom_order(&func),
             &egraph.block_param_classes(),
             &BlockParamSlotMap::new(),
         );
@@ -2593,6 +2605,7 @@ mod tests {
 
         detect_blockparam_slot_routing(
             &func,
+            &dom_order(&func),
             &egraph,
             &egraph.block_param_classes(),
             &block_schedules,
@@ -2673,6 +2686,7 @@ mod tests {
 
         detect_blockparam_slot_routing(
             &func,
+            &dom_order(&func),
             &egraph,
             &egraph.block_param_classes(),
             &block_schedules,
@@ -2737,6 +2751,7 @@ mod tests {
 
         detect_blockparam_slot_routing(
             &func,
+            &dom_order(&func),
             &egraph,
             &egraph.block_param_classes(),
             &block_schedules,
@@ -2841,6 +2856,7 @@ mod tests {
 
         detect_blockparam_slot_routing(
             &func,
+            &dom_order(&func),
             &egraph,
             &egraph.block_param_classes(),
             &block_schedules,

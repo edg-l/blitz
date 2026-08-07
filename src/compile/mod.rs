@@ -961,6 +961,15 @@ pub fn compile(
         // derivation that can disagree with it.
         let mut phi_uses = barrier::terminator_uses(&block_schedules);
 
+        // The dominator tree of the schedules' own CFG. Every round of the
+        // splitter asks dominance questions, and so does the phi-copy routing
+        // below, but neither changes `func.blocks` -- the splitter rewrites
+        // schedules. One derivation serves all of them.
+        let split_dom = {
+            let rpo = cfg::compute_rpo(func);
+            cfg::DomOrder::new(&cfg::compute_idom(func, &rpo))
+        };
+
         // Pressure-driven splitter.
         // CRITICAL ORDER: apply_plan_to must run BEFORE collect_block_param_vregs_per_block.
         // The splitter may truncate segments, which affects what block params are found.
@@ -996,6 +1005,7 @@ pub fn compile(
                 &mut slots,
                 &loop_depths,
                 func,
+                &split_dom,
                 &block_param_map,
                 &slot_spilled_params,
             );
@@ -1085,9 +1095,7 @@ pub fn compile(
             // slot and the store is already in this block.
             // A back edge is one whose target dominates its source, which is what
             // says the slot was filled before the loop began.
-            let dom_rpo = cfg::compute_rpo(func);
-            let dom_idom = cfg::compute_idom(func, &dom_rpo);
-            let compile_dominates = |a: usize, b: usize| cfg::dominates(a, b, &dom_idom);
+            let compile_dominates = |a: usize, b: usize| split_dom.dominates(a, b);
             for (block_idx, block) in func.blocks.iter().enumerate() {
                 let terminator = block.ops.last().expect("block must have terminator");
                 let dests = barrier::terminator_arg_destinations(terminator);
