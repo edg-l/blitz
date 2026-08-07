@@ -128,6 +128,9 @@ pub struct CompileOptions {
     pub enable_phi_removal: bool,
     /// Enable function inlining before optimization.
     pub enable_inlining: bool,
+    /// Turn a tail call to this same function into a jump to the top of its own
+    /// body. Off at `-O0`: the recursion's frames are what a debugger walks.
+    pub enable_tail_calls: bool,
     /// Maximum inlining rescan iterations per caller function. Each rescan inlines one level
     /// of calls; a depth-3 chain A->B->C->D needs 3 rescans. Note: this limits rescans,
     /// not true nesting depth; a function with many independent leaf calls also consumes
@@ -195,13 +198,14 @@ impl CompileOptions {
                 "dse" => self.enable_dse = on,
                 "phi-removal" => self.enable_phi_removal = on,
                 "inlining" => self.enable_inlining = on,
+                "tail-calls" => self.enable_tail_calls = on,
                 "peephole" => self.enable_peephole = on,
                 "fast-regalloc" => self.enable_fast_regalloc = on,
                 other => {
                     return Err(format!(
                         "BLITZ_PASSES: unknown pass `{other}`; known: licm, dce, \
                          store-forwarding, dse, phi-removal, inlining, peephole, \
-                         fast-regalloc"
+                         fast-regalloc, tail-calls"
                     ));
                 }
             }
@@ -225,6 +229,7 @@ impl CompileOptions {
             enable_dse: false,
             enable_phi_removal: true,
             enable_inlining: false,
+            enable_tail_calls: false,
             max_inline_depth: 3,
             max_inline_nodes: 50,
             inline_cost_threshold: 0,
@@ -247,6 +252,7 @@ impl CompileOptions {
             enable_dse: true,
             enable_phi_removal: true,
             enable_inlining: true,
+            enable_tail_calls: true,
             max_inline_depth: 3,
             max_inline_nodes: 50,
             inline_cost_threshold: 100,
@@ -1756,6 +1762,58 @@ pub fn compile(
             Ok(())
         };
 
+        // Which effectful op of this block, if any, is a tail call to this very
+        // function -- the last one before a `Ret` that returns exactly its result.
+        //
+        // Only self-calls, and only with every argument in a register. A call to
+        // another function would jump to a body whose frame is not this one's, and
+        // a stack argument would have to be written into this function's own
+        // incoming argument area, which is the caller's memory; both are sound to
+        // do and neither is done here.
+        let tail_self_call: Option<usize> = (|| {
+            if !opts.enable_tail_calls {
+                return None;
+            }
+            let EffectfulOp::Ret { val } = block.ops.last()? else {
+                return None;
+            };
+            let last = non_term_ops.len().checked_sub(1)?;
+            let EffectfulOp::Call {
+                func: callee,
+                args,
+                arg_tys,
+                results,
+                variadic,
+                ..
+            } = &non_term_ops[last]
+            else {
+                return None;
+            };
+            if *callee != func.name || *variadic {
+                return None;
+            }
+            if crate::x86::abi::assign_args(&arg_tys)
+                .iter()
+                .any(|l| !matches!(l, crate::x86::abi::ArgLoc::Reg(_)))
+            {
+                return None;
+            }
+            // The returned value has to be the call's result and nothing else,
+            // or the call is not in tail position however it looks.
+            let same = match (val, results.first()) {
+                (None, None) => true,
+                (Some(v), Some(r)) => {
+                    egraph.unionfind.find_immutable(v.class())
+                        == egraph.unionfind.find_immutable(r.class())
+                }
+                _ => false,
+            };
+            if !same || args.len() != arg_tys.len() {
+                return None;
+            }
+            Some(last)
+        })();
+
         let mut pending: Vec<ScheduledInst> = Vec::new();
         let mut barrier_k = 0usize;
         for inst in full_schedule_for_barriers.iter() {
@@ -1782,6 +1840,8 @@ pub fn compile(
                     &egraph.unionfind,
                     full_schedule_for_barriers,
                     &frame_layout,
+                    (tail_self_call == Some(barrier_k))
+                        .then(|| func.blocks[0].id as crate::x86::inst::LabelId),
                 )?);
             }
             barrier_k += 1;
@@ -1838,28 +1898,34 @@ pub fn compile(
             }
         }
 
-        // Handle the terminator.
+        // Handle the terminator. A tail self-call has already jumped, so the
+        // `Ret` it stood in front of is unreachable and its epilogue would be
+        // dead code after an unconditional jump.
         let terminator = block.ops.last().expect("block must have terminator");
-        let term_items = lower_terminator(
-            terminator,
-            block_idx,
-            next_block_id,
-            &egraph,
-            &class_to_vreg,
-            &block_param_map,
-            // Straight off the final schedule: post-split, post-coalesce, the
-            // VRegs the allocator actually assigned registers to.
-            &barrier::terminator_arg_operands(&block_rewritten[block_idx])
-                .into_iter()
-                .collect::<BTreeMap<u32, VReg>>(),
-            &coalesce_aliases,
-            &regalloc_result,
-            func,
-            &mut next_label,
-            &slot_spilled_params,
-            &frame_layout,
-            &block_rewritten,
-        )?;
+        let term_items = if tail_self_call.is_some() {
+            Vec::new()
+        } else {
+            lower_terminator(
+                terminator,
+                block_idx,
+                next_block_id,
+                &egraph,
+                &class_to_vreg,
+                &block_param_map,
+                // Straight off the final schedule: post-split, post-coalesce, the
+                // VRegs the allocator actually assigned registers to.
+                &barrier::terminator_arg_operands(&block_rewritten[block_idx])
+                    .into_iter()
+                    .collect::<BTreeMap<u32, VReg>>(),
+                &coalesce_aliases,
+                &regalloc_result,
+                func,
+                &mut next_label,
+                &slot_spilled_params,
+                &frame_layout,
+                &block_rewritten,
+            )?
+        };
 
         // Phase 8: Peephole on this block's pure/effectful instructions.
         //

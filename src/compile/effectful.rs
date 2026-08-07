@@ -129,6 +129,7 @@ pub(super) fn lower_effectful_op(
     uf: &UnionFind,
     schedule: &[ScheduledInst],
     frame_layout: &crate::x86::FrameLayout,
+    tail_jump_to: Option<crate::x86::inst::LabelId>,
 ) -> Result<Vec<MachInst>, CompileError> {
     // Schedule position of this barrier, used both to resolve operands at the
     // right point and to bound the clobber scan in `build_mem_addr`.
@@ -437,6 +438,25 @@ pub(super) fn lower_effectful_op(
                     }),
                 })?;
                 arg_srcs.push(ArgSrc::Reg(r));
+            }
+
+            // A tail self-call is a jump to the top of this function's own body.
+            //
+            // The arguments go into their ABI registers exactly as a call needs
+            // them, and then control goes to the label bound *after* the
+            // prologue -- so the frame is not torn down and not rebuilt, RSP does
+            // not move, and the recursion is a loop. The body starts by moving
+            // each parameter out of its argument register, which is precisely the
+            // state a fresh entry would be in.
+            //
+            // No `call` means no return address pushed, so the base case's `ret`
+            // returns to the original caller. That is also where the win is: a
+            // recursion 128 deep overflows the return-address predictor and every
+            // `ret` mispredicts, and this removes the pair entirely.
+            if let Some(entry) = tail_jump_to {
+                let mut insts = setup_call_args(arg_tys, &arg_srcs, Reg::R11);
+                insts.push(MachInst::Jmp { target: entry });
+                return Ok(insts);
             }
 
             let mut insts = setup_call_args(arg_tys, &arg_srcs, Reg::R11);

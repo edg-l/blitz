@@ -45,6 +45,6 @@ state_machine.c	O1	229	857	3	19	89
 struct_fields.c	O0	428	2688	126	175	45
 struct_fields.c	O1	138	527	3	16	45
 tail_recursion.c	O0	252	1100	59	78	54
-tail_recursion.c	O1	118	440	6	15	36
+tail_recursion.c	O1	117	432	6	15	36
 transpose.c	O0	501	3176	159	195	62
 transpose.c	O1	168	581	3	18	64

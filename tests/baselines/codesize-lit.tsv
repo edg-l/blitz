@@ -362,6 +362,8 @@ functions/stack_arg_alignment_odd.c	O0	277	1194	67	76	63
 functions/stack_arg_alignment_odd.c	O1	144	521	4	12	57
 functions/stack_fp_args.c	O0	534	3125	138	151	94
 functions/stack_fp_args.c	O1	255	1198	8	15	74
+functions/tail_self_call.c	O0	97	407	20	27	21
+functions/tail_self_call.c	O1	47	160	0	0	20
 functions/ternary_in_printf.c	O0	72	296	15	19	17
 functions/ternary_in_printf.c	O1	22	90	0	0	9
 functions/three_args.c	O0	30	130	9	9	4
