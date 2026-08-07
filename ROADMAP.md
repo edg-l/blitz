@@ -177,28 +177,25 @@ Done when: `-O0` uses the fast path, all four corpora and the fuzz shapes are
 green at both levels, `args` seed 88 compiles at `-O0`, and `-O1` codesize rows
 are **unchanged** -- the change must not reach the optimized level at all.
 
-### 2. The last capacity failure
+### 2. ~~The last capacity failure~~ -- closed
 
-`tests/fuzz/corpus/open/args-seed88.c`, and at 200 seeds a shape it is the only
-one: `mixed` 200/200, `args` 199/200, `pressure` 200/200. Every other failure in
-the table this file used to carry has closed.
+`args` seed 88 compiles, and **200 seeds a shape is clean on all three for the
+first time**: `mixed` 200/200, `args` 200/200, `pressure` 200/200. The saved
+corpus is 14 passing with nothing open.
 
-The allocator names the shape itself: *"nothing live at the pressure point can
-be spilled: every value there is read by the instruction, a block parameter, or
-a result the hardware pins to a register"*. Thirteen block parameters feed a
-`TerminatorArgs` that reads all thirteen as its own operands, so spilling cannot
-relieve it -- the values are live at that point *because the instruction there
-reads them*. Only the splitter can, by routing a parameter through a slot before
-the schedules are built.
+What closed it was not a fifth attempt at the spill loop. The splitter models
+the registers a call takes away (`callee_saved_budget`) and modelled nothing at
+all for a division, where the allocator clobbers RAX and RDX as the dividend.
+Its own comment states the invariant that breaks -- *"must match what the
+allocator uses, or the splitter measures a different graph than the one being
+coloured"* -- so it reported functions as fitting that the colouring could not
+place, and left the spill loop to fail on them. Giving a division the same
+treatment as a call costs `+0.67%` instructions and `+0.93%` bytes over 107
+changed rows, and `live` does not move at all.
 
-**A program that does not compile is a program no oracle can judge**, which is
-the second reason to close it rather than a cosmetic one. Item 1 makes this
-program compile at `-O0` and so judgeable, but does not fix it at `-O1`; the two
-are worth doing in that order for exactly that reason.
-
-Before trying a fifth approach, read the four measured ones at the end of
-`docs/internal/refactor-roadmap.md`. Done when a 200-seed run of each shape is
-clean at both levels.
+**This is the shape item 1's step three is about**, arrived at from the other
+end: a pre-pass relieving pressure against a different graph than the allocator
+enforces. It was under-relieving here rather than over-relieving.
 
 ### 3. Give the inliner a pressure check, as LICM has
 
@@ -227,9 +224,9 @@ repeating them.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites.
 - `bash tests/lit/run_diff.sh`: 334 compared `-O0`-vs-`-O1` and against a
   reference compiler; no skips, no differences under gcc or clang.
-- `bash tests/fuzz/run_corpus.sh`: 13 `fixed` pass, 1 `open` fails as recorded.
-- Generated programs at 200 seeds a shape: `mixed` 200/200, `args` 199/200,
-  `pressure` 200/200. **No wrong-value programs and one capacity failure.**
+- `bash tests/fuzz/run_corpus.sh`: 14 `fixed` pass, `open/` is empty.
+- Generated programs at 200 seeds a shape: `mixed` 200/200, `args` 200/200,
+  `pressure` 200/200. **Nothing fails at either level.**
   At the 30 seeds every gate is pinned to, all three are clean -- **that width
   measures nothing**, and `run_corpus.sh` is what compensates for it.
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, over `lit`,
@@ -483,10 +480,11 @@ isel patterns; we should beat it on the ones we implement.
 
 ## Known bugs
 
-**No wrong-value programs are open.** One capacity failure is: `args` seed 88,
-checked in at `tests/fuzz/corpus/open/args-seed88.c`, described in item 2 of
-Start here. At 200 seeds a shape `mixed` and `pressure` are clean and `args` is
-199/200.
+**Nothing is open.** No wrong-value programs and no capacity failures: at 200
+seeds a shape `mixed`, `args` and `pressure` are all 200/200, and the saved
+corpus is 14 passing with an empty `open/`. `args` seed 88, the last one, closed
+when the splitter learned that a division clobbers RAX and RDX -- see item 2 of
+Start here.
 
 **Re-measure rather than trust that.** Entries have left this list without
 anyone fixing them, and one went the other way -- a capacity failure that a fold

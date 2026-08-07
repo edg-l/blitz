@@ -1,7 +1,7 @@
 # program	level	insts	bytes	spills	reloads
 # corpus: bench -- written by tests/run_codesize.sh --update
 binary_search.c	O0	96	332	1	6
-binary_search.c	O1	103	373	2	13
+binary_search.c	O1	104	378	3	14
 bitcount.c	O0	116	377	3	10
 bitcount.c	O1	88	277	0	0
 crc32.c	O0	93	304	0	0

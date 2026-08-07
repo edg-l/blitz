@@ -13,7 +13,7 @@ use crate::egraph::cost::CostModel;
 use crate::egraph::extract::{ClassVRegMap, ExtractionResult, extract_at_with_memo};
 use crate::ir::effectful::BlockId;
 use crate::ir::function::{BasicBlock, Function};
-use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
+use crate::ir::op::{ClassId, MachOp, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 use crate::regalloc::global_liveness::GlobalLiveness;
 use crate::regalloc::interference::VRegSet as BlockLiveSet;
@@ -448,19 +448,22 @@ fn collect_call_arg_vregs_set(schedule: &[ScheduledInst]) -> BTreeSet<VReg> {
 /// call point.
 ///
 /// `callee_saved_budget` = total GPRs − caller-saved GPRs.
+///
+/// `is_clobber_point` selects the instructions that take registers away. The
+/// allocator injects a clobber phantom at each call *and* at each division,
+/// where RAX and RDX are the dividend; this has to see both, or it measures a
+/// different graph than the one being coloured.
 fn find_call_crossing_overshoot(
     live_sets: &[VRegSet],
     schedule: &[ScheduledInst],
     class_mask: &VRegSet,
     callee_saved_budget: u32,
     call_arg_vregs: &BTreeSet<VReg>,
+    is_clobber_point: impl Fn(&Op) -> bool,
 ) -> Option<(usize, u32)> {
     let mut worst: Option<(usize, u32)> = None;
     for (inst_idx, inst) in schedule.iter().enumerate() {
-        if !matches!(
-            inst.op,
-            Op::Pseudo(PseudoOp::CallResult(..)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
-        ) {
+        if !is_clobber_point(&inst.op) {
             continue;
         }
         // Count values of `class` live before this call instruction.
@@ -1019,7 +1022,34 @@ pub(super) fn plan_splits(
             &gpr_mask,
             callee_saved_budget,
             &call_arg_vregs,
-        );
+            |op| {
+                matches!(
+                    op,
+                    Op::Pseudo(PseudoOp::CallResult(..)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
+                )
+            },
+        )
+        // A division is the other point the allocator clobbers: RAX and RDX are
+        // the dividend, so a value live across one has two fewer registers to
+        // sit in. Nothing here modelled that, so the splitter reported a
+        // function as fitting that the colouring then could not place -- the
+        // exact shape of a pre-pass relieving pressure against a different graph
+        // than the allocator enforces.
+        .or_else(|| {
+            find_call_crossing_overshoot(
+                &live_sets,
+                schedule,
+                &gpr_mask,
+                gpr_budget.saturating_sub(2),
+                &call_arg_vregs,
+                |op| {
+                    matches!(
+                        op,
+                        Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..))
+                    )
+                },
+            )
+        });
         if let Some((call_inst_idx, excess)) = call_crossing {
             if trace {
                 tracing::debug!(
@@ -1058,6 +1088,12 @@ pub(super) fn plan_splits(
             &xmm_mask,
             0, // no callee-saved XMM registers exist
             &call_arg_vregs,
+            |op| {
+                matches!(
+                    op,
+                    Op::Pseudo(PseudoOp::CallResult(..)) | Op::Pseudo(PseudoOp::VoidCallBarrier)
+                )
+            },
         );
         if let Some((call_inst_idx, excess)) = xmm_call_crossing {
             if trace {
