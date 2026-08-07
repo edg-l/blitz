@@ -689,7 +689,37 @@ so the holes stay visible.
       arguments in their ABI registers were dead. That deleted the argument setup
       of every call in the corpus, 248 of 576 lit tests, and is why `call_reads`
       exists.
-- [ ] **Narrowing / type-width analysis.** `(uint8_t)x + 1` should not promote
+- [ ] **Narrowing / type-width analysis.** **Attempted, measured, reverted, and
+      the reason is a cost-model hazard worth knowing before the next attempt.**
+
+      The concrete instance: **178 of 7696 instructions over `bench` and `live` are
+      a sign-extension**, in every one of the 34 kernels, inside loop bodies -- an
+      array index is `i32` in C and an address is 64 bits, so every subscript pays
+      one. A `movsxd` of a value whose sign bit is known zero is a *zero*-extension,
+      and `X86Movzx{I32, I64}` already lowers to **nothing** when its registers
+      coincide (`lower.rs`) and to a 2-byte `mov` when they do not.
+
+      The rewrite is 20 lines in `known_bits.rs` -- `Sext(x) -> Zext(x)` when
+      `known_zeros` covers the sign bit -- and it is sound. It fired **nowhere**:
+      178 of 7696 before and after. Every index in these kernels is a loop-carried
+      value, and known-bits gives up on block parameters, so no loop index is ever
+      provably non-negative. On a masked index (`argc & 7`) the rule does fire, 3
+      `movsxd` to 1.
+
+      **Then pricing the free widening as free regressed 234 rows across all four
+      corpora** -- 165 of 180 `fuzz`, 58 `lit`, 5 `bench`, 6 `live`, everything
+      that changed got worse. `X86Movsx` and `X86Movzx` are priced identically, so
+      extraction had no reason to prefer the one that can vanish; setting the
+      32-to-64 zero-extension to latency 0, size 1 made it prefer it, and made
+      every class containing one look cheap. **A near-zero-cost node is an
+      attractor**: extraction pulls subtrees through it that it should not.
+
+      So the order of work is fixed, and it is not this: known-bits has to reach
+      loop-carried values first, or the rule has nothing to fire on; and the cost
+      model has to be able to say "free *only* when the registers coincide", which
+      is a statement about allocation that a per-node cost cannot make. That second
+      one is `P2`'s cost-model item again, the same prerequisite the
+      exploration-rule experiment ended on. `(uint8_t)x + 1` should not promote
       to i32. Domain: `(min_bits, signed)` per e-class.
 - [x] **Dead call elimination** for provably pure functions.
       `dce::pure_functions` is the greatest fixpoint over the module -- a function
