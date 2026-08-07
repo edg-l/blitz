@@ -9,6 +9,7 @@ use crate::ir::condcode::CondCode;
 use crate::ir::effectful::{BlockId, EffectfulOp, TermArgs};
 use crate::ir::function::Function;
 use crate::ir::op::ClassId;
+use crate::regalloc::Assignment;
 use crate::regalloc::allocator::RegAllocResult;
 use crate::regalloc::coalesce::chase_alias;
 use crate::schedule::scheduler::ScheduledInst;
@@ -241,6 +242,36 @@ enum PhiCopy {
         slot: i64,
         size: OpSize,
     },
+    /// Both ends are frame slots, so the copy goes through one register.
+    ///
+    /// An allocator that keeps every value in a slot places the arguments of a
+    /// jump nowhere: a block with more parameters than the machine has registers
+    /// would otherwise need all of them live at once, which is a shape no
+    /// allocation can have.
+    SlotToSlot { src_slot: i64, dst_slot: i64 },
+}
+
+/// Which pass put a block parameter in a frame slot, and where.
+///
+/// The two are not interchangeable: one leaves the value where it already is
+/// and the other gives the parameter storage of its own, so what makes a copy
+/// on an edge unnecessary is a different question for each.
+#[derive(Clone, Copy)]
+enum ParamSlot {
+    /// The pressure splitter routed the parameter through a slot before the
+    /// schedules were built. `value_alias` marks a parameter that names the
+    /// value it carries rather than storage of its own.
+    Routed { slot: i64, value_alias: bool },
+    /// The allocator placed it, as it places every value it keeps in memory.
+    Allocated { slot: i64 },
+}
+
+impl ParamSlot {
+    fn slot(self) -> i64 {
+        match self {
+            ParamSlot::Routed { slot, .. } | ParamSlot::Allocated { slot } => slot,
+        }
+    }
 }
 
 /// The register holding a `Ret`'s value.
@@ -654,13 +685,8 @@ fn build_phi_copies(
             Some((v, _)) => format!(" k={v}"),
             None => String::new(),
         };
-        let src_reg = match regalloc
-            .assignment
-            .get(&arg_vreg)
-            .copied()
-            .and_then(crate::regalloc::Assignment::reg)
-        {
-            Some(r) => r,
+        let src = match regalloc.assignment.get(&arg_vreg).copied() {
+            Some(a) => a,
             None => {
                 // The argument side has no equivalent of the destination's
                 // "it is the parameter's own class" case: whatever the classes
@@ -695,67 +721,16 @@ fn build_phi_copies(
             OpSize::from_int_type(param_ty)
         };
 
-        // If this param is slot-spilled, emit a slot store directly.
-        // The param's segment was truncated to start after block_entry so the
-        // class_to_vreg lookup at tgt_entry would fail -- we skip it entirely.
-        //
-        // Back-edge optimisation: if the argument class IS the same as the
-        // param class (e.g. an immutable loop-carried value like `base`), the
-        // slot already contains the correct value from the forward-edge store.
-        // Skip the store; re-storing from an incorrect register would clobber it.
-        //
-        // Unless the parameter names the value it carries rather than storage of
-        // its own: then that equality is the signature of the edge that feeds the
-        // value in, and it is the one edge that must store.
-        // Two things can put a parameter in a slot, and both answer here. The
-        // splitter's routing decides it before the schedules are built and
-        // records `value_alias` with it; an allocator that keeps values in slots
-        // decides it during allocation and says so in `assignment`. The second
-        // has no `value_alias` to offer -- it is not routing a parameter around
-        // pressure, it puts every value in a slot -- so the back-edge identity
-        // below is the whole of the question for it.
-        let routed = slot_spilled_params.get(&(target, param_idx as u32));
-        let param_slot = routed.map(|i| (i.slot, i.value_alias)).or_else(|| {
-            // The block's own `param_vregs` names the parameter without going
-            // through the class map, which a slot-routed parameter's truncated
-            // segment would fail. `cfg::resolve_block_param_vreg` asks the same
-            // source first, and for the same reason.
-            target_block
-                .param_vreg(param_idx as u32)
-                .and_then(|v| regalloc.assignment.get(&v).copied())
-                .and_then(crate::regalloc::Assignment::slot)
-                .map(|slot| (slot as i64, false))
-        });
-        if let Some((slot, value_alias)) = param_slot {
-            let store = canon_arg != canon_param || value_alias;
-            if trace {
-                tracing::debug!(
-                    target: "blitz::phi",
-                    "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
-                     {arg_vreg:?} src={src_reg:?} -> slot {} {}",
-                    func.name,
-                    slot,
-                    if store { "" } else { "(skipped: back-edge identity)" },
-                );
-            }
-            if store {
-                // Arg differs from param: emit slot store with current src_reg.
-                copies.push(PhiCopy::Slot {
-                    src_reg,
-                    slot,
-                    size,
-                });
-                params_copied.insert(canon_param, param_idx);
-            }
-            // If canon_arg == canon_param: back-edge with unchanged value; slot
-            // already has the right value from the forward edge. Skip.
-            continue;
-        }
-
         // The destination, from the three places that can name it -- see
         // `cfg::resolve_block_param_vreg`, which every pass touching a phi copy
         // resolves through so they cannot disagree about which VReg the copy
-        // writes.
+        // writes. That includes the copy into a *slot*: reading the block's own
+        // `param_vregs` there instead was a second derivation of the same fact,
+        // and where the two disagreed the copy filled one slot while the block
+        // read the other.
+        //
+        // No VReg is not yet an error: the splitter's routing below answers
+        // without one.
         let param_vreg = super::cfg::resolve_block_param_vreg(
             target_block,
             param_idx as u32,
@@ -765,7 +740,73 @@ fn build_phi_copies(
             class_to_vreg,
             block_param_map,
         )
-        .ok_or_else(|| CompileError {
+        // Apply coalesce aliases so a dest VReg coalescing merged away resolves
+        // to its canonical. Without this, the assignment lookup fails and the copy
+        // is silently dropped, dropping the back-edge and miscompiling loops.
+        // The source side chases the same chain above.
+        .map(|v| chase_alias(v, coalesce_aliases));
+        let param_assignment = param_vreg.and_then(|v| regalloc.assignment.get(&v).copied());
+
+        // Two things put a parameter in a slot and they answer differently the
+        // question of whether this edge has to write it.
+        //
+        // The splitter routes a parameter around pressure before the schedules
+        // are built. It leaves the value where it already is, so the parameter's
+        // slot *is* the argument's storage on the edge that carries it
+        // unchanged, and re-storing from a register that no longer holds it
+        // would clobber it. Class identity is what names that edge, and
+        // `value_alias` names the one exception: a parameter that carries the
+        // expression the argument names rather than storage of its own, whose
+        // feeding edge is the one that must store.
+        //
+        // An allocator that keeps every value in a slot gives the parameter a
+        // slot of its own, one the argument does not share, so the same class on
+        // both ends says nothing about where the value is. A copy is needed
+        // unless the argument is already in that very slot, which is a copy from
+        // a slot to itself.
+        let param_slot = match slot_spilled_params.get(&(target, param_idx as u32)) {
+            Some(i) => Some(ParamSlot::Routed {
+                slot: i.slot,
+                value_alias: i.value_alias,
+            }),
+            None => param_assignment
+                .and_then(crate::regalloc::Assignment::slot)
+                .map(|slot| ParamSlot::Allocated { slot: slot as i64 }),
+        };
+        if let Some(param_slot) = param_slot {
+            let slot = param_slot.slot();
+            let store = match param_slot {
+                ParamSlot::Routed { value_alias, .. } => canon_arg != canon_param || value_alias,
+                ParamSlot::Allocated { .. } => src != Assignment::Slot(slot as u32),
+            };
+            if trace {
+                tracing::debug!(
+                    target: "blitz::phi",
+                    "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
+                     {arg_vreg:?} src={src:?} -> param {param_vreg:?} slot {} {}",
+                    func.name,
+                    slot,
+                    if store { "" } else { "(skipped: already there)" },
+                );
+            }
+            if store {
+                copies.push(match src {
+                    Assignment::Reg(src_reg) => PhiCopy::Slot {
+                        src_reg,
+                        slot,
+                        size,
+                    },
+                    Assignment::Slot(src_slot) => PhiCopy::SlotToSlot {
+                        src_slot: src_slot as i64,
+                        dst_slot: slot,
+                    },
+                });
+                params_copied.insert(canon_param, param_idx);
+            }
+            continue;
+        }
+
+        let param_vreg = param_vreg.ok_or_else(|| CompileError {
             phase: "phi-elim".into(),
             message: format!(
                 "param class {param_cid:?} of ({target}, {param_idx}) not in \
@@ -780,27 +821,32 @@ fn build_phi_copies(
             ),
             location: None,
         })?;
-        // Apply coalesce aliases so a dest VReg coalescing merged away resolves
-        // to its canonical. Without this, the assignment lookup fails and the copy
-        // is silently dropped, dropping the back-edge and miscompiling loops.
-        // The source side chases the same chain above.
-        let param_vreg = chase_alias(param_vreg, coalesce_aliases);
-
-        match regalloc
-            .assignment
-            .get(&param_vreg)
-            .copied()
-            .and_then(crate::regalloc::Assignment::reg)
-        {
+        match param_assignment.and_then(crate::regalloc::Assignment::reg) {
             Some(dst_reg) => {
                 if trace {
                     tracing::debug!(
                         target: "blitz::phi",
                         "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
-                         {arg_vreg:?} src={src_reg:?} -> param {param_cid:?} {param_vreg:?} dst={dst_reg:?}",
+                         {arg_vreg:?} src={src:?} -> param {param_cid:?} {param_vreg:?} dst={dst_reg:?}",
                         func.name,
                     );
                 }
+                // A parallel copy into registers is resolved as a permutation,
+                // which a memory source cannot join: reading it takes a register,
+                // and which one is free depends on where in the permutation the
+                // read lands. No allocator produces this pair -- one that keeps
+                // values in slots keeps parameters there too.
+                let Assignment::Reg(src_reg) = src else {
+                    return Err(CompileError {
+                        phase: "phi-elim".into(),
+                        message: format!(
+                            "b{src_block_idx} -> {target} p{param_idx}: argument \
+                             {arg_vreg:?} is in a slot but the parameter is in \
+                             {dst_reg:?}, and a permutation cannot read memory"
+                        ),
+                        location: None,
+                    });
+                };
                 copies.push(PhiCopy::Reg(src_reg, dst_reg, size));
                 params_copied.insert(canon_param, param_idx);
             }
@@ -823,7 +869,7 @@ fn build_phi_copies(
                     tracing::debug!(
                         target: "blitz::phi",
                         "[{}] b{src_block_idx} -> {target} p{param_idx}: arg {canon_arg:?}{arg_const} \
-                         {arg_vreg:?} src={src_reg:?} -> param {param_cid:?} {param_vreg:?} \
+                         {arg_vreg:?} src={src:?} -> param {param_cid:?} {param_vreg:?} \
                          is the argument's own class -- no copy needed",
                         func.name,
                     );
@@ -853,12 +899,20 @@ fn build_phi_copies(
 
 /// Emit `MachInst`s for a list of `PhiCopy` entries.
 ///
-/// Slot copies are emitted first (as spill stores), then register copies
-/// are handed to `phi_copies` for Briggs-style permutation resolution.
-/// This ordering is safe because slot stores write to memory (never to any
-/// phi-copy destination register), so they commute with register copies.
+/// Everything that writes memory is emitted first -- stores out of a register
+/// and copies from one slot to another -- and the register copies then go to
+/// `phi_copies` for Briggs-style permutation resolution. That ordering is safe
+/// because a memory write is never a phi-copy destination register, so the two
+/// commute; `temp` carries the memory-to-memory copies and is the permutation's
+/// scratch, which no value occupies at either point.
 fn emit_phi_copies(copies: &[PhiCopy], temp: Reg, frame_layout: &FrameLayout) -> Vec<MachInst> {
     let mut result = Vec::new();
+    let addr_of = |slot: i64| Addr {
+        base: Some(frame_layout.spill_base),
+        index: None,
+        scale: 1,
+        disp: frame_layout.spill_offset + (slot as i32) * 8,
+    };
 
     // Emit slot stores first.
     for copy in copies {
@@ -868,12 +922,7 @@ fn emit_phi_copies(copies: &[PhiCopy], temp: Reg, frame_layout: &FrameLayout) ->
             size,
         } = copy
         {
-            let addr = Addr {
-                base: Some(frame_layout.spill_base),
-                index: None,
-                scale: 1,
-                disp: frame_layout.spill_offset + (*slot as i32) * 8,
-            };
+            let addr = addr_of(*slot);
             // Float params use movsd (S64); integer params use mov (S64 for slots).
             if *size == OpSize::S64 && src_reg.is_xmm() {
                 result.push(MachInst::MovsdMR {
@@ -887,6 +936,29 @@ fn emit_phi_copies(copies: &[PhiCopy], temp: Reg, frame_layout: &FrameLayout) ->
                     src: Operand::Reg(*src_reg),
                 });
             }
+        }
+    }
+
+    // Memory-to-memory copies, eight raw bytes at a time: a slot is eight bytes
+    // whatever it holds, so a float needs no XMM scratch to travel through.
+    //
+    // Order does not matter, and that is the allocator's doing rather than
+    // luck. No destination here is another copy's source: an argument that
+    // *is* one of the target's parameters is copied to a slot of its own
+    // before the terminator, so the rotation a back edge can name cannot reach
+    // this list.
+    for copy in copies {
+        if let PhiCopy::SlotToSlot { src_slot, dst_slot } = copy {
+            result.push(MachInst::MovRM {
+                size: OpSize::S64,
+                dst: Operand::Reg(temp),
+                addr: addr_of(*src_slot),
+            });
+            result.push(MachInst::MovMR {
+                size: OpSize::S64,
+                addr: addr_of(*dst_slot),
+                src: Operand::Reg(temp),
+            });
         }
     }
 
