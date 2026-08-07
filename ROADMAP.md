@@ -175,15 +175,14 @@ makes attribution possible here.
 None of these is a gate; they are what turns a wall of numbers into a name. The
 ordering is by hours lost, not by effort to build.
 
-- [ ] **Put the over-budget histogram in the error, not just the trace.** The
+- [x] **Put the over-budget histogram in the error, not just the trace.** The
       allocator's failure names a count -- "over-budget VRegs=48, of which
       spillable=21" -- and a peak. It does not say *what* those values are, and
       the answer settles the whole question: 21 of 24 on `args` seed 61 are
       `Pure(BlockParam)`, which says "this is the block-parameter wall" rather
-      than "spilling failed". `BLITZ_DEBUG=regalloc` prints it now; the error
-      itself should carry the top three defining ops with counts. Cost of not
-      having it: most of a session spent on the spill loop, which was not the
-      cause.
+      than "spilling failed". The error now carries the top three defining ops
+      with counts. Cost of not having had it: most of a session spent on the
+      spill loop, which was not the cause.
 - [ ] **Say which register class each VReg is in, in the liveness dump.** There
       was no way to see that a value lived in EFLAGS rather than a GPR short of
       joining the `sched` and `liveness` dumps and re-deriving it from the op
