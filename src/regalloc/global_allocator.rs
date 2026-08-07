@@ -783,6 +783,22 @@ fn merge_precolorings_global(
 
 // ── Coalescing and post-rebuild ──────────────────────────────
 
+/// Follow `from -> into` to the end of its chain.
+///
+/// The self-entry check is what makes this terminate: a map with `x -> x` in it
+/// is a fixpoint, not a step, and a loop that only asks whether a key is present
+/// spins on one forever. The bound is a second guard, for a cycle no single
+/// entry reveals.
+fn chase_u32(mut idx: u32, aliases: &BTreeMap<u32, u32>) -> u32 {
+    for _ in 0..aliases.len() + 1 {
+        match aliases.get(&idx) {
+            Some(&target) if target != idx => idx = target,
+            _ => break,
+        }
+    }
+    idx
+}
+
 /// Run Phase 3: precoloring, clobber phantoms, coalescing, and graph rebuild.
 ///
 /// # Order of operations (matches the per-block allocator)
@@ -872,13 +888,7 @@ fn run_phase3(
     // with a pre-coalesce name instead would name a VReg the schedule never
     // mentions, and the canonical one (e.g. v1 for n) would not read as live —
     // a new def in the block could then land on the same register as n.
-    let resolve_vreg_early = |v: VReg| -> VReg {
-        let mut idx = v.0;
-        while let Some(&target) = alias_map_early.get(&idx) {
-            idx = target;
-        }
-        VReg(idx)
-    };
+    let resolve_vreg_early = |v: VReg| -> VReg { VReg(chase_u32(v.0, &alias_map_early)) };
     let post_coalesce_phi_uses = crate::compile::barrier::terminator_uses(&post_coalesce_schedules);
     let renamed_block_param_vregs: Vec<VRegSet> = block_param_vregs_per_block
         .iter()
@@ -921,15 +931,9 @@ fn run_phase3(
     // Rebuild precolorings on the post-coalesce VReg set: apply the alias map
     // to precolor keys. The coalescing alias map renames `from` -> `into`, so
     // a precoloring for a `from` VReg should transfer to `into`.
-    let alias_map = alias_map_early.clone();
+    let alias_map = alias_map_early;
 
-    let resolve_vreg = |v: VReg| -> VReg {
-        let mut idx = v.0;
-        while let Some(&target) = alias_map.get(&idx) {
-            idx = target;
-        }
-        VReg(idx)
-    };
+    let resolve_vreg = |v: VReg| -> VReg { VReg(chase_u32(v.0, &alias_map)) };
 
     // Rebuild param_vreg_to_reg with aliased VReg keys.
     let mut param_vreg_to_reg_post: BTreeMap<VReg, Reg> = BTreeMap::new();
@@ -1727,16 +1731,7 @@ pub fn allocate_global(
         // The schedules from here on are the post-coalesce ones, so the block
         // parameters have to be named the same way.
         if !phase4.alias_map.is_empty() {
-            let resolve = |v: VReg| -> VReg {
-                let mut idx = v.0;
-                while let Some(&target) = phase4.alias_map.get(&idx) {
-                    if target == idx {
-                        break;
-                    }
-                    idx = target;
-                }
-                VReg(idx)
-            };
+            let resolve = |v: VReg| -> VReg { VReg(chase_u32(v.0, &phase4.alias_map)) };
             for set in block_params_now.iter_mut() {
                 *set = set
                     .iter()
