@@ -120,22 +120,24 @@ fn kills_reg(inst: &MachInst) -> Option<Reg> {
     }
 }
 
-/// True when the LEA at `idx` computes an address this block then discards.
+/// The instruction at `idx`, if its whole effect is a register it writes without
+/// reading and the block then discards that register.
 ///
-/// A load or store whose address folded into its own addressing mode leaves the
-/// LEA that computed it behind: the fold happens in `compile::effectful`, after
-/// the address has already been scheduled and lowered as an instruction of its
-/// own, and nothing between the two removes it.
+/// The commonest case is an address computation a load or store folded into its
+/// own addressing mode: the fold happens in `compile::effectful`, after the
+/// address has been scheduled and lowered as an instruction of its own, and
+/// nothing between the two removes it. A reload the allocator emitted for a
+/// value some later instruction overwrites first has the same shape, as does a
+/// constant materialized into a register a second constant then takes.
+///
+/// An instruction that writes EFLAGS is dead only where those flags are, since
+/// deleting it would leave a later `jcc` reading whatever came before.
 ///
 /// The scan is block-local and stops at anything it cannot reason about, so the
-/// address is dead only where this block overwrites the register outright before
-/// reaching a branch, a call, or its own end.
-fn lea_result_dead(insts: &[MachInst], idx: usize) -> bool {
-    let MachInst::Lea {
-        dst: Operand::Reg(dst),
-        ..
-    } = &insts[idx]
-    else {
+/// definition is dead only where this block overwrites the register outright
+/// before reaching a branch, a call, or its own end.
+fn def_dead(insts: &[MachInst], idx: usize) -> bool {
+    let Some(dst) = kills_reg(&insts[idx]) else {
         return false;
     };
     // The frame registers are read by the epilogue and by every stack access,
@@ -143,6 +145,10 @@ fn lea_result_dead(insts: &[MachInst], idx: usize) -> bool {
     if matches!(dst, Reg::RSP | Reg::RBP) {
         return false;
     }
+    if writes_flags(&insts[idx]) && !flags_dead_after(insts, idx) {
+        return false;
+    }
+    let dst = &dst;
     for inst in &insts[idx + 1..] {
         if matches!(
             inst,
@@ -279,7 +285,9 @@ fn push_inst(out: &mut Vec<MachInst>, inst: MachInst) {
 /// 5. `sub rX, 1` -> `dec rX` when flags are dead after the sub.
 /// 6. `add rX, -1` -> `dec rX` when flags are dead.
 /// 7. `sub rX, -1` -> `inc rX` when flags are dead.
-/// 8. Delete a LEA whose address the block overwrites before reading.
+/// 8. Delete a definition the block overwrites before reading it -- a folded
+///    address, a reload of a value the next instruction replaces, a constant a
+///    second constant takes the register of.
 /// 9. `lea rX, [rY]` -> `mov rX, rY`.
 /// 10. `mov rD, rS; add rD, rT` -> `lea rD, [rS+rT]` when flags are dead, and
 ///     the same for `add rD, imm` / `sub rD, imm` / `add rD, rD` / `shl rD, 1`.
@@ -289,9 +297,8 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
 
     while i < insts.len() {
         match &insts[i] {
-            // 8. An address computation nothing reads: the load or store that
-            // wanted it folded it into its own addressing mode.
-            MachInst::Lea { .. } if lea_result_dead(&insts, i) => {
+            // 8. A definition nothing reads before the block overwrites it.
+            _ if def_dead(&insts, i) => {
                 i += 1;
                 continue;
             }
@@ -1038,6 +1045,59 @@ mod tests {
         let out = peephole(insts);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], MachInst::MovMR { .. }));
+    }
+
+    #[test]
+    fn dead_reload_deleted() {
+        // A reload of a value the next instruction overwrites is the same shape
+        // as the folded address, and goes the same way.
+        let insts = vec![
+            MachInst::MovRM {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                addr: crate::x86::addr::Addr::new(Some(Reg::RSP), None, 1, 0x10),
+            },
+            MachInst::MovRM {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                addr: crate::x86::addr::Addr::new(Some(Reg::RSP), None, 1, 0x18),
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 1, "the first reload is dead: {out:?}");
+        assert!(matches!(
+            out[0],
+            MachInst::MovRM {
+                addr: crate::x86::addr::Addr { disp: 0x18, .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dead_def_kept_when_its_flags_are_live() {
+        // `imul` writes EFLAGS, and the `jcc` below reads them: the destination
+        // being dead does not make the instruction dead.
+        let insts = vec![
+            MachInst::Imul3RRI {
+                size: OpSize::S32,
+                dst: reg(Reg::RAX),
+                src: reg(Reg::RCX),
+                imm: 3,
+            },
+            MachInst::Setcc {
+                cc: CondCode::Eq,
+                dst: reg(Reg::RDX),
+            },
+            MachInst::MovRI {
+                size: OpSize::S32,
+                dst: reg(Reg::RAX),
+                imm: 3,
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 3, "flags are read: {out:?}");
+        assert!(matches!(out[0], MachInst::Imul3RRI { .. }));
     }
 
     #[test]
