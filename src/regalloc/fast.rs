@@ -28,14 +28,15 @@
 //! **What it does not do**: no interference graph, no liveness, no coalescing,
 //! no splitting, no rematerialization. One pass over the instructions.
 //!
-//! **Not finished.** Forced on it reaches 321 of 334 differential comparisons
-//! and refuses 5 programs. The remaining wrong values are one class: an op that
-//! *names* a value but lowers to no instruction. `Proj0` names half of a pair
-//! and emits nothing, so running it into a fresh VReg and storing that VReg
-//! stores a register nothing wrote -- visible on `tests/lit/asm/rotate.c` as
-//! `cmp rax,rcx` followed by `mov [rsp+0x18],rdx` with RDX never assigned. A
-//! projection's storage is the pair's, not its own, and the same holds for
-//! `Param`. That is the next thing to fix.
+//! **Not finished.** Forced on it reaches 323 of 334 differential comparisons
+//! and refuses 5 programs, against 268 and 55 for the model before it. What is
+//! left is one class: an op that *names* a value without writing it into a
+//! register. A comparison was the first of them -- `cmp rax,rcx` followed by a
+//! store of an unwritten RDX on `tests/lit/asm/rotate.c` -- and asking
+//! `produces_flags()` rather than the class map fixed that one. `rotate.c`
+//! still returns 0 for 216, so the class has more members; a pair-producing op
+//! whose `Proj1` is flags and whose `Proj0` is the value is the place to look
+//! next, since the pair VReg itself holds neither.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -117,7 +118,7 @@ pub fn allocate_fast(
     // and which the colouring allocator also leaves without a register.
     for insts in block_schedules {
         for inst in insts {
-            if inst.op.has_no_result() || is_flags(&classes, inst.dst) {
+            if inst.op.has_no_result() || inst.op.produces_flags() || is_flags(&classes, inst.dst) {
                 continue;
             }
             claim_slot(&mut frame, slots, inst.dst);
@@ -261,9 +262,12 @@ fn expand(
         operands.push(tmp);
     }
 
-    // Nothing to store: the op names no value, or names EFLAGS, which has no
-    // slot. Either way it keeps its own dst.
-    if inst.op.has_no_result() || is_flags(classes, inst.dst) {
+    // Nothing to store: the op names no value, or its result is EFLAGS, which
+    // no register holds. The op is asked rather than the class map, because the
+    // map answers for a VReg and a comparison's dst can reach it as an ordinary
+    // GPR from a block that saw it only as an operand -- storing that dst then
+    // writes whatever the scratch register happened to hold.
+    if inst.op.has_no_result() || inst.op.produces_flags() || is_flags(classes, inst.dst) {
         out.push(ScheduledInst {
             op: inst.op.clone(),
             dst: inst.dst,
