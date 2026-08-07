@@ -326,7 +326,9 @@ impl<'b> FnCtx<'b> {
 
     /// Emit icmp+select yielding an I32 0/1 value (C standard: comparison yields int).
     pub(super) fn emit_icmp_val(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
-        let flags = self.builder.icmp(cc, a, b);
+        // The comparison canonicalizes its operands and flips the condition
+        // with them, so the select has to test what was emitted.
+        let (flags, cc) = self.builder.icmp_canonical(cc, a, b);
         let one = self.builder.iconst(1, Type::I32);
         let zero = self.builder.iconst(0, Type::I32);
         self.builder.select(cc, flags, one, zero)

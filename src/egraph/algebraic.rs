@@ -430,7 +430,18 @@ fn apply_constant_folding(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             Op::Pure(PureOp::Xor) => Some(lv ^ rv),
             Op::Pure(PureOp::Shl) if (0..64).contains(&rv) => Some(lv.wrapping_shl(rv as u32)),
             Op::Pure(PureOp::Shr) if (0..64).contains(&rv) => {
-                Some(((lv as u64).wrapping_shr(rv as u32)) as i64)
+                // A logical shift is over the value's own width. The constant
+                // is held sign-extended to 64 bits, so an I32 `0xffffffff`
+                // arrives as `-1`, and shifting that pattern brings down the
+                // sign bits that are not part of the value: `0xffffffffu >> 28`
+                // came out `0xffffffff` where it should be `15`.
+                let bits = lty.bit_width();
+                let width_masked = if bits >= 64 {
+                    lv as u64
+                } else {
+                    (lv as u64) & ((1u64 << bits) - 1)
+                };
+                Some(width_masked.wrapping_shr(rv as u32) as i64)
             }
             Op::Pure(PureOp::Sar) if (0..64).contains(&rv) => Some(lv.wrapping_shr(rv as u32)),
             _ => None,

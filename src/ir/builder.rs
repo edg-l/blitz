@@ -292,7 +292,7 @@ impl FunctionBuilder {
 
     /// Emit `icmp(cc, a, b)` followed by `select(flags, 1, 0)`, returning an I64.
     pub fn icmp_val(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
-        let flags = self.icmp(cc, a, b);
+        let (flags, cc) = self.icmp_canonical(cc, a, b);
         let one = self.iconst(1, Type::I64);
         let zero = self.iconst(0, Type::I64);
         self.select(cc, flags, one, zero)
@@ -454,12 +454,23 @@ impl FunctionBuilder {
     /// Compare two integers. The result is a flags value: pass it to
     /// [`Self::select`] or to [`Self::branch`], not to arithmetic.
     pub fn icmp(&mut self, cc: CondCode, a: Value, b: Value) -> Value {
+        self.icmp_canonical(cc, a, b).0
+    }
+
+    /// `icmp`, and the condition the emitted comparison actually tests.
+    ///
+    /// Operands are canonicalized -- a constant moves to the right, which flips
+    /// the condition -- so `1 < u` is emitted as `u > 1`. Anything that reads
+    /// the flags has to test the condition that came *out* of this, not the one
+    /// that went in: a `select` built with the original cc tests `Ult` against
+    /// the flags of `cmp u, 1` and answers `u < 1`.
+    pub fn icmp_canonical(&mut self, cc: CondCode, a: Value, b: Value) -> (Value, CondCode) {
         let (cc, a, b) = canonical_icmp_operands(&self.egraph, cc, a, b);
         let node = ENode {
             op: Op::Pure(PureOp::Icmp(cc)),
             children: smallvec![a.0, b.0],
         };
-        self.add_node(node)
+        (self.add_node(node), cc)
     }
 
     /// Compare two floats, producing a flags value as [`Self::icmp`] does.

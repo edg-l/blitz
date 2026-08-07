@@ -308,6 +308,9 @@ pub enum Stmt {
     Break(Span),
     Continue(Span),
     ExprStmt(SpannedExpr, Span),
+    /// A bare compound statement, `{ ... }`. Its own scope, so a declaration
+    /// inside it shadows for the block and no longer.
+    Block(Vec<Stmt>, Span),
 }
 
 #[derive(Clone)]
@@ -324,7 +327,8 @@ impl SpannedExpr {
 
 #[derive(Clone)]
 pub enum Expr {
-    IntLit(i64),
+    /// Value, and whether a `u`/`U` suffix made it unsigned.
+    IntLit(i64, bool),
     /// Float literal: (bits as u64, has_f_suffix). If has_f_suffix, type is float; otherwise double.
     FloatLit(u64, bool),
     StringLit(Vec<u8>),

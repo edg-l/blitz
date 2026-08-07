@@ -289,6 +289,18 @@ what makes attribution possible here.
 - [ ] **`assign_args` `unreachable!()`s on a struct** (`src/x86/abi.rs`). Same
       tier mistake: the frontend cannot produce one today, so it reads as a
       feature gap, but the failure mode is a panic rather than a diagnostic.
+- [ ] **Probe the C surface the way the ABI surface should be probed.** Twenty
+      small programs run against `cc` found five failures, and the four that
+      were silent wrong answers were worth more than the whole session's
+      guessing: block scoping, pointer difference, an unsigned compare whose
+      condition was flipped out from under it, and a logical shift folded on a
+      sign-extended pattern. The loud ones -- a missing `sizeof(expr)` -- cost
+      nothing, because a parse error cannot be mistaken for a result. **tinyc is
+      inside every oracle's trusted base**: `run_diff.sh` compares blitz against
+      `cc` on source tinyc parsed, so a frontend bug is reported as a blitz
+      difference and costs a session in the wrong component. This is the same
+      item as the ABI enumeration above, moved up a level from calling
+      conventions to the language.
 - [ ] **The allocator's liveness disagrees with the emitted code's**, at `-O1`.
       *Start here points at this one.*
       `verify_register_sharing` flags 1 of 450 generated programs; `-O0` is

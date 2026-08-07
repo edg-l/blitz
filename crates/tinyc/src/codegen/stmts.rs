@@ -180,6 +180,9 @@ fn compile_stmt(ctx: &mut FnCtx, stmt: &Stmt) -> Result<(), TinyErr> {
         Stmt::ExprStmt(expr, _span) => {
             ctx.compile_expr(expr)?;
         }
+        Stmt::Block(stmts, _span) => {
+            compile_block(ctx, stmts)?;
+        }
         Stmt::VarDecl {
             ty,
             name,

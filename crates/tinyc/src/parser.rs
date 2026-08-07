@@ -74,7 +74,7 @@ impl Parser {
                         p.advance();
                         let init_tok = p.advance().clone();
                         match &init_tok.token {
-                            Token::IntLit(n) => Some(*n),
+                            Token::IntLit(n, _) => Some(*n),
                             other => {
                                 return Err(TinyErr {
                                     line: init_tok.span.line,
@@ -175,8 +175,8 @@ impl Parser {
             self.advance();
             let dim_tok = self.advance().clone();
             let dim = match &dim_tok.token {
-                Token::IntLit(n) if *n > 0 => *n as usize,
-                Token::IntLit(n) => {
+                Token::IntLit(n, _) if *n > 0 => *n as usize,
+                Token::IntLit(n, _) => {
                     return Err(TinyErr {
                         line: dim_tok.span.line,
                         col: dim_tok.span.col,
@@ -460,7 +460,7 @@ impl Parser {
         let cond = if self.at(Token::Semi) {
             let s = *self.span();
             self.advance();
-            SpannedExpr::new(Expr::IntLit(1), s) // always true
+            SpannedExpr::new(Expr::IntLit(1, false), s) // always true
         } else {
             let c = self.parse_expr()?;
             self.expect(Token::Semi)?;
@@ -605,6 +605,11 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Result<Stmt, TinyErr> {
         let stmt_span = *self.span();
+        // A bare compound statement. Its own scope, which is the whole reason
+        // to write one.
+        if self.at(Token::LBrace) {
+            return Ok(Stmt::Block(self.parse_block()?, stmt_span));
+        }
         // Check for type-started variable declaration first.
         if self.peek_is_type() {
             let ty = self.parse_type()?;
@@ -837,8 +842,13 @@ impl Parser {
             }
 
             // Ternary operator: cond ? then : else (right-associative, below ||)
+            //
+            // Entered at min_bp 1, not 2, because a function argument is an
+            // assignment-expression (C17 6.5.2.2p1) and that includes a
+            // conditional-expression. Call arguments parse at 1 to keep the
+            // comma a separator, which also excluded `f(a ? b : c)`.
             if self.at(Token::Question) {
-                if 1 <= min_bp {
+                if 2 <= min_bp {
                     break;
                 }
                 self.advance();
@@ -994,9 +1004,9 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<SpannedExpr, TinyErr> {
         let span = *self.span();
         match self.peek().clone() {
-            Token::IntLit(v) => {
+            Token::IntLit(v, uns) => {
                 self.advance();
-                Ok(SpannedExpr::new(Expr::IntLit(v), span))
+                Ok(SpannedExpr::new(Expr::IntLit(v, uns), span))
             }
             Token::FloatLit(bits, has_f_suffix) => {
                 self.advance();

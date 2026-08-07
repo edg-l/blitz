@@ -36,7 +36,7 @@ fn walk_expr(sexpr: &SpannedExpr, set: &mut HashSet<String>) {
             }
             walk_expr(inner, set);
         }
-        Expr::IntLit(_) => {}
+        Expr::IntLit(..) => {}
         Expr::FloatLit(_, _) => {}
         Expr::StringLit(_) => {}
         Expr::Var(_) => {}
@@ -91,6 +91,11 @@ fn walk_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
         Stmt::Return(Some(expr), _) => walk_expr(expr, set),
         Stmt::Return(None, _) => {}
         Stmt::ExprStmt(expr, _) => walk_expr(expr, set),
+        Stmt::Block(stmts, _) => {
+            for s in stmts {
+                walk_stmt(s, set);
+            }
+        }
         Stmt::VarDecl { init, .. } => {
             if let Some(init) = init {
                 walk_expr(init, set);

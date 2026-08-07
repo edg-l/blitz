@@ -172,7 +172,24 @@ impl<'b> FnCtx<'b> {
     pub(super) fn compile_expr(&mut self, sexpr: &SpannedExpr) -> Result<(Value, CType), TinyErr> {
         let span = sexpr.span;
         match &sexpr.expr {
-            Expr::IntLit(v) => {
+            Expr::IntLit(v, unsigned) => {
+                // C17 6.4.4.1p5: the type is the first on the suffix's list
+                // that can represent the value, so the magnitude picks the
+                // width and the suffix picks the signedness.
+                if *unsigned {
+                    return if *v >= 0 && *v <= u32::MAX as i64 {
+                        // An `Iconst` of I32 carries the 32-bit pattern, so a
+                        // value above i32::MAX rides as its negative twin --
+                        // `4294967295u` is the same bits as `-1`, and the
+                        // condition codes are what make the two behave apart.
+                        let bits = i64::from(*v as u32 as i32);
+                        let val = self.builder.iconst(bits, Type::I32);
+                        Ok((val, CType::UInt))
+                    } else {
+                        let val = self.builder.iconst(*v, Type::I64);
+                        Ok((val, CType::ULong))
+                    };
+                }
                 // Unsuffixed decimal literal: i32 if fits, otherwise i64.
                 if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
                     let val = self.builder.iconst(*v, Type::I32);

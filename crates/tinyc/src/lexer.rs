@@ -23,7 +23,8 @@ pub enum Token {
     Sizeof,
     Extern,
     // Literals and names
-    IntLit(i64),
+    /// Value, and whether a `u`/`U` suffix made it unsigned.
+    IntLit(i64, bool),
     /// Float literal: (value, has_f_suffix)
     FloatLit(u64, bool),
     StringLit(Vec<u8>),
@@ -99,6 +100,20 @@ pub struct SpannedToken {
 /// Parse the exponent, optional f/F suffix, and convert accumulated float string to a token.
 /// `start` is the index in `chars` where the float literal began (for building the string).
 /// `pos` and `col` are advanced past the exponent and suffix.
+/// Consume an integer literal's `u`/`U`/`l`/`L` suffix, in any order and any
+/// combination, and report whether it made the literal unsigned. The width
+/// letters are accepted and dropped: the value's own magnitude already decides
+/// between 32 and 64 bits.
+fn take_int_suffix(chars: &[char], pos: &mut usize, col: &mut u32) -> bool {
+    let mut unsigned = false;
+    while *pos < chars.len() && matches!(chars[*pos], 'u' | 'U' | 'l' | 'L') {
+        unsigned |= chars[*pos] == 'u' || chars[*pos] == 'U';
+        *pos += 1;
+        *col += 1;
+    }
+    unsigned
+}
+
 fn finish_float_literal(
     chars: &[char],
     pos: &mut usize,
@@ -441,7 +456,7 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                         col: span.col,
                         msg: format!("invalid hex literal '0x{s}'"),
                     })?;
-                    Token::IntLit(val)
+                    Token::IntLit(val, take_int_suffix(&chars, &mut pos, &mut col))
                 } else {
                     let start = pos;
                     while pos < chars.len() && chars[pos].is_ascii_digit() {
@@ -471,7 +486,7 @@ pub fn tokenize(input: &str) -> Result<Vec<SpannedToken>, TinyErr> {
                             col: span.col,
                             msg: format!("invalid integer literal '{s}'"),
                         })?;
-                        Token::IntLit(val)
+                        Token::IntLit(val, take_int_suffix(&chars, &mut pos, &mut col))
                     }
                 }
             }

@@ -242,6 +242,8 @@ control/short_circuit_and.c	O0	11	41	2	3
 control/short_circuit_and.c	O1	6	13	0	0
 control/short_circuit_or.c	O0	8	33	2	2
 control/short_circuit_or.c	O1	4	10	0	0
+control/ternary_and_blocks.c	O0	146	715	41	40
+control/ternary_and_blocks.c	O1	69	238	0	0
 control/triple_nested_while.c	O0	76	326	25	28
 control/triple_nested_while.c	O1	24	59	0	0
 control/while_countdown.c	O0	17	64	4	5
@@ -716,5 +718,7 @@ types/sizeof.c	O0	7	31	2	2
 types/sizeof.c	O1	3	11	0	0
 types/unsigned_char.c	O0	4	16	1	1
 types/unsigned_char.c	O1	2	6	0	0
+types/unsigned_literals.c	O0	97	399	18	24
+types/unsigned_literals.c	O1	49	187	0	0
 types/unsigned_ops.c	O0	4	16	1	1
 types/unsigned_ops.c	O1	2	3	0	0
