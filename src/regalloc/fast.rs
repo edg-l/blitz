@@ -16,12 +16,15 @@
 //! 3. **Locals in frame slots is what debug info describes**, which is the
 //!    shape `-O0` wants once DWARF exists.
 //!
-//! It keeps the same interface as `allocate_global` -- one physical register per
-//! VReg for the whole function -- rather than the per-instruction scratch model
-//! a true "fast" allocator uses. That model cannot be expressed here: everything
-//! downstream of allocation reads `assignment`, which has one entry per VReg.
-//! Spilling mints fresh short-lived VRegs for each reload, so the same effect is
-//! reached through the interface that already exists.
+//! **This is a first attempt and it does not work; see ROADMAP item 1.** It
+//! allocates whole live ranges, which forces a value live in an early block and
+//! a late one to hold a register across everything between. Block parameters
+//! cannot be spilled, so a loop-heavy function meets a wall of them with nothing
+//! the scan may take: on `tests/lit/bench/sieve.c` that is round 0, before any
+//! spilling. Pre-spilling the long values first was tried and is worse, because
+//! a spill turns a spillable value into reloads and a reload cannot be spilled
+//! in turn. The model that does not have this failure holds nothing across an
+//! instruction, so live ranges stop mattering -- that is the rewrite.
 //!
 //! What it deliberately does not do: no interference graph, no coalescing, no
 //! live-range splitting, no rematerialization. It is linear in instructions

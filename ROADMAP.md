@@ -107,9 +107,41 @@ register without ever being live together. It reaches `vreg_to_reg` by rewriting
 the stream so each use loads into a *fresh* short-lived VReg and each definition
 stores back -- the same interface, different VRegs.
 
-The shape is LLVM's `RegAllocFast`: every VReg gets a slot, operands are loaded
-into scratch registers per instruction, results stored back, no interference
-graph, no coalescing, no splitting, linear in instructions. What it still has to
+**And the pipeline, not the allocator, is where this is decided.**
+`docs/internal/refactor-roadmap.md` measured it while folding the two allocators
+into one: *"Skip the splitter for single-block functions and let the global
+allocator's spill loop cope: 159 of 474 lit tests fail, most of them compilation
+failures. The spill loop is not a substitute for the splitter even on one
+block."* And it names the cause: *"What blocks step 6 is not the merge; it is
+that the passes in front of the allocator spill before knowing whether the
+allocator needs them to."* A second allocator with its own pressure model
+inherits relief planned against the colouring allocator's, which is why the
+attempt above failed with the splitter running. Read that file first.
+
+So the order is: teach the allocator result to say where a value lives, then
+make pressure relief something the allocator asks for rather than a pre-pass
+guesses at, and only then write the second allocator.
+
+**Step one is in** (`1a4b1cb`): `Assignment` is `Reg(Reg) | Slot(u32)` and the
+result field is `assignment`. The colouring allocator constructs only
+`Assignment::Reg`, so it changed no emitted code on any corpus.
+
+**Step two, not started:** have the splitter's block-param slot routing record
+`Assignment::Slot` instead of the `BlockParamSlotMap` side table, so
+`terminator.rs:651`'s silent `continue` -- reached when a VReg has neither a
+register nor a side-table entry, on a path whose failure mode is a
+non-terminating loop -- becomes a real answer rather than a skip. Note what does
+*not* move: `SlotSpilledParamInfo::value_alias` says whether a parameter names
+the value it carries, which decides whether a back edge must store. That is edge
+identity, not storage, and `docs/internal/refactor-roadmap.md`'s section "A back
+edge is not 'the VRegs are equal'" is why it needs care.
+
+The shape to aim for is every VReg in a slot, operands loaded into scratch
+registers per instruction, results stored back: no interference graph, no
+coalescing, no splitting, linear in instructions. Derive the details from
+blitz's own constraints rather than from another compiler's fast allocator --
+the reason there is one here is oracle independence, where LLVM's is compile
+time at scale, and the two do not want the same design. What it still has to
 honour, none of it optional:
 
 - precoloring and the SysV ABI at calls (`compile/precolor.rs`), including AL on
