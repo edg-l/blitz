@@ -1801,7 +1801,7 @@ pub fn compile(
             if *callee != func.name && ret_tys != &func.return_types {
                 return None;
             }
-            if crate::x86::abi::assign_args(&arg_tys)
+            if crate::x86::abi::assign_args(arg_tys)
                 .iter()
                 .any(|l| !matches!(l, crate::x86::abi::ArgLoc::Reg(_)))
             {
