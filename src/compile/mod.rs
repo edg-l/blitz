@@ -648,7 +648,7 @@ pub fn compile(
         rpo_order,
         block_vreg_insts,
         block_snapshots: block_class_to_vreg_snapshot,
-        vreg_types,
+        mut vreg_types,
         ..
     } = lin;
 
@@ -1398,12 +1398,12 @@ pub fn compile(
                 &block_schedules,
                 &param_vregs,
                 call_arg_precolors,
-                &phi_uses,
                 &cfg_succs,
                 &block_param_vregs_per_block,
                 &func.name,
                 opts.force_frame_pointer,
                 &mut slots,
+                &mut vreg_types,
             )
         } else {
             allocate_global(
