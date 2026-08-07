@@ -196,11 +196,10 @@ pub fn compile_module_to_ir(
     let has_main = functions.iter().any(|f| f.name == "main");
     crate::inline::inline_module(&mut functions, opts, has_main);
 
-    // DCE1: remove unreachable blocks created by inlining.
-    if opts.enable_dce {
-        for func in &mut functions {
-            super::dce::run_dce1(func);
-        }
+    // DCE1: remove unreachable blocks created by inlining. Unconditional, to
+    // match the pipeline module.rs runs.
+    for func in &mut functions {
+        super::dce::run_dce1(func);
     }
 
     let mut results = Vec::new();

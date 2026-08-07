@@ -284,10 +284,25 @@ pub(super) fn run_dce1(func: &mut Function) {
 ///
 /// Runs after e-graph extraction, before the immutable func freeze and
 /// index construction in compile().
-fn run_dce2_inner(func: &mut Function, egraph: &EGraph, extraction: &ExtractionResult) {
+///
+/// `eliminate_loads` gates the dead-load half alone. Folding a constant branch
+/// and dropping the blocks it orphans is canonicalization: no path reaches
+/// them, so no debugger can stop in one and no schedule need carry them. Dead
+/// loads are different -- removing a read is what makes a variable
+/// uninspectable -- so that half is the optimization and stays on `-O1`.
+fn run_dce2_inner(
+    func: &mut Function,
+    egraph: &EGraph,
+    extraction: &ExtractionResult,
+    eliminate_loads: bool,
+) {
     let folded = fold_constant_branches(func, egraph, extraction);
     let unreachable = eliminate_unreachable_blocks(func);
-    let dead_loads = eliminate_dead_loads(func, egraph, extraction);
+    let dead_loads = if eliminate_loads {
+        eliminate_dead_loads(func, egraph, extraction)
+    } else {
+        0
+    };
 
     if (folded > 0 || unreachable > 0 || dead_loads > 0)
         && crate::trace::is_enabled("dce")
@@ -309,6 +324,7 @@ pub(super) fn run_dce2_with_extra_roots(
     egraph: &EGraph,
     extraction: &ExtractionResult,
     extra_roots: super::licm::ExtraRoots,
+    eliminate_loads: bool,
 ) -> super::licm::ExtraRoots {
     // Filter extra_roots: LICM's find_invariant_classes walks the PRE-saturation
     // e-graph transitively and hoists any invariant ancestor. After saturation
@@ -348,7 +364,7 @@ pub(super) fn run_dce2_with_extra_roots(
         }
     }
 
-    run_dce2_inner(func, egraph, extraction);
+    run_dce2_inner(func, egraph, extraction, eliminate_loads);
 
     // Rebuild index-keyed map using post-DCE2 block order.
     let mut rebuilt: BTreeMap<usize, Vec<ClassId>> = BTreeMap::new();

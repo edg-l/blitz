@@ -483,12 +483,19 @@ pub(super) fn run_ir_passes(
 
     // DCE2: constant branch folding, unreachable block elimination, dead loads.
     // Must run before the caller freezes `func` and builds index-keyed structures.
-    let extra_roots = if opts.enable_dce {
-        let roots = dce::run_dce2_with_extra_roots(func, egraph, &extraction, extra_roots);
+    //
+    // The CFG half runs at every level. It is not an optimization the level
+    // buys: a block no path reaches costs the scheduler, the splitter and the
+    // allocator their full price for code that cannot run, and compile time
+    // here is `~(blocks * classes)^0.86`. On a 6048-line input it is 2519 of
+    // 3763 blocks, which is the whole of why `-O0` used to cost 2.6x `-O1`.
+    // Only the dead-load half is gated, because only that one takes a read
+    // away from a value someone might want to look at.
+    let extra_roots = {
+        let roots =
+            dce::run_dce2_with_extra_roots(func, egraph, &extraction, extra_roots, opts.enable_dce);
         crate::verify::verify_stage("dce2", func, egraph);
         roots
-    } else {
-        extra_roots
     };
 
     Ok(IrPasses {

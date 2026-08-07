@@ -42,13 +42,14 @@ pub fn compile_module_with_globals(
     crate::inline::inline_module(&mut functions, opts, has_main);
     verify_all("inlining", &functions);
 
-    // DCE1: remove unreachable blocks created by inlining.
-    if opts.enable_dce {
-        for func in &mut functions {
-            super::dce::run_dce1(func);
-        }
-        verify_all("dce1", &functions);
+    // DCE1: remove unreachable blocks created by inlining. Unconditional, for
+    // the same reason DCE2's CFG half is: an unreachable block is not an
+    // optimization opportunity, it is work the rest of the pipeline would do
+    // for code that cannot run.
+    for func in &mut functions {
+        super::dce::run_dce1(func);
     }
+    verify_all("dce1", &functions);
 
     // Collect global and rodata names so we can filter them from externals.
     let global_names: std::collections::HashSet<String> = globals
