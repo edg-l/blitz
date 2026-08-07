@@ -352,9 +352,9 @@ functions/param_reemitted_in_sibling_blocks.c	O0	58	293	15	15
 functions/param_reemitted_in_sibling_blocks.c	O1	12	63	0	0
 functions/recursion_factorial.c	O0	32	143	7	9
 functions/recursion_factorial.c	O1	15	54	0	0
-functions/stack_arg_alignment_odd.c	O0	277	1198	67	76
+functions/stack_arg_alignment_odd.c	O0	277	1194	67	76
 functions/stack_arg_alignment_odd.c	O1	144	521	4	12
-functions/stack_fp_args.c	O0	535	3133	138	151
+functions/stack_fp_args.c	O0	534	3125	138	151
 functions/stack_fp_args.c	O1	255	1198	8	15
 functions/ternary_in_printf.c	O0	72	296	15	19
 functions/ternary_in_printf.c	O1	22	90	0	0
@@ -362,7 +362,7 @@ functions/three_args.c	O0	30	130	9	9
 functions/three_args.c	O1	2	6	0	0
 functions/two_args.c	O0	20	89	6	6
 functions/two_args.c	O1	2	6	0	0
-functions/variadic_call.c	O0	226	1203	44	62
+functions/variadic_call.c	O0	226	1196	44	62
 functions/variadic_call.c	O1	138	578	6	23
 functions/void_call_multi_arg.c	O0	80	362	15	24
 functions/void_call_multi_arg.c	O1	38	182	0	0
@@ -594,7 +594,7 @@ regalloc/cmp_width_reemitted_class.c	O0	97	519	35	37
 regalloc/cmp_width_reemitted_class.c	O1	25	81	0	0
 regalloc/coalesce_pair_from_schedule.c	O0	2629	17723	842	1018
 regalloc/coalesce_pair_from_schedule.c	O1	1420	8366	325	408
-regalloc/coalesce_widens_param_clique.c	O0	1868	13701	791	839
+regalloc/coalesce_widens_param_clique.c	O0	1868	13697	791	839
 regalloc/coalesce_widens_param_clique.c	O1	463	1462	6	12
 regalloc/cross_block_spill_addr_reload.c	O0	342	2139	88	127
 regalloc/cross_block_spill_addr_reload.c	O1	113	537	6	6
@@ -612,11 +612,11 @@ regalloc/dup_const_block_params.c	O0	819	5303	267	321
 regalloc/dup_const_block_params.c	O1	416	2311	94	126
 regalloc/entry_param_parallel_copy.c	O0	163	704	42	46
 regalloc/entry_param_parallel_copy.c	O1	81	292	1	2
-regalloc/entry_param_stack_scratch.c	O0	195	1224	43	41
+regalloc/entry_param_stack_scratch.c	O0	194	1217	43	41
 regalloc/entry_param_stack_scratch.c	O1	139	763	9	9
 regalloc/float_sum_guard_seed23.c	O0	1854	12308	623	737
 regalloc/float_sum_guard_seed23.c	O1	736	3348	84	140
-regalloc/folded_addr_under_pressure.c	O0	1648	10301	431	588
+regalloc/folded_addr_under_pressure.c	O0	1647	10294	431	588
 regalloc/folded_addr_under_pressure.c	O1	760	3862	116	162
 regalloc/high_pressure_with_calls.c	O0	45	177	10	9
 regalloc/high_pressure_with_calls.c	O1	16	53	0	0
@@ -640,9 +640,9 @@ regalloc/param_shadow_seed13.c	O0	1223	8040	354	460
 regalloc/param_shadow_seed13.c	O1	464	2569	82	102
 regalloc/param_shadow_seed16.c	O0	2205	14622	707	854
 regalloc/param_shadow_seed16.c	O1	1234	7900	354	413
-regalloc/param_shadow_seed3.c	O0	4600	31729	1587	1867
+regalloc/param_shadow_seed3.c	O0	4598	31715	1587	1867
 regalloc/param_shadow_seed3.c	O1	1960	10244	322	450
-regalloc/phi_dest_from_target_schedule.c	O0	1180	8593	503	527
+regalloc/phi_dest_from_target_schedule.c	O0	1180	8584	503	527
 regalloc/phi_dest_from_target_schedule.c	O1	261	787	0	0
 regalloc/seed6_truncated_guard_values.c	O0	552	3392	183	205
 regalloc/seed6_truncated_guard_values.c	O1	114	488	0	0

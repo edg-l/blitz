@@ -52,6 +52,46 @@ pub(super) fn assign_param_vregs_from_map(
     pairs
 }
 
+/// Every VReg that is a stack-position call argument and is never a
+/// register-position one.
+///
+/// A stack-position argument is pushed, and `abi::setup_call_args` reads the
+/// push's source from memory when the allocator left the value in a slot -- so
+/// such a value needs no register at the call, which is what lets a call with
+/// more arguments than the machine has registers be allocated at all. The
+/// register-position arguments of the same call still need theirs.
+///
+/// A VReg used at both kinds of position is excluded rather than handled: it has
+/// to be in a register at the call that wants it there, and one answer per VReg
+/// is what both allocators can act on. Nothing in the generated or saved corpora
+/// hits that case, and being conservative there costs only the pressure relief.
+///
+/// Stated here, from the CFG's own `EffOperand` VRegs and `assign_args`, because
+/// this is where the ABI positions of a call are already known. Deriving it in
+/// the allocators from the absence of a pre-coloring would be the same fact
+/// inferred twice.
+pub(crate) fn stack_arg_vregs(func: &Function) -> BTreeSet<VReg> {
+    let mut on_stack = BTreeSet::new();
+    let mut in_reg = BTreeSet::new();
+    for block in &func.blocks {
+        for op in &block.ops {
+            let EffectfulOp::Call { args, arg_tys, .. } = op else {
+                continue;
+            };
+            for (arg, loc) in args.iter().zip(assign_args(arg_tys).iter()) {
+                if let Some(vreg) = arg.vreg() {
+                    match loc {
+                        ArgLoc::Stack { .. } => on_stack.insert(vreg),
+                        ArgLoc::Reg(_) => in_reg.insert(vreg),
+                    };
+                }
+            }
+        }
+    }
+    on_stack.retain(|v| !in_reg.contains(v));
+    on_stack
+}
+
 /// Pre-color call argument and result VRegs for a single block.
 ///
 /// Same logic as `add_call_precolors` but scoped to one block, preventing

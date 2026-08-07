@@ -117,6 +117,7 @@ pub fn allocate_fast(
     func_name: &str,
     uses_frame_pointer: bool,
     arg_locs: &[ArgLoc],
+    stack_args: &BTreeSet<VReg>,
     slots: &mut SlotAllocator,
     vreg_types: &mut BTreeMap<VReg, Type>,
 ) -> Result<GlobalRegAllocResult, String> {
@@ -182,6 +183,7 @@ pub fn allocate_fast(
         gpr_pool: allocatable_gpr_order(uses_frame_pointer),
         xmm_pool: allocatable_xmm_order(),
         arg_locs,
+        stack_args,
         func_name,
     };
 
@@ -296,6 +298,8 @@ struct Ctx<'a> {
     xmm_pool: Vec<Reg>,
     /// Where the caller left each parameter.
     arg_locs: &'a [ArgLoc],
+    /// Call arguments that go on the stack, which need no register at the call.
+    stack_args: &'a BTreeSet<VReg>,
     /// Named by every error this pass can return.
     func_name: &'a str,
 }
@@ -596,6 +600,19 @@ fn expand(
         // between a comparison and its consumer writes EFLAGS: a spill load and
         // a spill store are both `mov`, which does not.
         if ctx.is_flags(op) {
+            operands.push(op);
+            continue;
+        }
+        // A stack-position call argument stays in its slot, for the same reason a
+        // jump's arguments do: the push reads memory, so no register has to hold
+        // it here. Fourteen integer arguments each taking one is why a call with
+        // that many did not compile at all -- the barrier reads them at a single
+        // instruction and there are thirteen registers to read them into.
+        if calls
+            && ctx.stack_args.contains(&op)
+            && let Some(&slot) = frame.slot.get(&op)
+        {
+            frame.assignment.insert(op, Assignment::Slot(slot));
             operands.push(op);
             continue;
         }

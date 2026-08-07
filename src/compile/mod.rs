@@ -942,6 +942,9 @@ pub fn compile(
         .iter()
         .any(|op| matches!(op, EffectfulOp::Call { .. }));
     let func_arg_locs = crate::x86::abi::assign_args(&func.param_types);
+    // Call arguments that travel on the stack: `setup_call_args` pushes them, and
+    // a push can read memory, so neither allocator has to find a register for one.
+    let stack_arg_vregs = precolor::stack_arg_vregs(func);
     let param_vregs = assign_param_vregs_from_map(
         func,
         &class_to_vreg,
@@ -1488,6 +1491,7 @@ pub fn compile(
                 &func.name,
                 opts.force_frame_pointer,
                 &func_arg_locs,
+                &stack_arg_vregs,
                 &mut slots,
                 &mut vreg_types,
             )
@@ -1772,6 +1776,7 @@ pub fn compile(
                     func,
                     &egraph.unionfind,
                     full_schedule_for_barriers,
+                    &frame_layout,
                 )?);
             }
             barrier_k += 1;

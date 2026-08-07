@@ -22,7 +22,7 @@ use super::{CompileError, IrLocation};
 /// When `uses_frame_pointer` is true, spills are addressed as `[RBP + spill_offset + slot*8]`
 /// (spill_offset is negative). When false, spills are `[RSP + spill_offset + slot*8]`
 /// (spill_offset is non-negative for normal frames, negative for red-zone frames).
-fn spill_addr(frame_layout: &FrameLayout, slot: i32) -> Addr {
+pub(super) fn spill_addr(frame_layout: &FrameLayout, slot: i32) -> Addr {
     Addr {
         base: Some(frame_layout.spill_base),
         index: None,

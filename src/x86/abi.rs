@@ -3,6 +3,7 @@
 use std::cmp::Reverse;
 
 use crate::ir::types::Type;
+use crate::x86::addr::Addr;
 use crate::x86::encode::Encoder;
 use crate::x86::inst::{MachInst, OpSize, Operand};
 use crate::x86::reg::Reg;
@@ -449,17 +450,39 @@ pub type Reg2Reg = (Reg, Reg);
 
 // ── 8.6a Call site setup ──────────────────────────────────────────────────────
 
+/// Where an argument's value is when the call sequence starts.
+///
+/// A register-position argument has to reach a specific register, so it comes
+/// from one. **A stack-position argument does not**: it is pushed, and a push can
+/// read memory, so the value may sit in a frame slot and never occupy a register
+/// at all. That is the same fact `regalloc::fast` states about a jump's
+/// arguments -- the phi copies on the edge read them out of their slots -- and it
+/// is the difference between a 14-argument call compiling and needing more
+/// registers at one instruction than the machine has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgSrc {
+    /// In this register.
+    Reg(Reg),
+    /// In memory at this address. Only legal for a stack-position argument.
+    Mem(Addr),
+}
+
 /// Build the instruction sequence to set up arguments for a call.
 ///
-/// `arg_types` are the parameter types; `arg_regs` are the current physical
-/// registers holding the argument values (one per argument, in order).
-/// `temp` is a scratch register available for cycle-breaking during parallel
-/// copy resolution (must not overlap with any argument register).
+/// `arg_types` are the parameter types; `arg_srcs` says where each argument's
+/// value currently is (one per argument, in order). `temp` is a scratch register
+/// available for cycle-breaking during parallel copy resolution and for moving a
+/// value that cannot travel directly (must not overlap with any argument
+/// register).
 ///
 /// Returns a `Vec<MachInst>` that should be emitted immediately before the
 /// CALL instruction.  Stack arguments are pushed right-to-left.
-pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<MachInst> {
-    assert_eq!(arg_types.len(), arg_regs.len());
+///
+/// A register-position argument given as [`ArgSrc::Mem`] is a bug in the caller
+/// rather than a shape to handle: the allocator is what decides where a value
+/// lives, and it is told that those positions need a register.
+pub fn setup_call_args(arg_types: &[Type], arg_srcs: &[ArgSrc], temp: Reg) -> Vec<MachInst> {
+    assert_eq!(arg_types.len(), arg_srcs.len());
 
     let locs = assign_args(arg_types);
     let mut insts: Vec<MachInst> = Vec::new();
@@ -467,12 +490,12 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
     // Push stack arguments right-to-left BEFORE doing register copies.
     // This ensures the stack-arg source registers are not yet clobbered by
     // moves that place other values into the ABI argument registers.
-    let stack_args: Vec<(i32, Reg)> = locs
+    let stack_args: Vec<(i32, ArgSrc)> = locs
         .iter()
-        .zip(arg_regs.iter())
-        .filter_map(|(loc, &src)| {
+        .zip(arg_srcs.iter())
+        .filter_map(|(loc, src)| {
             if let ArgLoc::Stack { offset } = *loc {
-                Some((offset, src))
+                Some((offset, src.clone()))
             } else {
                 None
             }
@@ -495,36 +518,62 @@ pub fn setup_call_args(arg_types: &[Type], arg_regs: &[Reg], temp: Reg) -> Vec<M
         });
     }
 
+    // How far RSP has already moved below where the allocator computed frame
+    // displacements from: the alignment pad, plus eight per push done so far. A
+    // frame slot addressed off RSP is at a different displacement after each
+    // push, and getting this wrong reads the neighbouring slot rather than
+    // faulting. RBP-relative addresses are unaffected, which is why the base is
+    // checked rather than assumed.
+    let mut rsp_moved = pad.max(0);
     for (_, src) in stack_args {
         // `push` addresses no XMM register, and a stack argument slot is eight
         // bytes whatever it holds, so a floating-point argument travels through
         // the scratch GPR. It is free here for the same reason the copy
         // sequentialization below can use it: no value is in it.
-        if src.is_xmm() {
-            insts.push(MachInst::MovqFromXmm {
-                dst: Operand::Reg(temp),
-                src: Operand::Reg(src),
-            });
-            insts.push(MachInst::Push {
-                src: Operand::Reg(temp),
-            });
-        } else {
-            insts.push(MachInst::Push {
-                src: Operand::Reg(src),
-            });
+        //
+        // A value already in memory travels through the same scratch. `push m64`
+        // exists and would be one instruction shorter, but it would still need
+        // the displacement fixed up, so it buys only the load.
+        match src {
+            ArgSrc::Reg(r) if r.is_xmm() => {
+                insts.push(MachInst::MovqFromXmm {
+                    dst: Operand::Reg(temp),
+                    src: Operand::Reg(r),
+                });
+                insts.push(MachInst::Push {
+                    src: Operand::Reg(temp),
+                });
+            }
+            ArgSrc::Reg(r) => insts.push(MachInst::Push {
+                src: Operand::Reg(r),
+            }),
+            ArgSrc::Mem(mut addr) => {
+                if addr.base == Some(Reg::RSP) {
+                    addr.disp += rsp_moved;
+                }
+                insts.push(MachInst::MovRM {
+                    size: OpSize::S64,
+                    dst: Operand::Reg(temp),
+                    addr,
+                });
+                insts.push(MachInst::Push {
+                    src: Operand::Reg(temp),
+                });
+            }
         }
+        rsp_moved += 8;
     }
 
     // Collect register-to-register copies.
     let reg_copies: Vec<(Reg, Reg)> = locs
         .iter()
-        .zip(arg_regs.iter())
-        .filter_map(|(loc, &src)| {
-            if let ArgLoc::Reg(dst) = *loc {
-                if src != dst { Some((src, dst)) } else { None }
-            } else {
-                None
-            }
+        .zip(arg_srcs.iter())
+        .filter_map(|(loc, src)| {
+            let ArgLoc::Reg(dst) = *loc else { return None };
+            let ArgSrc::Reg(src) = *src else {
+                panic!("setup_call_args: register-position argument for {dst:?} is in memory")
+            };
+            if src != dst { Some((src, dst)) } else { None }
         })
         .collect();
 

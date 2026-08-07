@@ -7,7 +7,7 @@ use crate::ir::function::Function;
 use crate::ir::op::{Op, PseudoOp, PureOp};
 use crate::regalloc::allocator::RegAllocResult;
 use crate::x86::abi::{
-    ArgLoc, FP_RETURN_REG, GPR_RETURN_REG, assign_args, setup_call_args, stack_arg_bytes,
+    ArgLoc, ArgSrc, FP_RETURN_REG, GPR_RETURN_REG, assign_args, setup_call_args, stack_arg_bytes,
 };
 use crate::x86::addr::Addr;
 use crate::x86::inst::{MachInst, OpSize, Operand};
@@ -119,6 +119,7 @@ fn build_mem_addr(
 }
 
 /// Lower a non-terminator effectful op (Load, Store, Call) to MachInsts.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_effectful_op(
     op: &EffectfulOp,
     block_idx: usize,
@@ -127,6 +128,7 @@ pub(super) fn lower_effectful_op(
     func: &Function,
     uf: &UnionFind,
     schedule: &[ScheduledInst],
+    frame_layout: &crate::x86::FrameLayout,
 ) -> Result<Vec<MachInst>, CompileError> {
     // Schedule position of this barrier, used both to resolve operands at the
     // right point and to bound the clobber scan in `build_mem_addr`.
@@ -187,6 +189,19 @@ pub(super) fn lower_effectful_op(
                 .get(&v)
                 .copied()
                 .and_then(crate::regalloc::Assignment::reg)
+        })
+    };
+    // The frame slot holding a role operand, for the operands that are allowed to
+    // live in one. Same source as `role_reg` and the same reasoning: the barrier
+    // records where the value is, and `Assignment` says whether that is a
+    // register or a slot.
+    let role_slot = |i: usize| -> Option<u32> {
+        role_vreg(i).and_then(|v| {
+            regalloc
+                .assignment
+                .get(&v)
+                .copied()
+                .and_then(crate::regalloc::Assignment::slot)
         })
     };
 
@@ -393,9 +408,25 @@ pub(super) fn lower_effectful_op(
             // (their defs are short-lived after the spill store). The actual
             // values at the call point live in SpillLoad vregs, which have
             // distinct registers. Find those registers by tracing spill slots.
-            let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len());
+            let locs = assign_args(arg_tys);
+            let mut arg_srcs: Vec<ArgSrc> = Vec::with_capacity(args.len());
             for (i, arg) in args.iter().enumerate() {
                 let cid = arg.class();
+                // A stack-position argument is pushed, and a push can read
+                // memory, so the allocator is entitled to leave it in its frame
+                // slot rather than spend a register on it at the call. That is
+                // the only reason a 14-argument call fits: the barrier reads
+                // every argument at one instruction, and only the
+                // register-position ones need a register there.
+                if matches!(locs.get(i), Some(ArgLoc::Stack { .. }))
+                    && let Some(slot) = role_slot(i)
+                {
+                    arg_srcs.push(ArgSrc::Mem(crate::compile::lower::spill_addr(
+                        frame_layout,
+                        slot as i32,
+                    )));
+                    continue;
+                }
                 let r = role_reg(i).ok_or_else(|| CompileError {
                     phase: "lowering".into(),
                     message: format!("Call: no register for argument class {cid:?}"),
@@ -405,12 +436,10 @@ pub(super) fn lower_effectful_op(
                         inst: None,
                     }),
                 })?;
-                arg_regs.push(r);
+                arg_srcs.push(ArgSrc::Reg(r));
             }
 
-            let mut insts = setup_call_args(arg_tys, &arg_regs, Reg::R11);
-
-            let locs = assign_args(arg_tys);
+            let mut insts = setup_call_args(arg_tys, &arg_srcs, Reg::R11);
 
             // SysV AMD64: AL holds the number of vector registers used to pass
             // arguments. A variadic callee branches on it to decide whether to
