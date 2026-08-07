@@ -15,6 +15,9 @@
 // CHECK: mov    DWORD PTR
 // CHECK: mov    DWORD PTR
 // CHECK: call
+//
+// The call is kept out of tail position below, or lowering would turn it into a
+// jump to `identity` and there would be no call here to order the stores against.
 
 __attribute__((noinline))
 int identity(int *p) {
@@ -27,5 +30,6 @@ int main() {
     arr[1] = 12;
     arr[2] = 20;
     arr[3] = 42;
-    return identity(arr + 3);
+    int r = identity(arr + 3);
+    return r + arr[0] - 10;
 }

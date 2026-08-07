@@ -1770,7 +1770,8 @@ pub fn compile(
         // a stack argument would have to be written into this function's own
         // incoming argument area, which is the caller's memory; both are sound to
         // do and neither is done here.
-        let tail_self_call: Option<usize> = (|| {
+        let mut tail_is_self = false;
+        let tail_call_at: Option<usize> = (|| {
             if !opts.enable_tail_calls {
                 return None;
             }
@@ -1782,14 +1783,22 @@ pub fn compile(
                 func: callee,
                 args,
                 arg_tys,
+                ret_tys,
                 results,
                 variadic,
-                ..
             } = &non_term_ops[last]
             else {
                 return None;
             };
-            if *callee != func.name || *variadic {
+            if *variadic {
+                return None;
+            }
+            // A tail call to another function is the same transform with the frame
+            // coming down first, but it needs one thing a self-call gets for free:
+            // the callee's return has to *be* this function's return, so the
+            // signatures have to agree on it. A `long` returned where an `int` is
+            // declared would leave the caller reading a register nobody narrowed.
+            if *callee != func.name && ret_tys != &func.return_types {
                 return None;
             }
             if crate::x86::abi::assign_args(&arg_tys)
@@ -1811,6 +1820,7 @@ pub fn compile(
             if !same || args.len() != arg_tys.len() {
                 return None;
             }
+            tail_is_self = *callee == func.name;
             Some(last)
         })();
 
@@ -1840,8 +1850,15 @@ pub fn compile(
                     &egraph.unionfind,
                     full_schedule_for_barriers,
                     &frame_layout,
-                    (tail_self_call == Some(barrier_k))
-                        .then(|| func.blocks[0].id as crate::x86::inst::LabelId),
+                    (tail_call_at == Some(barrier_k)).then(|| {
+                        if tail_is_self {
+                            effectful::TailCall::SelfEntry(
+                                func.blocks[0].id as crate::x86::inst::LabelId,
+                            )
+                        } else {
+                            effectful::TailCall::Other
+                        }
+                    }),
                 )?);
             }
             barrier_k += 1;
@@ -1902,7 +1919,7 @@ pub fn compile(
         // `Ret` it stood in front of is unreachable and its epilogue would be
         // dead code after an unconditional jump.
         let terminator = block.ops.last().expect("block must have terminator");
-        let term_items = if tail_self_call.is_some() {
+        let term_items = if tail_call_at.is_some() {
             Vec::new()
         } else {
             lower_terminator(
@@ -2070,6 +2087,13 @@ pub fn compile(
                     if *inst == MachInst::Ret {
                         emit_epilogue(&mut encoder, &frame_layout);
                     } else {
+                        // A tail call to another function tears this frame down
+                        // first: the callee's prologue builds its own, and RSP has
+                        // to be back on the return address the original `call`
+                        // pushed so the callee returns past this function.
+                        if matches!(inst, MachInst::TailCallDirect { .. }) {
+                            crate::x86::abi::emit_frame_teardown(&mut encoder, &frame_layout);
+                        }
                         encoder.encode_inst_with_form(&flat_insts[flat_idx - 1], short);
                     }
                 }

@@ -17,6 +17,23 @@ use crate::schedule::scheduler::ScheduledInst;
 
 use super::{CompileError, IrLocation, barrier};
 
+/// How a tail call reaches its callee.
+///
+/// The two differ in one thing and it decides everything else: whether the frame
+/// this function built is the one the callee will run in.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TailCall {
+    /// The callee is this function, so the frame it needs is the one already
+    /// standing. Jump to the label bound after the prologue with the arguments in
+    /// their ABI registers, which is the state a fresh entry would be in.
+    SelfEntry(crate::x86::inst::LabelId),
+    /// The callee will build its own frame, so this one comes down first. The
+    /// epilogue runs, leaving RSP on the return address the original `call`
+    /// pushed, and the jump goes to the symbol -- so the callee returns straight
+    /// past this function.
+    Other,
+}
+
 /// Build an `Addr` for Load/Store, folding the address computation into the
 /// addressing mode when `addr_vreg` is the destination of an `Addr` instruction
 /// in this schedule.
@@ -129,7 +146,7 @@ pub(super) fn lower_effectful_op(
     uf: &UnionFind,
     schedule: &[ScheduledInst],
     frame_layout: &crate::x86::FrameLayout,
-    tail_jump_to: Option<crate::x86::inst::LabelId>,
+    tail_call: Option<TailCall>,
 ) -> Result<Vec<MachInst>, CompileError> {
     // Schedule position of this barrier, used both to resolve operands at the
     // right point and to bound the clobber scan in `build_mem_addr`.
@@ -453,9 +470,14 @@ pub(super) fn lower_effectful_op(
             // returns to the original caller. That is also where the win is: a
             // recursion 128 deep overflows the return-address predictor and every
             // `ret` mispredicts, and this removes the pair entirely.
-            if let Some(entry) = tail_jump_to {
+            if let Some(kind) = tail_call {
                 let mut insts = setup_call_args(arg_tys, &arg_srcs, Reg::R11);
-                insts.push(MachInst::Jmp { target: entry });
+                insts.push(match kind {
+                    TailCall::SelfEntry(entry) => MachInst::Jmp { target: entry },
+                    TailCall::Other => MachInst::TailCallDirect {
+                        target: callee.clone(),
+                    },
+                });
                 return Ok(insts);
             }
 

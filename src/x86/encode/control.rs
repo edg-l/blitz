@@ -66,6 +66,23 @@ impl Encoder {
         });
     }
 
+    /// `E9 + rel32`, the same PLT32 relocation a call uses.
+    ///
+    /// The caller emits this *after* the epilogue, so RSP is back on the return
+    /// address the original `call` pushed and the callee returns straight past
+    /// this function.
+    pub fn encode_jmp_direct(&mut self, target: &str) {
+        self.emit_byte(0xE9);
+        let offset = self.buf.len();
+        self.emit_le32(0);
+        self.relocations.push(Reloc {
+            offset,
+            kind: RelocKind::PLT32,
+            symbol: target.to_string(),
+            addend: -4,
+        });
+    }
+
     pub fn encode_call_indirect(&mut self, target: Reg) {
         // FF /2
         let t = target.hw_enc();

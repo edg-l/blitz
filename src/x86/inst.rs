@@ -286,6 +286,16 @@ pub enum MachInst {
     Jmp {
         target: LabelId,
     },
+    /// A tail call: this function's epilogue, then a jump to `target`.
+    ///
+    /// One instruction rather than an epilogue marker plus a jump, because the
+    /// epilogue is encoded from the frame layout at encode time and nothing before
+    /// then can spell it. It is a terminator: control does not come back, and the
+    /// callee's `ret` returns to *this* function's caller, because the teardown
+    /// leaves RSP on the return address and no `call` pushed another.
+    TailCallDirect {
+        target: String,
+    },
     Jcc {
         cc: CondCode,
         target: LabelId,
@@ -664,9 +674,11 @@ impl MachInst {
             // cdq/cqo sign-extend RAX into RDX; cbw/cwd widen within RAX.
             MachInst::Cdq | MachInst::Cqo | MachInst::Cwd => vec![Reg::RDX],
             MachInst::Cbw => vec![Reg::RAX],
-            MachInst::Ret | MachInst::Jmp { .. } | MachInst::Jcc { .. } | MachInst::Nop { .. } => {
-                Vec::new()
-            }
+            MachInst::Ret
+            | MachInst::Jmp { .. }
+            | MachInst::TailCallDirect { .. }
+            | MachInst::Jcc { .. }
+            | MachInst::Nop { .. } => Vec::new(),
         }
     }
 
@@ -804,9 +816,11 @@ impl MachInst {
             MachInst::CallDirect { .. } => Vec::new(),
             MachInst::CallIndirect { target } => collect(&[target]),
             MachInst::Cdq | MachInst::Cqo | MachInst::Cwd | MachInst::Cbw => vec![Reg::RAX],
-            MachInst::Ret | MachInst::Jmp { .. } | MachInst::Jcc { .. } | MachInst::Nop { .. } => {
-                Vec::new()
-            }
+            MachInst::Ret
+            | MachInst::Jmp { .. }
+            | MachInst::TailCallDirect { .. }
+            | MachInst::Jcc { .. }
+            | MachInst::Nop { .. } => Vec::new(),
         }
     }
 }

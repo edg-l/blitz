@@ -491,7 +491,12 @@ fn asm_call_4arg_abi() {
     let c3 = b.iconst(3, Type::I64);
     let c4 = b.iconst(4, Type::I64);
     let ret = b.call("ext_fn", &[c1, c2, c3, c4], &[Type::I64]);
-    b.ret(Some(ret[0]));
+    // Returning the call's result directly would put it in tail position, and
+    // lowering emits a jump for that -- correct, and not a test of the call. The
+    // add keeps a real `call` here; `lit/functions/tail_self_call.c` covers the
+    // tail form.
+    let sum = b.add(ret[0], c1);
+    b.ret(Some(sum));
 
     check_asm(
         b.finalize().unwrap(),

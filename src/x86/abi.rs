@@ -323,8 +323,20 @@ pub fn emit_prologue(encoder: &mut Encoder, layout: &FrameLayout) {
 ///   pop rbp               (only if `uses_frame_pointer`)
 ///   ret
 pub fn emit_epilogue(encoder: &mut Encoder, layout: &FrameLayout) {
+    emit_frame_teardown(encoder, layout);
+    encoder.encode_inst(&MachInst::Ret);
+}
+
+/// The epilogue without the `ret`: restore RSP and the callee-saved registers,
+/// and leave control alone.
+///
+/// A tail call needs exactly this. It is separate from [`emit_epilogue`] rather
+/// than duplicated because the two must move RSP by the same amount -- a tail call
+/// that tears down a different number of bytes than a return does would leave the
+/// callee reading its return address from the wrong place, and nothing downstream
+/// could see it.
+pub fn emit_frame_teardown(encoder: &mut Encoder, layout: &FrameLayout) {
     if layout.is_leaf {
-        encoder.encode_inst(&MachInst::Ret);
         return;
     }
 
@@ -348,8 +360,6 @@ pub fn emit_epilogue(encoder: &mut Encoder, layout: &FrameLayout) {
             dst: Operand::Reg(Reg::RBP),
         });
     }
-
-    encoder.encode_inst(&MachInst::Ret);
 }
 
 // ── 8.6 Parallel copy sequentialization ──────────────────────────────────────

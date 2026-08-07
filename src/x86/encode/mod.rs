@@ -539,6 +539,12 @@ impl Encoder {
             MachInst::Jmp { target } => {
                 self.encode_jmp(*target);
             }
+            // The epilogue is emitted by the caller of `encode_inst`, which is the
+            // only place that has the frame layout -- see `compile::mod`'s encode
+            // loop, which treats this the same way it treats `Ret`.
+            MachInst::TailCallDirect { target } => {
+                self.encode_jmp_direct(target);
+            }
             MachInst::Jcc { cc, target } => {
                 self.encode_jcc(*cc, *target);
             }

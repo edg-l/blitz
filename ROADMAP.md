@@ -72,11 +72,8 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Tail calls to another function** -- `P1`. The self-call form landed and is
-  `-25.5%` cycles on `live/tail_recursion.c`; the mutually recursive pair in the
-  same kernel still pays for every call and is most of the `x2.13` left there. The
-  lowering differs -- the frame has to come down first -- and the entry says how.
-- **Copies are still a third of what blitz emits** -- `P1`. 697 register-to-register moves in 2407 instructions over `bench` against
+- **Copies are still a third of what blitz emits** -- `P1`, and its first entry.
+  697 register-to-register moves in 2407 instructions over `bench` against
   `gcc -O2`'s 351 in 2322, and **585 of the 697 are parallel copies** -- phi
   copies on edges, entry parameter moves, argument setup -- which on their own
   exceed gcc's entire copy count. `stats` reports the split and
@@ -530,7 +527,7 @@ so the holes stay visible.
 - [ ] **nsw/nuw/nnan/ninf op flags.** Without them the signed-ordering
       algebraic rewrites stay permanently rejected (see Decisions). Op-flag
       bitfield threaded through saturation.
-- [x] **Tail call optimization**, for a tail call to the same function.
+- [x] **Tail call optimization.**
       A tail self-call is now a `jmp` to the label bound *after* the prologue:
       arguments into their ABI registers exactly as a call needs them, and control
       to the top of the body. The frame is neither torn down nor rebuilt, RSP does
@@ -545,32 +542,48 @@ so the holes stay visible.
       once. Median of 5 at `ARGS=100`:
 
       ```
-      blitz -O1, no TCO   145.7M cycles     x2.85 vs gcc
-      blitz -O1, TCO      108.5M cycles     x2.13 vs gcc     -25.5%
-      gcc -O2              51.1M
-      clang -O2            16.4M
+      blitz -O1, no TCO        146.6M cycles    x2.87 vs gcc
+      blitz -O1, self only     107.8M           x2.11            -26.5%
+      blitz -O1, self + other   72.5M           x1.42            -50.6%
+      gcc -O2                   51.1M
+      clang -O2                 16.4M
       ```
 
-      **`-0.8%` instructions for `-25.5%` cycles**, which is the sharpest example
-      in the repo of why the ranking is cycles: the `call` is replaced by one
-      `jmp`, so a static count sees almost nothing. The win is that a recursion
-      deeper than the return-address predictor makes every `ret` mispredict, and
-      this removes the pair. Only one row of 977 moves at all.
+      **Both forms, and they differ in one thing that decides everything else:
+      whether the frame this function built is the one the callee will run in.** A
+      self-call jumps to the label bound after the prologue and the frame stands.
+      A call to another function tears the frame down first -- the callee's
+      prologue builds its own -- so it is `setup_call_args`, then
+      `abi::emit_frame_teardown`, then `jmp <symbol>` as a new
+      `MachInst::TailCallDirect` (`E9 + rel32`, the same PLT32 relocation a call
+      uses). RSP is then back on the return address the original `call` pushed, so
+      the callee returns straight past this function. The argument registers
+      survive the teardown because they are caller-saved and the teardown only pops
+      callee-saved ones.
+
+      `emit_frame_teardown` is the epilogue *without* the `ret`, split out of
+      `emit_epilogue` rather than duplicated: the two have to move RSP by the same
+      amount or the callee reads its return address from the wrong place, and
+      nothing downstream could see that. Getting it wrong the first way was
+      visible immediately -- the epilogue emitted its `ret` before the jump, so the
+      function returned instead of tail-calling and the kernel printed 140106
+      instead of 264767.
+
+      **A static count cannot see most of this**, which makes it the sharpest
+      example in the repo of why the ranking is cycles: a `call` becomes one
+      `jmp`, so the self-call form moved `-0.8%` instructions for `-26.5%` cycles.
+      The win is that a recursion deeper than the return-address predictor makes
+      every `ret` mispredict, and this removes the pair.
+
+      29 `lit` rows do improve on instructions, at `-3.7%` to `-16.7%` -- every
+      `return f(x)` in the corpus loses its call and its `ret`. `bench` and the
+      generated programs do not move at all; they discard no call results and
+      return no call directly.
 
       `BLITZ_PASSES=-tail-calls` turns it off; it is on at `-O1` and off at `-O0`,
       where the recursion's frames are what a debugger walks.
       `lit/functions/tail_self_call.c` pins it, with `n * f(n - 1)` as the control
       that must keep its call.
-
-- [ ] **Tail calls to *another* function**, which is the rest of the item above.
-      The kernel's `even_step`/`odd_step` pair is mutually tail-recursive and still
-      pays for every call, which is most of the `x2.13` that remains. It needs the
-      other lowering: the frame *does* have to come down, because the callee's
-      prologue will build its own, so it is `setup_call_args`, then the epilogue,
-      then `jmp <symbol>`. RSP is then back where it was with the return address on
-      top. The argument registers survive the teardown because they are
-      caller-saved and the epilogue only pops callee-saved ones. Same
-      register-only-arguments restriction as above.
 
 - [ ] **Loop unrolling.** Compounds with LSR; do it after.
 - [ ] **Narrowing / type-width analysis.** `(uint8_t)x + 1` should not promote
