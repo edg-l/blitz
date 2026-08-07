@@ -43,7 +43,7 @@ use super::{GlobalRegAllocResult, build_vreg_classes_from_all_blocks};
 /// A round that spills nothing new has converged; one that does not is retried.
 /// Each round strictly shortens the intervals it spilled, so this bound is a
 /// backstop against a bug rather than an expected limit.
-const MAX_SPILL_ROUNDS: usize = 8;
+const MAX_SPILL_ROUNDS: usize = 16;
 
 /// Where one VReg is live, as a half-open span of the flattened instruction
 /// numbering. Blocks are laid end to end, so a VReg live across a block
@@ -96,6 +96,13 @@ pub fn allocate_fast(
     let xmm_order = allocatable_xmm_order();
     let callee_saved: BTreeSet<Reg> = CALLEE_SAVED.iter().copied().collect();
 
+    // Every VReg from here up is one a spill round minted: a reload, defined
+    // immediately before the use it feeds. Spilling one stores a value that was
+    // just loaded and mints another reload to load it again, which is a cascade
+    // with no fixpoint -- 40 of 55 refusals were this, and raising the round
+    // limit to 64 moved one program.
+    let first_reload_vreg = next_vreg;
+
     let mut spilled: BTreeSet<usize> = BTreeSet::new();
 
     for round in 0..MAX_SPILL_ROUNDS {
@@ -134,6 +141,15 @@ pub fn allocate_fast(
                 unspillable.insert(VReg(v as u32));
             }
         }
+        for insts in &schedules {
+            for inst in insts {
+                for v in std::iter::once(inst.dst).chain(inst.operands.iter().copied()) {
+                    if v.0 >= first_reload_vreg {
+                        unspillable.insert(v);
+                    }
+                }
+            }
+        }
 
         let scan = Scan {
             gpr_order: &gpr_order,
@@ -146,6 +162,15 @@ pub fn allocate_fast(
             unspillable: &unspillable,
         };
         let outcome = scan.run(&intervals);
+
+        if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
+            eprintln!(
+                "[regalloc] fast {func_name} round {round}: {} intervals, {} unplaced, {} spilled so far",
+                intervals.len(),
+                outcome.to_spill.len(),
+                spilled.len()
+            );
+        }
 
         if outcome.to_spill.is_empty() {
             if crate::trace::is_enabled("regalloc") && crate::trace::fn_matches(func_name) {
@@ -161,6 +186,22 @@ pub fn allocate_fast(
                 outcome.assignment,
                 &callee_saved,
                 param_vregs,
+            ));
+        }
+
+        if !outcome.unplaceable.is_empty() {
+            let names: Vec<String> = outcome
+                .unplaceable
+                .iter()
+                .take(8)
+                .map(|v| format!("v{}", v.0))
+                .collect();
+            return Err(format!(
+                "fast regalloc: {} value(s) need a register that nothing can give up \
+                 [{}] -- every value live there is a block parameter, a call argument, \
+                 a result the hardware pins, or a reload (in function '{func_name}')",
+                outcome.unplaceable.len(),
+                names.join(", ")
             ));
         }
 
@@ -329,6 +370,9 @@ struct Scan<'a> {
 struct ScanOutcome {
     assignment: BTreeMap<VReg, Reg>,
     to_spill: Vec<usize>,
+    /// Values that got no register and that no store can move. This is the wall
+    /// itself, not a round that failed to make progress.
+    unplaceable: Vec<VReg>,
 }
 
 impl Scan<'_> {
@@ -357,6 +401,7 @@ impl Scan<'_> {
     fn run(&self, intervals: &[Interval]) -> ScanOutcome {
         let mut assignment: BTreeMap<VReg, Reg> = BTreeMap::new();
         let mut to_spill: Vec<usize> = Vec::new();
+        let mut unplaceable: Vec<VReg> = Vec::new();
         // Active intervals, each with the register it holds, kept sorted by end
         // so expiry is a prefix.
         let mut active: Vec<(usize, Reg, VReg)> = Vec::new();
@@ -438,6 +483,12 @@ impl Scan<'_> {
                             active.push((iv.end, r, iv.vreg));
                             active.sort_by_key(|&(e, _, _)| e);
                         }
+                        // No register and nothing that may give one up. Asking
+                        // for this to be spilled is what does not terminate: a
+                        // reload spilled mints another reload to load what was
+                        // just loaded, and a block parameter spilled is a store
+                        // no phi copy reads.
+                        _ if must_place => unplaceable.push(iv.vreg),
                         _ => to_spill.push(iv.vreg.0 as usize),
                     }
                 }
@@ -449,6 +500,7 @@ impl Scan<'_> {
         ScanOutcome {
             assignment,
             to_spill,
+            unplaceable,
         }
     }
 }

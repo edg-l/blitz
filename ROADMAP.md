@@ -75,6 +75,28 @@ note there about unjudged programs. And **it is what DWARF will want**: locals
 in frame slots at fixed offsets is what `-O0` debug info describes, where the
 colouring allocator's whole job is to keep values in registers.
 
+**A whole-live-range linear scan was tried and is measured out. Do not start
+there again.** `src/regalloc/fast.rs` is that attempt, behind
+`BLITZ_PASSES=+fast-regalloc`. Forced on it reaches 268 of 334 differential
+comparisons and refuses 55 programs, and the refusals are structural rather than
+a list of bugs: keeping `allocate_global`'s interface means one physical register
+per VReg for the whole function, so a value live in an early block and a late one
+holds a register across everything between. Blocks laid end to end give no holes
+to exploit. Pressure is then high everywhere, which would only mean heavy
+spilling -- except that block parameters cannot be spilled at all, since a phi
+copy on the edge writes them. A loop-heavy function has many long-lived
+parameters live at once and the scan runs out with nothing it may take. On
+`tests/lit/bench/sieve.c` this happens in round 0, before any spilling: 48
+intervals, and `v19` needs a register no value can give up.
+
+The lesson is that the whole-range model and the one-register-per-VReg interface
+cannot both hold. **The per-instruction scratch model does not have this failure
+mode**, because nothing is held across an instruction: every interval is about
+one instruction long, so long live ranges stop mattering and many VRegs share a
+register without ever being live together. It reaches `vreg_to_reg` by rewriting
+the stream so each use loads into a *fresh* short-lived VReg and each definition
+stores back -- the same interface, different VRegs.
+
 The shape is LLVM's `RegAllocFast`: every VReg gets a slot, operands are loaded
 into scratch registers per instruction, results stored back, no interference
 graph, no coalescing, no splitting, linear in instructions. What it still has to
