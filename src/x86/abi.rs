@@ -445,6 +445,32 @@ fn sequentialize_one_class(copies: &[Reg2Reg], temp: Reg) -> Vec<Reg2Reg> {
     result
 }
 
+/// Whether a parameter marker's value is already in a register before its
+/// block's first instruction runs.
+///
+/// Two of the three kinds are: a **block** parameter, because the phi copies on
+/// the edge wrote it, and a **register-passed** function parameter, because the
+/// caller left it in its argument register. Both must therefore hold a register
+/// of their own over the whole run of markers, however the scheduler ordered
+/// them, and everything that models pressure or interference has to say so.
+///
+/// A **stack-passed** function parameter is the one that is not. Its value is in
+/// the caller's frame and the marker lowers to the load that brings it into a
+/// register, so it is an ordinary value defined where its marker sits. Counting
+/// it as resident makes every parameter of the function interfere with every
+/// other: fifteen integer parameters became a clique of fifteen where fourteen
+/// colours exist, at a measured pressure of eight.
+pub fn marker_is_entry_resident(op: &crate::ir::op::Op, arg_locs: &[ArgLoc]) -> bool {
+    use crate::ir::op::{Op, PureOp};
+    match op {
+        Op::Pure(PureOp::BlockParam(..)) => true,
+        Op::Pure(PureOp::Param(idx, _)) => {
+            matches!(arg_locs.get(*idx as usize), Some(ArgLoc::Reg(_)))
+        }
+        _ => false,
+    }
+}
+
 /// A single register-to-register copy, `(src, dst)`.
 pub type Reg2Reg = (Reg, Reg);
 

@@ -1174,6 +1174,7 @@ pub fn compile(
                     &bp,
                     &func.name,
                     opts.force_frame_pointer,
+                    &func_arg_locs,
                     &stack_arg_vregs,
                     &mut slots,
                     0,
@@ -1211,6 +1212,7 @@ pub fn compile(
                 &split_dom,
                 &block_param_map,
                 &slot_spilled_params,
+                &func_arg_locs,
             );
             // An empty plan still goes through `apply_plan_to`: that is what
             // bumps `split_generation`, and `collect_block_param_vregs_per_block`
@@ -1507,6 +1509,7 @@ pub fn compile(
                 &block_param_vregs_per_block,
                 &func.name,
                 opts.force_frame_pointer,
+                &func_arg_locs,
                 &stack_arg_vregs,
                 &mut slots,
                 crate::regalloc::MAX_GLOBAL_SPILL_ROUNDS,

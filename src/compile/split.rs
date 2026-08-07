@@ -21,6 +21,7 @@ use crate::regalloc::spill::LOOP_DEPTH_PENALTY_BASE;
 use crate::regalloc::vregset::VRegSet;
 use crate::regalloc::{SlotAllocator, SlotOwner};
 use crate::schedule::scheduler::ScheduledInst;
+use crate::x86::abi::ArgLoc;
 use crate::x86::abi::CALLER_SAVED_GPR;
 use crate::x86::reg::RegClass;
 
@@ -144,6 +145,7 @@ fn compute_local_liveness(
     schedule: &[ScheduledInst],
     live_out_seed: &BlockLiveSet,
     vreg_count: usize,
+    arg_locs: &[ArgLoc],
 ) -> Vec<VRegSet> {
     let n = schedule.len();
     // result[i] = live set before instruction i.
@@ -179,17 +181,18 @@ fn compute_local_liveness(
         result[i] = live.clone();
     }
 
-    // Every parameter of the block holds a register before the block's first
-    // instruction runs -- a block parameter because the phi copies on the edge
-    // wrote it, a function parameter because the caller did. `Op::is_param_marker`
-    // says which ops are only markers for that, and the scheduler puts them
-    // wherever the dependence order allows, so the backward scan above reads
-    // almost nothing as live across the run of markers -- at exactly the point
-    // where a whole parallel copy, or the whole argument list, is resident.
+    // A parameter whose value is already in a register before the block's first
+    // instruction runs holds that register over the whole run of markers, and the
+    // scheduler puts the markers wherever the dependence order allows -- so the
+    // backward scan above reads almost nothing as live across that run, at exactly
+    // the point where a whole parallel copy, or the whole argument list, is
+    // resident. `abi::marker_is_entry_resident` says which parameters those are,
+    // and a stack-passed one is not among them: its marker is the load.
     //
-    // `add_param_interferences` asserts the same thing to the colorer.
-    // Leaving it out here is what let the colorer need a register the splitter
-    // had never been asked to free.
+    // `add_param_interferences` asserts the same thing to the colorer, and the two
+    // must agree -- leaving it out here is what let the colorer need a register
+    // the splitter had never been asked to free, and putting a stack parameter in
+    // made every parameter of the function interfere with every other.
     let shadow_end = schedule
         .iter()
         .rposition(|inst| inst.op.is_param_marker())
@@ -197,7 +200,7 @@ fn compute_local_liveness(
     if shadow_end > 0 {
         let params: VRegSet = schedule[..shadow_end]
             .iter()
-            .filter(|inst| inst.op.is_param_marker())
+            .filter(|inst| crate::x86::abi::marker_is_entry_resident(&inst.op, arg_locs))
             .map(|inst| inst.dst)
             .collect();
         for live in result[..shadow_end].iter_mut() {
@@ -265,6 +268,7 @@ fn compute_pressures_only(
     schedule: &[ScheduledInst],
     live_out_seed: &BlockLiveSet,
     masks: &[&VRegSet],
+    arg_locs: &[ArgLoc],
 ) -> Vec<Vec<u32>> {
     let n = schedule.len();
     let mut out: Vec<Vec<u32>> = masks.iter().map(|_| vec![0u32; n + 1]).collect();
@@ -278,7 +282,7 @@ fn compute_pressures_only(
         .map_or(0, |i| i + 1);
     let params: VRegSet = schedule[..shadow_end]
         .iter()
-        .filter(|inst| inst.op.is_param_marker())
+        .filter(|inst| crate::x86::abi::marker_is_entry_resident(&inst.op, arg_locs))
         .map(|inst| inst.dst)
         .collect();
     // Per class, the parameters of that class: a point in the shadow holds all
@@ -825,6 +829,7 @@ pub(super) fn plan_splits(
     dom: &super::cfg::DomOrder,
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     already_slot_spilled: &BlockParamSlotMap,
+    arg_locs: &[ArgLoc],
 ) -> SplitPlan {
     let trace = crate::trace::is_enabled("split") && crate::trace::fn_matches(&func.name);
     let n_blocks = block_schedules.len();
@@ -879,6 +884,7 @@ pub(super) fn plan_splits(
         &mut next_vreg,
         &mut per_block_insertions,
         &mut new_segments,
+        arg_locs,
         &mut operand_rewrites,
         &mut slot_spilled_params,
         &mut planned_victims,
@@ -925,7 +931,8 @@ pub(super) fn plan_splits(
         let vreg_classes = ctx.vreg_classes;
 
         // Compute per-instruction live-before sets.
-        let live_sets = compute_local_liveness(block_idx, schedule, live_out_seed, vreg_count);
+        let live_sets =
+            compute_local_liveness(block_idx, schedule, live_out_seed, vreg_count, arg_locs);
 
         // Compute pressure per class.
         let gpr_pressure = compute_pressure_for_class(&live_sets, schedule, &gpr_mask);
@@ -1315,6 +1322,7 @@ fn detect_blockparam_slot_routing(
     next_vreg: &mut u32,
     per_block_insertions: &mut [Vec<(usize, ScheduledInst)>],
     new_segments: &mut Vec<(ClassId, VReg, ProgramPoint, ProgramPoint)>,
+    arg_locs: &[ArgLoc],
     operand_rewrites: &mut Vec<(usize, usize, usize, VReg)>,
     slot_spilled_params: &mut BTreeMap<(BlockId, u32), SlotSpilledParamInfo>,
     planned_victims: &mut BTreeSet<VReg>,
@@ -1720,7 +1728,7 @@ fn detect_blockparam_slot_routing(
         if schedule.is_empty() {
             continue;
         }
-        let pressures = compute_pressures_only(schedule, live_out, &masks);
+        let pressures = compute_pressures_only(schedule, live_out, &masks, arg_locs);
         // Nothing over budget anywhere in the block: no parameter here can be
         // the value that does not fit, and the live sets go unread.
         if !pressures
@@ -1730,7 +1738,7 @@ fn detect_blockparam_slot_routing(
         {
             continue;
         }
-        let live_sets = compute_local_liveness(block_idx, schedule, live_out, vreg_count);
+        let live_sets = compute_local_liveness(block_idx, schedule, live_out, vreg_count, arg_locs);
         for ((class, budget, _), pressure) in class_masks.iter().zip(&pressures) {
             let (class, budget) = (*class, *budget);
             for (point, &at_point) in pressure.iter().enumerate() {
@@ -2410,6 +2418,7 @@ mod tests {
             &dom_order(&func),
             &egraph.block_param_classes(),
             &BlockParamSlotMap::new(),
+            &[],
         );
 
         assert!(
@@ -2461,6 +2470,7 @@ mod tests {
             &dom_order(&func),
             &egraph.block_param_classes(),
             &BlockParamSlotMap::new(),
+            &[],
         );
 
         // Should have planned at least one split (insertions or rewrites).
@@ -2658,6 +2668,7 @@ mod tests {
             &mut next_vreg,
             &mut per_block_insertions,
             &mut new_segments,
+            &[],
             &mut operand_rewrites,
             &mut slot_spilled_params,
             &mut BTreeSet::new(),
@@ -2739,6 +2750,7 @@ mod tests {
             &mut next_vreg,
             &mut per_block_insertions,
             &mut new_segments,
+            &[],
             &mut operand_rewrites,
             &mut slot_spilled_params,
             &mut BTreeSet::new(),
@@ -2804,6 +2816,7 @@ mod tests {
             &mut next_vreg,
             &mut per_block_insertions,
             &mut new_segments,
+            &[],
             &mut operand_rewrites,
             &mut slot_spilled_params,
             &mut BTreeSet::new(),
@@ -2909,6 +2922,7 @@ mod tests {
             &mut next_vreg,
             &mut per_block_insertions,
             &mut new_segments,
+            &[],
             &mut operand_rewrites,
             &mut slot_spilled_params,
             &mut BTreeSet::new(),

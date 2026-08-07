@@ -338,6 +338,8 @@ functions/factorial.c	O0	59	249	12	16
 functions/factorial.c	O1	30	102	0	0
 functions/fibonacci.c	O0	68	275	13	18
 functions/fibonacci.c	O1	35	139	0	0
+functions/fifteen_int_params.c	O0	288	1715	80	79
+functions/fifteen_int_params.c	O1	209	1313	62	9
 functions/forward_decl.c	O0	66	287	14	16
 functions/forward_decl.c	O1	28	115	0	0
 functions/fourteen_int_args.c	O0	199	1083	47	46

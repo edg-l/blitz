@@ -72,19 +72,12 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Fifteen or more integer parameters do not colour** -- `P0` Correctness. The
-  *callee* side of the enumeration below, and the last four red rows in it:
-  `abi_n15_int_*` and `abi_n16_int_*` at `-O1`, in `callee` rather than at the
-  call. `gpr_overshoot=1` with `over-budget VRegs=1 defined by Pure(Param)x1` at
-  a *peak of 8 GPRs live*, so this is not pressure -- a parameter cannot be
-  given a colour where eight registers are free, which points at the
-  pre-colouring rather than the budget. `-O0` takes all sixteen.
 - **Give the inliner a pressure check, as LICM has** -- `P1`, first entry. Done
   when `-O1` beats `-O0` on all 15 `bench` kernels. **Re-measure before
   starting**: the figure behind it is from 2026-08-06 and a lot of codegen has
   moved since.
 
-After those, `P1` is ordered by measured impact. **`P2` is where the
+After that, `P1` is ordered by measured impact. **`P2` is where the
 single-target thesis pays off**, though half of it is unreachable until tinyc
 grows builtins -- see the note there.
 
@@ -223,7 +216,10 @@ pre-coloring conflict assertion exists (`coloring::check_precolorings`, under
 - 1010 Rust tests + 552 lit tests, all green. `cargo fmt` clean, `cargo clippy
   --all-targets` clean, zero build warnings, zero rustdoc warnings.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites, with no
-  row red on purpose.
+  row red on purpose. **No `P0` item is in the Start here queue any more**: the
+  queue starts at `P1`. `P0` still holds the items below that no reproducer names
+  -- the `assign_args` panic, the C-surface probe, the second implementation, the
+  one-fact-one-place audit.
 - `bash tests/lit/run_diff.sh`: 337 compared `-O0`-vs-`-O1` and against a
   reference compiler; no skips, no differences under gcc or clang.
 - **`-O0` is on `regalloc::fast` and both levels are correct.** Everything below
@@ -232,8 +228,7 @@ pre-coloring conflict assertion exists (`coloring::check_precolorings`, under
   levels, and nothing open.
 - Generated programs: `mixed` 400/400, `args` 400/400, `pressure` 400/400, which
   is what `run_fuzz.sh` now sweeps by default, plus `abi` -- 98 programs
-  enumerating the argument surface rather than sampling it, 94 passing and 4 open
-  above. **The width is what makes it a
+  enumerating the argument surface rather than sampling it, all passing. **The width is what makes it a
   check** -- the `-O1` allocator bug in `fixed/args-seed310.c` is at seed 310 of
   `args` alone, and at the 30 seeds the gates used to be run at, all three
   shapes were green while seven programs miscompiled.
@@ -321,6 +316,19 @@ what makes attribution possible here.
       out of a program the segfault above was hiding** -- 546 lit tests, 335
       differential comparisons and 400 seeds a shape were all green while a
       six-argument function that calls anything computed the wrong sum.
+- [x] **Every parameter of a function was modelled as holding a register at
+      entry.** True of a block parameter, whose phi copies wrote it on the edge,
+      and of a register-passed function parameter, whose caller did. False of a
+      stack-passed one: its value is in the caller's frame and its marker *is* the
+      load. `add_param_interferences` and the splitter's two pressure scans both
+      asserted it of all of them, so 15 integer parameters were a clique of 15
+      where 14 colours exist and `callee` did not compile at `-O1` -- at a
+      measured peak of 8 GPRs live, so the graph and the pressure disagreed by
+      seven. Fourteen fitted exactly and hid it. `abi::marker_is_entry_resident`
+      is now the one place that decides, and the splitter and the colourer read
+      the same one -- they have to, or the colourer needs a register the splitter
+      was never asked to free. `lit/functions/fifteen_int_params.c`. Found by the
+      ABI enumeration; changed none of the 980 codesize rows.
 - [ ] **`assign_args` `unreachable!()`s on a struct** (`src/x86/abi.rs`). Same
       tier mistake: the frontend cannot produce one today, so it reads as a
       feature gap, but the failure mode is a panic rather than a diagnostic.
@@ -352,11 +360,12 @@ what makes attribution possible here.
       run**, none of them reachable from `gen_c.py`, which caps at 12 parameters:
       a silently wrong first double at `-O0` from nine parameters up (the entry
       sequence scratched XMM0 while it still held one), a call of 14 arguments
-      that could not be allocated at either level, and 15 or more *parameters*
-      still open above.
-- [ ] **Fifteen or more integer parameters do not colour, at `-O1`.** See Start
-      here. The callee's side of the same shape, and the only red rows the
-      enumeration has left.
+      that could not be allocated at either level, and 15 parameters that could
+      not be coloured because every parameter of a function was modelled as
+      holding a register at entry. **All three fixed, and 98/98 passes under
+      `BLITZ_VERIFY=strict`.** None of the three changed a single one of the 980
+      `run_codesize.sh` rows, which is the measure of how far outside the sampled
+      space they were.
 - [ ] **A "one fact, one place" audit.** Two bugs in one session were the same
       fact derived twice and disagreeing -- the block's `param_vregs` against
       `cfg::resolve_block_param_vreg`, and `Op::BlockParam`'s shadow modelled
@@ -634,14 +643,10 @@ without taking it is picking up work that cannot land.
 
 ## Known bugs
 
-**No wrong answers, one shape that does not compile.** At 400 seeds a shape
-`mixed`, `args` and `pressure` are all 400/400, the saved corpus is 18 `fixed`
+**Nothing open.** At 400 seeds a shape `mixed`, `args` and `pressure` are all
+400/400, the enumerated `abi` shape is 98/98, the saved corpus is 18 `fixed`
 passing with nothing open, and `BLITZ_VERIFY` is green at `1` and `strict` across
-all 562 lit tests.
-
-- **Fifteen or more integer parameters do not colour at `-O1`**, four rows of the
-  enumerated ABI shape (`run_fuzz.sh 0 abi`). It is a compile error, not a wrong
-  answer, and `-O0` takes the same programs. See Start here.
+all 566 lit tests.
 
 The entry that used to stand here -- a register-sharing violation with no
 behavioural symptom -- was a defect in the verifier's own inputs rather than in

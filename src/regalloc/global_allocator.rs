@@ -56,6 +56,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::egraph::extract::VReg;
 use crate::ir::op::{MachOp, Op, PseudoOp, PureOp};
 use crate::schedule::scheduler::ScheduledInst;
+use crate::x86::abi::ArgLoc;
 use crate::x86::abi::{CALLER_SAVED_GPR, CALLER_SAVED_XMM};
 use crate::x86::reg::{Reg, RegClass};
 
@@ -152,6 +153,7 @@ fn add_param_interferences(
     block_param_vregs_per_block: &[VRegSet],
     block_schedules: &[Vec<ScheduledInst>],
     alias_map: &BTreeMap<u32, u32>,
+    arg_locs: &[ArgLoc],
 ) {
     let resolve = |v: VReg| -> VReg {
         let mut idx = v.0;
@@ -189,7 +191,10 @@ fn add_param_interferences(
             .chain(
                 sched
                     .iter()
-                    .filter(|inst| matches!(inst.op, Op::Pure(PureOp::Param(..))))
+                    .filter(|inst| {
+                        matches!(inst.op, Op::Pure(PureOp::Param(..)))
+                            && crate::x86::abi::marker_is_entry_resident(&inst.op, arg_locs)
+                    })
                     .map(|inst| inst.dst),
             )
             .map(resolve)
@@ -212,7 +217,12 @@ fn add_param_interferences(
         };
         let mut in_shadow: BTreeSet<VReg> = BTreeSet::new();
         for inst in &sched[..=last_marker] {
-            if !inst.op.is_param_marker() && !inst.op.has_no_result() {
+            // A stack-passed parameter is not resident, so its marker is an
+            // ordinary definition inside the shadow rather than one of the values
+            // the shadow is drawn around.
+            if !crate::x86::abi::marker_is_entry_resident(&inst.op, arg_locs)
+                && !inst.op.has_no_result()
+            {
                 in_shadow.insert(resolve(inst.dst));
             }
             in_shadow.extend(inst.operands.iter().map(|&v| resolve(v)));
@@ -845,6 +855,7 @@ fn run_phase3(
     mut next_vreg: u32,
     coalesce_now: bool,
     slot_resident: &VRegSet,
+    arg_locs: &[ArgLoc],
 ) -> Phase3State {
     // Build function-wide precoloring (params + shifts + divs +
     // caller-supplied call-arg precolors).
@@ -938,6 +949,7 @@ fn run_phase3(
         &renamed_block_param_vregs,
         &post_coalesce_schedules,
         &alias_map_early,
+        arg_locs,
     );
 
     // Re-inject clobber phantoms into the rebuilt graph.
@@ -1608,6 +1620,7 @@ pub fn allocate_global(
     block_param_vregs_per_block: &[VRegSet],
     func_name: &str,
     uses_frame_pointer: bool,
+    arg_locs: &[ArgLoc],
     stack_args: &BTreeSet<VReg>,
     slots: &mut SlotAllocator,
     spill_rounds: usize,
@@ -1755,6 +1768,7 @@ pub fn allocate_global(
             &block_params_now,
             block_schedules,
             &BTreeMap::new(),
+            arg_locs,
         );
 
         // Determine starting next_vreg for phantom injection.
@@ -1780,6 +1794,7 @@ pub fn allocate_global(
             next_vreg,
             !coalesced,
             &slot_resident_set,
+            arg_locs,
         );
         coalesced = true;
 
@@ -2682,6 +2697,7 @@ mod tests {
             10,    // next_vreg start
             true,  // coalesce_now
             &VRegSet::new(),
+            &[],
         );
 
         // v0 was precolored to RDI. With a call phantom for RDI interfering
@@ -2755,6 +2771,7 @@ mod tests {
             next_vreg,
             true, // coalesce_now,
             &VRegSet::new(),
+            &[],
         );
 
         // Phase 3 graph must have more VRegs than Phase 2 due to phantom
@@ -2810,6 +2827,7 @@ mod tests {
             next_vreg,
             true, // coalesce_now,
             &VRegSet::new(),
+            &[],
         );
 
         let gpr_order = allocatable_gpr_order(false);
@@ -2864,6 +2882,7 @@ mod tests {
             next_vreg,
             true, // coalesce_now,
             &VRegSet::new(),
+            &[],
         );
 
         let gpr_order = allocatable_gpr_order(false);
@@ -2902,6 +2921,7 @@ mod tests {
             next_vreg,
             true,
             &VRegSet::new(),
+            &[],
         )
     }
 
@@ -3091,6 +3111,7 @@ mod tests {
             &block_param_vregs,
             "test_fn",
             uses_frame_pointer,
+            &[],
             &BTreeSet::new(),
             slots,
             MAX_GLOBAL_SPILL_ROUNDS,
@@ -3282,6 +3303,7 @@ mod tests {
             &block_param_vregs,
             "test_many_args",
             false,
+            &[],
             &BTreeSet::new(),
             &mut SlotAllocator::new(),
             MAX_GLOBAL_SPILL_ROUNDS,
@@ -3433,6 +3455,7 @@ mod tests {
             &block_param_vregs,
             "three_phi_params",
             false,
+            &[],
             &BTreeSet::new(),
             &mut SlotAllocator::new(),
             MAX_GLOBAL_SPILL_ROUNDS,
