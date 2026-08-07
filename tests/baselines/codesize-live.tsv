@@ -34,6 +34,8 @@ nested_carried.c	O0	102	334	0	0
 nested_carried.c	O1	92	304	0	0
 pointer_chase.c	O0	66	243	0	0
 pointer_chase.c	O1	62	227	0	0
+sort_search.c	O0	209	683	0	0
+sort_search.c	O1	199	634	0	0
 state_machine.c	O0	156	568	0	0
 state_machine.c	O1	154	524	0	0
 struct_fields.c	O0	105	350	0	0
