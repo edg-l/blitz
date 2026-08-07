@@ -243,11 +243,36 @@ fn copy_add_to_lea(mov: &MachInst, add: &MachInst) -> Option<MachInst> {
     })
 }
 
+/// Emit `inst`, unless it is a 64-bit move of a register to itself.
+///
+/// Such a move is architecturally a no-op, and it reaches here two ways: it can
+/// arrive in the input, and a rule that rewrites some other instruction into a
+/// move can produce one -- `lea rX, [rX]` and a store-load pair through the same
+/// register both do. Filtering at the push covers all of them, where a match arm
+/// on the input covers only the first.
+///
+/// A narrower move is not a no-op: a 32-bit destination zero-extends into the
+/// full register, and an 8- or 16-bit one leaves the upper bits alone, so both
+/// are observable.
+fn push_inst(out: &mut Vec<MachInst>, inst: MachInst) {
+    if let MachInst::MovRR {
+        size: OpSize::S64,
+        dst,
+        src,
+    } = &inst
+        && dst == src
+    {
+        return;
+    }
+    out.push(inst);
+}
+
 /// Apply peephole optimizations to a sequence of `MachInst`s.
 ///
 /// Optimizations applied (in order of pattern matching):
 /// 0. Redundant round-trip mov: `mov rA, rB; mov rB, rA` -> `mov rA, rB` (S64 only).
-/// 1. Delete `mov rX, rX` (redundant self-move).
+/// 1. Delete `mov rX, rX` (redundant self-move), wherever it comes from -- see
+///    `push_inst`.
 /// 2. `mov rX, 0` -> `xor rX, rX` (zero idiom, shorter encoding).
 /// 3. `cmp rX, 0` followed by Jcc/Setcc -> `test rX, rX` followed by Jcc/Setcc.
 /// 4. `add rX, 1` -> `inc rX` when flags are dead after the add.
@@ -279,11 +304,14 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
             MachInst::Lea { size, dst, addr }
                 if addr.base.is_some() && addr.index.is_none() && addr.disp == 0 =>
             {
-                result.push(MachInst::MovRR {
-                    size: *size,
-                    dst: dst.clone(),
-                    src: Operand::Reg(addr.base.expect("base is some")),
-                });
+                push_inst(
+                    &mut result,
+                    MachInst::MovRR {
+                        size: *size,
+                        dst: dst.clone(),
+                        src: Operand::Reg(addr.base.expect("base is some")),
+                    },
+                );
                 i += 1;
                 continue;
             }
@@ -302,20 +330,8 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
                     if dst == src_b && src == dst_a
                 ) =>
             {
-                result.push(insts[i].clone());
+                push_inst(&mut result, insts[i].clone());
                 i += 2;
-                continue;
-            }
-
-            // 1. Delete mov rX, rX -- but only for S64.
-            // A S32 `mov eax, eax` zero-extends the upper 32 bits and is NOT a no-op.
-            // S8/S16 partial-register writes also have observable effects.
-            MachInst::MovRR {
-                size: OpSize::S64,
-                dst,
-                src,
-            } if dst == src => {
-                i += 1;
                 continue;
             }
 
@@ -327,7 +343,8 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
                     && flags_dead_after(&insts, i + 1)
                     && copy_add_to_lea(&insts[i], &insts[i + 1]).is_some() =>
             {
-                result.push(
+                push_inst(
+                    &mut result,
                     copy_add_to_lea(&insts[i], &insts[i + 1]).expect("the guard just built it"),
                 );
                 i += 2;
@@ -337,11 +354,14 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
             // 2. mov rX, 0  ->  xor rX, rX (zero idiom, shorter encoding).
             // Only safe when flags are not live (xor clobbers flags).
             MachInst::MovRI { size, dst, imm: 0 } if flags_dead_after(&insts, i) => {
-                result.push(MachInst::XorRR {
-                    size: *size,
-                    dst: dst.clone(),
-                    src: dst.clone(),
-                });
+                push_inst(
+                    &mut result,
+                    MachInst::XorRR {
+                        size: *size,
+                        dst: dst.clone(),
+                        src: dst.clone(),
+                    },
+                );
                 i += 1;
                 continue;
             }
@@ -350,11 +370,14 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
             MachInst::CmpRI { size, dst, imm: 0 }
                 if i + 1 < insts.len() && is_flag_consumer(&insts[i + 1]) =>
             {
-                result.push(MachInst::TestRR {
-                    size: *size,
-                    dst: dst.clone(),
-                    src: dst.clone(),
-                });
+                push_inst(
+                    &mut result,
+                    MachInst::TestRR {
+                        size: *size,
+                        dst: dst.clone(),
+                        src: dst.clone(),
+                    },
+                );
                 // The Jcc itself will be pushed on the next iteration.
                 i += 1;
                 continue;
@@ -362,40 +385,52 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
 
             // 4. add rX, 1  ->  inc rX  (when flags are dead).
             MachInst::AddRI { size, dst, imm: 1 } if flags_dead_after(&insts, i) => {
-                result.push(MachInst::Inc {
-                    size: *size,
-                    dst: dst.clone(),
-                });
+                push_inst(
+                    &mut result,
+                    MachInst::Inc {
+                        size: *size,
+                        dst: dst.clone(),
+                    },
+                );
                 i += 1;
                 continue;
             }
 
             // 5. sub rX, 1  ->  dec rX  (when flags are dead).
             MachInst::SubRI { size, dst, imm: 1 } if flags_dead_after(&insts, i) => {
-                result.push(MachInst::Dec {
-                    size: *size,
-                    dst: dst.clone(),
-                });
+                push_inst(
+                    &mut result,
+                    MachInst::Dec {
+                        size: *size,
+                        dst: dst.clone(),
+                    },
+                );
                 i += 1;
                 continue;
             }
 
             // 6. add rX, -1  ->  dec rX  (when flags are dead).
             MachInst::AddRI { size, dst, imm: -1 } if flags_dead_after(&insts, i) => {
-                result.push(MachInst::Dec {
-                    size: *size,
-                    dst: dst.clone(),
-                });
+                push_inst(
+                    &mut result,
+                    MachInst::Dec {
+                        size: *size,
+                        dst: dst.clone(),
+                    },
+                );
                 i += 1;
                 continue;
             }
 
             // 7. sub rX, -1  ->  inc rX  (when flags are dead).
             MachInst::SubRI { size, dst, imm: -1 } if flags_dead_after(&insts, i) => {
-                result.push(MachInst::Inc {
-                    size: *size,
-                    dst: dst.clone(),
-                });
+                push_inst(
+                    &mut result,
+                    MachInst::Inc {
+                        size: *size,
+                        dst: dst.clone(),
+                    },
+                );
                 i += 1;
                 continue;
             }
@@ -410,21 +445,24 @@ pub fn peephole(insts: Vec<MachInst>) -> Vec<MachInst> {
                         if s2 == size && a2 == addr
                     ) =>
             {
-                result.push(insts[i].clone());
+                push_inst(&mut result, insts[i].clone());
                 // Replace the load with a reg-reg move.
                 if let MachInst::MovRM { size: s2, dst, .. } = &insts[i + 1] {
-                    result.push(MachInst::MovRR {
-                        size: *s2,
-                        dst: dst.clone(),
-                        src: src.clone(),
-                    });
+                    push_inst(
+                        &mut result,
+                        MachInst::MovRR {
+                            size: *s2,
+                            dst: dst.clone(),
+                            src: src.clone(),
+                        },
+                    );
                 }
                 i += 2;
                 continue;
             }
 
             _ => {
-                result.push(insts[i].clone());
+                push_inst(&mut result, insts[i].clone());
                 i += 1;
             }
         }
@@ -838,6 +876,48 @@ mod tests {
                 src: reg(Reg::RAX),
             }
         );
+    }
+
+    #[test]
+    fn store_load_forwarding_into_the_stored_register_leaves_nothing() {
+        use crate::x86::addr::Addr;
+        let addr = Addr::new(Some(Reg::RSP), None, 1, 0);
+        let insts = vec![
+            MachInst::MovMR {
+                size: OpSize::S64,
+                addr: addr.clone(),
+                src: reg(Reg::RAX),
+            },
+            MachInst::MovRM {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                addr: addr.clone(),
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 1, "the forwarded load is a self-move: {out:?}");
+        assert!(matches!(out[0], MachInst::MovMR { .. }));
+    }
+
+    #[test]
+    fn lea_of_its_own_base_leaves_nothing() {
+        use crate::x86::addr::Addr;
+        let insts = vec![
+            MachInst::Lea {
+                size: OpSize::S64,
+                dst: reg(Reg::RAX),
+                addr: Addr::new(Some(Reg::RAX), None, 1, 0),
+            },
+            // A read, so the LEA is not dead and rule 9 is the one that fires.
+            MachInst::AddRR {
+                size: OpSize::S64,
+                dst: reg(Reg::RCX),
+                src: reg(Reg::RAX),
+            },
+        ];
+        let out = peephole(insts);
+        assert_eq!(out.len(), 1, "the copy is a self-move: {out:?}");
+        assert!(matches!(out[0], MachInst::AddRR { .. }));
     }
 
     #[test]
