@@ -11,7 +11,7 @@ alias/dse_overwritten_store.c	O1	5	15	0	0	0
 alias/forward_across_disjoint_slots.c	O0	33	138	8	10	4
 alias/forward_across_disjoint_slots.c	O1	7	26	0	0	1
 alias/forward_across_struct_field.c	O0	42	178	10	16	4
-alias/forward_across_struct_field.c	O1	7	29	0	0	0
+alias/forward_across_struct_field.c	O1	6	25	0	0	0
 alias/forward_three_loads.c	O0	40	168	11	14	4
 alias/forward_three_loads.c	O1	7	20	0	0	0
 alias/load_to_load_forward.c	O0	27	115	7	9	2
@@ -55,21 +55,21 @@ arithmetic/urem_basic.c	O1	2	6	0	0	0
 arrays/array_in_struct.c	O0	91	434	22	33	10
 arrays/array_in_struct.c	O1	22	87	0	0	2
 arrays/basic.c	O0	68	298	17	26	6
-arrays/basic.c	O1	23	71	0	0	3
+arrays/basic.c	O1	21	67	0	0	3
 arrays/extra_array_store_seed58.c	O0	1843	12909	710	810	73
 arrays/extra_array_store_seed58.c	O1	401	2463	127	156	5
 arrays/large_array.c	O0	73	318	18	27	8
-arrays/large_array.c	O1	24	83	0	0	4
+arrays/large_array.c	O1	22	79	0	0	4
 arrays/multidim.c	O0	80	378	21	29	8
-arrays/multidim.c	O1	24	83	0	0	3
+arrays/multidim.c	O1	23	83	0	0	3
 arrays/param_decay_bracket.c	O0	99	441	28	37	10
-arrays/param_decay_bracket.c	O1	22	95	0	0	3
+arrays/param_decay_bracket.c	O1	21	91	0	0	3
 arrays/param_decay.c	O0	106	549	34	45	6
-arrays/param_decay.c	O1	24	96	0	0	4
+arrays/param_decay.c	O1	23	92	0	0	4
 arrays/sizeof.c	O0	4	16	1	1	0
 arrays/sizeof.c	O1	2	6	0	0	0
 arrays/struct_array.c	O0	106	537	25	40	10
-arrays/struct_array.c	O1	28	114	0	0	2
+arrays/struct_array.c	O1	27	114	0	0	2
 asm/alu_imm32.c	O0	24	111	6	6	4
 asm/alu_imm32.c	O1	11	43	0	0	3
 asm/bit_ops.c	O0	253	1212	67	72	66
@@ -109,7 +109,7 @@ asm/shift_mask.c	O1	32	107	2	2	11
 asm/shl_strength.c	O0	15	65	4	4	2
 asm/shl_strength.c	O1	5	24	0	0	1
 asm/store_imm.c	O0	46	208	12	17	2
-asm/store_imm.c	O1	8	39	0	0	0
+asm/store_imm.c	O1	7	35	0	0	0
 asm/struct_field_disp.c	O0	31	145	8	12	1
 asm/struct_field_disp.c	O1	7	27	0	0	1
 asm/xor_zero.c	O0	4	16	1	1	0
@@ -171,7 +171,7 @@ control/cmp_negative_values.c	O1	35	115	0	0	5
 control/compound_assign.c	O0	85	384	19	27	8
 control/compound_assign.c	O1	25	79	0	0	2
 control/compound_assign_complex.c	O0	179	948	37	61	18
-control/compound_assign_complex.c	O1	49	168	0	0	3
+control/compound_assign_complex.c	O1	48	168	0	0	3
 control/constant_index_stores_then_call.c	O0	62	258	14	19	10
 control/constant_index_stores_then_call.c	O1	15	65	0	0	1
 control/continue_basic.c	O0	108	498	29	43	9
@@ -199,7 +199,7 @@ control/early_return_in_while.c	O1	33	106	0	0	3
 control/eflags_across_calls.c	O0	71	302	15	17	6
 control/eflags_across_calls.c	O1	37	145	1	1	5
 control/for_loop_array.c	O0	68	297	17	26	6
-control/for_loop_array.c	O1	22	71	0	0	2
+control/for_loop_array.c	O1	20	67	0	0	2
 control/for_loop_basic.c	O0	29	116	8	9	4
 control/for_loop_basic.c	O1	10	30	0	0	1
 control/for_loop_countdown.c	O0	28	111	8	8	4
@@ -217,7 +217,7 @@ control/for_loop_no_init.c	O1	10	30	0	0	2
 control/for_loop_no_update.c	O0	26	102	7	8	4
 control/for_loop_no_update.c	O1	10	30	0	0	2
 control/for_loop_pointer_update.c	O0	74	337	20	29	6
-control/for_loop_pointer_update.c	O1	22	71	0	0	2
+control/for_loop_pointer_update.c	O1	20	67	0	0	2
 control/for_loop_struct_field.c	O0	36	140	8	12	4
 control/for_loop_struct_field.c	O1	14	36	0	0	1
 control/if_else.c	O0	4	16	1	1	0
@@ -225,7 +225,7 @@ control/if_else.c	O1	2	6	0	0	0
 control/if_else_false.c	O0	4	16	1	1	0
 control/if_else_false.c	O1	2	6	0	0	0
 control/incr_decr_complex.c	O0	259	1480	55	86	21
-control/incr_decr_complex.c	O1	84	347	0	0	6
+control/incr_decr_complex.c	O1	82	339	0	0	6
 control/increment_decrement.c	O0	72	282	17	22	8
 control/increment_decrement.c	O1	31	88	0	0	4
 control/logical_and_or.c	O0	53	210	15	15	6
@@ -279,7 +279,7 @@ edge/many_args.c	O1	2	3	0	0	0
 edge/many_locals.c	O0	4	16	1	1	0
 edge/many_locals.c	O1	2	6	0	0	0
 edge/noinline_struct_ptr_return.c	O0	30	147	8	11	0
-edge/noinline_struct_ptr_return.c	O1	13	52	0	0	2
+edge/noinline_struct_ptr_return.c	O1	12	48	0	0	2
 edge/overflow_wrap.c	O0	4	16	1	1	0
 edge/overflow_wrap.c	O1	2	3	0	0	0
 edge/zero_operations.c	O0	4	16	1	1	0
@@ -349,7 +349,7 @@ functions/forward_decl.c	O1	24	104	0	0	0
 functions/fourteen_int_args.c	O0	199	1083	47	46	10
 functions/fourteen_int_args.c	O1	123	704	9	9	9
 functions/linked_list.c	O0	222	1017	53	75	26
-functions/linked_list.c	O1	95	410	0	0	29
+functions/linked_list.c	O1	93	402	0	0	29
 functions/many_args.c	O0	80	331	21	20	20
 functions/many_args.c	O1	7	29	0	0	0
 functions/multi_call.c	O0	31	125	7	8	8
@@ -361,9 +361,9 @@ functions/param_reemitted_in_sibling_blocks.c	O1	12	63	0	0	0
 functions/recursion_factorial.c	O0	32	143	7	9	4
 functions/recursion_factorial.c	O1	13	51	0	0	3
 functions/stack_arg_alignment_odd.c	O0	277	1194	67	76	63
-functions/stack_arg_alignment_odd.c	O1	124	464	4	12	37
+functions/stack_arg_alignment_odd.c	O1	123	462	4	12	36
 functions/stack_fp_args.c	O0	534	3125	138	151	94
-functions/stack_fp_args.c	O1	235	1158	8	15	54
+functions/stack_fp_args.c	O1	234	1156	8	15	53
 functions/tail_call_other.c	O0	77	329	17	23	14
 functions/tail_call_other.c	O1	33	124	0	0	12
 functions/tail_self_call.c	O0	97	407	20	27	21
@@ -375,7 +375,7 @@ functions/three_args.c	O1	2	6	0	0	0
 functions/two_args.c	O0	20	89	6	6	2
 functions/two_args.c	O1	2	6	0	0	0
 functions/variadic_call.c	O0	226	1196	44	62	51
-functions/variadic_call.c	O1	132	566	6	23	34
+functions/variadic_call.c	O1	131	564	6	23	33
 functions/void_call_multi_arg.c	O0	80	362	15	24	6
 functions/void_call_multi_arg.c	O1	38	182	0	0	7
 functions/void_function.c	O0	7	33	1	1	0
@@ -389,7 +389,7 @@ functions/zero_arg_void_mixed.c	O1	100	513	12	6	18
 globals/addr_of.c	O0	18	84	5	6	0
 globals/addr_of.c	O1	6	30	0	0	0
 globals/array.c	O0	68	294	17	26	6
-globals/array.c	O1	23	71	0	0	3
+globals/array.c	O1	21	67	0	0	3
 globals/basic.c	O0	12	52	3	4	0
 globals/basic.c	O1	4	15	0	0	0
 globals/global_across_calls.c	O0	84	348	18	21	17
@@ -525,7 +525,7 @@ licm/correctness_sum.c	O1	16	54	0	0	2
 licm/nested_loop.c	O0	49	204	15	17	6
 licm/nested_loop.c	O1	17	47	0	0	4
 licm/no_hoist_load.c	O0	68	297	17	26	6
-licm/no_hoist_load.c	O1	22	71	0	0	2
+licm/no_hoist_load.c	O1	20	67	0	0	2
 licm/no_hoist_loop_dep.c	O0	32	123	8	10	6
 licm/no_hoist_loop_dep.c	O1	10	30	0	0	1
 licm/simple_hoist.c	O0	37	147	10	11	6
@@ -631,7 +631,7 @@ regalloc/double_array_base_shares_counter.c	O1	34	134	2	2	2
 regalloc/dup_const_block_params.c	O0	810	5279	264	318	70
 regalloc/dup_const_block_params.c	O1	177	781	18	42	6
 regalloc/entry_param_parallel_copy.c	O0	163	704	42	46	37
-regalloc/entry_param_parallel_copy.c	O1	70	267	1	2	29
+regalloc/entry_param_parallel_copy.c	O1	69	265	1	2	28
 regalloc/entry_param_stack_scratch.c	O0	194	1217	43	41	3
 regalloc/entry_param_stack_scratch.c	O1	139	763	9	9	11
 regalloc/float_sum_guard_seed23.c	O0	1823	12213	614	723	153
@@ -643,9 +643,9 @@ regalloc/high_pressure_with_calls.c	O1	15	51	0	0	4
 regalloc/loop_carried_terms_collapse.c	O0	423	2546	118	153	46
 regalloc/loop_carried_terms_collapse.c	O1	76	352	6	6	1
 regalloc/loop_counter_blockparam_remat.c	O0	962	6050	231	336	161
-regalloc/loop_counter_blockparam_remat.c	O1	219	1058	6	6	45
+regalloc/loop_counter_blockparam_remat.c	O1	217	1026	6	6	45
 regalloc/loop_latch_param_passthrough.c	O0	941	6119	267	362	111
-regalloc/loop_latch_param_passthrough.c	O1	188	920	6	6	37
+regalloc/loop_latch_param_passthrough.c	O1	187	904	6	6	37
 regalloc/many_cross_block_values.c	O0	132	646	40	44	23
 regalloc/many_cross_block_values.c	O1	31	102	0	0	5
 regalloc/mixed_pressure_seed12.c	O0	1502	9576	444	561	200
@@ -653,7 +653,7 @@ regalloc/mixed_pressure_seed12.c	O1	849	5172	226	269	44
 regalloc/multi_block_param_group.c	O0	1709	11048	435	624	277
 regalloc/multi_block_param_group.c	O1	481	2831	62	121	46
 regalloc/nested_loops_deep_pressure.c	O0	81	342	21	26	12
-regalloc/nested_loops_deep_pressure.c	O1	29	119	0	0	5
+regalloc/nested_loops_deep_pressure.c	O1	28	119	0	0	5
 regalloc/param_shadow_const_v7.c	O0	1067	6975	362	420	101
 regalloc/param_shadow_const_v7.c	O1	535	3484	184	205	6
 regalloc/param_shadow_seed13.c	O0	1203	7934	348	452	163
@@ -661,7 +661,7 @@ regalloc/param_shadow_seed13.c	O1	293	1428	21	36	40
 regalloc/param_shadow_seed16.c	O0	2182	14551	700	845	221
 regalloc/param_shadow_seed16.c	O1	919	5769	223	316	41
 regalloc/param_shadow_seed3.c	O0	4292	29976	1505	1749	317
-regalloc/param_shadow_seed3.c	O1	1526	8325	268	320	219
+regalloc/param_shadow_seed3.c	O1	1500	8219	268	320	199
 regalloc/phi_dest_from_target_schedule.c	O0	1174	8563	501	525	29
 regalloc/phi_dest_from_target_schedule.c	O1	138	454	0	0	20
 regalloc/projection_shares_pair_register.c	O0	31	124	8	11	4

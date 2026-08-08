@@ -307,6 +307,50 @@ three-operand `lea` that existed to dodge a copy blitz no longer makes:
 
 What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
 
+### ~~Everything was live at a `ret`~~
+
+`emit::dead_inst` removes an instruction whose only effect is a register write
+nothing reads, and it exists because lowering folds an address into the
+addressing mode of the load or store that uses it -- when every consumer folds,
+the `lea` is left with nothing reading it. **It was declining to remove almost
+all of them**, for two reasons that are the same mistake in different places.
+
+**A callee-saved register is not live at a `ret`.** The pass marked every
+register live out of a successor-less block -- caller-saved, callee-saved and
+XMM. But a callee-saved register's value belongs to the caller and the epilogue
+restores it with a `pop` that overwrites whatever this function put there, and a
+caller-saved one is not expected back at all. What survives is the value being
+returned and `RSP`.
+
+**`RBP` is only the frame pointer when there is one.** It was excluded
+unconditionally on the grounds that the frame layout owns it. That holds while
+the frame pointer is in use; blitz omits it by default, and then `RBP` is an
+ordinary allocatable register whose dead writes are dead like any other.
+
+One entry carries an obligation, stated where it is made: `GPR_RETURN_REG2` and
+`XMM1` are deliberately *not* in the live-out set, because `lower_terminator`
+never writes them -- a `Ret` puts its value in `RAX` or `XMM0`. A lowering that
+starts returning a pair has to add them back. Keeping them cost real deletions,
+`RDX` being where a scaled index lands.
+
+```
+lit    24 rows  insts -1.9%  bytes -1.6%  copies -6.4%
+live    6 rows  insts -1.9%  bytes -1.9%
+fuzz   23 rows  insts -0.8%  bytes -0.8%  copies -3.4%
+bench   unchanged
+```
+
+**Not one row regressed, and cycles did not move**: `x2.212` and `x2.214`
+against `x2.207` and `x2.206`, which is the run-to-run band. The instructions
+removed are real and sit in loop bodies, so this is the mirror of the layout
+entry -- there the instruction count was blind to an 8% win, here it reports one
+that the clock does not. **Both readings are the same lesson**: neither metric
+substitutes for the other, and a change is worth landing on either only when it
+regresses nothing on the other.
+
+Six unit tests pin the exit rule, one per case, because being wrong there
+deletes live code rather than keeping dead code.
+
 ### ~~Loop bodies were laid out where dominance put them~~
 
 **RPO is a dominance order and says nothing about what should follow a block in

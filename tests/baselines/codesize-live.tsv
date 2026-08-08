@@ -5,11 +5,11 @@ accum_pair.c	O1	221	1156	40	64	22
 array_stride.c	O0	370	2387	124	145	44
 array_stride.c	O1	80	324	0	0	24
 bitscan.c	O0	610	4080	215	247	67
-bitscan.c	O1	116	494	1	12	16
+bitscan.c	O1	112	494	1	12	16
 branchy_filter.c	O0	510	3401	182	206	57
-branchy_filter.c	O1	97	397	2	12	14
+branchy_filter.c	O1	95	377	2	12	14
 byte_copy.c	O0	884	6150	319	376	66
-byte_copy.c	O1	245	1177	35	64	21
+byte_copy.c	O1	237	1145	35	64	21
 call_hot.c	O0	209	1081	58	71	41
 call_hot.c	O1	69	284	4	12	12
 call_inlinable.c	O0	209	1081	58	71	41
@@ -23,11 +23,11 @@ float_convert.c	O1	67	275	0	0	19
 float_reduce.c	O0	435	2891	142	172	45
 float_reduce.c	O1	95	420	0	0	23
 funnel_mix.c	O0	395	2508	128	151	58
-funnel_mix.c	O1	95	390	2	9	22
+funnel_mix.c	O1	93	386	2	9	22
 hash_mix.c	O0	417	2623	135	159	61
 hash_mix.c	O1	111	447	8	16	23
 histogram.c	O0	741	5036	262	306	67
-histogram.c	O1	145	638	2	19	17
+histogram.c	O1	144	638	2	19	17
 int_divide.c	O0	353	2183	109	133	52
 int_divide.c	O1	83	327	0	0	27
 matmul_rt.c	O0	469	3040	148	192	50
@@ -39,7 +39,7 @@ nested_carried.c	O1	95	395	2	9	14
 pointer_chase.c	O0	280	1732	85	107	38
 pointer_chase.c	O1	68	299	0	0	20
 sort_search.c	O0	917	6204	322	379	91
-sort_search.c	O1	379	2204	90	134	27
+sort_search.c	O1	376	2180	90	134	27
 state_machine.c	O0	850	5925	316	358	60
 state_machine.c	O1	153	614	2	17	20
 struct_fields.c	O0	410	2578	120	166	45

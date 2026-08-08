@@ -2088,7 +2088,11 @@ pub fn compile(
                 }
             }
         }
-        let dead = crate::emit::dead_inst::dead_value_moves(&scratch, &scratch_labels);
+        let dead = crate::emit::dead_inst::dead_value_moves(
+            &scratch,
+            &scratch_labels,
+            frame_layout.uses_frame_pointer,
+        );
         if !dead.is_empty() {
             let mut drop_at: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); block_items.len()];
             for &flat in &dead {

@@ -6,10 +6,9 @@
 // The body is laid after the header, so the conditional leaves the loop and
 // the fallthrough enters it.
 // CHECK: jge
-// array base address via lea
-// CHECK: lea
-// scaled index access
-// CHECK: lea    {{[a-z0-9]+}},{{.*}}
+// The scaled index is the store's own addressing mode, not a separate `lea`
+// into a register the store then ignores.
+// CHECK: mov    DWORD PTR [{{[a-z0-9]+}}+{{[a-z0-9]+}}*4]
 // backward jump for loop iteration
 // CHECK: jmp
 
