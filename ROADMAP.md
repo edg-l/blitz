@@ -307,6 +307,44 @@ three-operand `lea` that existed to dodge a copy blitz no longer makes:
 
 What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
 
+### ~~A constant multiply had no immediate form~~
+
+`imul r, r/m, imm32` is the 3-operand signed multiply, `MachInst::Imul3RRI`
+existed and encoded, and **nothing emitted it**. `X86Imul3` lowered to
+`mov dst, a` then `imul dst, b`, so every multiply by a constant no
+shift-and-lea decomposition reaches cost three instructions: the `mov` filling
+a register with the constant, the `mov` the destructive form needs, and the
+multiply. It shows up in nearly every kernel -- `mov r14d, 0x35; imul r15d, r14d`
+in `byte_copy`'s inner loop.
+
+`MachOp::X86ImulI(i32)` joins the immediate forms `apply_alu_imm_isel` already
+builds, and it is **the one that is not two-address**: it reads its operand and
+writes a different register, so it replaces all three instructions with one.
+That is also why it needed no discount to win -- the constant's `mov` is charged
+to the register form by `operand_needs_register`, and the destructive `mov` is
+one instruction the immediate form simply does not have.
+
+```
+bench   5 rows  insts -3.4%  bytes -3.7%  spills -3.0%  copies -6.5%
+live   46 rows  insts -2.3%  bytes -1.8%  spills -1.5%  copies -5.9%
+lit    26 rows  insts -0.8%  bytes -0.6%                copies -2.1%
+fuzz  102 rows  insts -0.3%
+```
+
+One row regressed, `functions/variadic_call.c` at `-O1` by two bytes and one
+copy, with its instruction count unchanged and its `-O0` row `-1.8%`.
+
+**Cycles are flat at the geomean**: `x2.206` against `x2.212` and `x2.214`,
+inside the run-to-run band, even though the instruction counts move 2-3% on the
+two loop corpora. Third change in a row where the two metrics disagree, and the
+reason is the same each time -- an instruction removed from a body that is not
+the binding constraint costs nothing to remove and buys nothing back.
+
+**The strength reductions still win where they apply**: `x * 2`, `x * 3`,
+`x * 8` and `x * 12` emit no `imul` at all. This is what is left over, which is
+the shape of an isel gap worth closing -- the decomposition rules were doing
+their half and nothing did the other.
+
 ### ~~Everything was live at a `ret`~~
 
 `emit::dead_inst` removes an instruction whose only effect is a register write

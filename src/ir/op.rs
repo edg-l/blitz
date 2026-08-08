@@ -161,6 +161,14 @@ pub enum MachOp {
     /// element is the operand type, so the dst class carries the width.
     X86AddI(i32),
     X86SubI(i32),
+    /// `imul dst, src, imm` -- the 3-operand signed multiply; 1 child;
+    /// produces `Pair(childtype, Flags)` as the register form does.
+    ///
+    /// **Not two-address**, which is the whole of why it is worth a node: the
+    /// register form is `mov dst, a` then `imul dst, b`, and the constant needs
+    /// a `mov` of its own before either. This reads its operand and writes a
+    /// different register in one instruction.
+    X86ImulI(i32),
     X86AndI(i32),
     X86OrI(i32),
     X86XorI(i32),
@@ -777,6 +785,7 @@ impl Op {
             // ── x86 immediate-form ALU and shifts (1 child → Pair(childtype, Flags)) ──
             Op::Mach(MachOp::X86AddI(_))
             | Op::Mach(MachOp::X86SubI(_))
+            | Op::Mach(MachOp::X86ImulI(_))
             | Op::Mach(MachOp::X86AndI(_))
             | Op::Mach(MachOp::X86OrI(_))
             | Op::Mach(MachOp::X86XorI(_))

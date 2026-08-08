@@ -260,6 +260,29 @@ fn lower_op(
                 MachInst::SubRI { size, dst, imm }
             })
         }
+        // The one immediate form that is not two-address: `imul dst, src, imm`
+        // reads its operand and writes a different register, so there is no
+        // `mov dst, src` to emit first. x86 has no byte `imul`; widen S8 to S32
+        // as the register form does, where the low byte of the result is what an
+        // 8-bit multiply would have produced.
+        Op::Mach(MachOp::X86ImulI(imm)) => {
+            let dst = dst_reg.ok_or_else(|| "X86ImulI: no register for dst".to_string())?;
+            let src = operand_regs
+                .first()
+                .and_then(|r| *r)
+                .ok_or_else(|| "X86ImulI: no register for operand 0".to_string())?;
+            let imul_size = if size == OpSize::S8 {
+                OpSize::S32
+            } else {
+                size
+            };
+            Ok(vec![MachInst::Imul3RRI {
+                size: imul_size,
+                dst: Operand::Reg(dst),
+                src: Operand::Reg(src),
+                imm: *imm,
+            }])
+        }
         Op::Mach(MachOp::X86AndI(imm)) => {
             lower_dst_imm("X86AndI", size, dst_reg, operand_regs, *imm, |dst, imm| {
                 MachInst::AndRI { size, dst, imm }

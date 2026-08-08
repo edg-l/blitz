@@ -282,6 +282,20 @@ impl CostModel {
             }
             .weighted(self.goal),
 
+            // `imul dst, src, imm` is the same multiply on the same ports, and
+            // it is priced against the register form as the ALU immediates are:
+            // three bytes for the `imm8` encoding and six for `imm32`, less the
+            // register form's own 4.0. It saves more than they do, because it is
+            // the one immediate form that is *not* two-address -- the register
+            // form needs a `mov dst, a` before the multiply as well as the
+            // `mov r, imm32` that `operand_needs_register` charges it.
+            Op::Mach(MachOp::X86ImulI(imm)) => CostTuple {
+                latency: 3.0,
+                throughput: 1.0,
+                size: if (-128..=127).contains(imm) { 0.0 } else { 2.0 },
+            }
+            .weighted(self.goal),
+
             // ── X86Cmov: latency=1, throughput=0.5, size=4 ───────────────────────
             Op::Mach(MachOp::X86Cmov(_)) => CostTuple {
                 latency: 1.0,

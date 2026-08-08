@@ -182,13 +182,17 @@ fn apply_shift_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
 }
 
 /// `X86Add(a, Iconst(n))` -> add `X86AddI(n)(a)` as an alternative in the same
-/// class, and the same for Sub/And/Or/Xor.
+/// class, and the same for Sub/And/Or/Xor and the 3-operand multiply.
 ///
 /// Both forms are one instruction, so what the immediate form saves is the
 /// other operand: an `Iconst` selected as a register operand costs a register
 /// and the `mov` that fills it, for the whole of its live range. The cost model
 /// prices only the node, so it carries a small discount to break the tie; the
 /// real win shows up as one fewer value live.
+///
+/// `X86Imul3` saves one more instruction than the rest. `imul dst, src, imm` is
+/// not two-address, so where the register form is `mov r, imm32`, `mov dst, a`
+/// and `imul dst, r`, the immediate form is the multiply alone.
 ///
 /// `Sub` takes the constant on the right only. `c - x` has no immediate form --
 /// the immediate is the subtrahend -- and the algebraic rules do not turn one
@@ -206,6 +210,9 @@ fn apply_alu_imm_isel(egraph: &mut EGraph, snaps: &[NodeSnap]) -> bool {
             }
             Op::Mach(MachOp::X86Sub) => {
                 Some(((|n| Op::Mach(MachOp::X86SubI(n))) as fn(i32) -> Op, false))
+            }
+            Op::Mach(MachOp::X86Imul3) => {
+                Some(((|n| Op::Mach(MachOp::X86ImulI(n))) as fn(i32) -> Op, true))
             }
             Op::Mach(MachOp::X86And) => {
                 Some(((|n| Op::Mach(MachOp::X86AndI(n))) as fn(i32) -> Op, true))
