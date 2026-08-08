@@ -307,6 +307,34 @@ three-operand `lea` that existed to dodge a copy blitz no longer makes:
 
 What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
 
+### ~~Weighting class placement by loop depth~~
+
+`linearize::class_placement` decides whether a subtree is emitted once above its
+users or re-emitted in each block that names it, and the gate is a static
+`cost > 5.0` -- the splitter's price for the one spill store and reload that
+hoisting risks. **It reads no frequency at all**, so a subtree re-emitted inside
+a loop is priced as if it ran once.
+
+Weighting both sides by `2^depth`, the same reading `phi_removal` and the
+splitter give `block_loop_depths`, **loses**:
+
+```
+lit     3 rows  insts +4.2%  copies +29.9%   3 of 3 changed rows regressed
+fuzz   22 rows  insts +3.3%  copies +10.6%  22 of 22 regressed
+live    6 rows  insts +0.3%
+bench   2 rows  insts -3.4%
+```
+
+It fails for the reason unrestricted placement failed and the arithmetic is the
+same one: hoisting converts a short range inside one block into a range live
+from the dominator to the last use, and the allocator pays. Weighting by loop
+depth hoists *more*, so it moves further into that failure and only `bench` --
+the corpus whose kernels a reference compiler can fold -- comes out ahead.
+
+**What this rules out for the invariant `lea [rsp+disp]`**: the answer is not
+to hoist it. The address is `[rsp + idx*scale + disp]`, which x86 encodes in one
+operand, so the instruction should not be emitted at all. See the open item.
+
 ### ~~A constant multiply had no immediate form~~
 
 `imul r, r/m, imm32` is the 3-operand signed multiply, `MachInst::Imul3RRI`
@@ -1213,6 +1241,23 @@ without taking it is picking up work that cannot land.
 - [ ] **Latency/port-aware DAG scheduling.** A uarch model (ports, latencies,
       throughput) is only tractable because there is one target. ~5% but it is
       exactly the kind of win the single-target thesis predicts.
+- [ ] **Fold a stack slot into the addressing mode that reads it.** 78 of the
+      3295 instructions in `live`'s loop bodies are `lea r, [rsp+disp]`
+      recomputing a loop-invariant frame address, and the access beside each one
+      is `[r + idx*s]`. x86 encodes `[base + index*scale + disp]` in a single
+      operand, so `[rsp + idx*s + disp]` is one addressing mode and the `lea`
+      should not exist at all.
+
+      **It cannot be an e-graph rewrite**: a slot's frame displacement is known
+      at frame-layout time and nowhere earlier, so `PureOp::Addr` takes its base
+      as a register operand and a `StackAddr` base becomes one through the
+      `lea`. The fold belongs in lowering or in `emit::peephole`, where the
+      liveness that says the `lea`'s destination is otherwise dead already
+      exists.
+
+      **Hoisting them instead is measured out** -- see the closed placement
+      entry. Removing the instruction is the answer, not moving it.
+
 - [ ] **Loop rotation.** The layout half is done -- see the closed entry -- and
       a loop still closes on an unconditional `jmp`: **135 of 135 back edges in
       `live`**. The header tests and the body falls through, so the branch that
