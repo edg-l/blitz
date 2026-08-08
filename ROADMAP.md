@@ -72,25 +72,37 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Loop strength reduction** -- `P1`, and the largest remaining item now that
-  copies and placement are done. No measurement yet; the `live` loop kernels are
-  where it would show.
+- **SCCP** -- `P1`, and the only open optimizer item with a measured payoff:
+  `lit` `-5.2%` instructions over 33 rows, `fuzz` `-1.3%` over 88. The meet is
+  written; what is missing is the landing mechanism, and the route is known --
+  `phi_removal`'s remove-re-extract-verify protocol, not a class merge.
+- **Loop strength reduction** -- `P1`, the largest *claimed* payoff and no
+  measurement at all. Count what the `live` kernels recompute before writing the
+  pass.
 - **What is left of the copies** -- `P1`, and much smaller than it was. blitz
   emits 385 register-to-register moves in 2138 `bench` instructions against
   `gcc -O2`'s 429 in 2388, so the headline gap is closed; `BLITZ_DEBUG=stats`
   still puts 150 of 371 in `cp_other`, which is no longer one shape. Measure
   before choosing a fix -- doing that is what found both of the last two.
 
-`P1` is ordered by measured impact. **`P2` is where the
-single-target thesis pays off**, though half of it is unreachable until tinyc
-grows builtins -- see the note there.
+`P1` is ordered by evidence, and only its first entry has any -- see the note at
+the head of that section. **`P2` is where the single-target thesis pays off**,
+though half of it is unreachable until tinyc grows builtins -- see the note
+there.
 
 **One reordering worth stating outright.** `P2`'s constant cost model belongs
-above most of `P1`: it unblocks three isel items at once, the missing structure
-is a parents map in the e-graph, and the payoff is measured. The temptation is
-to start on GVN or loop strength reduction because they are the recognizable
-names, and neither is where this backend is currently losing -- `P1`'s own
-copies item says the whole remaining instruction gap to gcc is copies.
+above most of `P1`: it unblocks three isel items at once *and* `P1`'s narrowing
+item, the missing structure is a parents map in the e-graph, and the payoff is
+measured -- which is more than any open `P1` entry below SCCP can say.
+
+The argument this paragraph used to make is gone and worth not repeating: it
+said the temptation is to start on GVN or LSR because they are the recognizable
+names, and that neither is where blitz is losing, because the whole instruction
+gap to gcc was copies. **The copies are closed** -- blitz emits 385 in 2138
+`bench` instructions against `gcc -O2`'s 429 in 2388 -- and **the GVN item was
+closed by discovering it did not exist**, since the e-graph is function-wide.
+So there is no longer a measured gap pointing anywhere in particular, which is
+exactly why the `P1` entries below SCCP need counting before they need code.
 
 **Do not start in the register allocator, the splitter, or the block-parameter
 machinery without reading `docs/internal/refactor-roadmap.md` first.** It is
@@ -215,20 +227,350 @@ sessions as an allocator bug. Related sub-item it also carried, now stale: the
 pre-coloring conflict assertion exists (`coloring::check_precolorings`, under
 `BLITZ_VERIFY`), and `interval_color` no longer exists to need one.
 
-## Current state (2026-08-07)
+### ~~Copies were a third of what blitz emitted~~
 
-- 1010 Rust tests + 552 lit tests, all green. `cargo fmt` clean, `cargo clippy
+**The fix was optimistic coalescing.** Over the `bench` kernels, counted off
+the disassembly so blitz and the references are counted the same way: blitz
+went from **709
+register-to-register moves in 2379 instructions (29.8%) to 599 in 2340
+(25.6%)**, against `gcc -O2`'s 429 in 2388 (18.0%) and `clang -O2`'s 299 in
+2791 (10.7%). **The surplus over gcc fell from 280 copies to 170**, and
+blitz went from 9 instructions behind gcc on this corpus to 48 ahead.
+
+Across all four corpora: **copies `-28.5%`, instructions `-5.6%`, bytes
+`-2.6%`**, spills and reloads within 1%. Cycles over the 24 `live`
+kernels: `x2.725` to `x2.685` against `gcc -O2`, two samples each
+reproducing to 0.15%. `branchy_filter` `-26.4%`, `sort_search` `-16.0%`,
+`call_inlinable` `-12.1%`.
+
+**The measurement that turned it around.** The roadmap read the 585
+non-two-address copies as "phi copies on edges, entry parameter moves and
+argument setup" -- which was an inference from `copies - two_addr`, not a
+measurement. `trace::classify_copies` measures it, and on `bench` the three
+named sources are 289 edge, 31 argument and 5 entry: **44% of the total,
+with the largest single bucket unaccounted for.** The `coalesce` declines
+then named the real cause: over `live`, **986 of 2476 candidate copies were
+refused by Briggs and George while only 5 pairs genuinely interfered.**
+Almost every surviving copy was a conservative test declining to predict,
+not a merge that was unsafe.
+
+So the fix is Park & Moon's: merge every copy whose endpoints do not
+interfere, and where the colouring then does not fit, throw the attempt
+away and retry with the implicated merges denied. `coalesce` no longer
+guesses at colourability and `allocate_global` owns the retry.
+**This is not the iterated coalescing that Decisions retires** -- George &
+Appel's leverage is `simplify`, which was simulated and buys nothing here.
+
+Retrying from the original schedules rather than patching the failed
+attempt is what makes it sound: a merge renames a VReg in every schedule,
+every block-parameter set and every precoloring, and the spill rounds after
+it are stated in the post-coalesce numbering, so there is no "undo one
+merge" that leaves the rest consistent. `SlotAllocator::rollback_to` gives
+back the frame slots a discarded attempt committed.
+
+**One program needed the retry**, and it is why aggressive-without-undo is
+not the answer: `args` seed 164 stopped compiling outright
+(`gpr_overshoot=1`, the over-budget value a block parameter, nothing
+spillable). One un-coalescing round -- 5 merges denied -- and it colours.
+Nothing else in `lit`, `bench`, `live`, the corpus or 1352 generated
+programs needed a second round.
+
+**Then `cp_other` turned out to be one thing, and it was an
+interference-graph bug.** A pair-producing x86 op keeps its result in the
+pair VReg and `Proj0` reads it out, so lowering emits `mov proj, pair`
+unless the two share a register -- and `Op::two_address_src` did not name
+`Proj0`, so the graph gave every projection's result an edge to the very
+value it is a copy of. **The graph asserted that a value and its own copy
+cannot share a register**, which also put the copy beyond coalescing's
+reach, since a pair whose groups interfere is refused. It is the same
+defect `interference.rs` already documents for two-address ops, on a
+different op.
+
+`interference::result_shares_operand` is now the one predicate, read by the
+graph and by the coalescing candidate list so a pair offered to one is
+never forbidden by the other. A division is the exception and is why this
+cannot be a property of `Op` alone: `X86Idiv`/`X86Div` leave their results
+in RAX and RDX, so the projection copies out of a fixed register and the
+pair VReg holds nothing.
+
+Over `bench`: copies **585 -> 371**, instructions **2062 -> 1857**; over
+`live`, copies **1071 -> 472** and instructions **4060 -> 3455**. Across
+the corpora, **copies `-36.6%`, instructions `-6.4%`, bytes `-2.7%`, and
+not one of the 288 changed rows got worse on instructions.** Cycles
+`x2.685 -> x2.489`.
+
+**This is where the item's own claim came true.** On `bench` blitz now
+emits **385 copies in 2138 instructions against `gcc -O2`'s 429 in 2388**
+-- fewer copies than gcc, at the same 18.0% rate, in 250 fewer
+instructions. Eight `lit` tests changed, all of them pinning a
+three-operand `lea` that existed to dodge a copy blitz no longer makes:
+`lea x,[x+1]` is now `inc x` and `lea x,[x+y]` is `add x,y`.
+
+What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
+
+### ~~Dominance-scoped elaboration~~
+
+**The premise was wrong, which is why it cost a placement rule rather than a
+rewrite.**
+
+The item read: "the e-graph does local CSE only, so repeated address
+computations and field loads survive across blocks -- typically 5-15% on
+real code", and proposed Cranelift's answer, rebuilding SSA in
+dominator-tree order. **But blitz's e-graph is function-wide.** The same
+expression in two blocks is already *one class*; cross-block CSE is not
+missing and never was. What was missing is only *placement*: which block
+emits the class. Checked on a diamond whose arms both compute
+`argc * 7 + 3` -- one class, emitted twice, because linearization emits in
+the first block to name a class and neither arm dominates the other.
+
+**The fix is one pre-pass**, `linearize::class_placement`: emit each class
+in the nearest common dominator of the blocks that need it, closing over
+the extraction's children so an operand is always in scope where its
+consumer lands. The precedent was already in the file, applied to one op --
+entry parameters are emitted at the entry block because "a param that two
+sibling branches both read gets re-emitted in each". This is that rule for
+every class.
+
+**Unrestricted it loses, and the number is the point**: `+6.5%` spills,
+`+10.1%` reloads, `+1.7%` instructions, `+13.8%` cycles. Computing once
+and holding the value from the dominator to the last use is a *trade*
+against re-emitting into short ranges, and the allocator pays for it. So
+placement is taken only where the subtree costs more than the one spill
+store and reload it risks -- the splitter's `SLOT_STORE_LOAD_COST` of 5.0,
+already the price of exactly that pair.
+
+Gated: **instructions `-5.3%`, spills `-3.6%`, reloads `-4.3%`, copies
+`-11.2%`, and not one of the 124 changed rows got worse.** Cycles
+unchanged at `x2.49` over two samples -- the work removed is real and is
+not on the `live` kernels' hot paths, which is the same lesson the
+instruction count keeps teaching.
+
+The Cranelift rewrite is still available and would additionally delete the
+per-block re-emission machinery and shrink the "one class maps to several
+VRegs" hazard. It is no longer justified by GVN, because there is no GVN
+here to win.
+
+### ~~Tail call optimization~~
+
+A tail self-call is now a `jmp` to the label bound *after* the prologue:
+arguments into their ABI registers exactly as a call needs them, and control
+to the top of the body. The frame is neither torn down nor rebuilt, RSP does
+not move, and the body begins by moving each parameter out of its argument
+register -- which is the state a fresh entry would be in. No `call` means no
+return address pushed, so the base case's `ret` returns to the original
+caller.
+
+`tests/lit/live/tail_recursion.c` exists to price it, because nothing could:
+`bench`, `live` and the generated programs contained **zero** tail-call sites
+between them, and the 59 in `lit` are almost all `main` returning a call
+once. Median of 5 at `ARGS=100`:
+
+```
+blitz -O1, no TCO        146.6M cycles    x2.87 vs gcc
+blitz -O1, self only     107.8M           x2.11            -26.5%
+blitz -O1, self + other   72.5M           x1.42            -50.6%
+gcc -O2                   51.1M
+clang -O2                 16.4M
+```
+
+**Both forms, and they differ in one thing that decides everything else:
+whether the frame this function built is the one the callee will run in.** A
+self-call jumps to the label bound after the prologue and the frame stands.
+A call to another function tears the frame down first -- the callee's
+prologue builds its own -- so it is `setup_call_args`, then
+`abi::emit_frame_teardown`, then `jmp <symbol>` as a new
+`MachInst::TailCallDirect` (`E9 + rel32`, the same PLT32 relocation a call
+uses). RSP is then back on the return address the original `call` pushed, so
+the callee returns straight past this function. The argument registers
+survive the teardown because they are caller-saved and the teardown only pops
+callee-saved ones.
+
+`emit_frame_teardown` is the epilogue *without* the `ret`, split out of
+`emit_epilogue` rather than duplicated: the two have to move RSP by the same
+amount or the callee reads its return address from the wrong place, and
+nothing downstream could see that. Getting it wrong the first way was
+visible immediately -- the epilogue emitted its `ret` before the jump, so the
+function returned instead of tail-calling and the kernel printed 140106
+instead of 264767.
+
+**A static count cannot see most of this**, which makes it the sharpest
+example in the repo of why the ranking is cycles: a `call` becomes one
+`jmp`, so the self-call form moved `-0.8%` instructions for `-26.5%` cycles.
+The win is that a recursion deeper than the return-address predictor makes
+every `ret` mispredict, and this removes the pair.
+
+29 `lit` rows do improve on instructions, at `-3.7%` to `-16.7%` -- every
+`return f(x)` in the corpus loses its call and its `ret`. `bench` and the
+generated programs do not move at all; they discard no call results and
+return no call directly.
+
+`BLITZ_PASSES=-tail-calls` turns it off; it is on at `-O1` and off at `-O0`,
+where the recursion's frames are what a debugger walks.
+`lit/functions/tail_self_call.c` pins it, with `n * f(n - 1)` as the control
+that must keep its call.
+
+### ~~Loop headers were aligned by accident~~
+
+**It was worth up to 20%.**
+`emit::align_loop_headers` was written, exported from `emit/mod.rs`, and
+**never called**; `enable_nop_alignment` was `false` at both levels and was
+never read. So where a hot loop fell relative to a fetch boundary was
+whatever the instruction stream happened to produce.
+
+**Landed, `-O1` only, `BLITZ_PASSES=-loop-align` to turn it off.** Over the
+24 `live` kernels, `x2.852` cycles against `gcc -O2` became `x2.797`:
+**`-1.9%`**, and repeat runs put it at `-2.3%` (`2.852/2.849` off against
+`2.797/2.773` on, so the off side reproduces to `0.1%`). `.text` grows
+`+0.46%` and instructions `+0.51%` over the 167 rows that changed.
+
+**It is not a monotone win and the spread is the finding.** `matmul_rt`
+`-20.2%` -- which is the `+20.7%` layout artifact below, reclaimed -- then
+`call_hot` `-8.7%`, `state_machine` `-5.4%`, `int_divide` `-4.8%`,
+`accum_pair` `-4.1%`, `hash_mix` `-3.8%`. Against `mixed_width` `+4.7%`,
+`transpose` `+2.8%`, `float_convert` `+2.0%`, `byte_copy` `+1.7%`.
+Alignment is a coin flip on any one loop; what it buys is that the flip is
+now a property of the loop.
+
+**The cap was measured twice and the answer inverted, which is the part
+worth keeping.** Against the code as it stood, `MAX_SKIP = 8` aligned 54%
+of the 184 `bench`+`live` headers -- exactly the 9-in-16 the policy allows,
+so nothing was lost to relaxation moving a header after it was padded --
+and measured `x2.797` where no cap aligned 99% and measured `x2.819`. The
+cap won, on half the bytes. **After optimistic coalescing took 28% of the
+copies out, it loses**: `x2.725` capped against `x2.685` uncapped, two
+samples each. `MAX_SKIP` is now 15, so every header is aligned.
+
+A padding budget is priced against the code it pads, and `-7%`
+instructions was enough to move where the trade lands. Do not carry this
+constant through a change that moves code size; re-measure it.
+
+**A loop header is a label a backward jump targets**, computed from the
+emitted stream. Not from the CFG: `cfg::block_loop_depths` is keyed on
+`func.blocks` order, blocks are emitted in RPO, and a trampoline label can
+be a back-edge target without being a block.
+
+**Two things it had to get right.** The offset is measured from the
+function's first byte, so it includes the prologue -- which is encoded
+separately from the instruction stream, and which the pass as written did
+not count. And padding and relaxation each move the other, so
+`align::loop_header_pads` iterates them; correctness does not rest on that
+converging, because relaxation runs last on the padded stream and only ever
+*widens* a jump, so no jump can be left short and out of range. Which side
+of the label the NOPs land on is the other half: padding after the binding
+point puts them inside the loop, where every iteration pays.
+
+**Function starts are aligned now, which is the half of this that had no
+hazard.** `compile_module_with_globals` pads to 16 between functions, and
+what that buys is not speed -- `+0.04%` geometric mean over 24 `live`
+kernels, which is nothing -- but *invariance*: a function's offsets modulo 16
+no longer depend on the length of anything before it, so a codegen change in
+one function cannot re-time the loops of another. Demonstrated rather than
+argued: growing the first of four functions used to shift every absolute
+address in the last one modulo 16 (`14 15 0 2 4 ...` became `9 10 11 13
+15 ...`) and now leaves them identical. `compile::module`'s
+`function_starts_are_16_byte_aligned` pins it.
+
+**What is left is the loop headers, and the ordering is the problem.** NOPs
+have to go in before branch relaxation, or a jump the relaxer shortened may
+no longer reach; but relaxation then shrinks jumps and moves the header it
+just aligned. It needs align and relax iterated to a fixpoint, which is what
+an assembler does and what this pass does not. Two other things it gets
+wrong as written: the offset it computes is relative to the *body*, while the
+prologue is encoded separately and is part of the distance, and it never asks
+whether a loop is hot enough to be worth the padding.
+
+**Measured, and the measurement is the point.** Removing 4 dead `lea`s from
+`live/matmul_rt.c` -- a strict reduction, `-107M` dynamic instructions --
+cost `+94M` cycles, `+20.7%`. Not the frontend (idle went 0.29% to 0.67%, a
+rounding error against 20%), not branches (218.3M and 0.10% missed in both),
+and IPC fell 5.99 to 4.77. Then adding three unrelated instructions before
+the loop, changing nothing but where the code sits, took the same comparison
+from `x1.2069` to `x0.9901`.
+
+**This puts a layout term in every number the perf harness prints**, and
+nobody controls it. Two consequences: a pass that changes code size can be
+credited or blamed for up to 20% that has nothing to do with it, and
+`run_perf.sh` results are not comparable across changes that move code. Wire
+the pass up, then re-measure anything the layout could have decided.
+
+### ~~Dead instructions in the final stream~~
+
+`emit::dead_inst` deletes
+instructions that compute a value nothing reads, over backward register
+liveness on the CFG `verify` already recovers from labels and branches.
+
+**Why it has to be here.** Lowering folds an address into the addressing
+mode of the load that uses it and decides that per consumer, at the last
+possible moment; when every consumer folds, the `lea` is left with nothing
+reading it. No earlier pass can see that -- DCE runs on the CFG before
+scheduling and the e-graph never sees an effectful op. Measured before the
+pass: 122 of 7801 instructions over `bench` and `live` were a `lea`
+immediately followed by an instruction naming the same address in its own
+mode, in every one of the 34 kernels, and they sit in loop bodies.
+
+```
+bench   insts -2.69%   copies -1.80%    over 14 changed rows
+live    insts -1.33%   copies -2.67%    over 19
+fuzz    insts -0.40%   copies -1.13%    over 54
+lit     insts -0.98%   copies -1.35%    over 44
+```
+
+**Zero regressed rows in any of the four corpora.** Cycles over `live`:
+`-0.85%` geometric mean, or `-1.69%` excluding `matmul_rt`, whose `+20.7%`
+is the layout artifact the loop-alignment entry above is about. Six kernels
+gain more than
+1%: `histogram` `-11.8%`, `nested_carried` `-9.1%`, `pointer_chase` `-5.4%`,
+`branchy_filter` `-4.4%`, `byte_copy` `-3.7%`, `state_machine` `-1.9%`.
+
+What it will delete is deliberately short: register-to-register moves,
+immediate loads and `lea`, and nothing else. Not arithmetic, because EFLAGS
+is not a register this liveness models; not anything touching memory; not a
+write to RSP or RBP. `BLITZ_PASSES=-dead-insts` turns it off.
+
+**The bug worth remembering**: `MachInst::CallDirect` carries a symbol and no
+operands, so `uses()` says a call reads nothing -- and the `mov`s putting
+arguments in their ABI registers were dead. That deleted the argument setup
+of every call in the corpus, 248 of 576 lit tests, and is why `call_reads`
+exists.
+
+### ~~Dead call elimination~~
+
+For provably pure functions.
+`dce::pure_functions` is the greatest fixpoint over the module -- a function
+is pure when it stores nothing and calls nothing impure, so a self-recursive
+one stays pure and every extern is impure because nothing here can see into
+it. `eliminate_dead_pure_calls` then removes a call whose results no e-node
+and no other effectful op reads. Both halves of that are needed: the e-graph
+holds the pure computations and the CFG holds the effectful ones.
+
+**It removes the one dead computation nothing else could.** An effectful op
+is invisible to the e-graph by construction, so a call the inliner declined
+and whose result went unread survived every pass. Measured: 3 `fuzz` rows
+at `-3.1%`, `-5.2%` and `-4.0%` instructions with copies down with them,
+`bench` and `live` untouched -- those corpora discard no call results.
+Gated with the dead-load half, and for the same reason: removing a call
+takes away something a debugger could step into, which is the line `-O0`
+holds. `lit/functions/dead_pure_call.c`.
+
+It found a stale test on the way: `zero_arg_void_mixed.c`'s `void nop()
+{ return; }` is pure, its result list is empty, and all nine calls to it
+were removed -- correctly, and leaving the test asserting nothing about the
+call-point detection it was written for. Its callee now stores.
+
+## Current state (2026-08-08)
+
+- 1025 Rust tests + 586 lit tests, all green. `cargo fmt` clean, `cargo clippy
   --all-targets` clean, zero build warnings, zero rustdoc warnings.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites, with no
   row red on purpose. **No `P0` item is in the Start here queue any more**: the
   queue starts at `P1`. `P0` still holds the items below that no reproducer names
   -- the `assign_args` panic, the C-surface probe, the second implementation, the
   one-fact-one-place audit.
-- `bash tests/lit/run_diff.sh`: 337 compared `-O0`-vs-`-O1` and against a
+- `bash tests/lit/run_diff.sh`: 353 compared `-O0`-vs-`-O1` and against a
   reference compiler; no skips, no differences under gcc or clang.
 - **`-O0` is on `regalloc::fast` and both levels are correct.** Everything below
   is `-O1` unless it says otherwise.
-- `bash tests/fuzz/run_corpus.sh`: 17 `fixed` programs, all passing at both
+- `bash tests/fuzz/run_corpus.sh`: 19 `fixed` programs, all passing at both
   levels, and nothing open.
 - Generated programs: `mixed` 400/400, `args` 400/400, `pressure` 400/400, which
   is what `run_fuzz.sh` now sweeps by default, plus `abi` -- 98 programs
@@ -483,128 +825,15 @@ so the holes stay visible.
       does a hundredth of the work and the lit and differential harnesses stay
       quick.
 
-### P1 -- Optimizer gaps with the largest measured impact
+### P1 -- Optimizer gaps
 
-- [x] **Copies were a third of what blitz emitted, and the fix was optimistic
-      coalescing.** Over the `bench` kernels, counted off the disassembly so
-      blitz and the references are counted the same way: blitz went from **709
-      register-to-register moves in 2379 instructions (29.8%) to 599 in 2340
-      (25.6%)**, against `gcc -O2`'s 429 in 2388 (18.0%) and `clang -O2`'s 299 in
-      2791 (10.7%). **The surplus over gcc fell from 280 copies to 170**, and
-      blitz went from 9 instructions behind gcc on this corpus to 48 ahead.
+**Ranked by evidence, and only the first entry has any.** SCCP is measured and
+its blocker is named; everything below it is ranked on argument, which is the
+weaker thing and is marked as such per item. The honest first step for an
+unmeasured entry is to measure it, not to implement it -- that is what turned
+the copies item around and what showed the elaboration item was resting on a
+false premise.
 
-      Across all four corpora: **copies `-28.5%`, instructions `-5.6%`, bytes
-      `-2.6%`**, spills and reloads within 1%. Cycles over the 24 `live`
-      kernels: `x2.725` to `x2.685` against `gcc -O2`, two samples each
-      reproducing to 0.15%. `branchy_filter` `-26.4%`, `sort_search` `-16.0%`,
-      `call_inlinable` `-12.1%`.
-
-      **The measurement that turned it around.** The roadmap read the 585
-      non-two-address copies as "phi copies on edges, entry parameter moves and
-      argument setup" -- which was an inference from `copies - two_addr`, not a
-      measurement. `trace::classify_copies` measures it, and on `bench` the three
-      named sources are 289 edge, 31 argument and 5 entry: **44% of the total,
-      with the largest single bucket unaccounted for.** The `coalesce` declines
-      then named the real cause: over `live`, **986 of 2476 candidate copies were
-      refused by Briggs and George while only 5 pairs genuinely interfered.**
-      Almost every surviving copy was a conservative test declining to predict,
-      not a merge that was unsafe.
-
-      So the fix is Park & Moon's: merge every copy whose endpoints do not
-      interfere, and where the colouring then does not fit, throw the attempt
-      away and retry with the implicated merges denied. `coalesce` no longer
-      guesses at colourability and `allocate_global` owns the retry.
-      **This is not the iterated coalescing that Decisions retires** -- George &
-      Appel's leverage is `simplify`, which was simulated and buys nothing here.
-
-      Retrying from the original schedules rather than patching the failed
-      attempt is what makes it sound: a merge renames a VReg in every schedule,
-      every block-parameter set and every precoloring, and the spill rounds after
-      it are stated in the post-coalesce numbering, so there is no "undo one
-      merge" that leaves the rest consistent. `SlotAllocator::rollback_to` gives
-      back the frame slots a discarded attempt committed.
-
-      **One program needed the retry**, and it is why aggressive-without-undo is
-      not the answer: `args` seed 164 stopped compiling outright
-      (`gpr_overshoot=1`, the over-budget value a block parameter, nothing
-      spillable). One un-coalescing round -- 5 merges denied -- and it colours.
-      Nothing else in `lit`, `bench`, `live`, the corpus or 1352 generated
-      programs needed a second round.
-
-      **Then `cp_other` turned out to be one thing, and it was an
-      interference-graph bug.** A pair-producing x86 op keeps its result in the
-      pair VReg and `Proj0` reads it out, so lowering emits `mov proj, pair`
-      unless the two share a register -- and `Op::two_address_src` did not name
-      `Proj0`, so the graph gave every projection's result an edge to the very
-      value it is a copy of. **The graph asserted that a value and its own copy
-      cannot share a register**, which also put the copy beyond coalescing's
-      reach, since a pair whose groups interfere is refused. It is the same
-      defect `interference.rs` already documents for two-address ops, on a
-      different op.
-
-      `interference::result_shares_operand` is now the one predicate, read by the
-      graph and by the coalescing candidate list so a pair offered to one is
-      never forbidden by the other. A division is the exception and is why this
-      cannot be a property of `Op` alone: `X86Idiv`/`X86Div` leave their results
-      in RAX and RDX, so the projection copies out of a fixed register and the
-      pair VReg holds nothing.
-
-      Over `bench`: copies **585 -> 371**, instructions **2062 -> 1857**; over
-      `live`, copies **1071 -> 472** and instructions **4060 -> 3455**. Across
-      the corpora, **copies `-36.6%`, instructions `-6.4%`, bytes `-2.7%`, and
-      not one of the 288 changed rows got worse on instructions.** Cycles
-      `x2.685 -> x2.489`.
-
-      **This is where the item's own claim came true.** On `bench` blitz now
-      emits **385 copies in 2138 instructions against `gcc -O2`'s 429 in 2388**
-      -- fewer copies than gcc, at the same 18.0% rate, in 250 fewer
-      instructions. Eight `lit` tests changed, all of them pinning a
-      three-operand `lea` that existed to dodge a copy blitz no longer makes:
-      `lea x,[x+1]` is now `inc x` and `lea x,[x+y]` is `add x,y`.
-
-      What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
-- [x] **Dominance-scoped elaboration -- and the premise was wrong, which is why
-      it cost a placement rule rather than a rewrite.**
-
-      The item read: "the e-graph does local CSE only, so repeated address
-      computations and field loads survive across blocks -- typically 5-15% on
-      real code", and proposed Cranelift's answer, rebuilding SSA in
-      dominator-tree order. **But blitz's e-graph is function-wide.** The same
-      expression in two blocks is already *one class*; cross-block CSE is not
-      missing and never was. What was missing is only *placement*: which block
-      emits the class. Checked on a diamond whose arms both compute
-      `argc * 7 + 3` -- one class, emitted twice, because linearization emits in
-      the first block to name a class and neither arm dominates the other.
-
-      **The fix is one pre-pass**, `linearize::class_placement`: emit each class
-      in the nearest common dominator of the blocks that need it, closing over
-      the extraction's children so an operand is always in scope where its
-      consumer lands. The precedent was already in the file, applied to one op --
-      entry parameters are emitted at the entry block because "a param that two
-      sibling branches both read gets re-emitted in each". This is that rule for
-      every class.
-
-      **Unrestricted it loses, and the number is the point**: `+6.5%` spills,
-      `+10.1%` reloads, `+1.7%` instructions, `+13.8%` cycles. Computing once
-      and holding the value from the dominator to the last use is a *trade*
-      against re-emitting into short ranges, and the allocator pays for it. So
-      placement is taken only where the subtree costs more than the one spill
-      store and reload it risks -- the splitter's `SLOT_STORE_LOAD_COST` of 5.0,
-      already the price of exactly that pair.
-
-      Gated: **instructions `-5.3%`, spills `-3.6%`, reloads `-4.3%`, copies
-      `-11.2%`, and not one of the 124 changed rows got worse.** Cycles
-      unchanged at `x2.49` over two samples -- the work removed is real and is
-      not on the `live` kernels' hot paths, which is the same lesson the
-      instruction count keeps teaching.
-
-      The Cranelift rewrite is still available and would additionally delete the
-      per-block re-emission machinery and shrink the "one class maps to several
-      VRegs" hazard. It is no longer justified by GVN, because there is no GVN
-      here to win.
-- [ ] **Loop strength reduction + induction variable recognition.** Every array
-      loop recomputes `base + i*scale`. Worth 2-5x on loop-heavy code and is
-      table stakes for calling the backend "optimizing".
 - [ ] **SCCP.** `propagate_block_params` only handles single-predecessor
       constants; conditional arms that become constant are missed.
 
@@ -612,8 +841,9 @@ so the holes stay visible.
       written.** Extending the pass from one predecessor to a meet over all of
       them -- a parameter every predecessor passes the same constant to *is* that
       constant -- is `lit` `-5.2%` instructions over 33 changed rows and `fuzz`
-      `-1.3%` over 88, with `bench` and `live` unchanged. It also cuts copies,
-      which is the item above: `inline/inline_multi_return.c` goes from 9 to 1.
+      `-1.3%` over 88, with `bench` and `live` unchanged. It also cuts copies --
+      `inline/inline_multi_return.c` goes from 9 to 1 -- which is worth less than
+      it was now that optimistic coalescing has taken 28% of them out.
 
       **It introduces an `-O0` miscompile, and the cause is the merge rather than
       the meet.** `run_diff.sh` catches it on `control/block_scope_shadowing.c`:
@@ -637,189 +867,49 @@ so the holes stay visible.
       than predicting it" after two attempts to predict merge composition were
       both defeated by a program. **The existing single-predecessor merge has the
       same latent hazard**; nothing in the current corpus reaches it.
-- [ ] **Memory SSA / memory versioning.** Makes forwarding, DSE, and GVN work
-      cross-block on shared machinery instead of three intra-block passes.
+
+- [ ] **Loop strength reduction + induction variable recognition.** Every array
+      loop recomputes `base + i*scale`. Worth 2-5x on loop-heavy code and is
+      table stakes for calling the backend "optimizing".
+
+      **Ranked second on argument, not evidence: nothing here has been
+      measured.** The 2-5x is the literature's, on other compilers. Before
+      writing the pass, count what the `live` kernels actually recompute -- how
+      many address computations in a loop body are an induction variable times a
+      constant plus a base -- the way `classify_copies` and the re-emission probe
+      were built first. Two items above were reordered by that count and one of
+      them turned out not to exist.
+
+- [ ] **Memory SSA / memory versioning.** Makes forwarding, DSE and dead-load
+      elimination work cross-block on shared machinery instead of three
+      intra-block passes.
+
+      **Unmeasured, and its stated payoff needs restating.** It used to say
+      "forwarding, DSE, and GVN"; there is no GVN item any more, because the
+      e-graph is function-wide and already shares pure expressions across blocks
+      -- see the closed elaboration entry. What is left is the memory side,
+      which the e-graph genuinely does not model. What that is worth here is
+      unknown: the intra-block passes are on at `-O1` and no measurement says
+      how much they decline for want of cross-block information.
+
+- [ ] **Loop unrolling.** Compounds with LSR; do it after. Unmeasured, and
+      ranked here only by that dependency.
+
 - [ ] **nsw/nuw/nnan/ninf op flags.** Without them the signed-ordering
       algebraic rewrites stay permanently rejected (see Decisions). Op-flag
       bitfield threaded through saturation.
-- [x] **Tail call optimization.**
-      A tail self-call is now a `jmp` to the label bound *after* the prologue:
-      arguments into their ABI registers exactly as a call needs them, and control
-      to the top of the body. The frame is neither torn down nor rebuilt, RSP does
-      not move, and the body begins by moving each parameter out of its argument
-      register -- which is the state a fresh entry would be in. No `call` means no
-      return address pushed, so the base case's `ret` returns to the original
-      caller.
 
-      `tests/lit/live/tail_recursion.c` exists to price it, because nothing could:
-      `bench`, `live` and the generated programs contained **zero** tail-call sites
-      between them, and the 59 in `lit` are almost all `main` returning a call
-      once. Median of 5 at `ARGS=100`:
+      **Ranked low because it unblocks rewrites whose value is unmeasured.** It
+      is a prerequisite, not a win: nothing says what the rejected rewrites are
+      worth once they can fire. Counting how often their patterns occur in the
+      corpora is cheap and would move this up or off the list.
 
-      ```
-      blitz -O1, no TCO        146.6M cycles    x2.87 vs gcc
-      blitz -O1, self only     107.8M           x2.11            -26.5%
-      blitz -O1, self + other   72.5M           x1.42            -50.6%
-      gcc -O2                   51.1M
-      clang -O2                 16.4M
-      ```
-
-      **Both forms, and they differ in one thing that decides everything else:
-      whether the frame this function built is the one the callee will run in.** A
-      self-call jumps to the label bound after the prologue and the frame stands.
-      A call to another function tears the frame down first -- the callee's
-      prologue builds its own -- so it is `setup_call_args`, then
-      `abi::emit_frame_teardown`, then `jmp <symbol>` as a new
-      `MachInst::TailCallDirect` (`E9 + rel32`, the same PLT32 relocation a call
-      uses). RSP is then back on the return address the original `call` pushed, so
-      the callee returns straight past this function. The argument registers
-      survive the teardown because they are caller-saved and the teardown only pops
-      callee-saved ones.
-
-      `emit_frame_teardown` is the epilogue *without* the `ret`, split out of
-      `emit_epilogue` rather than duplicated: the two have to move RSP by the same
-      amount or the callee reads its return address from the wrong place, and
-      nothing downstream could see that. Getting it wrong the first way was
-      visible immediately -- the epilogue emitted its `ret` before the jump, so the
-      function returned instead of tail-calling and the kernel printed 140106
-      instead of 264767.
-
-      **A static count cannot see most of this**, which makes it the sharpest
-      example in the repo of why the ranking is cycles: a `call` becomes one
-      `jmp`, so the self-call form moved `-0.8%` instructions for `-26.5%` cycles.
-      The win is that a recursion deeper than the return-address predictor makes
-      every `ret` mispredict, and this removes the pair.
-
-      29 `lit` rows do improve on instructions, at `-3.7%` to `-16.7%` -- every
-      `return f(x)` in the corpus loses its call and its `ret`. `bench` and the
-      generated programs do not move at all; they discard no call results and
-      return no call directly.
-
-      `BLITZ_PASSES=-tail-calls` turns it off; it is on at `-O1` and off at `-O0`,
-      where the recursion's frames are what a debugger walks.
-      `lit/functions/tail_self_call.c` pins it, with `n * f(n - 1)` as the control
-      that must keep its call.
-
-- [x] **Loop headers were aligned by accident, and it was worth up to 20%.**
-      `emit::align_loop_headers` was written, exported from `emit/mod.rs`, and
-      **never called**; `enable_nop_alignment` was `false` at both levels and was
-      never read. So where a hot loop fell relative to a fetch boundary was
-      whatever the instruction stream happened to produce.
-
-      **Landed, `-O1` only, `BLITZ_PASSES=-loop-align` to turn it off.** Over the
-      24 `live` kernels, `x2.852` cycles against `gcc -O2` became `x2.797`:
-      **`-1.9%`**, and repeat runs put it at `-2.3%` (`2.852/2.849` off against
-      `2.797/2.773` on, so the off side reproduces to `0.1%`). `.text` grows
-      `+0.46%` and instructions `+0.51%` over the 167 rows that changed.
-
-      **It is not a monotone win and the spread is the finding.** `matmul_rt`
-      `-20.2%` -- which is the `+20.7%` layout artifact below, reclaimed -- then
-      `call_hot` `-8.7%`, `state_machine` `-5.4%`, `int_divide` `-4.8%`,
-      `accum_pair` `-4.1%`, `hash_mix` `-3.8%`. Against `mixed_width` `+4.7%`,
-      `transpose` `+2.8%`, `float_convert` `+2.0%`, `byte_copy` `+1.7%`.
-      Alignment is a coin flip on any one loop; what it buys is that the flip is
-      now a property of the loop.
-
-      **The cap was measured twice and the answer inverted, which is the part
-      worth keeping.** Against the code as it stood, `MAX_SKIP = 8` aligned 54%
-      of the 184 `bench`+`live` headers -- exactly the 9-in-16 the policy allows,
-      so nothing was lost to relaxation moving a header after it was padded --
-      and measured `x2.797` where no cap aligned 99% and measured `x2.819`. The
-      cap won, on half the bytes. **After optimistic coalescing took 28% of the
-      copies out, it loses**: `x2.725` capped against `x2.685` uncapped, two
-      samples each. `MAX_SKIP` is now 15, so every header is aligned.
-
-      A padding budget is priced against the code it pads, and `-7%`
-      instructions was enough to move where the trade lands. Do not carry this
-      constant through a change that moves code size; re-measure it.
-
-      **A loop header is a label a backward jump targets**, computed from the
-      emitted stream. Not from the CFG: `cfg::block_loop_depths` is keyed on
-      `func.blocks` order, blocks are emitted in RPO, and a trampoline label can
-      be a back-edge target without being a block.
-
-      **Two things it had to get right.** The offset is measured from the
-      function's first byte, so it includes the prologue -- which is encoded
-      separately from the instruction stream, and which the pass as written did
-      not count. And padding and relaxation each move the other, so
-      `align::loop_header_pads` iterates them; correctness does not rest on that
-      converging, because relaxation runs last on the padded stream and only ever
-      *widens* a jump, so no jump can be left short and out of range. Which side
-      of the label the NOPs land on is the other half: padding after the binding
-      point puts them inside the loop, where every iteration pays.
-
-      **Function starts are aligned now, which is the half of this that had no
-      hazard.** `compile_module_with_globals` pads to 16 between functions, and
-      what that buys is not speed -- `+0.04%` geometric mean over 24 `live`
-      kernels, which is nothing -- but *invariance*: a function's offsets modulo 16
-      no longer depend on the length of anything before it, so a codegen change in
-      one function cannot re-time the loops of another. Demonstrated rather than
-      argued: growing the first of four functions used to shift every absolute
-      address in the last one modulo 16 (`14 15 0 2 4 ...` became `9 10 11 13
-      15 ...`) and now leaves them identical. `compile::module`'s
-      `function_starts_are_16_byte_aligned` pins it.
-
-      **What is left is the loop headers, and the ordering is the problem.** NOPs
-      have to go in before branch relaxation, or a jump the relaxer shortened may
-      no longer reach; but relaxation then shrinks jumps and moves the header it
-      just aligned. It needs align and relax iterated to a fixpoint, which is what
-      an assembler does and what this pass does not. Two other things it gets
-      wrong as written: the offset it computes is relative to the *body*, while the
-      prologue is encoded separately and is part of the distance, and it never asks
-      whether a loop is hot enough to be worth the padding.
-
-      **Measured, and the measurement is the point.** Removing 4 dead `lea`s from
-      `live/matmul_rt.c` -- a strict reduction, `-107M` dynamic instructions --
-      cost `+94M` cycles, `+20.7%`. Not the frontend (idle went 0.29% to 0.67%, a
-      rounding error against 20%), not branches (218.3M and 0.10% missed in both),
-      and IPC fell 5.99 to 4.77. Then adding three unrelated instructions before
-      the loop, changing nothing but where the code sits, took the same comparison
-      from `x1.2069` to `x0.9901`.
-
-      **This puts a layout term in every number the perf harness prints**, and
-      nobody controls it. Two consequences: a pass that changes code size can be
-      credited or blamed for up to 20% that has nothing to do with it, and
-      `run_perf.sh` results are not comparable across changes that move code. Wire
-      the pass up, then re-measure anything the layout could have decided.
-- [ ] **Loop unrolling.** Compounds with LSR; do it after.
-- [x] **Dead instructions in the final stream.** `emit::dead_inst` deletes
-      instructions that compute a value nothing reads, over backward register
-      liveness on the CFG `verify` already recovers from labels and branches.
-
-      **Why it has to be here.** Lowering folds an address into the addressing
-      mode of the load that uses it and decides that per consumer, at the last
-      possible moment; when every consumer folds, the `lea` is left with nothing
-      reading it. No earlier pass can see that -- DCE runs on the CFG before
-      scheduling and the e-graph never sees an effectful op. Measured before the
-      pass: 122 of 7801 instructions over `bench` and `live` were a `lea`
-      immediately followed by an instruction naming the same address in its own
-      mode, in every one of the 34 kernels, and they sit in loop bodies.
-
-      ```
-      bench   insts -2.69%   copies -1.80%    over 14 changed rows
-      live    insts -1.33%   copies -2.67%    over 19
-      fuzz    insts -0.40%   copies -1.13%    over 54
-      lit     insts -0.98%   copies -1.35%    over 44
-      ```
-
-      **Zero regressed rows in any of the four corpora.** Cycles over `live`:
-      `-0.85%` geometric mean, or `-1.69%` excluding `matmul_rt`, whose `+20.7%`
-      is the layout artifact the item above is about. Six kernels gain more than
-      1%: `histogram` `-11.8%`, `nested_carried` `-9.1%`, `pointer_chase` `-5.4%`,
-      `branchy_filter` `-4.4%`, `byte_copy` `-3.7%`, `state_machine` `-1.9%`.
-
-      What it will delete is deliberately short: register-to-register moves,
-      immediate loads and `lea`, and nothing else. Not arithmetic, because EFLAGS
-      is not a register this liveness models; not anything touching memory; not a
-      write to RSP or RBP. `BLITZ_PASSES=-dead-insts` turns it off.
-
-      **The bug worth remembering**: `MachInst::CallDirect` carries a symbol and no
-      operands, so `uses()` says a call reads nothing -- and the `mov`s putting
-      arguments in their ABI registers were dead. That deleted the argument setup
-      of every call in the corpus, 248 of 576 lit tests, and is why `call_reads`
-      exists.
-- [ ] **Narrowing / type-width analysis.** **Attempted, measured, reverted, and
-      the reason is a cost-model hazard worth knowing before the next attempt.**
+- [ ] **Narrowing / type-width analysis.** **Last because it is blocked, not
+      merely unmeasured**: it needs known-bits to reach loop-carried values and
+      it needs a cost model that can say "free only when the registers
+      coincide", and both are named below. **Attempted, measured, reverted, and
+      the reason is a cost-model hazard worth knowing before the next
+      attempt.**
 
       The concrete instance: **178 of 7696 instructions over `bench` and `live` are
       a sign-extension**, in every one of the 34 kernels, inside loop bodies -- an
@@ -850,27 +940,7 @@ so the holes stay visible.
       one is `P2`'s cost-model item again, the same prerequisite the
       exploration-rule experiment ended on. `(uint8_t)x + 1` should not promote
       to i32. Domain: `(min_bits, signed)` per e-class.
-- [x] **Dead call elimination** for provably pure functions.
-      `dce::pure_functions` is the greatest fixpoint over the module -- a function
-      is pure when it stores nothing and calls nothing impure, so a self-recursive
-      one stays pure and every extern is impure because nothing here can see into
-      it. `eliminate_dead_pure_calls` then removes a call whose results no e-node
-      and no other effectful op reads. Both halves of that are needed: the e-graph
-      holds the pure computations and the CFG holds the effectful ones.
 
-      **It removes the one dead computation nothing else could.** An effectful op
-      is invisible to the e-graph by construction, so a call the inliner declined
-      and whose result went unread survived every pass. Measured: 3 `fuzz` rows
-      at `-3.1%`, `-5.2%` and `-4.0%` instructions with copies down with them,
-      `bench` and `live` untouched -- those corpora discard no call results.
-      Gated with the dead-load half, and for the same reason: removing a call
-      takes away something a debugger could step into, which is the line `-O0`
-      holds. `lit/functions/dead_pure_call.c`.
-
-      It found a stale test on the way: `zero_arg_void_mixed.c`'s `void nop()
-      { return; }` is pure, its result list is empty, and all nine calls to it
-      were removed -- correctly, and leaving the test asserting nothing about the
-      call-point detection it was written for. Its callee now stores.
 ### P2 -- x86-64 specialization (the differentiator)
 
 This is where single-target focus is supposed to pay off. LLVM has ~10x the
@@ -1047,6 +1117,31 @@ seconds -- what the other harnesses already cost.
 
 ## Decisions worth not relitigating
 
+**Two kinds live here, and only one of them keeps.** A decision resting on a
+*fact* -- what the ISA provides, what is sound -- does not expire: x86-64 will
+not grow a flag-only ADD, and reusing a `sub`'s flags for a signed comparison
+will not become correct. A decision resting on a *measurement* was taken against
+the code as it stood, and the code moves. Those carry a **What would have to
+change first** line, naming the condition their own entry already implies -- the
+exploration-rules entry has had one all along, and it is the convention worth
+following. Nothing here is a standing ban on thinking about a topic again; it is
+a ban on re-deriving the same number by hand.
+
+**Both failure modes have bitten, one session apart, which is why this note
+exists.**
+
+An entry going stale: capping loop-header padding at 8 bytes beat no cap
+(`x2.797` against `x2.819`) and was written up as settled. After optimistic
+coalescing took 28% of the copies out, the same comparison came back `x2.725`
+against `x2.685` -- **inverted, by a change that had nothing to do with
+alignment.** A padding budget is priced against the code it pads.
+
+An entry over-reaching: "iterated coalescing is worthless here" is correct and
+still stands, and it was being read as closing coalescing improvements
+generally. It does not -- optimistic coalescing is a different technique, was
+never measured, and landed for `-28.5%` copies. **Read what an entry actually
+measured, not what it seems to settle.**
+
 - **Exploration-shaped rules do not pay here, and the experiment has a number.**
   Written, measured, reverted. Two rules, both exact in wrapping arithmetic so
   neither needed the `nsw`/`nuw` flags: **distribution**
@@ -1162,6 +1257,9 @@ seconds -- what the other harnesses already cost.
   `tests/lit/alias/forward_across_struct_field.c` covers it; the corpus cannot
   price it, because `gen_c.py` does not generate structs at all. That is a gap
   in the corpus, not a reason to revisit the pass.
+
+  **What would have to change first**: `gen_c.py` generating structs. This
+  number is a statement about the corpus, not about the analysis.
 - **Real flag fusion is rejected, not deferred.** Reusing an earlier
   `X86Sub(a,b)`'s flags for a later `Icmp(cc, diff, 0)` is unsound for signed
   ordering across overflow. Eq/Ne and unsigned only.
@@ -1177,7 +1275,9 @@ seconds -- what the other harnesses already cost.
 - **LICM runs before saturation**, on the raw e-graph, so hoisted code still
   gets the full rewrite pass.
 - **Forwarding runs pre-LICM; DSE runs post-forwarding.** Order is load-bearing.
-- **Equality saturation converges in two rounds and is worth 0.39%.** Measured
+- **Equality saturation converges in two rounds and is worth 0.39%.**
+  **What would have to change first**: a materially larger rule set -- this
+  prices the rules that exist. Measured
   by setting `-O1`'s `saturation_limit` to 16, 8, 4, 2 and 1 and comparing the
   emitted code over `live` + `bench`: 16, 8, 4 and 2 are byte-identical (4390
   instructions, 15996 bytes) and 1 costs +17 instructions and +42 bytes. Nothing
