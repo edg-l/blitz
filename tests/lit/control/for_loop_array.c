@@ -3,7 +3,9 @@
 // CHECK-LABEL: # main
 // loop comparison against bound 5 (immediate fused into cmp via X86CmpI)
 // CHECK: cmp    {{[a-z0-9]+}},0x5
-// CHECK: jl
+// The body is laid after the header, so the conditional leaves the loop and
+// the fallthrough enters it.
+// CHECK: jge
 // array base address via lea
 // CHECK: lea
 // scaled index access

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compile::program_point::ProgramPoint;
 use crate::egraph::EGraph;
@@ -117,6 +117,64 @@ pub(super) fn compute_rpo(func: &Function) -> Vec<usize> {
     }
 
     rpo
+}
+
+/// The order blocks are laid out in memory.
+///
+/// **RPO is a dominance order and says nothing about what should follow a block
+/// in memory.** Its DFS finishes a branch's second successor first, so the
+/// reversal puts the first successor last -- for a loop header
+/// `branch cond body exit`, everything reachable from `exit` lands between the
+/// header and the body. The header's conditional is then a *taken* forward
+/// branch and the back edge a *taken* backward jump: two taken branches an
+/// iteration, where a body laid directly after its header costs one, and most
+/// cores retire at most one taken branch per cycle.
+///
+/// The order is a greedy trace. From each block it continues to the unvisited
+/// successor with the greatest [`block_loop_depths`] depth, breaking ties by
+/// RPO position, and starts a new trace from the first unvisited block in RPO
+/// when it runs out. A loop body is deeper than the loop's exit, so the body
+/// follows the header and the exit is picked up after the trace ends at the
+/// back edge. The depth is that function's back-edge heuristic rather than a
+/// loop forest, which is all a *preference* between two successors needs.
+///
+/// The entry block stays first, since it is first in RPO and every trace seed
+/// is taken in RPO order. Blocks no path reaches are last, for the same reason.
+pub(super) fn block_layout_order(func: &Function) -> Vec<usize> {
+    let n = func.blocks.len();
+    if n == 0 {
+        return vec![];
+    }
+    let rpo = compute_rpo(func);
+    let mut rpo_pos = vec![usize::MAX; n];
+    for (pos, &b) in rpo.iter().enumerate() {
+        rpo_pos[b] = pos;
+    }
+    let depths = block_loop_depths(func);
+    let succ = successor_indices(func);
+
+    let mut visited = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+    for &seed in &rpo {
+        if visited[seed] {
+            continue;
+        }
+        let mut block = seed;
+        loop {
+            visited[block] = true;
+            order.push(block);
+            let next = succ[block]
+                .iter()
+                .copied()
+                .filter(|&s| !visited[s])
+                .max_by_key(|&s| (depths[s], std::cmp::Reverse(rpo_pos[s])));
+            match next {
+                Some(s) => block = s,
+                None => break,
+            }
+        }
+    }
+    order
 }
 
 /// Compute the immediate dominator for each block using the Cooper-Harvey-Kennedy
@@ -715,6 +773,28 @@ pub(super) fn projection_copy_pairs(block_schedules: &[Vec<ScheduledInst>]) -> V
     pairs
 }
 
+/// The blocks a back edge targets: the loop headers, as the CFG defines them.
+///
+/// A block heads a loop when it dominates one of its own predecessors -- the
+/// standard definition, and the one worth paying a dominator computation for.
+/// The cheap proxies are both wrong here: `block_loop_depths` reads a back edge
+/// off `func.blocks` order, and reading one off the *emitted* stream calls any
+/// backward jump a loop, which `block_layout_order` produces routinely for a
+/// diamond whose second arm jumps forward to a join laid before it.
+pub(super) fn loop_header_blocks(func: &Function) -> BTreeSet<BlockId> {
+    let rpo = compute_rpo(func);
+    let idom = compute_idom(func, &rpo);
+    let mut headers = BTreeSet::new();
+    for (src, targets) in successor_indices(func).into_iter().enumerate() {
+        for target in targets {
+            if dominates(target, src, &idom) {
+                headers.insert(func.blocks[target].id);
+            }
+        }
+    }
+    headers
+}
+
 /// Loop depth per block index, by back-edge counting.
 ///
 /// A target at or before its source is a back edge, and every block between the
@@ -912,6 +992,50 @@ mod tests {
     /// 0 returns; 1 and 2 form a cycle the entry cannot reach.
     fn unreachable_cycle() -> Function {
         func_with(vec![ret(), jump(2), jump(1)])
+    }
+
+    /// The whole point of the layout order: the loop body follows its header,
+    /// so the header's conditional is the one that leaves the loop.
+    #[test]
+    fn a_loop_body_is_laid_directly_after_its_header() {
+        // 0 -> 1, 1 -> {2 body, 3 exit}, 2 -> 1, 3 returns. RPO puts the exit
+        // between the header and the body, since the DFS finishes the second
+        // successor first.
+        let func = loop_with_exit();
+        assert_eq!(compute_rpo(&func), vec![0, 1, 3, 2]);
+        assert_eq!(block_layout_order(&func), vec![0, 1, 2, 3]);
+    }
+
+    /// Every block appears exactly once, entry first, including blocks no trace
+    /// from the entry can reach.
+    #[test]
+    fn the_layout_covers_every_block_with_the_entry_first() {
+        let func = unreachable_cycle();
+        let order = block_layout_order(&func);
+        assert_eq!(order[0], 0);
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..func.blocks.len()).collect::<Vec<_>>());
+    }
+
+    /// A diamond has no loop, so nothing outranks anything and the layout is the
+    /// RPO: whichever arm the trace takes first, the join comes after it.
+    #[test]
+    fn a_diamond_lays_an_arm_before_the_join() {
+        let func = diamond();
+        let order = block_layout_order(&func);
+        assert_eq!(order[0], 0);
+        let pos = |b: usize| order.iter().position(|&x| x == b).unwrap();
+        assert!(pos(1) < pos(3) || pos(2) < pos(3));
+    }
+
+    /// A block that dominates one of its own predecessors heads a loop; the
+    /// join a diamond's second arm jumps back to does not, which is the case
+    /// reading back edges off the emitted stream gets wrong.
+    #[test]
+    fn only_a_real_back_edge_names_a_loop_header() {
+        assert_eq!(loop_header_blocks(&loop_with_exit()), BTreeSet::from([1]));
+        assert!(loop_header_blocks(&diamond()).is_empty());
     }
 
     fn idom_of(func: &Function) -> Vec<Option<usize>> {

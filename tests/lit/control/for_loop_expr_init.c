@@ -2,7 +2,9 @@
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
 // CHECK: cmp
-// CHECK: jl
+// The body is laid after the header, so the conditional leaves the loop and
+// the fallthrough enters it.
+// CHECK: jge
 // CHECK: add    {{[a-z0-9]+}},{{[a-z0-9]+}}
 // CHECK: jmp
 

@@ -3,7 +3,9 @@
 // CHECK-LABEL: # main
 // loop bound fused into cmp via X86CmpI
 // CHECK: cmp    {{[a-z0-9]+}},0xa
-// CHECK: jl
+// The body is laid after the header, so the conditional leaves the loop and
+// the fallthrough enters it.
+// CHECK: jge
 // increment inside body, the constant a lea displacement
 // CHECK: inc    {{[a-z0-9]+}}
 // CHECK: jmp

@@ -1700,16 +1700,24 @@ pub fn compile(
     );
 
     // Phase 7: Per-block MachInst lowering + phi elimination + terminator emission.
-    // Blocks are processed and emitted in RPO order.
+    //
+    // Emitted in layout order, not RPO: RPO answers which block dominates
+    // which, and what should *follow* a block in memory is a different
+    // question -- see `cfg::block_layout_order`. Everything before this point
+    // reads the RPO, and nothing here needs one: every per-block structure is
+    // keyed by block index, and the only thing a position means here is which
+    // block a fallthrough reaches.
+    //
     // LabelIds are block IDs (block.id), which are stable across reordering.
+    let layout_order = cfg::block_layout_order(func);
     let n_blocks = func.blocks.len();
     // Extra labels for trampoline code start after the maximum block id + 1.
     let max_block_id = func.blocks.iter().map(|b| b.id).max().unwrap_or(0);
     let mut next_label: LabelId = max_block_id + 1;
-    // block_items[i] holds the items for the block at rpo_order[i].
+    // block_items[i] holds the items for the block at layout_order[i].
     let mut block_items: Vec<Vec<BlockItem>> = Vec::with_capacity(n_blocks);
 
-    for (rpo_pos, &block_idx) in rpo_order.iter().enumerate() {
+    for (layout_pos, &block_idx) in layout_order.iter().enumerate() {
         let block = &func.blocks[block_idx];
         // Strip barrier pseudo-ops before Phase 7 grouping: their dummy dst VRegs
         // are not in barrier maps and would be misrouted to group 0.
@@ -1731,8 +1739,8 @@ pub fn compile(
         let full_schedule_for_barriers = &block_rewritten[block_idx];
 
         // The block that follows this one in emission order (for fallthrough).
-        let next_block_id: Option<BlockId> = rpo_order
-            .get(rpo_pos + 1)
+        let next_block_id: Option<BlockId> = layout_order
+            .get(layout_pos + 1)
             .map(|&next_idx| func.blocks[next_idx].id);
 
         // Handle non-terminator effectful ops (loads, stores, calls).
@@ -1763,7 +1771,7 @@ pub fn compile(
                 entry_copies.push((*abi_reg, dst_reg));
             }
         }
-        if block_idx == rpo_order[0] {
+        if block_idx == layout_order[0] {
             for &(param_vreg, abi_reg) in &regalloc_result.unprecolored_params {
                 if let Some(dst_reg) = regalloc_result
                     .assignment
@@ -2030,12 +2038,12 @@ pub fn compile(
 
     // Branch threading: rewrite Jcc/Jmp targets that point to empty blocks
     // containing only a single Jmp. Repeat until fixed point.
-    thread_branches(&mut block_items, func, &rpo_order);
+    thread_branches(&mut block_items, func, &layout_order);
 
     // Threading can leave a jump over nothing: its new target may be the block
     // that follows, which `lower_terminator` could not see when it chose to
     // emit the jump at all.
-    remove_fallthrough_jumps(&mut block_items, func, &rpo_order);
+    remove_fallthrough_jumps(&mut block_items, func, &layout_order);
 
     // Phase 10: Encoding with branch relaxation.
     //
@@ -2065,13 +2073,13 @@ pub fn compile(
         let mut scratch: Vec<MachInst> = Vec::new();
         let mut scratch_labels: BTreeMap<LabelId, usize> = BTreeMap::new();
         let mut origin: Vec<(usize, usize)> = Vec::new();
-        for (rpo_pos, items) in block_items.iter().enumerate() {
-            let block_id = func.blocks[rpo_order[rpo_pos]].id;
+        for (layout_pos, items) in block_items.iter().enumerate() {
+            let block_id = func.blocks[layout_order[layout_pos]].id;
             scratch_labels.insert(block_id as LabelId, scratch.len());
             for (item_idx, item) in items.iter().enumerate() {
                 match item {
                     BlockItem::Inst(inst) => {
-                        origin.push((rpo_pos, item_idx));
+                        origin.push((layout_pos, item_idx));
                         scratch.push(inst.clone());
                     }
                     BlockItem::BindLabel(label_id) => {
@@ -2105,8 +2113,8 @@ pub fn compile(
     let flatten = |block_items: &[Vec<BlockItem>]| {
         let mut insts: Vec<MachInst> = Vec::new();
         let mut labels: BTreeMap<LabelId, usize> = BTreeMap::new();
-        for (rpo_pos, items) in block_items.iter().enumerate() {
-            let block_id = func.blocks[rpo_order[rpo_pos]].id;
+        for (layout_pos, items) in block_items.iter().enumerate() {
+            let block_id = func.blocks[layout_order[layout_pos]].id;
             // The block label is bound before the first instruction of this block.
             labels.insert(block_id as LabelId, insts.len());
 
@@ -2159,7 +2167,10 @@ pub fn compile(
     // can do is move a header off the boundary it was just padded to, which
     // `align::loop_header_pads` iterates against.
     if opts.enable_nop_alignment {
-        let headers = crate::emit::loop_header_labels(&flat_insts, &label_positions);
+        let headers: std::collections::BTreeSet<LabelId> = cfg::loop_header_blocks(func)
+            .into_iter()
+            .map(|id| id as LabelId)
+            .collect();
         let prologue_size = {
             let mut scratch = Encoder::new();
             emit_prologue(&mut scratch, &frame_layout);
@@ -2173,7 +2184,7 @@ pub fn compile(
             &inst_size_for_relax,
         );
         if !pads.is_empty() {
-            insert_alignment_nops(&mut block_items, func, &rpo_order, &pads);
+            insert_alignment_nops(&mut block_items, func, &layout_order, &pads);
             let rebuilt = flatten(&block_items);
             flat_insts = rebuilt.0;
             label_positions = rebuilt.1;
@@ -2220,8 +2231,8 @@ pub fn compile(
     // Bind block labels and trampoline labels in RPO order.
     // Labels use block.id so that jump targets encoded in lower_terminator resolve.
     let mut flat_idx = 0usize;
-    for (rpo_pos, items) in block_items.iter().enumerate() {
-        let block_id = func.blocks[rpo_order[rpo_pos]].id;
+    for (layout_pos, items) in block_items.iter().enumerate() {
+        let block_id = func.blocks[layout_order[layout_pos]].id;
         encoder.bind_label(block_id as LabelId);
 
         for item in items {
@@ -2346,19 +2357,19 @@ pub(crate) enum BlockItem {
 fn insert_alignment_nops(
     block_items: &mut [Vec<BlockItem>],
     func: &Function,
-    rpo_order: &[usize],
+    layout_order: &[usize],
     pads: &BTreeMap<LabelId, u8>,
 ) {
     // (block position, item index, pad). An item index equal to the list length
     // means "append".
     let mut inserts: Vec<Vec<(usize, u8)>> = vec![Vec::new(); block_items.len()];
 
-    for (rpo_pos, items) in block_items.iter().enumerate() {
-        let block_id = func.blocks[rpo_order[rpo_pos]].id as LabelId;
+    for (layout_pos, items) in block_items.iter().enumerate() {
+        let block_id = func.blocks[layout_order[layout_pos]].id as LabelId;
         if let Some(&pad) = pads.get(&block_id)
-            && rpo_pos > 0
+            && layout_pos > 0
         {
-            let prev = rpo_pos - 1;
+            let prev = layout_pos - 1;
             let at = block_items[prev].len();
             inserts[prev].push((at, pad));
         }
@@ -2366,16 +2377,16 @@ fn insert_alignment_nops(
             if let BlockItem::BindLabel(label) = item
                 && let Some(&pad) = pads.get(label)
             {
-                inserts[rpo_pos].push((item_idx, pad));
+                inserts[layout_pos].push((item_idx, pad));
             }
         }
     }
 
-    for (rpo_pos, mut sites) in inserts.into_iter().enumerate() {
+    for (layout_pos, mut sites) in inserts.into_iter().enumerate() {
         // Descending, so an insertion never shifts one still to be made.
         sites.sort_by_key(|&(at, _)| std::cmp::Reverse(at));
         for (at, pad) in sites {
-            block_items[rpo_pos].insert(at, BlockItem::Inst(MachInst::Nop { size: pad }));
+            block_items[layout_pos].insert(at, BlockItem::Inst(MachInst::Nop { size: pad }));
         }
     }
 }

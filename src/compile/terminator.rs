@@ -88,13 +88,13 @@ fn negate_cc(cc: CondCode) -> CondCode {
 pub(super) fn thread_branches(
     block_items: &mut [Vec<BlockItem>],
     func: &Function,
-    rpo_order: &[usize],
+    layout_order: &[usize],
 ) {
     loop {
         // Build a map: block_id -> jump_target for blocks that are just a Jmp.
         let mut redirect: BTreeMap<LabelId, LabelId> = BTreeMap::new();
-        for (rpo_pos, items) in block_items.iter().enumerate() {
-            let block_id = func.blocks[rpo_order[rpo_pos]].id as LabelId;
+        for (layout_pos, items) in block_items.iter().enumerate() {
+            let block_id = func.blocks[layout_order[layout_pos]].id as LabelId;
             // Count real instructions (not BindLabel).
             let real: Vec<&MachInst> = items
                 .iter()
@@ -172,31 +172,38 @@ pub(super) fn thread_branches(
 pub(super) fn remove_fallthrough_jumps(
     block_items: &mut [Vec<BlockItem>],
     func: &Function,
-    rpo_order: &[usize],
+    layout_order: &[usize],
 ) {
     // Backwards, so a jump made redundant by a later deletion is seen in the
     // same pass: what follows a jump can only shrink.
-    for rpo_pos in (0..block_items.len()).rev() {
-        for item_idx in (0..block_items[rpo_pos].len()).rev() {
+    for layout_pos in (0..block_items.len()).rev() {
+        for item_idx in (0..block_items[layout_pos].len()).rev() {
             let BlockItem::Inst(MachInst::Jmp { target } | MachInst::Jcc { target, .. }) =
-                block_items[rpo_pos][item_idx]
+                block_items[layout_pos][item_idx]
             else {
                 continue;
             };
-            if binds_at_next_instruction(block_items, func, rpo_order, rpo_pos, item_idx, target) {
-                block_items[rpo_pos].remove(item_idx);
+            if binds_at_next_instruction(
+                block_items,
+                func,
+                layout_order,
+                layout_pos,
+                item_idx,
+                target,
+            ) {
+                block_items[layout_pos].remove(item_idx);
             }
         }
     }
 }
 
 /// True when `target` is bound at the first instruction after the item at
-/// (`rpo_pos`, `item_idx`), with only label bindings in between.
+/// (`layout_pos`, `item_idx`), with only label bindings in between.
 fn binds_at_next_instruction(
     block_items: &[Vec<BlockItem>],
     func: &Function,
-    rpo_order: &[usize],
-    rpo_pos: usize,
+    layout_order: &[usize],
+    layout_pos: usize,
     item_idx: usize,
     target: LabelId,
 ) -> bool {
@@ -211,12 +218,12 @@ fn binds_at_next_instruction(
         None
     };
 
-    if let Some(found) = binds(&block_items[rpo_pos][item_idx + 1..]) {
+    if let Some(found) = binds(&block_items[layout_pos][item_idx + 1..]) {
         return found;
     }
-    for next_pos in rpo_pos + 1..block_items.len() {
+    for next_pos in layout_pos + 1..block_items.len() {
         // A block's own label is bound before its first item.
-        if func.blocks[rpo_order[next_pos]].id as LabelId == target {
+        if func.blocks[layout_order[next_pos]].id as LabelId == target {
             return true;
         }
         if let Some(found) = binds(&block_items[next_pos]) {
@@ -497,7 +504,17 @@ pub(super) fn lower_terminator(
             let true_is_fallthrough = next_block_id == Some(*bb_true);
 
             let mut items = Vec::new();
-            if true_phi.is_empty() {
+            // Which side the `jcc` names is forced by the copies: the side it
+            // jumps to is reached without running any, so it has to be the side
+            // that has none. When *neither* side has copies the choice is free,
+            // and it goes to whichever leaves the following block as the
+            // fallthrough -- a loop body laid after its header is reached by a
+            // branch that is not taken, and a not-taken branch is nearly free
+            // where a taken one costs the iteration a slot.
+            if true_phi.is_empty() && false_phi.is_empty() && true_is_fallthrough {
+                // jcc !cc, false_block; fall through to true_block
+                items.extend(emit_jcc(negate_cc(cc), *bb_false as LabelId, next_label));
+            } else if true_phi.is_empty() {
                 // jcc cc, true_block; [false_phi]; jmp false_block
                 items.extend(emit_jcc(cc, *bb_true as LabelId, next_label));
                 items.extend(false_phi.into_iter().map(BlockItem::Inst));
@@ -985,7 +1002,7 @@ mod tests {
     use super::*;
     use crate::ir::function::BasicBlock;
 
-    /// Blocks 0..n with ids equal to indices, which is what lets `rpo_order` be
+    /// Blocks 0..n with ids equal to indices, which is what lets `layout_order` be
     /// the identity below and a `LabelId` be a block index.
     fn func_of(n: usize) -> Function {
         Function {

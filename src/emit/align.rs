@@ -26,31 +26,6 @@ pub const MAX_SKIP: usize = 15;
 /// is monotone, so the sequence settles quickly or not at all.
 const MAX_ROUNDS: usize = 8;
 
-/// The labels a backward jump targets: a loop header, as the emitted stream
-/// sees it.
-///
-/// Nothing here consults the CFG. `cfg::block_loop_depths` is keyed on
-/// `func.blocks` order, blocks are emitted in RPO, and a trampoline label can
-/// be a back-edge target without being a block at all. A jump whose target
-/// sits at or before the jump itself is the whole definition.
-pub fn loop_header_labels(
-    insts: &[MachInst],
-    label_positions: &BTreeMap<LabelId, usize>,
-) -> BTreeSet<LabelId> {
-    let mut headers = BTreeSet::new();
-    for (i, inst) in insts.iter().enumerate() {
-        let target = match inst {
-            MachInst::Jmp { target } => *target,
-            MachInst::Jcc { target, .. } => *target,
-            _ => continue,
-        };
-        if label_positions.get(&target).is_some_and(|&pos| pos <= i) {
-            headers.insert(target);
-        }
-    }
-    headers
-}
-
 /// Byte offset of every instruction, given which jumps are short.
 fn offsets(
     insts: &[MachInst],
@@ -223,31 +198,11 @@ mod tests {
     }
 
     #[test]
-    fn backward_jump_target_is_a_header() {
-        let insts = loop_at(7, 4);
-        let pos = positions(&[(7, 2)]);
-        let headers = loop_header_labels(&insts, &pos);
-        assert_eq!(headers.iter().copied().collect::<Vec<_>>(), vec![7]);
-    }
-
-    #[test]
-    fn forward_jump_target_is_not_a_header() {
-        let insts = vec![
-            MachInst::Jmp { target: 3 },
-            MachInst::Ret,
-            MachInst::Ret,
-            MachInst::Ret,
-        ];
-        let pos = positions(&[(3, 3)]);
-        assert!(loop_header_labels(&insts, &pos).is_empty());
-    }
-
-    #[test]
     fn header_already_aligned_gets_no_pad() {
         // Prologue 0, four 4-byte instructions, header at 16.
         let insts = loop_at(1, 8);
         let pos = positions(&[(1, 4)]);
-        let headers = loop_header_labels(&insts, &pos);
+        let headers = BTreeSet::from([1]);
         let pads = loop_header_pads(&insts, &pos, &headers, 0, &size);
         assert!(pads.is_empty(), "got {pads:?}");
     }
@@ -258,7 +213,7 @@ mod tests {
         // needs nothing with no prologue, and the prologue's own length with one.
         let insts = loop_at(1, 8);
         let pos = positions(&[(1, 4)]);
-        let headers = loop_header_labels(&insts, &pos);
+        let headers = BTreeSet::from([1]);
         assert!(loop_header_pads(&insts, &pos, &headers, 0, &size).is_empty());
 
         // A prologue of 8 leaves the header at 24, wanting 8.
@@ -276,7 +231,7 @@ mod tests {
         // among them.
         let insts = loop_at(1, 8);
         let pos = positions(&[(1, 4)]);
-        let headers = loop_header_labels(&insts, &pos);
+        let headers = BTreeSet::from([1]);
         for prologue in 0..64 {
             for &pad in loop_header_pads(&insts, &pos, &headers, prologue, &size).values() {
                 assert!(pad as usize <= MAX_SKIP, "pad {pad} at prologue {prologue}");
@@ -290,7 +245,7 @@ mod tests {
         // Move it: prologue 10 -> 30, wants 2.
         let insts = loop_at(1, 10);
         let pos = positions(&[(1, 5)]);
-        let headers = loop_header_labels(&insts, &pos);
+        let headers = BTreeSet::from([1]);
         let pads = loop_header_pads(&insts, &pos, &headers, 10, &size);
         assert_eq!(pads.get(&1), Some(&2));
 
@@ -339,8 +294,7 @@ mod tests {
         });
 
         let pos = positions(&[(label_fwd, 32), (label_hdr, hdr_idx)]);
-        let headers = loop_header_labels(&insts, &pos);
-        assert!(headers.contains(&label_hdr));
+        let headers = BTreeSet::from([label_hdr]);
 
         let pads = loop_header_pads(&insts, &pos, &headers, 6, &size);
         let padded = apply_pads(&insts, &pos, &pads);

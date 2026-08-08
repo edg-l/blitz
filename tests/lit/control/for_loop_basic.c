@@ -3,9 +3,11 @@
 // CHECK-LABEL: # main
 // loop init: i = 1
 // CHECK: mov    {{[a-z0-9]+}},0x1
-// loop comparison against the 10 bound (immediate fused into cmp via X86CmpI)
+// loop comparison against the 10 bound (immediate fused into cmp via X86CmpI).
+// The body is laid after the header, so the conditional leaves the loop and
+// the fallthrough enters it.
 // CHECK: cmp    {{[a-z0-9]+}},0xa
-// CHECK: jle
+// CHECK: jg
 // loop body: the sum accumulated in place, no copy to set up the addend
 // CHECK: add    {{[a-z0-9]+}},{{[a-z0-9]+}}
 // loop increment: i + 1, in place

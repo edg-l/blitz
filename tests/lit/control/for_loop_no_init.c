@@ -3,7 +3,9 @@
 // CHECK-LABEL: # main
 // comparison against bound 10 (immediate fused into cmp via X86CmpI)
 // CHECK: cmp    {{[a-z0-9]+}},0xa
-// CHECK: jl
+// The body is laid after the header, so the conditional leaves the loop and
+// the fallthrough enters it.
+// CHECK: jge
 // loop body: add 1, the constant a lea displacement
 // CHECK: inc    {{[a-z0-9]+}}
 

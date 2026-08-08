@@ -3,9 +3,10 @@
 // CHECK-LABEL: # main
 // while loop comparison
 // CHECK: cmp
-// break comparison (i == 5)
+// break comparison (i == 5). The block the branch falls into is the one that
+// continues the loop, so the conditional is the break's negation.
 // CHECK: cmp
-// CHECK: je
+// CHECK: jne
 // backward jump for loop
 // CHECK: jmp
 

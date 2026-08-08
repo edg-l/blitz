@@ -8,7 +8,9 @@
 // CHECK: jl
 // inner loop compare + branch
 // CHECK: cmp    {{[a-z0-9]+}},0x3
-// CHECK: jl
+// The body is laid after the header, so the conditional leaves the loop and
+// the fallthrough enters it.
+// CHECK: jge
 // i*3 via lea (scale-by-3 addressing)
 // CHECK: lea
 

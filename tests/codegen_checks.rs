@@ -537,12 +537,15 @@ fn asm_diamond_branch() {
     check_asm(
         b.finalize().unwrap(),
         "
+        // One arm falls through into the join and the other jumps to it, which
+        // is the least a diamond can cost. Nothing here is a loop, so the join
+        // takes no alignment padding even though a backward jump reaches it.
         // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
         // CHECK: jg
         // CHECK: lea    rax,[{{[a-z0-9]+}}+0x1]
-        // CHECK: jmp
-        // CHECK: lea    rax,[{{[a-z0-9]+}}+0x1]
         // CHECK-NEXT: ret
+        // CHECK: lea    rax,[{{[a-z0-9]+}}+0x1]
+        // CHECK-NEXT: jmp
         ",
     );
 }

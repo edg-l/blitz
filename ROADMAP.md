@@ -72,9 +72,14 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **`P2`'s `subsume` marker** -- no measurement, but it is the one item whose
-  payoff is structural rather than guessed: it makes `saturate_isel` a property
-  of the rules instead of a pass and shrinks every class isel touches.
+- **Loop rotation** -- the second half of the layout work, and the only entry
+  with a measurement waiting for it: 135 of 135 loops in `live` still close on
+  an unconditional `jmp`. Laying the body after the header made the header's
+  conditional not-taken and was worth `-7.9%` cycles; turning `while` into
+  `do-while` removes the remaining taken branch.
+- **`P2`'s `subsume` marker** -- no measurement, but its payoff is structural
+  rather than guessed: it makes `saturate_isel` a property of the rules instead
+  of a pass and shrinks every class isel touches.
 - **Loop strength reduction** -- `P1`, the largest *claimed* payoff and no
   measurement at all. Count what the `live` kernels recompute before writing the
   pass.
@@ -84,10 +89,10 @@ rather than restating it. Take them top to bottom.
   still puts 150 of 371 in `cp_other`, which is no longer one shape. Measure
   before choosing a fix -- doing that is what found both of the last two.
 
-**No open entry anywhere has a measurement**, which is the state to read this
-document in: the last two that did have both landed. `P1` is ordered by
-argument, and **`P2` is where the single-target thesis pays off**, though half
-of it is unreachable until tinyc grows builtins -- see the note there.
+Below those two, **no open entry has a measurement**, which is the state to
+read this document in. `P1` is ordered by argument, and **`P2` is where the
+single-target thesis pays off**, though half of it is unreachable until tinyc
+grows builtins -- see the note there.
 
 The argument this paragraph used to make is gone and worth not repeating: it
 said the temptation is to start on GVN or LSR because they are the recognizable
@@ -301,6 +306,58 @@ three-operand `lea` that existed to dodge a copy blitz no longer makes:
 `lea x,[x+1]` is now `inc x` and `lea x,[x+y]` is `add x,y`.
 
 What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
+
+### ~~Loop bodies were laid out where dominance put them~~
+
+**RPO is a dominance order and says nothing about what should follow a block in
+memory.** Its DFS finishes a branch's second successor first, so the reversal
+puts the first successor last: for a loop header `branch cond body exit`,
+everything reachable from `exit` landed *between* the header and the body. The
+header's conditional was a taken forward branch and the back edge a taken
+backward jump -- **two taken branches an iteration**, and most cores retire at
+most one per cycle, so a five-instruction body was branch-bound at two cycles no
+matter what was in it.
+
+**Measured before it was believed: 0 of 113 loops in `live` were rotated**, and
+the body sat a median 175 bytes from its header, 37 of them over 256.
+
+`cfg::block_layout_order` is a greedy trace that follows the deepest unvisited
+successor, so the body is laid directly after its header, and
+`lower_terminator` inverts the condition when both edges are copy-free and the
+true side is the fallthrough. The header's conditional is then the one that
+*leaves* the loop. Span fell to a median 84 bytes and `byte_copy`'s copy loop
+became 12 contiguous instructions with one taken branch, from an 887-byte round
+trip with two.
+
+**It is emission order only.** Everything before phase 7 still reads the RPO --
+dominance, linearization, the splitter, the allocator -- and phase 7 needed no
+RPO at all: every per-block structure is keyed by block index, and the only
+thing a position means there is which block a fallthrough reaches.
+
+**It also had to fix how a loop header is recognized.** `emit::loop_header_labels`
+read them off backward jumps in the *emitted stream*, which under trace layout
+calls a diamond's join a loop -- the second arm jumps back to it. `asm_diamond_branch`
+was being padded 7 bytes for a loop that does not exist. `cfg::loop_header_blocks`
+asks the CFG instead: a block heads a loop when it dominates one of its own
+predecessors.
+
+```
+cycles vs gcc -O2    x2.395  ->  x2.207 / x2.206   (-7.9%, two samples)
+cycles vs clang -O2  x3.063  ->  x2.813 / x2.810
+instructions         lit +0.1%   bench -0.1%   live -0.0%   fuzz +0.1%
+bytes                lit +0.4%   bench -0.1%   live -0.8%   fuzz +0.5%
+```
+
+**The instruction count is the wrong instrument for this and says so.** It is
+flat while cycles move 8%, because what changed is which branches are taken, and
+the bytes that did appear are alignment padding now landing on headers that are
+genuinely headers. A change measured only by `run_codesize.sh` would have read
+as a small regression.
+
+Eight tests changed and every one was the inverted branch sense or the dropped
+false-header pad. **`MAX_SKIP` is owed a re-measurement**: its own entry says a
+padding budget is priced against the code it pads, and this moved both the code
+and which headers get padded.
 
 ### ~~A cost model that can see a constant being materialized~~
 
@@ -1074,8 +1131,23 @@ without taking it is picking up work that cannot land.
 - [ ] **Latency/port-aware DAG scheduling.** A uarch model (ports, latencies,
       throughput) is only tractable because there is one target. ~5% but it is
       exactly the kind of win the single-target thesis predicts.
-- [ ] **Branch layout**: `__builtin_expect` / likely-unlikely hints and
-      profile-free heuristics driving block ordering.
+- [ ] **Loop rotation.** The layout half is done -- see the closed entry -- and
+      a loop still closes on an unconditional `jmp`: **135 of 135 back edges in
+      `live`**. The header tests and the body falls through, so the branch that
+      is not taken is the exit and the one that *is* taken is the back edge.
+      Rotating the loop puts the test at the bottom, where the back edge is the
+      conditional and nothing else branches at all.
+
+      **The measurement is the layout entry's**: making the header's conditional
+      not-taken was worth `-7.9%` cycles, and this removes the other taken
+      branch of the pair. What it costs is a guard -- a `while` whose trip count
+      can be zero needs its first test kept above the loop -- which is a CFG
+      transform rather than a layout one.
+
+- [ ] **Branch layout beyond loops**: `__builtin_expect` / likely-unlikely hints
+      and profile-free heuristics for the non-loop edges. `block_layout_order`
+      ranks successors by loop depth alone, so a diamond's arms are ordered by
+      RPO position and nothing prefers the likely one.
 
 ### P3 -- Register allocation
 
