@@ -8,7 +8,11 @@
 // CHECK: jge
 // increment inside body, the constant a lea displacement
 // CHECK: inc    {{[a-z0-9]+}}
-// CHECK: jmp
+// The header's test is copied onto the back edge, so the loop closes on the
+// conditional and no unconditional jump closes it.
+// CHECK: cmp    {{[a-z0-9]+}},0xa
+// CHECK: jl
+// CHECK-NOT: jmp
 
 int main() {
     int sum = 0;

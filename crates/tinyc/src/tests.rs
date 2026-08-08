@@ -1494,7 +1494,13 @@ fn backward_jump_targets(disasm: &str) -> Vec<usize> {
         let (Some(mnemonic), Some(operand)) = (words.next(), words.next()) else {
             continue;
         };
-        if !mnemonic.starts_with('j') {
+        // Conditional jumps only. A rotated loop closes on its test, so a
+        // backward `jmp` is the branch *out* of one, to an exit the trace laid
+        // before the body -- and padding an exit is padding code no iteration
+        // runs. Which is the same reason `emit::loop_header_labels` is gone:
+        // the emitted stream cannot tell a loop from a join, and only the CFG
+        // can.
+        if !mnemonic.starts_with('j') || mnemonic == "jmp" {
             continue;
         }
         let Some(hex) = operand.strip_prefix("0x") else {

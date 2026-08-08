@@ -5,8 +5,11 @@
 // the constant is in the instruction rather than a register of its own
 // CHECK: mov    {{[a-z0-9]+}},0xa
 // CHECK: dec    {{[a-z0-9]+}}
-// backward jump
-// CHECK: jmp
+// The header's test is copied onto the back edge, so the loop closes on the
+// conditional and no unconditional jump closes it.
+// CHECK: test   {{[a-z0-9]+}},{{[a-z0-9]+}}
+// CHECK: jg
+// CHECK-NOT: jmp
 
 int main() {
     int sum = 0;

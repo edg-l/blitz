@@ -72,11 +72,17 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Loop rotation** -- the second half of the layout work, and the only entry
-  with a measurement waiting for it: 135 of 135 loops in `live` still close on
-  an unconditional `jmp`. Laying the body after the header made the header's
-  conditional not-taken and was worth `-7.9%` cycles; turning `while` into
-  `do-while` removes the remaining taken branch.
+- **The layout trace can rank a loop's exit above its body** -- `P1`, and it is
+  the one open entry with a mechanism rather than a guess. `cfg::block_loop_depths`
+  calls an edge a back edge when it points at a lower *block index*, and block
+  indices are not in loop order: `licm::insert_preheader` appends preheaders past
+  the end. So a loop body can score depth 0 and `block_layout_order` follows the
+  exit instead, which puts the header's conditional back on the taken side --
+  exactly what the layout entry was supposed to have closed. Reproduces on a
+  nested `while` in `tests/lit/control/loop_rotation.c`, where the outer header
+  branches *into* its loop. The depth is already computable exactly:
+  `licm::detect_loops` returns each natural loop's body from the dominator tree.
+
 - **`P2`'s `subsume` marker** -- no measurement, but its payoff is structural
   rather than guessed: it makes `saturate_isel` a property of the rules instead
   of a pass and shrinks every class isel touches.
@@ -89,7 +95,7 @@ rather than restating it. Take them top to bottom.
   still puts 150 of 371 in `cp_other`, which is no longer one shape. Measure
   before choosing a fix -- doing that is what found both of the last two.
 
-Below those two, **no open entry has a measurement**, which is the state to
+Below the first, **no open entry has a measurement**, which is the state to
 read this document in. `P1` is ordered by argument, and **`P2` is where the
 single-target thesis pays off**, though half of it is unreachable until tinyc
 grows builtins -- see the note there.
@@ -455,6 +461,56 @@ regresses nothing on the other.
 
 Six unit tests pin the exit rule, one per case, because being wrong there
 deletes live code rather than keeping dead code.
+
+### ~~Loop rotation~~
+
+**135 of 135 back edges in `live` closed on an unconditional `jmp`**, and 130
+of the 135 carried no phi copy, so the header's test could be copied onto the
+back edge and inverted. `compile::rotate` does that on the emitted item lists,
+after register allocation: the instructions are already physical, so nothing in
+the e-graph or the block parameters is touched, and the copy is placed on the
+edge that would have reached the header -- it runs at the same point in the
+trace on the same registers, and the path that runs the copy does not also run
+the original. What makes a run ineligible is that it cannot be *written* twice:
+a bound label would be bound twice, and a memory or symbol operand is not known
+to encode the same at a second address.
+
+**The premise this entry used to carry was wrong, and the correction is the
+interesting part.** It said rotation removes the second taken branch of a pair.
+It does not: both shapes execute exactly *one* taken branch per iteration, since
+the top-test shape's pair is one *not-taken* conditional plus one taken `jmp`.
+What goes away is an instruction and a not-taken branch, so the win exists only
+where the front end is what the loop is bound by.
+
+Measured in isolation before it was written -- hand-written asm, identical
+bodies, only the loop shape differing, min-of-11 interleaved A/B on Zen 3:
+
+```
+ALU throughput   4/5/7/11 insns   -0.06%  +0.03%  -0.45%  -0.74%
+serial chain     4..19 insns      0.00% +-0.1%   (reproduces to 0.02%)
+byte-copy body   8 insns          -4.3%   (holds across six loop-start alignments)
+byte-copy body   13/23/43 insns   +0.15%  -1.00%  -0.01%
+```
+
+So it is worth nothing on an ALU- or latency-bound loop and `-4.3%` on a tight
+memory-shaped one, which is the shape `live`'s hottest kernels have and 26 of
+its 135 loops are small enough to be. End to end, back to back under one load
+and twice over:
+
+```
+cycles vs gcc -O2     x2.205 / x2.200  ->  x2.191 / x2.186   (-0.6%)
+cycles vs clang -O2   x2.818 / x2.815  ->  x2.798 / x2.803   (-0.6%)
+insts   lit +6.0%   bench +2.6%   live +1.4%   fuzz +1.0%
+```
+
+**The instruction column is up and that is the shape of the change, not a
+regression.** The test is duplicated once per loop and removed once per
+*iteration*, which no static count can see -- the same reason the block-layout
+entry above reads flat on instructions while moving cycles 8%.
+
+**A backward `jmp` in the emitted stream is now a loop exit, not a loop.** The
+alignment pass is told which header each rotation replaced, since a rotated
+header runs once as a guard and padding it pads a block outside the loop.
 
 ### ~~Loop bodies were laid out where dominance put them~~
 
@@ -1280,19 +1336,6 @@ without taking it is picking up work that cannot land.
 - [ ] **Latency/port-aware DAG scheduling.** A uarch model (ports, latencies,
       throughput) is only tractable because there is one target. ~5% but it is
       exactly the kind of win the single-target thesis predicts.
-- [ ] **Loop rotation.** The layout half is done -- see the closed entry -- and
-      a loop still closes on an unconditional `jmp`: **135 of 135 back edges in
-      `live`**. The header tests and the body falls through, so the branch that
-      is not taken is the exit and the one that *is* taken is the back edge.
-      Rotating the loop puts the test at the bottom, where the back edge is the
-      conditional and nothing else branches at all.
-
-      **The measurement is the layout entry's**: making the header's conditional
-      not-taken was worth `-7.9%` cycles, and this removes the other taken
-      branch of the pair. What it costs is a guard -- a `while` whose trip count
-      can be zero needs its first test kept above the loop -- which is a CFG
-      transform rather than a layout one.
-
 - [ ] **Branch layout beyond loops**: `__builtin_expect` / likely-unlikely hints
       and profile-free heuristics for the non-loop edges. `block_layout_order`
       ranks successors by loop depth alone, so a diamond's arms are ordered by

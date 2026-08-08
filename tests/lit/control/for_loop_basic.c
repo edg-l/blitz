@@ -12,8 +12,11 @@
 // CHECK: add    {{[a-z0-9]+}},{{[a-z0-9]+}}
 // loop increment: i + 1, in place
 // CHECK: inc    {{[a-z0-9]+}}
-// backward jump to loop header
-// CHECK: jmp
+// The header's test is copied onto the back edge, so the loop closes on the
+// conditional and no unconditional jump closes it.
+// CHECK: cmp    {{[a-z0-9]+}},0xa
+// CHECK: jle
+// CHECK-NOT: jmp
 
 int main() {
     int sum = 0;

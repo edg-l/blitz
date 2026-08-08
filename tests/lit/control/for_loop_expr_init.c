@@ -6,7 +6,11 @@
 // the fallthrough enters it.
 // CHECK: jge
 // CHECK: add    {{[a-z0-9]+}},{{[a-z0-9]+}}
-// CHECK: jmp
+// The header's test is copied onto the back edge, so the loop closes on the
+// conditional and no unconditional jump closes it.
+// CHECK: cmp    {{[a-z0-9]+}},0xa
+// CHECK: jl
+// CHECK-NOT: jmp
 
 // init clause is an expression, not a declaration
 int main() {

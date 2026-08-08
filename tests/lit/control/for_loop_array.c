@@ -9,8 +9,11 @@
 // The scaled index is the store's own addressing mode, not a separate `lea`
 // into a register the store then ignores.
 // CHECK: mov    DWORD PTR [{{[a-z0-9]+}}+{{[a-z0-9]+}}*4]
-// backward jump for loop iteration
-// CHECK: jmp
+// The header's test is copied onto the back edge, so the loop closes on the
+// conditional and no unconditional jump closes it.
+// CHECK: cmp    {{[a-z0-9]+}},0x5
+// CHECK: jl
+// CHECK-NOT: jmp
 
 int main() {
     int arr[5];

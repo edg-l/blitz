@@ -64,6 +64,7 @@ use lower::lower_block_pure_ops;
 mod precolor;
 pub(crate) mod pressure;
 use precolor::{add_call_precolors_for_block, assign_param_vregs_from_map};
+mod rotate;
 mod terminator;
 use terminator::{lower_terminator, remove_fallthrough_jumps, thread_branches};
 pub mod alias;
@@ -98,6 +99,14 @@ pub struct CompileOptions {
     /// of the loop rather than of everything emitted before it.
     /// `BLITZ_PASSES=-loop-align` turns it off.
     pub enable_nop_alignment: bool,
+    /// Copy a loop's test onto its back edge, so the back edge is the
+    /// conditional and the loop closes on no unconditional `jmp`.
+    ///
+    /// **On at `-O1`, off at `-O0`.** It is a code-quality transform and `-O0`
+    /// buys nothing with it, and keeping it off there leaves `run_diff.sh`'s
+    /// `-O0`-vs-`-O1` leg able to see a bug in it. `BLITZ_PASSES=-loop-rotation`
+    /// turns it off.
+    pub enable_loop_rotation: bool,
     pub verbosity: Verbosity,
     /// Force the frame pointer (push rbp / mov rbp, rsp / pop rbp) to always be emitted.
     /// Defaults to `false`: the frame pointer is omitted when not needed, freeing RBP as a
@@ -238,11 +247,13 @@ impl CompileOptions {
                 "peephole" => self.enable_peephole = on,
                 "fast-regalloc" => self.enable_fast_regalloc = on,
                 "loop-align" => self.enable_nop_alignment = on,
+                "loop-rotation" => self.enable_loop_rotation = on,
                 other => {
                     return Err(format!(
                         "BLITZ_PASSES: unknown pass `{other}`; known: licm, dce, \
                          store-forwarding, dse, phi-removal, sccp, inlining, \
-                         peephole, fast-regalloc, tail-calls, dead-insts, loop-align"
+                         peephole, fast-regalloc, tail-calls, dead-insts, loop-align, \
+                         loop-rotation"
                     ));
                 }
             }
@@ -257,6 +268,7 @@ impl CompileOptions {
             saturation_limit: 1,
             enable_peephole: false,
             enable_nop_alignment: false,
+            enable_loop_rotation: false,
             verbosity: Verbosity::Silent,
             force_frame_pointer: false,
             enable_licm: false,
@@ -283,6 +295,7 @@ impl CompileOptions {
             saturation_limit: 16,
             enable_peephole: true,
             enable_nop_alignment: true,
+            enable_loop_rotation: true,
             verbosity: Verbosity::Silent,
             force_frame_pointer: false,
             enable_licm: true,
@@ -2045,6 +2058,22 @@ pub fn compile(
     // emit the jump at all.
     remove_fallthrough_jumps(&mut block_items, func, &layout_order);
 
+    // Copy each loop's test onto its back edge, so the back edge is the
+    // conditional and the unconditional `jmp` that closed the loop is gone.
+    // After the fallthrough jump above, since that is what leaves a header as a
+    // bare test ending in one conditional, and before it again, since the jump
+    // to the exit the rotation appends is a fallthrough whenever the trace put
+    // the exit next.
+    let rotated_headers = if opts.enable_loop_rotation {
+        let rotated = rotate::rotate_loops(&mut block_items, func, &layout_order);
+        if !rotated.is_empty() {
+            remove_fallthrough_jumps(&mut block_items, func, &layout_order);
+        }
+        rotated
+    } else {
+        BTreeMap::new()
+    };
+
     // Phase 10: Encoding with branch relaxation.
     //
     // Step 10a: Flatten all BlockItems into a linear instruction sequence,
@@ -2171,9 +2200,12 @@ pub fn compile(
     // can do is move a header off the boundary it was just padded to, which
     // `align::loop_header_pads` iterates against.
     if opts.enable_nop_alignment {
+        // A rotated loop is entered at its body: the header runs once as a
+        // guard, so padding it pads a block outside the loop.
         let headers: std::collections::BTreeSet<LabelId> = cfg::loop_header_blocks(func)
             .into_iter()
             .map(|id| id as LabelId)
+            .map(|id| rotated_headers.get(&id).copied().unwrap_or(id))
             .collect();
         let prologue_size = {
             let mut scratch = Encoder::new();

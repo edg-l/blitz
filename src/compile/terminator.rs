@@ -60,7 +60,7 @@ fn emit_jcc(cc: CondCode, target: LabelId, next_label: &mut LabelId) -> Vec<Bloc
 }
 
 /// Negate a CondCode.
-fn negate_cc(cc: CondCode) -> CondCode {
+pub(super) fn negate_cc(cc: CondCode) -> CondCode {
     match cc {
         CondCode::Eq => CondCode::Ne,
         CondCode::Ne => CondCode::Eq,

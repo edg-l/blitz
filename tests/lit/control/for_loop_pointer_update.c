@@ -5,7 +5,11 @@
 // addressing mode of the access itself.
 // CHECK: lea    {{[a-z0-9]+}},[rsp{{[-+]0x[0-9a-f]+}}]
 // CHECK: mov    {{[a-z0-9]+}},DWORD PTR [{{[a-z0-9]+}}+{{[a-z0-9]+}}*4]
-// CHECK: jmp
+// The header's test is copied onto the back edge, so the loop closes on the
+// conditional and no unconditional jump closes it.
+// CHECK: cmp    {{[a-z0-9]+}},0x5
+// CHECK: jl
+// CHECK-NOT: jmp
 
 int main() {
     int arr[5];
