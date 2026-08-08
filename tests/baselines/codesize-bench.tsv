@@ -12,9 +12,9 @@ fib_memo.c	O0	310	1443	75	106	52
 fib_memo.c	O1	143	611	3	20	41
 hash_table.c	O0	480	2821	131	180	66
 hash_table.c	O1	211	795	2	23	45
-loop_nest.c	O0	360	2156	93	135	50
-loop_nest.c	O1	104	416	0	0	23
-matmul.c	O0	400	2449	103	155	44
+loop_nest.c	O0	348	2087	90	132	47
+loop_nest.c	O1	99	381	0	0	20
+matmul.c	O0	375	2294	98	145	39
 matmul.c	O1	116	464	0	0	20
 nbody_step.c	O0	595	3999	150	241	49
 nbody_step.c	O1	169	795	6	10	28
@@ -22,8 +22,8 @@ queens.c	O0	461	2774	129	201	36
 queens.c	O1	165	672	11	35	32
 sieve.c	O0	192	1045	48	73	20
 sieve.c	O1	60	229	0	0	11
-sort_insert.c	O0	409	2456	105	151	51
-sort_insert.c	O1	123	475	0	0	32
+sort_insert.c	O0	405	2436	104	150	50
+sort_insert.c	O1	121	459	0	0	31
 sort_quick.c	O0	451	2451	114	180	54
 sort_quick.c	O1	136	503	0	0	37
 strops.c	O0	524	2699	139	204	58
