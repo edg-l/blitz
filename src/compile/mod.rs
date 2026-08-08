@@ -2239,10 +2239,14 @@ pub fn compile(
             frame_layout.spill_offset,
             &slots,
         );
-        let (copies, two_address) = crate::trace::count_copies(&flat_insts);
+        let k = crate::trace::classify_copies(&flat_insts, &label_positions);
+        let (copies, two_address) = (k.total, k.two_address);
+        let (cp_edge, cp_arg, cp_entry, cp_other) = (k.edge, k.call_arg, k.entry, k.other);
         tracing::debug!(
             target: "blitz::stats",
-            "name={} insts={} bytes={func_size} spills={spills} reloads={reloads}              copies={copies} two_addr={two_address} frame={} slots={}",
+            "name={} insts={} bytes={func_size} spills={spills} reloads={reloads} \
+             copies={copies} two_addr={two_address} cp_edge={cp_edge} cp_arg={cp_arg} \
+             cp_entry={cp_entry} cp_other={cp_other} frame={} slots={}",
             func.name,
             flat_insts.len(),
             frame_layout.frame_size,

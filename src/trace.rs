@@ -281,7 +281,52 @@ pub fn count_slot_traffic(
 /// copy's destination is not rewritten by the next instruction, or it would not
 /// be a copy.
 pub fn count_copies(insts: &[crate::x86::inst::MachInst]) -> (usize, usize) {
+    let kinds = classify_copies(insts, &std::collections::BTreeMap::new());
+    (kinds.total, kinds.two_address)
+}
+
+/// Where a register-to-register move came from, counted off the final stream.
+///
+/// `total` is the sum of the rest. The point of the split is that each kind has
+/// a different fix and they are not the same size: `two_address` is the
+/// colourer's, `edge` is the block-parameter machinery's, `call_arg` is the
+/// ABI's, `entry` is parameter placement, and `other` is what no rule below
+/// claims -- a coalescing leftover or a value re-emitted into another register.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CopyKinds {
+    pub total: usize,
+    pub two_address: usize,
+    pub edge: usize,
+    pub call_arg: usize,
+    pub entry: usize,
+    pub other: usize,
+}
+
+/// Classify every register-to-register move in a function's final instruction
+/// stream.
+///
+/// **Each kind is recognised by its shape rather than tracked from its emission
+/// site**, and the shapes are what the kinds *are*. A two-address fixup is
+/// `mov d, s` immediately followed by an op that reads and writes `d`; nothing
+/// else emits that pair, because a parallel copy's destination is not rewritten
+/// by the next instruction or it would not be a copy. A phi copy sits in the run
+/// immediately before the branch or the block boundary it is an edge of. An
+/// argument copy writes an ABI argument register in the run before a call.
+///
+/// Tracking provenance instead would mean carrying an origin tag on `MachInst`
+/// through scheduling, allocation, coalescing and the peephole -- four passes
+/// that legitimately delete, insert and rewrite copies, so the tag would be a
+/// claim about a pass boundary rather than about the code that came out.
+///
+/// `label_positions` may be empty, which costs only the block-boundary half of
+/// the edge rule.
+pub fn classify_copies(
+    insts: &[crate::x86::inst::MachInst],
+    label_positions: &std::collections::BTreeMap<crate::x86::inst::LabelId, usize>,
+) -> CopyKinds {
     use crate::x86::inst::{MachInst, Operand};
+    use std::collections::BTreeSet;
+
     let reg_to_reg = |i: &MachInst| -> Option<(crate::x86::reg::Reg, crate::x86::reg::Reg)> {
         match i {
             MachInst::MovRR {
@@ -300,22 +345,118 @@ pub fn count_copies(insts: &[crate::x86::inst::MachInst]) -> (usize, usize) {
             _ => None,
         }
     };
-    let mut copies = 0;
-    let mut two_address = 0;
-    for (i, inst) in insts.iter().enumerate() {
-        let Some((dst, _)) = reg_to_reg(inst) else {
-            continue;
-        };
-        copies += 1;
+    let is_call = |i: &MachInst| {
+        matches!(
+            i,
+            MachInst::CallDirect { .. }
+                | MachInst::CallIndirect { .. }
+                | MachInst::TailCallDirect { .. }
+        )
+    };
+    let is_arg_reg = |r: crate::x86::reg::Reg| {
+        crate::x86::abi::GPR_ARG_REGS.contains(&r) || crate::x86::abi::FP_ARG_REGS.contains(&r)
+    };
+
+    // A copy belongs to at most one kind. These sets claim their members in the
+    // order the kinds are documented, so a copy that looks like two things is
+    // counted once.
+    let mut two_address = BTreeSet::new();
+    let mut edge = BTreeSet::new();
+    let mut call_arg = BTreeSet::new();
+    let mut entry = BTreeSet::new();
+
+    let copies: Vec<usize> = (0..insts.len())
+        .filter(|&i| reg_to_reg(&insts[i]).is_some())
+        .collect();
+
+    for &i in &copies {
+        let (dst, _) = reg_to_reg(&insts[i]).expect("filtered to copies");
         if let Some(next) = insts.get(i + 1)
             && reg_to_reg(next).is_none()
             && next.defs().contains(&dst)
             && next.uses().contains(&dst)
         {
-            two_address += 1;
+            two_address.insert(i);
         }
     }
-    (copies, two_address)
+
+    // The argument-setup run before each call: back from the call while the
+    // instructions are copies into argument registers.
+    for (c, inst) in insts.iter().enumerate() {
+        if !is_call(inst) {
+            continue;
+        }
+        for i in (0..c).rev() {
+            let Some((dst, _)) = reg_to_reg(&insts[i]) else {
+                break;
+            };
+            if !is_arg_reg(dst) && dst != crate::x86::reg::Reg::RAX {
+                break;
+            }
+            if !two_address.contains(&i) {
+                call_arg.insert(i);
+            }
+        }
+    }
+
+    // The edge run: copies immediately before a branch, or immediately before a
+    // label that something else jumps to. Phi copies are sequentialized as one
+    // group at exactly those two points.
+    let boundaries: BTreeSet<usize> = insts
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| matches!(i, MachInst::Jmp { .. } | MachInst::Jcc { .. }))
+        .map(|(i, _)| i)
+        .chain(label_positions.values().copied())
+        .collect();
+    for &b in &boundaries {
+        for i in (0..b).rev() {
+            if reg_to_reg(&insts[i]).is_none() {
+                break;
+            }
+            if !two_address.contains(&i) && !call_arg.contains(&i) {
+                edge.insert(i);
+            }
+        }
+    }
+
+    // The run at the *head* of a block is an edge copy too. Which side of the
+    // label a parallel copy lands on is a scheduling accident -- a fallthrough
+    // edge's copies can sit after the boundary as easily as before it -- and
+    // both are the same permutation of the same values across the same edge.
+    for &b in label_positions.values() {
+        for (i, inst) in insts.iter().enumerate().skip(b) {
+            if reg_to_reg(inst).is_none() {
+                break;
+            }
+            if !two_address.contains(&i) && !call_arg.contains(&i) {
+                edge.insert(i);
+            }
+        }
+    }
+
+    // Entry parameter moves: the run at the very top of the function, before
+    // anything the caller did not already place. Claimed after the edge rule
+    // because the entry block's label is a boundary like any other.
+    for (i, inst) in insts.iter().enumerate() {
+        if reg_to_reg(inst).is_none() {
+            break;
+        }
+        if !two_address.contains(&i) && !call_arg.contains(&i) {
+            edge.remove(&i);
+            entry.insert(i);
+        }
+    }
+
+    let claimed = two_address.len() + edge.len() + call_arg.len() + entry.len();
+    CopyKinds {
+        total: copies.len(),
+        two_address: two_address.len(),
+        edge: edge.len(),
+        call_arg: call_arg.len(),
+        entry: entry.len(),
+        other: copies.len() - claimed,
+    }
 }
 
 pub fn format_slot_traffic(

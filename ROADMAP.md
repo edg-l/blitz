@@ -72,13 +72,14 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Copies are still a third of what blitz emits** -- `P1`.
-  697 register-to-register moves in 2407 instructions over `bench` against
-  `gcc -O2`'s 351 in 2322, and **585 of the 697 are parallel copies** -- phi
-  copies on edges, entry parameter moves, argument setup -- which on their own
-  exceed gcc's entire copy count. `stats` reports the split and
-  `run_codesize.sh` tracks it. Read `docs/internal/refactor-roadmap.md` before
-  starting.
+- **`cp_other` is the copies that are left** -- `P1`. Optimistic coalescing took
+  the corpus from 709 register-to-register moves in 2379 `bench` instructions to
+  599 in 2340, against `gcc -O2`'s 429 in 2388. Of the 585 `MachInst`-level
+  copies that remain, `BLITZ_DEBUG=stats` puts **264 in `cp_other`**: not a
+  two-address fixup, not on an edge, not argument setup. Measure what they are
+  before choosing a fix -- doing that is what found the last one.
+- **Dominance-scoped elaboration** -- `P1`, and the largest remaining item.
+  Read `docs/internal/refactor-roadmap.md` before starting.
 
 `P1` is ordered by measured impact. **`P2` is where the
 single-target thesis pays off**, though half of it is unreachable until tinyc
@@ -238,7 +239,7 @@ pre-coloring conflict assertion exists (`coloring::check_precolorings`, under
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, over `lit`,
   `bench`, `live` and `fuzz`, fed by `BLITZ_DEBUG=stats`.
 - Code quality also has an *absolute* number, which is the one the Goal is
-  written against: `bash tests/run_perf.sh`, `x2.80` cycles vs `gcc -O2` over
+  written against: `bash tests/run_perf.sh`, `x2.69` cycles vs `gcc -O2` over
   the 24 `live` kernels, median of 5 `perf stat` samples each. Cycle counts vary
   ~1% run to run here; instructions retired vary 0.00%, and are the wrong metric
   for the reason the Goal gives. Widening `live` has no natural ceiling and is
@@ -484,35 +485,57 @@ so the holes stay visible.
 
 ### P1 -- Optimizer gaps with the largest measured impact
 
-- [ ] **Copies are still a third of what blitz emits.** Re-measured 2026-08-07
-      over the 15 `bench` kernels: blitz **697 register-to-register moves in 2407
-      instructions** (29.0%), against `gcc -O2`'s 351 in 2322 (15.1%) and
-      `clang -O2`'s 259 in 2661 (9.7%).
+- [x] **Copies were a third of what blitz emitted, and the fix was optimistic
+      coalescing.** Over the `bench` kernels, counted off the disassembly so
+      blitz and the references are counted the same way: blitz went from **709
+      register-to-register moves in 2379 instructions (29.8%) to 599 in 2340
+      (25.6%)**, against `gcc -O2`'s 429 in 2388 (18.0%) and `clang -O2`'s 299 in
+      2791 (10.7%). **The surplus over gcc fell from 280 copies to 170**, and
+      blitz went from 9 instructions behind gcc on this corpus to 48 ahead.
 
-      **The copy surplus is now four times the whole instruction gap**: blitz is
-      85 instructions behind gcc and emits 346 more copies than it, so removing
-      them would put blitz ahead on the count outright.
+      Across all four corpora: **copies `-28.5%`, instructions `-5.6%`, bytes
+      `-2.6%`**, spills and reloads within 1%. Cycles over the 24 `live`
+      kernels: `x2.725` to `x2.685` against `gcc -O2`, two samples each
+      reproducing to 0.15%. `branchy_filter` `-26.4%`, `sort_search` `-16.0%`,
+      `call_inlinable` `-12.1%`.
 
-      **And the split says which fix applies.** `BLITZ_DEBUG=stats` now reports
-      `copies=` and `two_addr=` per function, and `run_codesize.sh` tracks
-      `copies` as a fifth baseline column, so any change here is measured rather
-      than argued. Over `bench`: **112 two-address fixups and 585 parallel
-      copies**. The two-address half is already down from the 246 that
-      `coloring.rs` documents, which is `two_address_hints` working; the
-      remaining 585 are phi copies on edges, entry parameter moves and argument
-      setup, and **blitz's parallel copies alone exceed gcc's entire copy
-      count.** That is where the item is.
-      Conservative coalescing is at its limit: with Briggs and George both in,
-      34 of 64 candidate copies on `queens` and 43 of 112 on `hash_table` are
-      still refused because the merge genuinely constrains the graph
-      (`BLITZ_DEBUG=coalesce` reports the declines). Getting further needs a
-      structural change, and **iterated coalescing is measured out** -- see
-      Decisions. *Fewer block parameters to copy* is the candidate left, and
-      `docs/internal/refactor-roadmap.md` argues it at length. Note
-      `phi_removal` already does both tiers including self-references, so the
-      82% of parameters `count_trivial_phis.py` calls redundant on `hash_table`
-      is what the *rule* permits, not what is sound to remove -- one e-class is
-      one expression, not one value. Read that file before starting.
+      **The measurement that turned it around.** The roadmap read the 585
+      non-two-address copies as "phi copies on edges, entry parameter moves and
+      argument setup" -- which was an inference from `copies - two_addr`, not a
+      measurement. `trace::classify_copies` measures it, and on `bench` the three
+      named sources are 289 edge, 31 argument and 5 entry: **44% of the total,
+      with the largest single bucket unaccounted for.** The `coalesce` declines
+      then named the real cause: over `live`, **986 of 2476 candidate copies were
+      refused by Briggs and George while only 5 pairs genuinely interfered.**
+      Almost every surviving copy was a conservative test declining to predict,
+      not a merge that was unsafe.
+
+      So the fix is Park & Moon's: merge every copy whose endpoints do not
+      interfere, and where the colouring then does not fit, throw the attempt
+      away and retry with the implicated merges denied. `coalesce` no longer
+      guesses at colourability and `allocate_global` owns the retry.
+      **This is not the iterated coalescing that Decisions retires** -- George &
+      Appel's leverage is `simplify`, which was simulated and buys nothing here.
+
+      Retrying from the original schedules rather than patching the failed
+      attempt is what makes it sound: a merge renames a VReg in every schedule,
+      every block-parameter set and every precoloring, and the spill rounds after
+      it are stated in the post-coalesce numbering, so there is no "undo one
+      merge" that leaves the rest consistent. `SlotAllocator::rollback_to` gives
+      back the frame slots a discarded attempt committed.
+
+      **One program needed the retry**, and it is why aggressive-without-undo is
+      not the answer: `args` seed 164 stopped compiling outright
+      (`gpr_overshoot=1`, the over-budget value a block parameter, nothing
+      spillable). One un-coalescing round -- 5 merges denied -- and it colours.
+      Nothing else in `lit`, `bench`, `live`, the corpus or 1352 generated
+      programs needed a second round.
+
+      **What is left is `cp_other`**, 264 of the remaining 585 on `bench`: copies
+      that are not two-address fixups, not adjacent to a branch or block
+      boundary, and not argument setup. Some are the move back out of a
+      two-address result; the rest want the same treatment this item just got,
+      which is to measure what they are before choosing a fix.
 - [ ] **Dominance-scoped elaboration, which is GVN and several other things at
       once.** The e-graph does local CSE only, so repeated address computations
       and field loads survive across blocks -- typically 5-15% on real code. But
@@ -649,11 +672,18 @@ so the holes stay visible.
       Alignment is a coin flip on any one loop; what it buys is that the flip is
       now a property of the loop.
 
-      **The cap was measured, not assumed.** `MAX_SKIP = 8` aligns 54% of the 184
-      `bench`+`live` loop headers, up from 8%, which is exactly the 9-in-16 the
-      policy allows -- so nothing is lost to relaxation moving a header after it
-      was padded. Removing the cap entirely aligns 99% and measures `x2.819`:
-      **no better than capping at 8, for roughly twice the bytes.**
+      **The cap was measured twice and the answer inverted, which is the part
+      worth keeping.** Against the code as it stood, `MAX_SKIP = 8` aligned 54%
+      of the 184 `bench`+`live` headers -- exactly the 9-in-16 the policy allows,
+      so nothing was lost to relaxation moving a header after it was padded --
+      and measured `x2.797` where no cap aligned 99% and measured `x2.819`. The
+      cap won, on half the bytes. **After optimistic coalescing took 28% of the
+      copies out, it loses**: `x2.725` capped against `x2.685` uncapped, two
+      samples each. `MAX_SKIP` is now 15, so every header is aligned.
+
+      A padding budget is priced against the code it pads, and `-7%`
+      instructions was enough to move where the trade lands. Do not carry this
+      constant through a change that moves code size; re-measure it.
 
       **A loop header is a label a backward jump targets**, computed from the
       emitted stream. Not from the CFG: `cfg::block_loop_depths` is keyed on
@@ -1072,6 +1102,12 @@ seconds -- what the other harnesses already cost.
   **zero** refused copies would pass afterwards: the survivors have their
   endpoints in the dense core, which simplification does not touch. Do not write
   the worklist allocator for this.
+
+  **This is not an argument against optimistic coalescing, which landed and is
+  worth `-28.5%` copies.** The two answers to a conservative test refusing too
+  much are opposite: iterated coalescing makes the test *smarter* by improving
+  the graph it reads, and optimistic coalescing *removes* the test and undoes
+  what does not colour. Only the first was measured out.
 - **Offset-aware alias analysis is in and its measured effect is close to
   nothing** -- one `lit` row moves and `struct_walk` goes the other way by 2.7%
   because better forwarding keeps more values live. The capability is real and

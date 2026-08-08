@@ -1406,7 +1406,7 @@ fn test_uncalled_definition_survives_separate_compilation() {
 /// paddable before it trusts its own verdict.
 #[test]
 fn loop_headers_are_aligned_or_too_far_to_be_worth_it() {
-    const MAX_SKIP: usize = 8;
+    use blitz::emit::align::MAX_SKIP;
 
     let mut aligned_off = CompileOptions::o1();
     aligned_off.enable_nop_alignment = false;

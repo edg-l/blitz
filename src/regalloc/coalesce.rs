@@ -21,23 +21,32 @@ pub fn chase_alias(mut vreg: VReg, coalesce_aliases: &BTreeMap<VReg, VReg>) -> V
     vreg
 }
 
-/// Conservative (Briggs) coalescing on the SSA interference graph.
+/// Optimistic coalescing on the SSA interference graph.
 ///
-/// For each copy pair `(src, dst)`, if src and dst do not interfere and the
-/// merged node would still be colorable, they are merged (assigned the same
-/// physical register).
+/// For each copy pair `(src, dst)`, if the two groups do not interfere they are
+/// merged and the copy disappears. **Non-interference is the only test.**
 ///
-/// Non-interference alone is not enough. Merging replaces two nodes with one
-/// whose neighbourhood is the union of theirs, so a merge that is individually
-/// legal can still raise the chromatic number above the register budget. Six
-/// parameters of one nine-parameter block, each merged onto a different constant
-/// living across the whole function, built a 15-clique against a 14-register
-/// budget out of merges that all passed the interference test.
+/// Merging replaces two nodes with one whose neighbourhood is the union of
+/// theirs, so a merge that is individually legal can still raise the chromatic
+/// number above the register budget -- six parameters of one nine-parameter
+/// block, each merged onto a different constant living across the whole
+/// function, built a 15-clique against a 14-register budget out of merges that
+/// all passed the interference test. The conservative answer to that is Briggs
+/// and George, which admit a merge only when the merged node provably cannot be
+/// what makes the graph uncolourable.
 ///
-/// The Briggs test admits a merge only when the merged node has fewer than `k`
-/// neighbours of significant degree (degree >= `k`), counting per register class.
-/// Nodes below that degree can always be colored after their neighbours, so they
-/// cannot be what makes the graph uncolorable.
+/// **Both were in, and measurement retired them.** Over the `live` kernels they
+/// refused 986 of 2476 candidate copies while only 5 pairs genuinely interfered:
+/// the refusals were almost entirely the conservative tests declining to
+/// predict, not merges that were unsafe. Merging anyway and undoing what does
+/// not colour is Park & Moon's optimistic coalescing, and it is worth `-28%`
+/// copies and `-7%` instructions across the corpora.
+///
+/// So the colourability question moved to where the answer is known.
+/// `deny` is how the caller states it: a pair in that set is not merged, and
+/// `allocate_global` grows it from the VRegs a failed colouring names. This
+/// function no longer guesses, and does not need to be conservative, because a
+/// wrong guess is now retried rather than emitted.
 ///
 /// Must be run on the original SSA graph BEFORE spill code insertion.
 /// After spill insertion the graph may not be chordal, so coalescing
@@ -48,8 +57,7 @@ pub fn chase_alias(mut vreg: VReg, coalesce_aliases: &BTreeMap<VReg, VReg>) -> V
 pub fn coalesce(
     graph: &InterferenceGraph,
     copy_pairs: &[(usize, usize)], // (src, dst) VReg indices
-    gpr_colors: u32,
-    xmm_colors: u32,
+    deny: &std::collections::BTreeSet<(usize, usize)>,
 ) -> Vec<(usize, usize)> {
     let mut merged: Vec<(usize, usize)> = Vec::new();
     // Why each candidate copy was refused, for the summary trace below.
@@ -75,44 +83,40 @@ pub fn coalesce(
         x
     };
 
-    // Iterate to a fixpoint rather than deciding each copy once.
+    // One pass, in the caller's order.
     //
-    // This is *not* George & Appel's iterated coalescing, and measurement says
-    // it should not become it: their algorithm's leverage is `simplify`, which
-    // removes every node of degree < k from the graph so the remaining degrees
-    // fall. Simulated over the `bench` kernels, simplify removes 62 of 165
-    // nodes on `queens` and 80 of 297 on `hash_table` and **zero** of the
-    // refused copies would pass afterwards -- the copies that survive both
-    // tests have their endpoints in the dense core, which is exactly what
-    // simplification does not touch. The worklist rewrite would buy nothing.
+    // The fixpoint loop this replaced existed for one reason: Briggs and George
+    // are stated against significant degree, and merging two nodes drops the
+    // degree of every neighbour they shared, so a copy refused against the graph
+    // as it stands can be safe one merge later. With no conservative test left
+    // there is nothing a second round could overturn -- interference only ever
+    // grows as groups merge, so a pair refused for interference stays refused.
     //
-    // Merging two nodes leaves every neighbour they had in common seeing one
-    // node where it saw two, so that neighbour's degree drops and it can stop
-    // being "significant". Both conservative tests are stated in terms of
-    // significant degree, so a copy they refuse against the graph as it stands
-    // can be safe against the graph one merge later. Deciding once loses those.
-    //
-    // Each round re-tests only what the previous round refused, and the loop
-    // stops as soon as a round merges nothing, so it does at most one round per
-    // merge.
-    let mut pending: Vec<(usize, usize)> = copy_pairs
+    // Note this is *not* George & Appel's iterated coalescing, which measurement
+    // separately retired: their leverage is `simplify`, and simulated over the
+    // `bench` kernels it removes 62 of 165 nodes on `queens` and 80 of 297 on
+    // `hash_table` while letting through **zero** additional copies -- the
+    // survivors have their endpoints in the dense core, which simplification
+    // does not touch.
+    let candidates: Vec<(usize, usize)> = copy_pairs
         .iter()
         .copied()
         .filter(|&(src, dst)| src < graph.num_vregs && dst < graph.num_vregs)
         .collect();
-    let mut rounds = 0usize;
-    loop {
-        rounds += 1;
-        let before = merged.len();
-        let mut declined: Vec<(usize, usize)> = Vec::new();
-        why.clear();
-        for (src, dst) in std::mem::take(&mut pending) {
+    {
+        for (src, dst) in candidates.iter().copied() {
             let src_root = find(&mut parent, src);
             let dst_root = find(&mut parent, dst);
 
             if src_root == dst_root {
                 // Already in the same group; nothing will ever change that.
                 *why.entry("already merged").or_default() += 1;
+                continue;
+            }
+
+            // A merge a previous colouring attempt blamed for its overshoot.
+            if deny.contains(&(src, dst)) {
+                *why.entry("denied by a failed colouring").or_default() += 1;
                 continue;
             }
 
@@ -131,71 +135,25 @@ pub fn coalesce(
                 continue;
             }
 
-            let k = match graph.reg_class[src_root] {
-                RegClass::GPR => gpr_colors,
-                RegClass::XMM => xmm_colors,
-                // One EFLAGS. Two flags values never live at once, so nothing
-                // is ever a candidate here, and if one were, k = 1 refuses it.
-                RegClass::Flags => 1,
-            } as usize;
-            let class = graph.reg_class[src_root];
-
-            // Briggs: the merged node must have fewer than k neighbours of
-            // significant degree. Degrees are read from `adj`, which merges
-            // keep current, so this measures the graph as it stands.
-            let mut significant = VRegSet::new();
-            for n in adj[src_root].iter().chain(adj[dst_root].iter()) {
-                let n_root = find(&mut parent, n);
-                if n_root == src_root || n_root == dst_root {
-                    continue;
-                }
-                if graph.reg_class[n_root] == class && adj[n_root].len() >= k {
-                    significant.insert(n_root);
-                }
-            }
-
-            // George admits a different set and is conservative in the same
-            // sense, so taking either is still safe. For every neighbour `t` of
-            // the node being merged away, `t` is harmless if it cannot compete
-            // for the colour (different class), if it already interferes with
-            // the survivor, or if it has room to spare (degree below k). If
-            // that holds of all of them, the survivor's neighbourhood gains
-            // nothing that can stop it being coloured.
-            //
-            // Checked in both orientations: either one passing justifies the
-            // same merged node.
-            let george = |a: usize, b: usize, parent: &mut Vec<usize>| {
-                adj[a].iter().all(|t| {
-                    let t_root = find(parent, t);
-                    t_root == a
-                        || t_root == b
-                        || graph.reg_class[t_root] != class
-                        || adj[b].contains(t_root)
-                        || adj[t_root].len() < k
-                })
-            };
-            if significant.len() >= k
-                && !george(dst_root, src_root, &mut parent)
-                && !george(src_root, dst_root, &mut parent)
-            {
-                // The only refusal a later round can overturn.
-                *why.entry("briggs and george both decline").or_default() += 1;
-                declined.push((src, dst));
+            // One EFLAGS, and no store reaches it, so a flags value can never
+            // share a register with anything: two of them are never live at
+            // once, and merging one onto a value that is would put a
+            // comparison's result where the other value has to be.
+            if graph.reg_class[src_root] == RegClass::Flags {
+                *why.entry("flags").or_default() += 1;
                 continue;
             }
-
             if crate::trace::is_enabled("coalesce") {
                 // The merge is between the two groups' representatives, not
                 // between the copy's own endpoints: `src`/`dst` name the copy,
                 // `src_root`/`dst_root` name everything that goes with them. A
                 // merge whose endpoints carry no edge in the pre-merge graph
                 // while its groups hold values that do overlap is how an
-                // illegal merge gets in, and the degrees say whether the Briggs
-                // test was what admitted it.
+                // illegal merge gets in.
                 tracing::debug!(
                     target: "blitz::coalesce",
                     "merge v{src_root} <- v{dst_root} for copy (v{src}, v{dst}); \
-                     pre_merge_edge={} degrees {}/{} against k={k}",
+                     pre_merge_edge={} degrees {}/{}",
                     graph.adj[src_root].contains(dst_root),
                     adj[src_root].len(),
                     adj[dst_root].len(),
@@ -219,11 +177,6 @@ pub fn coalesce(
             parent[dst_root] = src_root;
             merged.push((src_root, dst_root));
         }
-
-        pending = declined;
-        if merged.len() == before || pending.is_empty() {
-            break;
-        }
     }
 
     // What was declined and why. The trace named only the merges it made, so a
@@ -232,7 +185,7 @@ pub fn coalesce(
     if crate::trace::is_enabled("coalesce") {
         tracing::debug!(
             target: "blitz::coalesce",
-            "{} copy pairs, {} merged over {rounds} round(s); declined: {:?}",
+            "{} copy pairs, {} merged; declined: {:?}",
             copy_pairs.len(),
             merged.len(),
             why,
@@ -246,6 +199,7 @@ mod tests {
     use super::*;
     use crate::regalloc::interference::{InterferenceGraph, VRegSet};
     use crate::x86::reg::RegClass;
+    use std::collections::BTreeSet;
 
     fn make_graph(n: usize, edges: &[(usize, usize)]) -> InterferenceGraph {
         let mut g = InterferenceGraph {
@@ -265,7 +219,7 @@ mod tests {
         let graph = make_graph(3, &[(0, 2)]); // v0--v2 interfere; v1 is isolated
         // Copy pair: v1 -> v0 (src=1, dst=0). They don't interfere.
         let pairs = [(1, 0)];
-        let result = coalesce(&graph, &pairs, 14, 16);
+        let result = coalesce(&graph, &pairs, &BTreeSet::new());
         assert_eq!(result.len(), 1, "one coalescing merge expected");
         // Either (0,1) or (1,0) depending on merge direction.
         let (into, from) = result[0];
@@ -281,7 +235,7 @@ mod tests {
         // v5 and v3 interfere.
         let graph = make_graph(6, &[(3, 5)]);
         let pairs = [(3, 5)]; // copy pair between interfering VRegs
-        let result = coalesce(&graph, &pairs, 14, 16);
+        let result = coalesce(&graph, &pairs, &BTreeSet::new());
         assert!(result.is_empty(), "interfering pair must not be coalesced");
     }
 
@@ -290,29 +244,41 @@ mod tests {
     fn multiple_non_interfering_coalesced() {
         let graph = make_graph(4, &[]);
         let pairs = [(0, 1), (2, 3)];
-        let result = coalesce(&graph, &pairs, 14, 16);
+        let result = coalesce(&graph, &pairs, &BTreeSet::new());
         assert_eq!(result.len(), 2);
     }
 
-    // A merge whose result would have k neighbours of significant degree is
-    // declined even though the pair does not interfere, and the same merge is
-    // taken when the budget is large enough to color around it.
+    // A merge that raises the merged node's degree is taken anyway: whether the
+    // graph can still be coloured is the colourer's answer, not a prediction
+    // made here, and `allocate_global` denies the merge and retries if it was
+    // wrong.
     #[test]
-    fn briggs_declines_merge_that_raises_degree() {
+    fn a_merge_that_raises_degree_is_taken_anyway() {
         // v0 and v1 do not interfere. v0's neighbour v2 and v1's neighbour v3
-        // both have degree 3, so with k=2 they are both significant and the
-        // merged node would have 2 >= k of them.
+        // both have degree 3, which is what the Briggs test used to refuse on.
         let graph = make_graph(6, &[(0, 2), (1, 3), (2, 4), (2, 5), (3, 4), (3, 5)]);
         let pairs = [(0, 1)];
+        assert_eq!(coalesce(&graph, &pairs, &BTreeSet::new()).len(), 1);
+    }
 
+    // The denylist is how a failed colouring takes a merge back.
+    #[test]
+    fn a_denied_pair_is_not_merged() {
+        let graph = make_graph(3, &[(0, 2)]);
+        let pairs = [(1, 0)];
+        let deny: BTreeSet<(usize, usize)> = [(1, 0)].into_iter().collect();
         assert!(
-            coalesce(&graph, &pairs, 2, 2).is_empty(),
-            "merge must be declined when the merged node has k significant neighbours"
+            coalesce(&graph, &pairs, &deny).is_empty(),
+            "a denied pair must survive as a copy"
         );
-        assert_eq!(
-            coalesce(&graph, &pairs, 14, 16).len(),
-            1,
-            "the same merge is safe against a budget no degree here reaches"
-        );
+    }
+
+    // A denied pair does not block an unrelated one.
+    #[test]
+    fn denying_one_pair_leaves_the_others() {
+        let graph = make_graph(4, &[]);
+        let pairs = [(0, 1), (2, 3)];
+        let deny: BTreeSet<(usize, usize)> = [(0, 1)].into_iter().collect();
+        assert_eq!(coalesce(&graph, &pairs, &deny).len(), 1);
     }
 }

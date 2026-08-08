@@ -5,11 +5,21 @@ use crate::x86::inst::{LabelId, MachInst};
 /// Loop headers are padded to this boundary.
 const LOOP_ALIGN: usize = 16;
 
-/// The largest padding worth paying for. A header 9 to 15 bytes short of the
-/// next boundary is left where it is: alignment is a coin flip on any one loop,
-/// and past half a boundary the bytes cost more than the flip is worth. This is
-/// the max-skip form of gcc's `-falign-loops`.
-const MAX_SKIP: usize = 8;
+/// The largest padding worth paying for, in the max-skip form of gcc's
+/// `-falign-loops`. At 15 nothing is ever skipped and every header is aligned.
+///
+/// **Capping this was measured twice and the answer inverted.** Against the
+/// code blitz emitted before optimistic coalescing, capping at 8 aligned 54% of
+/// headers and measured `x2.797` cycles where no cap aligned 99% and measured
+/// `x2.819` -- so the cap won, on half the bytes. Against the code with 28%
+/// fewer copies it loses: `x2.725` capped against `x2.685` uncapped, over two
+/// samples each that reproduce to 0.15%.
+///
+/// The lesson is about the measurement, not the constant. **A padding budget is
+/// priced against the code it pads**, and 7% fewer instructions is enough to
+/// move where the trade lands -- so this is not a number to carry forward
+/// through a change that moves code size. Re-measure it.
+pub const MAX_SKIP: usize = 15;
 
 /// How many align/relax rounds to run before taking what the last one produced.
 /// Each round only moves an offset when relaxation widened a jump, and widening
@@ -244,27 +254,34 @@ mod tests {
 
     #[test]
     fn prologue_is_part_of_the_offset() {
-        // Header at instruction index 4 = 16 bytes into the stream, but the
-        // prologue puts it at 20. It needs 12, which exceeds MAX_SKIP, so it is
-        // left alone -- and with a 4-byte prologue it needs 12 too.
+        // Header at instruction index 4, which is 16 bytes into the stream: it
+        // needs nothing with no prologue, and the prologue's own length with one.
         let insts = loop_at(1, 8);
         let pos = positions(&[(1, 4)]);
         let headers = loop_header_labels(&insts, &pos);
         assert!(loop_header_pads(&insts, &pos, &headers, 0, &size).is_empty());
 
-        // A prologue of 8 leaves the header at 24, wanting 8: exactly MAX_SKIP.
+        // A prologue of 8 leaves the header at 24, wanting 8.
         let pads = loop_header_pads(&insts, &pos, &headers, 8, &size);
         assert_eq!(pads.get(&1), Some(&8), "got {pads:?}");
+
+        // And of 4, at 20, wanting 12.
+        let pads = loop_header_pads(&insts, &pos, &headers, 4, &size);
+        assert_eq!(pads.get(&1), Some(&12), "got {pads:?}");
     }
 
     #[test]
-    fn pad_above_max_skip_is_skipped() {
-        // Prologue 4 puts the header at 20; the next boundary is 12 away.
+    fn no_pad_exceeds_max_skip() {
+        // Every distance from a boundary, so the widest pad the rule can want is
+        // among them.
         let insts = loop_at(1, 8);
         let pos = positions(&[(1, 4)]);
         let headers = loop_header_labels(&insts, &pos);
-        let pads = loop_header_pads(&insts, &pos, &headers, 4, &size);
-        assert!(pads.is_empty(), "12 > MAX_SKIP, got {pads:?}");
+        for prologue in 0..64 {
+            for &pad in loop_header_pads(&insts, &pos, &headers, prologue, &size).values() {
+                assert!(pad as usize <= MAX_SKIP, "pad {pad} at prologue {prologue}");
+            }
+        }
     }
 
     #[test]

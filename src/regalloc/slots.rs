@@ -74,6 +74,26 @@ impl SlotAllocator {
     pub fn owners(&self) -> &[SlotOwner] {
         &self.owners
     }
+
+    /// Give back every slot allocated since the count was `mark`.
+    ///
+    /// For a pass that allocates while *attempting* something and then discards
+    /// the attempt. The allocator's optimistic coalescing is the one that does:
+    /// an attempt that fails to colour is thrown away whole and retried with
+    /// fewer merges, and its slots would otherwise stay reserved in the frame
+    /// with nothing referring to them.
+    ///
+    /// Sound only because the discarded attempt's instructions go with it.
+    /// Truncating while a live `SpillStore` still names one of these indices
+    /// would hand the same cell to the next pass.
+    pub fn rollback_to(&mut self, mark: u32) {
+        debug_assert!(
+            mark <= self.count(),
+            "rollback to {mark} past the current count {}",
+            self.count(),
+        );
+        self.owners.truncate(mark as usize);
+    }
 }
 
 #[cfg(test)]

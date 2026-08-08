@@ -854,6 +854,7 @@ fn run_phase3(
     uses_frame_pointer: bool,
     mut next_vreg: u32,
     coalesce_now: bool,
+    coalesce_deny: &BTreeSet<(usize, usize)>,
     slot_resident: &VRegSet,
     arg_locs: &[ArgLoc],
 ) -> Phase3State {
@@ -879,12 +880,7 @@ fn run_phase3(
             .map(|(src, dst)| (src.0 as usize, dst.0 as usize))
             .filter(|&(src, dst)| src < phase2.graph.num_vregs && dst < phase2.graph.num_vregs)
             .collect();
-        coalesce(
-            &phase2.graph,
-            &pairs,
-            super::coloring::available_gpr_colors(uses_frame_pointer),
-            super::coloring::AVAILABLE_XMM_COLORS,
-        )
+        coalesce(&phase2.graph, &pairs, coalesce_deny)
     } else {
         Default::default()
     };
@@ -1583,6 +1579,158 @@ fn two_address_hints(per_block_insts: &[Vec<ScheduledInst>]) -> super::coloring:
     hints
 }
 
+/// A colouring that did not fit, and the merges to try without it.
+struct AllocFailure {
+    /// What the caller is told if no retry helps.
+    message: String,
+    /// Copy pairs, in their pre-coalesce names, whose merge the failed
+    /// colouring blames. Empty when nothing it can undo is implicated.
+    blame: Vec<(usize, usize)>,
+}
+
+/// The copy pairs that built the groups a failed colouring could not place.
+///
+/// `over_budget` names VRegs in the post-coalesce numbering, so each is the
+/// representative of a whole group; every copy with an endpoint in that group is
+/// what put a member there. Undoing all of them splits the group back apart,
+/// which is coarser than re-colouring its members individually but is the only
+/// version whose result the next attempt can simply be re-run to check.
+fn blame_coalescing(
+    over_budget: &[VReg],
+    copy_pairs: &[(VReg, VReg)],
+    aliases: &BTreeMap<u32, u32>,
+) -> Vec<(usize, usize)> {
+    if over_budget.is_empty() {
+        return Vec::new();
+    }
+    let blamed: BTreeSet<u32> = over_budget
+        .iter()
+        .map(|v| chase_u32(v.0, aliases))
+        .collect();
+    copy_pairs
+        .iter()
+        .filter(|(src, dst)| {
+            blamed.contains(&chase_u32(src.0, aliases))
+                || blamed.contains(&chase_u32(dst.0, aliases))
+        })
+        .map(|&(src, dst)| (src.0 as usize, dst.0 as usize))
+        .collect()
+}
+
+/// Colour the function, undoing coalescing where the colouring blames it.
+///
+/// **This is the "optimistic" half of optimistic coalescing.** `coalesce` merges
+/// every copy whose endpoints do not interfere, which is more than the graph can
+/// always take: the merged node's neighbourhood is the union of its members'.
+/// Where that overflows the register budget, the attempt is thrown away whole
+/// and re-run with the implicated merges denied, so the copies come back only on
+/// the values that could not do without them.
+///
+/// Retrying from the original schedules rather than patching the failed attempt
+/// is what makes it sound. A merge is not a local edit -- it renames a VReg in
+/// every schedule, every block-parameter set and every precoloring, and the
+/// spill rounds after it are stated in the post-coalesce numbering. There is no
+/// "undo one merge" that leaves the rest of that consistent.
+///
+/// Bounded, because each attempt is a full allocation of the function and the
+/// denylist only grows. A function that still does not fit falls through to the
+/// same error the conservative allocator raised, with the same text.
+#[allow(clippy::too_many_arguments)]
+pub fn allocate_global(
+    block_schedules: &[Vec<ScheduledInst>],
+    param_vregs: &[(VReg, Reg)],
+    call_arg_precolors: Vec<(VReg, Reg)>,
+    copy_pairs: &[(VReg, VReg)],
+    loop_depths: &BTreeMap<VReg, u32>,
+    cfg_succs: &[Vec<usize>],
+    block_param_vregs_per_block: &[VRegSet],
+    func_name: &str,
+    uses_frame_pointer: bool,
+    arg_locs: &[ArgLoc],
+    stack_args: &BTreeSet<VReg>,
+    slots: &mut SlotAllocator,
+    spill_rounds: usize,
+) -> Result<GlobalRegAllocResult, String> {
+    /// How many times a failed colouring may blame coalescing before the
+    /// function is simply reported as not fitting. Each attempt denies at least
+    /// one merge, and the corpus has never needed a third.
+    const MAX_UNCOALESCE_ATTEMPTS: usize = 4;
+
+    let mut deny: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let slot_mark = slots.count();
+    let mut last: Option<String> = None;
+
+    for attempt in 0..MAX_UNCOALESCE_ATTEMPTS {
+        // Every attempt starts from the frame the caller handed over. A failed
+        // one committed slots for spills whose instructions are being discarded
+        // with it, and leaving those reserved grows the frame for nothing.
+        slots.rollback_to(slot_mark);
+        let result = allocate_with_denylist(
+            block_schedules,
+            param_vregs,
+            call_arg_precolors.clone(),
+            copy_pairs,
+            loop_depths,
+            cfg_succs,
+            block_param_vregs_per_block,
+            func_name,
+            uses_frame_pointer,
+            arg_locs,
+            stack_args,
+            slots,
+            spill_rounds,
+            &deny,
+        );
+        let failure = match result {
+            Ok(ok) => return Ok(ok),
+            Err(f) => f,
+        };
+
+        let fresh: Vec<(usize, usize)> = failure
+            .blame
+            .iter()
+            .copied()
+            .filter(|p| !deny.contains(p))
+            .collect();
+        last = Some(failure.message);
+        if fresh.is_empty() {
+            break;
+        }
+        if crate::trace::is_enabled("coalesce") && crate::trace::fn_matches(func_name) {
+            tracing::debug!(
+                target: "blitz::coalesce",
+                "[{func_name}] attempt {attempt} did not colour; denying {} merge(s) and \
+                 retrying with {} denied in total",
+                fresh.len(),
+                deny.len() + fresh.len(),
+            );
+        }
+        deny.extend(fresh);
+    }
+
+    slots.rollback_to(slot_mark);
+    // The last attempt is the one the caller is told about, and it is the most
+    // constrained -- so the message describes the allocation that came closest.
+    let message = last.expect("the loop runs at least once");
+    allocate_with_denylist(
+        block_schedules,
+        param_vregs,
+        call_arg_precolors,
+        copy_pairs,
+        loop_depths,
+        cfg_succs,
+        block_param_vregs_per_block,
+        func_name,
+        uses_frame_pointer,
+        arg_locs,
+        stack_args,
+        slots,
+        spill_rounds,
+        &deny,
+    )
+    .map_err(|_| message)
+}
+
 /// Allocate physical registers for a whole function using a function-scope
 /// graph-coloring allocator.
 ///
@@ -1609,8 +1757,12 @@ fn two_address_hints(per_block_insts: &[Vec<ScheduledInst>]) -> super::coloring:
 ///   (phi destinations); these are excluded from cross-block reload insertion.
 /// * `func_name` - Function name used for debug tracing.
 /// * `uses_frame_pointer` - When `false`, RBP is allocatable as a general-purpose register.
+///
+/// `coalesce_deny` is the merges a previous attempt of `allocate_global`'s
+/// blamed for not fitting; this function makes one attempt with exactly those
+/// withheld.
 #[allow(clippy::too_many_arguments)] // The allocator's entry point; bundling these hides what each phase reads.
-pub fn allocate_global(
+fn allocate_with_denylist(
     block_schedules: &[Vec<ScheduledInst>],
     param_vregs: &[(VReg, Reg)],
     call_arg_precolors: Vec<(VReg, Reg)>,
@@ -1624,7 +1776,8 @@ pub fn allocate_global(
     stack_args: &BTreeSet<VReg>,
     slots: &mut SlotAllocator,
     spill_rounds: usize,
-) -> Result<GlobalRegAllocResult, String> {
+    coalesce_deny: &BTreeSet<(usize, usize)>,
+) -> Result<GlobalRegAllocResult, AllocFailure> {
     let mut schedules: Vec<Vec<ScheduledInst>> = block_schedules.to_vec();
     let mut spill_next_vreg: u32 = schedules
         .iter()
@@ -1793,6 +1946,7 @@ pub fn allocate_global(
             uses_frame_pointer,
             next_vreg,
             !coalesced,
+            coalesce_deny,
             &slot_resident_set,
             arg_locs,
         );
@@ -1826,7 +1980,12 @@ pub fn allocate_global(
         }
 
         if phase4.gpr_overshoot == 0 && phase4.xmm_overshoot == 0 {
-            return run_phase5(phase4, func_name, &alias_map, &slot_resident, slots);
+            return run_phase5(phase4, func_name, &alias_map, &slot_resident, slots).map_err(
+                |message| AllocFailure {
+                    message,
+                    blame: Vec::new(),
+                },
+            );
         }
 
         // Before spilling: a call argument that goes on the stack needs no
@@ -1978,17 +2137,20 @@ pub fn allocate_global(
                     "[{func_name}] over budget: [{}]", over.join(", "),
                 );
             }
-            return Err(format!(
-                "global regalloc: register pressure overshoot for function '{func_name}' \
-                 after {round} spill round(s): {why} (gpr_overshoot={}, xmm_overshoot={}, \
-                 over-budget VRegs={} defined by {defs}, of which spillable={}, \
-                 spill slots committed={}); {peak}",
-                phase4.gpr_overshoot,
-                phase4.xmm_overshoot,
-                phase4.over_budget.len(),
-                candidates.len(),
-                slots.count(),
-            ));
+            return Err(AllocFailure {
+                message: format!(
+                    "global regalloc: register pressure overshoot for function '{func_name}' \
+                     after {round} spill round(s): {why} (gpr_overshoot={}, xmm_overshoot={}, \
+                     over-budget VRegs={} defined by {defs}, of which spillable={}, \
+                     spill slots committed={}); {peak}",
+                    phase4.gpr_overshoot,
+                    phase4.xmm_overshoot,
+                    phase4.over_budget.len(),
+                    candidates.len(),
+                    slots.count(),
+                ),
+                blame: blame_coalescing(&phase4.over_budget, copy_pairs, &coalesce_aliases),
+            });
         }
         prev_overshoot = Some(overshoot);
         already_spilled.extend(candidates.iter().map(|&v| VReg(v as u32)));
@@ -2608,7 +2770,7 @@ mod tests {
 
         // Apply coalescing with copy pair (v0, v1).
         let pairs = [(0usize, 1usize)]; // v0 is src, v1 is dst
-        let coalesced = coalesce(&phase2.graph, &pairs, 14, 16);
+        let coalesced = coalesce(&phase2.graph, &pairs, &BTreeSet::new());
 
         // At least one merge should occur since v0 and v1 don't interfere.
         assert!(
@@ -2696,6 +2858,7 @@ mod tests {
             false, // uses_frame_pointer
             10,    // next_vreg start
             true,  // coalesce_now
+            &BTreeSet::new(),
             &VRegSet::new(),
             &[],
         );
@@ -2770,6 +2933,7 @@ mod tests {
             false,
             next_vreg,
             true, // coalesce_now,
+            &BTreeSet::new(),
             &VRegSet::new(),
             &[],
         );
@@ -2826,6 +2990,7 @@ mod tests {
             false,
             next_vreg,
             true, // coalesce_now,
+            &BTreeSet::new(),
             &VRegSet::new(),
             &[],
         );
@@ -2881,6 +3046,7 @@ mod tests {
             false,
             next_vreg,
             true, // coalesce_now,
+            &BTreeSet::new(),
             &VRegSet::new(),
             &[],
         );
@@ -2920,6 +3086,7 @@ mod tests {
             uses_frame_pointer,
             next_vreg,
             true,
+            &BTreeSet::new(),
             &VRegSet::new(),
             &[],
         )
