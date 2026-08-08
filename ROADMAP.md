@@ -307,6 +307,45 @@ three-operand `lea` that existed to dodge a copy blitz no longer makes:
 
 What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
 
+### ~~Folding a stack slot into the addressing mode that reads it~~
+
+**Written, correct, and measured out.** `lea r, [rsp+d]` followed by
+`mov [r + idx*s], v` is `mov [rsp + idx*s + d], v` in one operand -- x86 encodes
+`base + index*scale + disp` and `RSP` is a legal base -- so the `lea` need not
+exist. 78 of the 3295 instructions in `live`'s loop bodies were exactly that,
+recomputing a loop-invariant frame address every iteration.
+
+It cannot be an e-graph rewrite: a slot's frame displacement is fixed by the
+frame layout and nowhere earlier, which is why `PureOp::Addr` takes its base as
+a register operand at all. As an `emit::peephole` pre-pass it works, and it took
+`lea [rsp+disp]` in `live`'s loop bodies **from 78 to 23** -- the survivors are
+the ones whose register has a use that is not an address base, a call argument
+being the common one, where folding would add a displacement to each access and
+leave the `lea` alive anyway. The pass is all-or-nothing per `lea` for that
+reason.
+
+```
+insts   lit -1.1%   bench -1.1%   live -3.0%   fuzz -0.2%
+bytes   lit +0.6%   bench -1.8%   live -1.9%   fuzz +0.6%
+```
+
+**Cycles do not follow, and that is what settles it.** Back to back on one
+machine under one load, with each binary verified by a property only its own
+version emits: **fold on `x2.216`, fold off `x2.208`**, and a separate earlier
+sample read `x2.215` against `x2.206`. Twice on the wrong side of a band that is
+about `0.5%`.
+
+The mechanism is in the byte column. `[rsp + idx*s + disp]` needs a SIB byte and
+a displacement where `[r + idx*s]` needed neither, so several accesses can cost
+more bytes than the one instruction saved -- and a loop body that is bigger in
+bytes while smaller in instructions is not obviously faster. `bench` and `live`
+do gain bytes, and neither gains cycles.
+
+**Do not rewrite this expecting a different answer; measure the byte column
+first.** What would have to change for it to pay: an accounting that says the
+front end, not the instruction count, is what a tight loop is bound by -- which
+is a measurement this repo does not currently take.
+
 ### ~~Weighting class placement by loop depth~~
 
 `linearize::class_placement` decides whether a subtree is emitted once above its
@@ -1241,23 +1280,6 @@ without taking it is picking up work that cannot land.
 - [ ] **Latency/port-aware DAG scheduling.** A uarch model (ports, latencies,
       throughput) is only tractable because there is one target. ~5% but it is
       exactly the kind of win the single-target thesis predicts.
-- [ ] **Fold a stack slot into the addressing mode that reads it.** 78 of the
-      3295 instructions in `live`'s loop bodies are `lea r, [rsp+disp]`
-      recomputing a loop-invariant frame address, and the access beside each one
-      is `[r + idx*s]`. x86 encodes `[base + index*scale + disp]` in a single
-      operand, so `[rsp + idx*s + disp]` is one addressing mode and the `lea`
-      should not exist at all.
-
-      **It cannot be an e-graph rewrite**: a slot's frame displacement is known
-      at frame-layout time and nowhere earlier, so `PureOp::Addr` takes its base
-      as a register operand and a `StackAddr` base becomes one through the
-      `lea`. The fold belongs in lowering or in `emit::peephole`, where the
-      liveness that says the `lea`'s destination is otherwise dead already
-      exists.
-
-      **Hoisting them instead is measured out** -- see the closed placement
-      entry. Removing the instruction is the answer, not moving it.
-
 - [ ] **Loop rotation.** The layout half is done -- see the closed entry -- and
       a loop still closes on an unconditional `jmp`: **135 of 135 back edges in
       `live`**. The header tests and the body falls through, so the branch that
