@@ -47,6 +47,7 @@ use canon::canonicalize_class_refs;
 pub(crate) mod cfg;
 mod linearize;
 mod phi_removal;
+mod sccp;
 use cfg::{
     collect_alloc_block_params, collect_externals, collect_roots, commit_block_param_vregs,
     commit_effectful_vregs, commit_terminator_arg_vregs, compute_copy_pairs_from_schedules,
@@ -132,6 +133,16 @@ pub struct CompileOptions {
     /// parameter for every variable live across an edge and never revisits it, and
     /// 85-94% of them turn out to name a single value.
     pub enable_phi_removal: bool,
+    /// Remove block parameters whose predecessors all pass the same constant,
+    /// before saturation, so the rules fold through them.
+    ///
+    /// **Off at `-O0`, for the same reason the dead-load half of DCE is.** A
+    /// parameter carrying a merged constant is a source variable at the merge,
+    /// and removing it takes away the storage a debugger would read it from;
+    /// `-O0` is the level that maps to source. Being an `-O1`-only pass also
+    /// puts it inside what `run_diff.sh`'s `-O0`-vs-`-O1` leg can see, where a
+    /// transform running at both levels is visible only to the `cc` oracle.
+    pub enable_sccp: bool,
     /// Enable function inlining before optimization.
     pub enable_inlining: bool,
     /// This module is the entire program being linked, so a function no path
@@ -220,6 +231,7 @@ impl CompileOptions {
                 "store-forwarding" => self.enable_store_forwarding = on,
                 "dse" => self.enable_dse = on,
                 "phi-removal" => self.enable_phi_removal = on,
+                "sccp" => self.enable_sccp = on,
                 "inlining" => self.enable_inlining = on,
                 "tail-calls" => self.enable_tail_calls = on,
                 "dead-insts" => self.enable_dead_insts = on,
@@ -229,8 +241,8 @@ impl CompileOptions {
                 other => {
                     return Err(format!(
                         "BLITZ_PASSES: unknown pass `{other}`; known: licm, dce, \
-                         store-forwarding, dse, phi-removal, inlining, peephole, \
-                         fast-regalloc, tail-calls, dead-insts, loop-align"
+                         store-forwarding, dse, phi-removal, sccp, inlining, \
+                         peephole, fast-regalloc, tail-calls, dead-insts, loop-align"
                     ));
                 }
             }
@@ -253,6 +265,7 @@ impl CompileOptions {
             enable_store_forwarding: false,
             enable_dse: false,
             enable_phi_removal: true,
+            enable_sccp: false,
             enable_inlining: false,
             whole_program: false,
             enable_tail_calls: false,
@@ -278,6 +291,7 @@ impl CompileOptions {
             enable_store_forwarding: true,
             enable_dse: true,
             enable_phi_removal: true,
+            enable_sccp: true,
             enable_inlining: true,
             whole_program: false,
             enable_tail_calls: true,
@@ -352,7 +366,7 @@ type ExtractionOutput = (BTreeMap<(BlockId, u32), ClassId>, ExtractionResult);
 ///
 /// Shared between `compile()` and `compile_to_ir_string()`.
 pub(super) fn run_egraph_and_extract(
-    func: &Function,
+    func: &mut Function,
     egraph: &mut EGraph,
     opts: &CompileOptions,
 ) -> Result<ExtractionOutput, CompileError> {
@@ -360,7 +374,12 @@ pub(super) fn run_egraph_and_extract(
         iteration_limit: opts.saturation_limit,
         max_classes: 500_000,
     };
-    crate::egraph::algebraic::propagate_block_params(func, egraph);
+    // Before the rules run, so a parameter the meet proves constant is a
+    // constant the rules can fold through rather than an opaque value.
+    if opts.enable_sccp && sccp::run_sccp(func, egraph) {
+        canonicalize_class_refs(func, egraph);
+        crate::verify::verify_stage("sccp", func, egraph);
+    }
     // Before the rules run, so what they added is readable off the pair. No
     // extraction choices exist yet: nothing has a machine form to win with.
     crate::egraph::dump::dump(
@@ -379,7 +398,12 @@ pub(super) fn run_egraph_and_extract(
             inst: None,
         }),
     })?;
-    crate::egraph::algebraic::propagate_block_params(func, egraph);
+    // Again, because saturation is what proves most arguments constant: an
+    // argument that was `x * 0` on the way in is a constant now.
+    if opts.enable_sccp && sccp::run_sccp(func, egraph) {
+        canonicalize_class_refs(func, egraph);
+        crate::verify::verify_stage("sccp", func, egraph);
+    }
     crate::egraph::algebraic::apply_algebraic_rules(egraph);
     egraph.rebuild();
 

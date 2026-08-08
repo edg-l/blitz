@@ -1381,9 +1381,9 @@ fn detect_blockparam_slot_routing(
     // naming it -- function-wide, not per block.
     //
     // One VReg can name parameters of SEVERAL blocks, and two parameters of one
-    // block can be the same e-class (`propagate_block_params` merges a parameter
-    // with a constant incoming argument, so two parameters carrying the same
-    // constant collapse). Either way it is one value, and it has to be routed
+    // block can be the same e-class (`phi_removal` unions a parameter's class
+    // with the one its predecessors pass, so two parameters fed from one source
+    // collapse). Either way it is one value, and it has to be routed
     // once: routing it per position gave one VReg three slots, so its reloads
     // read one slot while predecessors stored to another.
     struct ParamGroup {

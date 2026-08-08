@@ -1,11 +1,14 @@
 // RUN: %tinyc %s --emit-ir 2>&1
 // RUN: %tinyc %s -o %t && %t
 // EXIT: 0
-// Inlined function with many intermediate computations.
-// compute(1,2,3)=47 should be constfolded after inlining.
+// Inlined function with many intermediate computations. All three calls fold
+// after inlining, and each result is compared against the constant it folded
+// to, so every branch resolves and `main` is its return value alone.
 // CHECK: function main
 // CHECK-NOT: function compute
-// CHECK: iconst(47
+// CHECK: iconst(0
+// CHECK-NOT: x86_imul
+// CHECK-NOT: x86_add
 
 int compute(int a, int b, int c) {
     int x = a + b;

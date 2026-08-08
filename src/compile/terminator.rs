@@ -617,11 +617,11 @@ fn build_phi_copies(
 
     let mut copies = Vec::new();
     // Two parameters of one block can be the same e-class, and then they are one
-    // value in one register: `propagate_block_params` merges a parameter with its
-    // incoming argument for single-predecessor blocks when that argument is
-    // constant, so two parameters carrying the same constant collapse onto the
-    // same class. The second copy would write the value its destination already
-    // holds, and a parallel copy cannot express two writes to one register.
+    // value in one register: `phi_removal` unions a parameter's class with the
+    // one its predecessors pass, so two parameters fed from one source collapse
+    // onto the same class. The second copy would write the value its destination
+    // already holds, and a parallel copy cannot express two writes to one
+    // register.
     let mut params_copied: BTreeMap<ClassId, usize> = BTreeMap::new();
     for (param_idx, arg) in args.iter().enumerate() {
         let param_cid = block_param_map

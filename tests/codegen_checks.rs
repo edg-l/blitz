@@ -170,8 +170,9 @@ fn ir_counted_loop() {
         b.finalize().unwrap(),
         "
         // CHECK-LABEL: function loop_sum
-        // CHECK: v0 = iconst(0, I64)
-        // CHECK: jump block3(v0, v0)
+        // The preheader's two parameters both receive 0, so it names the
+        // constant itself and the edge into it carries nothing.
+        // CHECK: jump block3()
         // CHECK-LABEL: block1(p0: I64, p1: I64):
         // CHECK: addr(scale=1, disp=1)
         // CHECK: x86_sub
@@ -180,9 +181,10 @@ fn ir_counted_loop() {
         // CHECK: branch Slt
         // CHECK-LABEL: block2(p0: I64):
         // CHECK: ret
-        // CHECK-LABEL: block3(p0: I64, p1: I64):
+        // CHECK-LABEL: block3:
         // CHECK: param(0, I64)
-        // CHECK: jump block1
+        // CHECK: v1 = iconst(0, I64)
+        // CHECK: jump block1(v1, v1)
         ",
     );
 }

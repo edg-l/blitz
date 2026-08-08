@@ -1,12 +1,12 @@
 // RUN: %tinyc %s --emit-ir 2>&1
 // RUN: %tinyc %s -o %t && %t
 // EXIT: 0
-// Inlined function with many arguments (tests param remapping).
-// First two calls const-fold after inlining (15 and 150).
+// Inlined function with many arguments (tests param remapping). All three
+// calls const-fold after inlining (15, 150, -15) and each is compared against
+// the constant it folded to, so `main` is its return value alone.
 // CHECK: function main
-// CHECK: iconst(15
-// CHECK: iconst(150
-// CHECK: iconst(-15
+// CHECK: iconst(0
+// CHECK-NOT: x86_add
 
 int sum5(int a, int b, int c, int d, int e) {
     return a + b + c + d + e;

@@ -311,9 +311,9 @@ pub(super) fn linearize(
                     } else if was_pre_emitted(canon) && block_preds[block_idx].len() <= 1 {
                         // Pass-through: the canonical class was already emitted
                         // in a dominating block (survived this block's filter)
-                        // AND this block has at most one predecessor, so
-                        // propagate_block_params merged the param with the
-                        // dominating definition and no phi storage is needed.
+                        // AND this block has at most one predecessor, so the
+                        // param and the dominating definition are one class and
+                        // no phi storage is needed.
                         // Skipping prevents creating a dead BlockParam VReg
                         // that the regalloc places in a caller-saved register,
                         // only to be clobbered by a subsequent call in this

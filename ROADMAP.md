@@ -72,10 +72,9 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **SCCP** -- `P1`, and the only open optimizer item with a measured payoff:
-  `lit` `-5.2%` instructions over 33 rows, `fuzz` `-1.3%` over 88. The meet is
-  written; what is missing is the landing mechanism, and the route is known --
-  `phi_removal`'s remove-re-extract-verify protocol, not a class merge.
+- **`P2`'s constant cost model** -- the only entry left with a measured payoff,
+  and it is not in `P1`. It unblocks three isel items at once *and* `P1`'s
+  narrowing item, and the missing structure is a parents map in the e-graph.
 - **Loop strength reduction** -- `P1`, the largest *claimed* payoff and no
   measurement at all. Count what the `live` kernels recompute before writing the
   pass.
@@ -85,15 +84,10 @@ rather than restating it. Take them top to bottom.
   still puts 150 of 371 in `cp_other`, which is no longer one shape. Measure
   before choosing a fix -- doing that is what found both of the last two.
 
-`P1` is ordered by evidence, and only its first entry has any -- see the note at
-the head of that section. **`P2` is where the single-target thesis pays off**,
+`P1` is ordered by evidence and **no open entry has any** -- see the note at the
+head of that section. **`P2` is where the single-target thesis pays off**,
 though half of it is unreachable until tinyc grows builtins -- see the note
 there.
-
-**One reordering worth stating outright.** `P2`'s constant cost model belongs
-above most of `P1`: it unblocks three isel items at once *and* `P1`'s narrowing
-item, the missing structure is a parents map in the e-graph, and the payoff is
-measured -- which is more than any open `P1` entry below SCCP can say.
 
 The argument this paragraph used to make is gone and worth not repeating: it
 said the temptation is to start on GVN or LSR because they are the recognizable
@@ -102,7 +96,7 @@ gap to gcc was copies. **The copies are closed** -- blitz emits 385 in 2138
 `bench` instructions against `gcc -O2`'s 429 in 2388 -- and **the GVN item was
 closed by discovering it did not exist**, since the e-graph is function-wide.
 So there is no longer a measured gap pointing anywhere in particular, which is
-exactly why the `P1` entries below SCCP need counting before they need code.
+exactly why the open `P1` entries need counting before they need code.
 
 **Do not start in the register allocator, the splitter, or the block-parameter
 machinery without reading `docs/internal/refactor-roadmap.md` first.** It is
@@ -307,6 +301,71 @@ three-operand `lea` that existed to dodge a copy blitz no longer makes:
 `lea x,[x+1]` is now `inc x` and `lea x,[x+y]` is `add x,y`.
 
 What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
+
+### ~~SCCP~~
+
+**A parameter every predecessor passes the same constant to *is* that
+constant**, and `compile::sccp` now removes it: unions its class with an
+`Iconst` it mints, drops the position from the block, from the `BlockParam`
+nodes and from every incoming edge, and iterates to a fixpoint because a removed
+parameter is a constant its own block may pass on.
+
+**The merge form miscompiles, and that is why the pass removes.** Merging the
+parameter's class with the constant's leaves a class holding *both*
+`BlockParam(b, i)` and `Iconst(k)`, and `cfg::resolve_block_param_vreg` asks the
+target block's own `BlockParam` first -- so a use reads the parameter's
+register, whose phi copy on the edge sources that same merged class and copies
+the register from itself. Removing the parameter leaves the class holding the
+constant alone, so nothing has a second answer to prefer. It also retires the
+single-predecessor merge that had the same latent hazard.
+
+**It needs no acceptance test of its own**, unlike `phi_removal`: the class it
+unions into is always a constant, which every block can re-emit, so the
+barrier-result hazard that test exists for cannot arise. It also runs before
+extraction, so there are no schedules to invalidate.
+
+**The conditional half is not done**, and is the one thing left in this item: an
+edge a constant branch can never take still contributes its argument to the
+meet, so a parameter two arms disagree about survives even when one arm is
+unreachable. `dce`'s constant branch folding does remove those blocks, but it
+runs after extraction and so cannot feed this. Unmeasured -- count how often an
+argument comes from a block a folded branch will delete before writing it.
+
+**It runs before saturation, and that is where the payoff is.** Removing the
+parameter buys the copies; folding through it buys the rest, and after
+saturation there is nothing left to fold. `x * 3 + 1` behind a parameter both
+arms pass `7` becomes `mov esi, 22`, four instructions to one.
+
+**It is `-O1` only**, for the reason the dead-load half of DCE is: a parameter
+carrying a merged constant is a source variable at the merge, and removing it
+takes away the storage a debugger reads it from. That also keeps it inside what
+`run_diff.sh`'s `-O0`-vs-`-O1` leg can see; a transform running at both levels
+is visible only to the `cc` oracle, which is the same argument the two
+allocators rest on.
+
+**Measured, and several times the entry's own prediction** -- which read `lit`
+`-5.2%` over 33 rows and `fuzz` `-1.3%` over 88, for the meet alone. Every
+`-O0` row is byte-identical, so these are the `-O1` rows that moved:
+
+```
+lit     insts -19.4%  bytes -21.8%  spills -31.2%  reloads -28.9%  copies  -7.6%   42 rows
+fuzz    insts -12.3%  bytes -14.9%  spills -20.8%  reloads -18.4%  copies  -4.1%   89 rows
+bench   insts  -2.0%  bytes  -1.8%  spills  +0.0%  reloads -26.9%  copies  +2.6%    8 rows
+live    insts  -2.7%  bytes  -3.5%  spills  +0.0%  reloads -31.2%  copies +14.9%    5 rows
+```
+
+`bench` and `live` move least, by construction: their kernels seed from `argc`
+so no parameter is provably constant, and what they gain is the reloads -- 24 of
+them for 8 copies, on absolute counts small enough (55 to 65) that the
+percentage overstates it. **Cycles do not move**: `x2.459` and `x2.482` against
+`gcc -O2` over two samples, against `x2.489` before, which is run-to-run
+variance. Same lesson the instruction count keeps teaching -- the work removed
+is real and is not on the `live` kernels' hot paths.
+
+Four lit tests changed because the constant folded *past* what they checked:
+`ir/const_fold.c` folds `fold() - 7` to `0` where it used to stop at
+`iconst(7)`, and both `inline/` tests fold their whole `main` to `xor eax,eax;
+ret`.
 
 ### ~~Dominance-scoped elaboration~~
 
@@ -827,53 +886,19 @@ so the holes stay visible.
 
 ### P1 -- Optimizer gaps
 
-**Ranked by evidence, and only the first entry has any.** SCCP is measured and
-its blocker is named; everything below it is ranked on argument, which is the
-weaker thing and is marked as such per item. The honest first step for an
-unmeasured entry is to measure it, not to implement it -- that is what turned
-the copies item around and what showed the elaboration item was resting on a
-false premise.
-
-- [ ] **SCCP.** `propagate_block_params` only handles single-predecessor
-      constants; conditional arms that become constant are missed.
-
-      **The constant meet is written and measured, and it cannot land as
-      written.** Extending the pass from one predecessor to a meet over all of
-      them -- a parameter every predecessor passes the same constant to *is* that
-      constant -- is `lit` `-5.2%` instructions over 33 changed rows and `fuzz`
-      `-1.3%` over 88, with `bench` and `live` unchanged. It also cuts copies --
-      `inline/inline_multi_return.c` goes from 9 to 1 -- which is worth less than
-      it was now that optimistic coalescing has taken 28% of them out.
-
-      **It introduces an `-O0` miscompile, and the cause is the merge rather than
-      the meet.** `run_diff.sh` catches it on `control/block_scope_shadowing.c`:
-      `-O0` prints 0 where `cc` and `-O1` print 7. Merging the parameter's class
-      with the constant's leaves a class holding *both* `BlockParam(b3, 0)` and
-      `Iconst(7)`, and `cfg::resolve_block_param_vreg` asks the target block's own
-      `BlockParam` first -- so the use reads the parameter's slot, whose phi copy
-      sources that same merged class and therefore copies the slot from itself.
-      The slot holds 0.
-
-      Ruled out on the way, so the next attempt does not re-check them: a
-      constant class used in a block its definition does not dominate is
-      *correctly* re-emitted at `-O0`, both as a `Ret` value and as a call
-      argument (`if/else` where both arms print the same literal is fine). The
-      hazard is specific to a class that is also a block parameter.
-
-      **So the route is `phi_removal`'s protocol, not a merge.** A parameter the
-      meet proves constant has to be *removed* from the block and its edges, then
-      re-extracted and re-linearized, and the result verified -- which is exactly
-      what `phi_removal` already does, and why it "proves its own result rather
-      than predicting it" after two attempts to predict merge composition were
-      both defeated by a program. **The existing single-predecessor merge has the
-      same latent hazard**; nothing in the current corpus reaches it.
+**Ranked by evidence, and no open entry has any.** Every item below is ranked on
+argument, which is the weaker thing and is marked as such per item. The honest
+first step for an unmeasured entry is to measure it, not to implement it -- that
+is what turned the copies item around, what showed the elaboration item was
+resting on a false premise, and what made SCCP three times the win its own entry
+predicted.
 
 - [ ] **Loop strength reduction + induction variable recognition.** Every array
       loop recomputes `base + i*scale`. Worth 2-5x on loop-heavy code and is
       table stakes for calling the backend "optimizing".
 
-      **Ranked second on argument, not evidence: nothing here has been
-      measured.** The 2-5x is the literature's, on other compilers. Before
+      **Ranked on argument, not evidence: nothing here has been measured.** The
+      2-5x is the literature's, on other compilers. Before
       writing the pass, count what the `live` kernels actually recompute -- how
       many address computations in a loop body are an induction variable times a
       constant plus a base -- the way `classify_copies` and the re-emission probe

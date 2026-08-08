@@ -1,13 +1,8 @@
-use std::collections::BTreeMap;
-
 use smallvec::smallvec;
 
-use crate::compile::barrier::terminator_edges;
 use crate::egraph::egraph::{EGraph, NodeSnap, snapshot_all};
 use crate::egraph::enode::ENode;
 use crate::ir::condcode::CondCode;
-use crate::ir::effectful::BlockId;
-use crate::ir::function::Function;
 use crate::ir::op::{ClassId, Op, PureOp};
 use crate::ir::types::Type;
 
@@ -1193,66 +1188,6 @@ fn apply_negation_distribution_rules(egraph: &mut EGraph, snaps: &[NodeSnap]) ->
         }
     }
     changed
-}
-
-// ── Block-param constant propagation ─────────────────────────────────────────
-
-/// For blocks with a single predecessor, merge each block parameter's e-class
-/// with the corresponding argument e-class from that predecessor. This enables
-/// constant folding through inlined function boundaries.
-pub fn propagate_block_params(func: &Function, egraph: &mut EGraph) {
-    // Step 1: Build predecessor map: block -> vec of (source_block, args).
-    let mut pred_map: BTreeMap<BlockId, Vec<(BlockId, Vec<ClassId>)>> = BTreeMap::new();
-    for block in &func.blocks {
-        let Some(term) = block.ops.last() else {
-            continue;
-        };
-        for (target, args) in terminator_edges(term) {
-            pred_map
-                .entry(target)
-                .or_default()
-                .push((block.id, args.expect_classes().to_vec()));
-        }
-    }
-
-    // Step 2: Which class names each parameter position.
-    let block_param_map = egraph.block_param_classes();
-
-    // Step 3: For single-predecessor blocks, merge block params with constant args.
-    // Only merge when the source arg contains a constant, since merging with
-    // non-constant values can cause extraction to schedule computations in the
-    // wrong block (the source computation may not dominate the target block).
-    let mut merged = false;
-    for block in &func.blocks {
-        if block.param_types.is_empty() {
-            continue;
-        }
-        let preds = match pred_map.get(&block.id) {
-            Some(p) if p.len() == 1 => p,
-            _ => continue,
-        };
-        let (_, ref args) = preds[0];
-        for (i, &source_class) in args.iter().enumerate().take(block.param_types.len()) {
-            let Some(&bp_class) = block_param_map.get(&(block.id, i as u32)) else {
-                continue;
-            };
-            // Only propagate constants to avoid extraction scheduling issues.
-            if egraph.get_constant(source_class).is_none() {
-                continue;
-            }
-            let bp_canon = egraph.unionfind.find(bp_class);
-            let src_canon = egraph.unionfind.find(source_class);
-            if bp_canon != src_canon {
-                egraph.merge(bp_class, source_class);
-                merged = true;
-            }
-        }
-    }
-
-    // Step 4: Rebuild if any merges happened.
-    if merged {
-        egraph.rebuild();
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

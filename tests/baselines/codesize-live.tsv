@@ -11,7 +11,7 @@ branchy_filter.c	O1	125	519	10	24	20
 byte_copy.c	O0	910	6313	326	394	66
 byte_copy.c	O1	283	1642	53	92	21
 call_hot.c	O0	227	1186	65	78	39
-call_hot.c	O1	80	317	5	16	12
+call_hot.c	O1	79	316	5	14	13
 call_inlinable.c	O0	227	1186	65	78	39
 call_inlinable.c	O1	57	216	0	0	12
 call_in_pressure.c	O0	688	3592	167	223	178
@@ -31,7 +31,7 @@ histogram.c	O1	154	666	3	21	17
 int_divide.c	O0	377	2327	117	143	52
 int_divide.c	O1	92	364	2	8	19
 matmul_rt.c	O0	486	3146	154	199	50
-matmul_rt.c	O1	108	464	2	12	12
+matmul_rt.c	O1	106	452	2	10	12
 mixed_width.c	O0	587	3823	196	232	69
 mixed_width.c	O1	205	972	38	59	20
 nested_carried.c	O0	433	2748	139	168	54
@@ -43,8 +43,8 @@ sort_search.c	O1	382	2208	90	134	25
 state_machine.c	O0	871	6056	323	368	60
 state_machine.c	O1	161	695	3	19	18
 struct_fields.c	O0	428	2688	126	175	45
-struct_fields.c	O1	106	426	3	16	11
+struct_fields.c	O1	103	414	3	4	18
 tail_recursion.c	O0	252	1100	59	78	54
-tail_recursion.c	O1	101	412	6	15	21
+tail_recursion.c	O1	99	395	6	12	22
 transpose.c	O0	501	3176	159	195	62
-transpose.c	O1	119	493	3	18	11
+transpose.c	O1	113	462	3	13	12

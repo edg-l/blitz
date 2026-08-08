@@ -1,8 +1,10 @@
 // EXIT: 0
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
-// ternary branches: compare and conditional jump
-// CHECK: sub
+// ternary branches: compare and conditional jump. Both arms of each ternary
+// yield a constant, so the merge carries no parameter and what is left is the
+// compare against the constant.
+// CHECK: cmp
 // CHECK: j
 
 int main() {

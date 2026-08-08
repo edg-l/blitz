@@ -1,19 +1,21 @@
 // Regression test: two parameters of one block are the same e-class, so the
 // parallel copy on the edge into it named one register twice.
 //
-// `propagate_block_params` merges a block parameter with its incoming argument
-// when the block has a single predecessor and that argument is a constant. Here
-// `main` jumps to a block passing the constant 0 for two different parameters,
-// so both parameters merge onto that constant's class. One class is one VReg is
-// one register, and that is correct -- a single predecessor passing the same
-// constant twice means the two parameters provably hold the same value.
-//
-// Each argument is its own operand of the terminator, though, and the constant
-// is materialized into a different register per operand. The edge therefore
-// asked for [(RDX, R14), (RCX, R14), (RAX, R9), (R10, RSI)] and aborted in
+// `main` jumps to a block passing the constant 0 for two different parameters.
+// One class is one VReg is one register, and that is correct -- both parameters
+// provably hold the same value -- but each argument is its own operand of the
+// terminator, and the constant is materialized into a different register per
+// operand. The edge therefore asked for
+// [(RDX, R14), (RCX, R14), (RAX, R9), (R10, RSI)] and aborted in
 // `sequentialize_copies`: a parallel copy cannot express two writes to one
 // register. Both copies say the same thing, so one of them carries the value and
 // the other is dropped.
+//
+// At `-O1`, `compile::sccp` removes a parameter every predecessor passes one
+// constant to, so this program no longer reaches the deduplication at either
+// level -- measured on the whole lit corpus, which reaches it nowhere. The
+// route that remains is `phi_removal` unioning two parameters onto one source.
+// The program is kept for its answer.
 //
 // OUTPUT: -780
 // EXIT: 0

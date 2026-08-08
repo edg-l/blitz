@@ -1,7 +1,7 @@
 # program	level	insts	bytes	spills	reloads	copies
 # corpus: bench -- written by tests/run_codesize.sh --update
 binary_search.c	O0	253	1306	73	93	30
-binary_search.c	O1	81	328	3	14	9
+binary_search.c	O1	75	295	3	7	10
 bitcount.c	O0	243	1157	61	81	46
 bitcount.c	O1	69	268	0	0	19
 crc32.c	O0	223	1102	60	72	39
@@ -9,11 +9,11 @@ crc32.c	O1	64	229	0	0	17
 dot_product.c	O0	266	1684	69	95	25
 dot_product.c	O1	93	453	4	6	13
 fib_memo.c	O0	310	1453	75	106	52
-fib_memo.c	O1	148	614	3	29	38
+fib_memo.c	O1	143	608	3	20	41
 hash_table.c	O0	496	2920	137	188	66
-hash_table.c	O1	233	875	4	44	42
+hash_table.c	O1	229	876	4	36	43
 loop_nest.c	O0	371	2218	97	140	50
-loop_nest.c	O1	105	414	0	0	23
+loop_nest.c	O1	104	414	0	0	23
 matmul.c	O0	393	2401	102	150	44
 matmul.c	O1	117	464	0	0	20
 nbody_step.c	O0	595	3991	150	241	49
@@ -23,10 +23,10 @@ queens.c	O1	166	663	11	35	32
 sieve.c	O0	206	1145	53	81	20
 sieve.c	O1	62	245	0	0	11
 sort_insert.c	O0	427	2572	111	160	51
-sort_insert.c	O1	126	456	0	0	33
+sort_insert.c	O1	127	460	0	0	33
 sort_quick.c	O0	462	2514	118	185	54
-sort_quick.c	O1	137	504	0	0	37
+sort_quick.c	O1	137	499	0	0	37
 strops.c	O0	524	2694	139	204	58
-strops.c	O1	193	743	2	30	31
+strops.c	O1	186	711	2	22	32
 struct_walk.c	O0	289	1643	67	112	34
-struct_walk.c	O1	85	326	2	2	15
+struct_walk.c	O1	85	322	2	2	15
