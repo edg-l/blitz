@@ -6,8 +6,21 @@ description = "An optimizing x86-64 compiler backend: e-graph IR with equality s
 repository = "https://github.com/edg-l/blitz"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-keywords = ["compiler", "codegen", "backend", "x86-64", "egraph"]
+
+# Both slugs are crates.io's own; a category it does not know is a publish
+# error, unlike a keyword. No `development-tools::*` subcategory fits a backend
+# better than `compilers` does.
 categories = ["compilers", "development-tools"]
+
+# Five is the cap. `backend` is dropped on purpose: its 343 crates are mostly
+# web and storage backends, so it is noise rather than reach. `x86-64` (29
+# crates) and `egraph` (4) are the two that actually name what this is, and
+# `elf` is a capability someone searches for on its own.
+keywords = ["compiler", "codegen", "x86-64", "egraph", "elf"]
+
+# Let-chains, which edition 2024 stabilized in 1.88. Bisected against the
+# toolchain, not assumed: 1.87 fails with E0658 and 1.88 builds.
+rust-version = "1.88"
 
 # The test corpora and the internal design notes are the repository's, not the
 # crate's: 459 files and 2.5MiB of lit programs, generated-program baselines and
