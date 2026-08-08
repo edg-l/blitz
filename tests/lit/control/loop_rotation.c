@@ -8,30 +8,29 @@
 // is and runs once, as the guard that a `while` whose trip count can be zero
 // needs.
 //
-// Both nesting levels are checked because the two senses of the header's
-// conditional are both reachable here: the trace lays the inner loop's body
-// after its header and the outer loop's exit after its own, so one header
-// branches out of its loop and the other branches into it. The back edge has to
-// carry whichever sense reaches the body, and the CFG is what says which
-// successor that is.
+// Both nesting levels are checked, because a nested loop is what makes the
+// layout trace's loop depth load-bearing: the depth has to say that the outer
+// loop's body outranks its exit, or the trace follows the exit and the outer
+// header's conditional goes back on the taken side.
 
 // CHECK-LABEL: # main
 
-// The outer guard, run once.
+// The outer guard, run once, leaving the loop.
 // CHECK: cmp    {{[a-z0-9]+}},0xa
-// CHECK: jl
+// CHECK: jge
 
-// The inner guard.
+// The inner guard, the same way round.
 // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
 // CHECK: jge
 
 // The inner back edge: the test is at the bottom and the branch back is the
-// conditional, with no unconditional jump closing the loop.
+// conditional.
 // CHECK: cmp    {{[a-z0-9]+}},{{[a-z0-9]+}}
 // CHECK: jl
-// CHECK-NOT: jmp
 
-// The outer back edge, conditional for the same reason.
+// The outer back edge, conditional for the same reason. Neither loop closes on
+// an unconditional jump; the two that remain are the branches *out*, to blocks
+// the trace laid before them.
 // CHECK: cmp    {{[a-z0-9]+}},0xa
 // CHECK: jl
 

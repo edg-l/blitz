@@ -3,13 +3,13 @@
 // CHECK-LABEL: # main
 // Each loop compare against the bound 3 fuses the immediate into `cmp`
 // directly via X86CmpI — no separate `mov ..., 0x3` for the bound.
-// outer loop compare + branch
+// Each loop's guard, run once. The body is laid after its header at both
+// levels -- which is what the layout trace's loop depth has to be exact for --
+// so both conditionals leave their loop and both fallthroughs enter it.
 // CHECK: cmp    {{[a-z0-9]+}},0x3
-// CHECK: jl
+// CHECK: jge
 // inner loop compare + branch
 // CHECK: cmp    {{[a-z0-9]+}},0x3
-// The body is laid after the header, so the conditional leaves the loop and
-// the fallthrough enters it.
 // CHECK: jge
 // i*3 via lea (scale-by-3 addressing)
 // CHECK: lea

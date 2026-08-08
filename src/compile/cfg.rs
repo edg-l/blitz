@@ -135,8 +135,14 @@ pub(super) fn compute_rpo(func: &Function) -> Vec<usize> {
 /// RPO position, and starts a new trace from the first unvisited block in RPO
 /// when it runs out. A loop body is deeper than the loop's exit, so the body
 /// follows the header and the exit is picked up after the trace ends at the
-/// back edge. The depth is that function's back-edge heuristic rather than a
-/// loop forest, which is all a *preference* between two successors needs.
+/// back edge. **The depth has to be the dominator-tree answer for that to
+/// hold** -- a preference is all this needs, but a preference that is wrong on
+/// a nested loop puts the header's conditional back on the taken side, which is
+/// the whole of what this ordering exists to avoid.
+///
+/// The seeding is still depth-blind: a trace that ends at a back edge resumes
+/// from the first unvisited block in RPO, which on a nested loop is the
+/// function's exit before the outer latch.
 ///
 /// The entry block stays first, since it is first in RPO and every trace seed
 /// is taken in RPO order. Blocks no path reaches are last, for the same reason.
@@ -777,10 +783,10 @@ pub(super) fn projection_copy_pairs(block_schedules: &[Vec<ScheduledInst>]) -> V
 ///
 /// A block heads a loop when it dominates one of its own predecessors -- the
 /// standard definition, and the one worth paying a dominator computation for.
-/// The cheap proxies are both wrong here: `block_loop_depths` reads a back edge
-/// off `func.blocks` order, and reading one off the *emitted* stream calls any
-/// backward jump a loop, which `block_layout_order` produces routinely for a
-/// diamond whose second arm jumps forward to a join laid before it.
+/// Reading a back edge off the *emitted* stream instead calls any backward jump
+/// a loop, which `block_layout_order` produces routinely: for a diamond whose
+/// second arm jumps forward to a join laid before it, and for a rotated loop's
+/// branch out to an exit laid before its body.
 pub(super) fn loop_header_blocks(func: &Function) -> BTreeSet<BlockId> {
     let rpo = compute_rpo(func);
     let idom = compute_idom(func, &rpo);
@@ -795,13 +801,113 @@ pub(super) fn loop_header_blocks(func: &Function) -> BTreeSet<BlockId> {
     headers
 }
 
-/// Loop depth per block index, by back-edge counting.
+/// Detect back edges in the CFG using the dominator tree.
 ///
-/// A target at or before its source is a back edge, and every block between the
-/// two is in the loop. A heuristic rather than a dominator-tree loop forest,
-/// which is what the callers weight costs by: how many times a block's code is
-/// expected to run, relative to the rest.
+/// A back edge is an edge `(src, tgt)` where `tgt` dominates `src`.
+/// Returns a list of `(src_idx, tgt_idx)` pairs.
+pub(super) fn detect_back_edges(func: &Function, idom: &[Option<usize>]) -> Vec<(usize, usize)> {
+    let mut back_edges = Vec::new();
+
+    for (src_idx, succs) in successor_indices(func).into_iter().enumerate() {
+        for tgt_idx in succs {
+            // A back edge exists when the target dominates (or is) the source.
+            // Self-loops where src == tgt are included via dominates(a, a) == true.
+            if dominates(tgt_idx, src_idx, idom) {
+                back_edges.push((src_idx, tgt_idx));
+            }
+        }
+    }
+
+    // Sorted for determinism; (src, tgt) is a total order on the edges.
+    back_edges.sort();
+    back_edges
+}
+
+/// Collect the body of a natural loop given its header and a back-edge source.
+///
+/// Performs a backward predecessor walk from `back_edge_src` up to `header_idx`,
+/// returning all block indices reachable this way (including both endpoints).
+pub(super) fn collect_loop_body(
+    header_idx: usize,
+    back_edge_src: usize,
+    preds: &[Vec<usize>],
+) -> BTreeSet<usize> {
+    let mut body = BTreeSet::new();
+    body.insert(header_idx);
+
+    // Worklist: blocks to process whose predecessors need to be added.
+    let mut worklist: Vec<usize> = Vec::new();
+    if body.insert(back_edge_src) {
+        worklist.push(back_edge_src);
+    }
+
+    while let Some(block) = worklist.pop() {
+        for &pred in &preds[block] {
+            if body.insert(pred) && pred != header_idx {
+                worklist.push(pred);
+            }
+        }
+    }
+
+    body
+}
+
+/// Loop depth per block index: how many natural loops contain each block.
+///
+/// **Not a back-edge count over `func.blocks` order**, which is what this was
+/// and which is wrong for the thing it is asked: block indices are not in loop
+/// order, since `licm::insert_preheader` appends preheaders past the end, so a
+/// loop body could score 0 and `block_layout_order` would follow the loop's
+/// *exit* instead of its body -- putting the header's conditional back on the
+/// taken side, which is the whole of what that ordering exists to avoid.
+///
+/// A loop is a back edge's target plus everything that reaches the source
+/// without leaving it, and two latches under one header are one loop, so the
+/// bodies are unioned per header before they are counted.
+///
+/// [`block_layout_order`] is the only caller: it asks which successor *is* in
+/// the loop, which is a membership question. The spill costs ask how often a
+/// block runs and keep their own estimate -- see [`spill_weight_depths`].
 pub(super) fn block_loop_depths(func: &Function) -> Vec<u32> {
+    let n = func.blocks.len();
+    let mut depth = vec![0u32; n];
+    if n == 0 {
+        return depth;
+    }
+    let rpo = compute_rpo(func);
+    let idom = compute_idom(func, &rpo);
+    let preds = predecessor_indices(func);
+
+    let mut bodies: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for (src, header) in detect_back_edges(func, &idom) {
+        bodies
+            .entry(header)
+            .or_default()
+            .extend(collect_loop_body(header, src, &preds));
+    }
+    for body in bodies.values() {
+        for &block in body {
+            depth[block] += 1;
+        }
+    }
+    depth
+}
+
+/// Loop depth per block index, estimated from `func.blocks` order: a target at
+/// or before its source is a back edge, and every block between the two counts
+/// as inside.
+///
+/// **A different question from [`block_loop_depths`], and deliberately still an
+/// estimate.** The callers here weight a spill by `2^depth`, which asks how
+/// often a block runs; the layout asks which successor *is* in the loop, and
+/// only that one needs to be exact. Handing these callers the exact depth was
+/// measured: cycles did not move (`x2.108` against `x2.105` over the 24 `live`
+/// kernels, where the layout change alone is worth `x2.19 -> x2.11`), and it
+/// re-ranked the splitter's victims enough to cost `pressure` seeds 20 and 241
+/// their compile -- an XMM overshoot at a phi seam that no spill can relieve.
+/// So the exact answer is not an improvement here, and this is not a stopgap
+/// waiting on one.
+pub(super) fn spill_weight_depths(func: &Function) -> Vec<u32> {
     let mut depth = vec![0u32; func.blocks.len()];
     for (src_idx, succs) in successor_indices(func).into_iter().enumerate() {
         for target_idx in succs {
@@ -815,16 +921,17 @@ pub(super) fn block_loop_depths(func: &Function) -> Vec<u32> {
     depth
 }
 
-/// Compute loop depth for each VReg based on the CFG back-edges.
+/// Loop depth for each VReg: the depth of the block that defines it.
 ///
-/// A back-edge is a jump/branch to a block with a lower (or equal) index,
-/// indicating a loop. All VRegs defined in blocks within the loop body get
-/// a non-zero depth. This is a simple heuristic (not a full dominator tree).
+/// A VReg defined outside every loop is absent rather than zero, since the
+/// callers weight a spill by this and have nothing to weight for a value that
+/// runs once. See [`spill_weight_depths`] for where the depth comes from,
+/// and why it is not the exact one.
 pub(super) fn compute_loop_depths(
     func: &Function,
     block_schedules: &[Vec<ScheduledInst>],
 ) -> BTreeMap<VReg, u32> {
-    let block_depth = block_loop_depths(func);
+    let block_depth = spill_weight_depths(func);
 
     // Map each VReg to its block's loop depth.
     let mut result: BTreeMap<VReg, u32> = BTreeMap::new();
@@ -1004,6 +1111,56 @@ mod tests {
         let func = loop_with_exit();
         assert_eq!(compute_rpo(&func), vec![0, 1, 3, 2]);
         assert_eq!(block_layout_order(&func), vec![0, 1, 2, 3]);
+    }
+
+    /// Depth counts the natural loops a block is in, and it holds when the
+    /// block indices are not in loop order.
+    ///
+    /// `licm::insert_preheader` appends preheaders past the end of
+    /// `func.blocks`, so a loop's blocks can carry higher indices than the code
+    /// after it. The back-edge-by-index rule this used to be scored the body 0
+    /// here and `block_layout_order` followed the exit, which puts the header's
+    /// conditional back on the taken side.
+    #[test]
+    fn loop_depth_survives_blocks_being_out_of_loop_order() {
+        // 0 -> 1 header, 1 -> {3 body, 2 exit}, 3 -> 1, 2 returns. The body's
+        // index is *above* the exit's, so the edge 3 -> 1 is the only one that
+        // points backwards by index and the range rule would stop at 1..=3
+        // having never seen 2 -- but it would also have to call 2 part of it.
+        let func = func_with(vec![jump(1), branch(3, 2), ret(), jump(1)]);
+        assert_eq!(block_loop_depths(&func), vec![0, 1, 0, 1]);
+        // Which is what makes the trace follow the body and leave the exit for
+        // afterwards.
+        let order = block_layout_order(&func);
+        let pos = |b: usize| order.iter().position(|&x| x == b).unwrap();
+        assert!(
+            pos(3) < pos(2),
+            "the exit was laid before the body: {order:?}"
+        );
+    }
+
+    /// Two latches under one header are one loop, not two.
+    #[test]
+    fn one_header_with_two_back_edges_is_one_loop() {
+        // 0 -> 1 header, 1 -> {2, 3}, both 2 and 3 jump back to 1.
+        let func = func_with(vec![jump(1), branch(2, 3), jump(1), jump(1)]);
+        assert_eq!(block_loop_depths(&func), vec![0, 1, 1, 1]);
+    }
+
+    /// A nested loop's inner blocks are in both loops.
+    #[test]
+    fn loop_depth_nests() {
+        // 0 -> 1 outer header, 1 -> {2 inner header, 5 exit},
+        // 2 -> {3 inner body, 4 outer latch}, 3 -> 2, 4 -> 1, 5 returns.
+        let func = func_with(vec![
+            jump(1),
+            branch(2, 5),
+            branch(3, 4),
+            jump(2),
+            jump(1),
+            ret(),
+        ]);
+        assert_eq!(block_loop_depths(&func), vec![0, 1, 2, 2, 1, 0]);
     }
 
     /// Every block appears exactly once, entry first, including blocks no trace

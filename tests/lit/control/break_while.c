@@ -3,12 +3,15 @@
 // CHECK-LABEL: # main
 // while loop comparison
 // CHECK: cmp
-// break comparison (i == 5). The block the branch falls into is the one that
-// continues the loop, so the conditional is the break's negation.
+// break comparison (i == 5). The block the branch falls into is the rest of the
+// body, so the conditional is the break itself and it leaves the loop.
+// CHECK: cmp    {{[a-z0-9]+}},0x5
+// CHECK: je
+// The back edge is the loop's own test, so the loop closes on no
+// unconditional jump.
 // CHECK: cmp
-// CHECK: jne
-// backward jump for loop
-// CHECK: jmp
+// CHECK: jl
+// CHECK-NOT: jmp
 
 // break and continue in while loops
 int main() {

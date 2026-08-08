@@ -8,7 +8,9 @@ use crate::ir::function::{BasicBlock, Function};
 use crate::ir::op::{ClassId, Op, PseudoOp, PureOp};
 use crate::ir::types::Type;
 
-use super::cfg::{compute_idom, compute_rpo, dominates, predecessor_indices, successor_indices};
+use super::cfg::{
+    collect_loop_body, compute_idom, compute_rpo, detect_back_edges, predecessor_indices,
+};
 
 /// Extra roots to add to specific blocks during linearization.
 /// Maps block_index -> Vec<ClassId> of invariant classes to emit there.
@@ -18,62 +20,6 @@ pub type ExtraRoots = BTreeMap<usize, Vec<ClassId>>;
 pub(super) struct LoopInfo {
     pub header_idx: usize,
     pub body: BTreeSet<usize>,
-}
-
-/// Detect back edges in the CFG using the dominator tree.
-///
-/// A back edge is an edge `(src, tgt)` where `tgt` dominates `src`.
-/// Returns a list of `(src_idx, tgt_idx)` pairs.
-pub(super) fn detect_back_edges(
-    func: &Function,
-    rpo: &[usize],
-    idom: &[Option<usize>],
-) -> Vec<(usize, usize)> {
-    let mut back_edges = Vec::new();
-
-    for (src_idx, succs) in successor_indices(func).into_iter().enumerate() {
-        for tgt_idx in succs {
-            // A back edge exists when the target dominates (or is) the source.
-            // Self-loops where src == tgt are included via dominates(a, a) == true.
-            if dominates(tgt_idx, src_idx, idom) {
-                back_edges.push((src_idx, tgt_idx));
-            }
-        }
-    }
-
-    // Sort for determinism, following RPO positions.
-    let _ = rpo; // rpo was used to compute idom; sorting by (src, tgt) is already deterministic.
-    back_edges.sort();
-    back_edges
-}
-
-/// Collect the body of a natural loop given its header and a back-edge source.
-///
-/// Performs a backward predecessor walk from `back_edge_src` up to `header_idx`,
-/// returning all block indices reachable this way (including both endpoints).
-pub(super) fn collect_loop_body(
-    header_idx: usize,
-    back_edge_src: usize,
-    preds: &[Vec<usize>],
-) -> BTreeSet<usize> {
-    let mut body = BTreeSet::new();
-    body.insert(header_idx);
-
-    // Worklist: blocks to process whose predecessors need to be added.
-    let mut worklist: Vec<usize> = Vec::new();
-    if body.insert(back_edge_src) {
-        worklist.push(back_edge_src);
-    }
-
-    while let Some(block) = worklist.pop() {
-        for &pred in &preds[block] {
-            if body.insert(pred) && pred != header_idx {
-                worklist.push(pred);
-            }
-        }
-    }
-
-    body
 }
 
 /// Detect all natural loops in the function's CFG.
@@ -88,7 +34,7 @@ pub(super) fn detect_loops(func: &Function) -> Vec<LoopInfo> {
     let rpo = compute_rpo(func);
     let idom = compute_idom(func, &rpo);
     let preds = predecessor_indices(func);
-    let back_edges = detect_back_edges(func, &rpo, &idom);
+    let back_edges = detect_back_edges(func, &idom);
 
     if back_edges.is_empty() {
         return vec![];
@@ -743,7 +689,7 @@ mod tests {
         let f = build_simple_while();
         let rpo = compute_rpo(&f);
         let idom = compute_idom(&f, &rpo);
-        let back_edges = detect_back_edges(&f, &rpo, &idom);
+        let back_edges = detect_back_edges(&f, &idom);
 
         // Only one back edge: bb2 (idx 2) -> bb1 (idx 1)
         assert_eq!(back_edges, vec![(2, 1)]);
@@ -754,7 +700,7 @@ mod tests {
         let f = build_nested_loops();
         let rpo = compute_rpo(&f);
         let idom = compute_idom(&f, &rpo);
-        let back_edges = detect_back_edges(&f, &rpo, &idom);
+        let back_edges = detect_back_edges(&f, &idom);
 
         // Two back edges: bb4->bb3 (inner) and bb3->bb1 (outer)
         // Indices: bb0=0, bb1=1, bb2=2, bb3=3, bb4=4, bb5=5
@@ -779,7 +725,7 @@ mod tests {
 
         let rpo = compute_rpo(&f);
         let idom = compute_idom(&f, &rpo);
-        let back_edges = detect_back_edges(&f, &rpo, &idom);
+        let back_edges = detect_back_edges(&f, &idom);
         assert!(back_edges.is_empty());
     }
 
@@ -793,7 +739,7 @@ mod tests {
 
         let rpo = compute_rpo(&f);
         let idom = compute_idom(&f, &rpo);
-        let back_edges = detect_back_edges(&f, &rpo, &idom);
+        let back_edges = detect_back_edges(&f, &idom);
 
         // Self-loop: (0, 0)
         assert_eq!(back_edges, vec![(0, 0)]);

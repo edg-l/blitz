@@ -72,16 +72,14 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **The layout trace can rank a loop's exit above its body** -- `P1`, and it is
-  the one open entry with a mechanism rather than a guess. `cfg::block_loop_depths`
-  calls an edge a back edge when it points at a lower *block index*, and block
-  indices are not in loop order: `licm::insert_preheader` appends preheaders past
-  the end. So a loop body can score depth 0 and `block_layout_order` follows the
-  exit instead, which puts the header's conditional back on the taken side --
-  exactly what the layout entry was supposed to have closed. Reproduces on a
-  nested `while` in `tests/lit/control/loop_rotation.c`, where the outer header
-  branches *into* its loop. The depth is already computable exactly:
-  `licm::detect_loops` returns each natural loop's body from the dominator tree.
+- **Where the trace goes when it runs out** -- `P1`. `block_layout_order` seeds
+  each new trace from the first unvisited block in RPO, which is depth-blind: on
+  a nested loop it picks up the function's exit before the outer latch, so both
+  loops end on a branch *out* to a block laid before them. Two `jmp`s in
+  `tests/lit/control/loop_rotation.c` are exactly this, and they are all that is
+  left of the unconditional jumps there. Seeding by depth, or continuing from
+  the deepest unvisited block rather than the earliest, is the obvious try; it
+  wants the same measurement the depth fix got.
 
 - **`P2`'s `subsume` marker** -- no measurement, but its payoff is structural
   rather than guessed: it makes `saturate_isel` a property of the rules instead
@@ -361,7 +359,7 @@ hoisting risks. **It reads no frequency at all**, so a subtree re-emitted inside
 a loop is priced as if it ran once.
 
 Weighting both sides by `2^depth`, the same reading `phi_removal` and the
-splitter give `block_loop_depths`, **loses**:
+splitter give `cfg::spill_weight_depths`, **loses**:
 
 ```
 lit     3 rows  insts +4.2%  copies +29.9%   3 of 3 changed rows regressed
@@ -461,6 +459,45 @@ regresses nothing on the other.
 
 Six unit tests pin the exit rule, one per case, because being wrong there
 deletes live code rather than keeping dead code.
+
+### ~~The layout trace ranked a loop's exit above its body~~
+
+**`cfg::block_loop_depths` called an edge a back edge when it pointed at a lower
+block index**, and block indices are not in loop order -- `licm::insert_preheader`
+appends preheaders past the end of `func.blocks`. So a loop body could score
+depth 0, `block_layout_order` would follow the loop's *exit* instead, and the
+header's conditional went back on the taken side: the exact defect the layout
+entry above exists to have closed, still reachable on any nested loop.
+
+It is now the dominator-tree answer -- a back edge is an edge whose target
+dominates its source, a loop is that target plus everything reaching the source
+without leaving it, and two latches under one header are one loop, so the bodies
+are unioned per header before they are counted. `detect_back_edges` and
+`collect_loop_body` moved from `licm` into `cfg` for it, which is where every
+derivation of the CFG's edges belongs; `licm::detect_loops` now shares them
+rather than owning them.
+
+```
+cycles vs gcc -O2     x2.186 / x2.190  ->  x2.105   (-3.7%)
+cycles vs clang -O2   x2.800           ->  x2.698 / x2.700   (-3.6%)
+insts   -0.1%   bytes +0.1%   (over the rows that changed, all four corpora)
+compile time  +0.7% on a 662-line generated program, 0.0% on a 530-line one
+```
+
+**Three passes read this depth and only one of them wanted it exact**, which the
+measurement had to separate. `phi_removal` and `compute_loop_depths` weight a
+spill by `2^depth`, which asks how often a block runs; the layout asks which
+successor *is* in the loop. Handing all three the exact answer scored `x2.108`
+against layout-alone's `x2.105` -- nothing -- and re-ranked the splitter's
+victims enough to cost `pressure` seeds 20 and 241 their compile, on an XMM
+overshoot at a phi seam that no spill can relieve. So the estimate stays where
+it is priced in, under its own name (`cfg::spill_weight_depths`), and the exact
+depth is the layout's alone. `-O0` output still moves: layout is not gated on
+the optimization level.
+
+**It was found by rotating loops, not by looking for it.** Rotation left a
+backward `jmp` in a nested loop that no rule of the pass explained, and the
+explanation was that the header had been laid the wrong way round all along.
 
 ### ~~Loop rotation~~
 
@@ -819,9 +856,11 @@ instructions was enough to move where the trade lands. Do not carry this
 constant through a change that moves code size; re-measure it.
 
 **A loop header is a label a backward jump targets**, computed from the
-emitted stream. Not from the CFG: `cfg::block_loop_depths` is keyed on
-`func.blocks` order, blocks are emitted in RPO, and a trampoline label can
-be a back-edge target without being a block.
+emitted stream, and that is superseded: `emit::loop_header_labels` is gone
+and `cfg::loop_header_blocks` answers it from the dominator tree, since a
+backward jump names a join under trace layout and a loop's *exit* under
+rotation. The pass is told which headers a rotation replaced, because a
+rotated header runs once as a guard.
 
 **Two things it had to get right.** The offset is measured from the
 function's first byte, so it includes the prologue -- which is encoded

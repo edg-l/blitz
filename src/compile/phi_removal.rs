@@ -82,7 +82,7 @@ pub(super) fn find_trivial_params(
     block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
     tier2: bool,
 ) -> Removal {
-    let depths = super::cfg::block_loop_depths(func);
+    let depths = super::cfg::spill_weight_depths(func);
     let entry = func.blocks.first().map(|b| b.id);
 
     // Per (target, position): the VRegs its predecessors pass, the classes they
