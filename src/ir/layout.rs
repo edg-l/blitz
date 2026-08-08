@@ -9,8 +9,8 @@
 //! scheduler or the register allocator.
 //!
 //! ```
-//! use blitz::ir::layout::Layout;
-//! use blitz::ir::types::Type;
+//! use blitzgen::ir::layout::Layout;
+//! use blitzgen::ir::types::Type;
 //!
 //! // struct Point { int x; int y; long tag; }
 //! let point = Layout::c(&[Type::I32, Type::I32, Type::I64]);

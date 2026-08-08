@@ -5,13 +5,13 @@
 //! This creates `output.o` which can be linked with a C main:
 //!   cc main.c output.o -o test && ./test
 
-use blitz::compile::{CompileOptions, compile_module};
-use blitz::ir::builder::FunctionBuilder;
-use blitz::ir::condcode::CondCode;
-use blitz::ir::types::Type;
+use blitzgen::compile::{CompileOptions, compile_module};
+use blitzgen::ir::builder::FunctionBuilder;
+use blitzgen::ir::condcode::CondCode;
+use blitzgen::ir::types::Type;
 
 /// Build: fn add(a: i64, b: i64) -> i64 { a + b }
-fn build_add() -> blitz::ir::function::Function {
+fn build_add() -> blitzgen::ir::function::Function {
     let mut b = FunctionBuilder::new("add", &[Type::I64, Type::I64], &[Type::I64]);
     let p = b.params().to_vec();
     let sum = b.add(p[0], p[1]);
@@ -20,7 +20,7 @@ fn build_add() -> blitz::ir::function::Function {
 }
 
 /// Build: fn max(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
-fn build_max() -> blitz::ir::function::Function {
+fn build_max() -> blitzgen::ir::function::Function {
     let mut b = FunctionBuilder::new("max", &[Type::I64, Type::I64], &[Type::I64]);
     let p = b.params().to_vec();
     let cond = b.icmp(CondCode::Sgt, p[0], p[1]);
@@ -31,7 +31,7 @@ fn build_max() -> blitz::ir::function::Function {
 
 /// Build: fn sum_to(n: i64) -> i64 { 1 + 2 + ... + n }
 /// Uses a loop with block parameters (SSA phi equivalent).
-fn build_sum_to() -> blitz::ir::function::Function {
+fn build_sum_to() -> blitzgen::ir::function::Function {
     let mut b = FunctionBuilder::new("sum_to", &[Type::I64], &[Type::I64]);
     let n = b.params()[0];
 
@@ -68,7 +68,7 @@ fn build_sum_to() -> blitz::ir::function::Function {
 ///   - sdiv(x, 1) is eliminated (identity)
 ///   - or(x, -1) folds to -1 (annihilation)
 ///   - The whole function becomes: return -1
-fn build_optimized() -> blitz::ir::function::Function {
+fn build_optimized() -> blitzgen::ir::function::Function {
     let mut b = FunctionBuilder::new("optimized", &[Type::I64], &[Type::I64]);
     let x = b.params().to_vec()[0];
     let one = b.iconst(1, Type::I64);
@@ -84,7 +84,7 @@ fn build_optimized() -> blitz::ir::function::Function {
 ///   - strength reduction: mul(i, 8) -> shl(i, 3)
 ///   - addr mode fusion: add(base, shl(i, 3)) -> addr(scale=8)(base, i)
 ///   - LEA formation: add(addr, 16) -> x86_lea4(scale=8, disp=16)(base, i)
-fn build_array_idx() -> blitz::ir::function::Function {
+fn build_array_idx() -> blitzgen::ir::function::Function {
     let mut b = FunctionBuilder::new("array_idx", &[Type::I64, Type::I64], &[Type::I64]);
     let p = b.params().to_vec();
     let c8 = b.iconst(8, Type::I64);

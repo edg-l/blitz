@@ -1,7 +1,22 @@
 [package]
-name = "blitz"
+name = "blitzgen"
 version = "0.1.0"
 edition = "2024"
+description = "An optimizing x86-64 compiler backend: e-graph IR with equality saturation for instruction selection, a DAG scheduler, and a graph-coloring register allocator"
+repository = "https://github.com/edg-l/blitz"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["compiler", "codegen", "backend", "x86-64", "egraph"]
+categories = ["compilers", "development-tools"]
+
+# The test corpora and the internal design notes are the repository's, not the
+# crate's: 459 files and 2.5MiB of lit programs, generated-program baselines and
+# saved fuzz findings, none of which a consumer builds against. `logo.svg` and
+# `ROADMAP.md` stay, because README.md embeds one and links the other.
+exclude = [
+    "tests/",
+    "docs/",
+]
 
 [dependencies]
 smallvec = "1"

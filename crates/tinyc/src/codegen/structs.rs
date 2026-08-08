@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use blitz::ir::builder::Value;
-use blitz::ir::types::Type;
+use blitzgen::ir::builder::Value;
+use blitzgen::ir::types::Type;
 
 use crate::ast::CType;
 use crate::error::TinyErr;

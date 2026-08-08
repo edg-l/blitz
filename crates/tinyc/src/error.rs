@@ -15,8 +15,8 @@ impl fmt::Display for TinyErr {
 
 impl std::error::Error for TinyErr {}
 
-impl From<blitz::compile::CompileError> for TinyErr {
-    fn from(e: blitz::compile::CompileError) -> Self {
+impl From<blitzgen::compile::CompileError> for TinyErr {
+    fn from(e: blitzgen::compile::CompileError) -> Self {
         // Backend errors (regalloc failures, encoding errors, etc.) are not tied
         // to source lines. line/col 0 signals a compiler-internal error.
         TinyErr {

@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
-use blitz::compile::OptLevel;
+use blitzgen::compile::OptLevel;
 
 enum Mode {
     Compile,
@@ -30,7 +30,7 @@ fn usage() -> ! {
 }
 
 fn main() {
-    blitz::trace::init_tracing();
+    blitzgen::trace::init_tracing();
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
@@ -83,8 +83,8 @@ fn main() {
     }
 
     let mut opts = match opt_level {
-        Some(OptLevel::O0) => blitz::compile::CompileOptions::o0(),
-        Some(OptLevel::O1) | None => blitz::compile::CompileOptions::o1(),
+        Some(OptLevel::O0) => blitzgen::compile::CompileOptions::o0(),
+        Some(OptLevel::O1) | None => blitzgen::compile::CompileOptions::o1(),
     };
     if let Err(e) = opts.apply_pass_overrides() {
         eprintln!("tinyc: {e}");
@@ -137,7 +137,7 @@ fn main() {
             for fi in &obj.functions {
                 println!("# {}", fi.name);
                 let code = &obj.code[fi.offset..fi.offset + fi.size];
-                match blitz::test_utils::objdump_disasm(code) {
+                match blitzgen::test_utils::objdump_disasm(code) {
                     Some(disasm) => print!("{}", disasm),
                     None => {
                         eprintln!("tinyc: objdump not found, cannot disassemble");

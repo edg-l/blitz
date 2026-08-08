@@ -8,8 +8,8 @@ pub mod parser;
 
 pub use error::TinyErr;
 
-fn default_opts() -> blitz::compile::CompileOptions {
-    blitz::compile::CompileOptions::o1()
+fn default_opts() -> blitzgen::compile::CompileOptions {
+    blitzgen::compile::CompileOptions::o1()
 }
 
 /// Run the tinyc frontend: tokenize, parse, and generate IR.
@@ -27,10 +27,10 @@ pub fn compile_source(src: &str) -> Result<Vec<u8>, TinyErr> {
 /// Compile a TinyC source string to object file bytes with custom options.
 pub fn compile_source_with_opts(
     src: &str,
-    opts: &blitz::compile::CompileOptions,
+    opts: &blitzgen::compile::CompileOptions,
 ) -> Result<Vec<u8>, TinyErr> {
     let cg = frontend(src)?;
-    let obj = blitz::compile::compile_module_with_globals(
+    let obj = blitzgen::compile::compile_module_with_globals(
         cg.functions,
         opts,
         cg.globals,
@@ -41,17 +41,17 @@ pub fn compile_source_with_opts(
 }
 
 /// Compile a TinyC source string and return the raw ObjectFile (for disassembly).
-pub fn compile_to_object(src: &str) -> Result<blitz::emit::object::ObjectFile, TinyErr> {
+pub fn compile_to_object(src: &str) -> Result<blitzgen::emit::object::ObjectFile, TinyErr> {
     compile_to_object_with_opts(src, &default_opts())
 }
 
 /// Compile a TinyC source string and return the raw ObjectFile with custom options.
 pub fn compile_to_object_with_opts(
     src: &str,
-    opts: &blitz::compile::CompileOptions,
-) -> Result<blitz::emit::object::ObjectFile, TinyErr> {
+    opts: &blitzgen::compile::CompileOptions,
+) -> Result<blitzgen::emit::object::ObjectFile, TinyErr> {
     let cg = frontend(src)?;
-    let obj = blitz::compile::compile_module_with_globals(
+    let obj = blitzgen::compile::compile_module_with_globals(
         cg.functions,
         opts,
         cg.globals,
@@ -69,10 +69,10 @@ pub fn compile_to_ir(src: &str) -> Result<String, TinyErr> {
 /// Compile a TinyC source string to IR text with custom options.
 pub fn compile_to_ir_with_opts(
     src: &str,
-    opts: &blitz::compile::CompileOptions,
+    opts: &blitzgen::compile::CompileOptions,
 ) -> Result<String, TinyErr> {
     let cg = frontend(src)?;
-    let ir = blitz::compile::compile_module_to_ir(cg.functions, opts)?;
+    let ir = blitzgen::compile::compile_module_to_ir(cg.functions, opts)?;
     Ok(ir)
 }
 

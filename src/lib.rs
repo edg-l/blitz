@@ -17,9 +17,9 @@
 //! back, and finish with [`compile`](compile::compile):
 //!
 //! ```
-//! use blitz::compile::{CompileOptions, compile};
-//! use blitz::ir::builder::FunctionBuilder;
-//! use blitz::ir::types::Type;
+//! use blitzgen::compile::{CompileOptions, compile};
+//! use blitzgen::ir::builder::FunctionBuilder;
+//! use blitzgen::ir::types::Type;
 //!
 //! // fn add(a: i64, b: i64) -> i64 { a + b }
 //! let mut b = FunctionBuilder::new("add", &[Type::I64, Type::I64], &[Type::I64]);

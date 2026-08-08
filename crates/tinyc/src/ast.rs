@@ -1,5 +1,5 @@
 use crate::lexer::Span;
-use blitz::ir::types::Type;
+use blitzgen::ir::types::Type;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CType {

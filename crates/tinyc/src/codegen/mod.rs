@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use blitz::ir::builder::{FunctionBuilder, Value, Variable};
-use blitz::ir::condcode::CondCode;
-use blitz::ir::effectful::BlockId;
-use blitz::ir::function::{Function, StackSlot};
-use blitz::ir::types::Type;
+use blitzgen::ir::builder::{FunctionBuilder, Value, Variable};
+use blitzgen::ir::condcode::CondCode;
+use blitzgen::ir::effectful::BlockId;
+use blitzgen::ir::function::{Function, StackSlot};
+use blitzgen::ir::types::Type;
 
 use crate::ast::{CType, Program};
 use crate::error::TinyErr;
@@ -26,8 +26,8 @@ mod expr;
 
 pub struct Codegen {
     pub functions: Vec<Function>,
-    pub globals: Vec<blitz::emit::object::GlobalInfo>,
-    pub rodata: Vec<blitz::emit::object::GlobalInfo>,
+    pub globals: Vec<blitzgen::emit::object::GlobalInfo>,
+    pub rodata: Vec<blitzgen::emit::object::GlobalInfo>,
     pub extern_globals: Vec<String>,
 }
 
@@ -129,7 +129,7 @@ impl Codegen {
                 bytes
             });
 
-            globals.push(blitz::emit::object::GlobalInfo {
+            globals.push(blitzgen::emit::object::GlobalInfo {
                 name: gvar.name.clone(),
                 size,
                 align,
@@ -189,7 +189,7 @@ pub(super) struct FnCtx<'b> {
     pub(super) struct_registry: &'b StructRegistry,
     pub(super) global_types: &'b HashMap<String, CType>,
     pub(super) loop_stack: Vec<LoopContext>,
-    pub(super) rodata: &'b mut Vec<blitz::emit::object::GlobalInfo>,
+    pub(super) rodata: &'b mut Vec<blitzgen::emit::object::GlobalInfo>,
     pub(super) string_counter: &'b mut usize,
     pub(super) string_dedup: &'b mut HashMap<Vec<u8>, String>,
 }
@@ -202,7 +202,7 @@ impl<'b> FnCtx<'b> {
         addressed_vars: HashSet<String>,
         struct_registry: &'b StructRegistry,
         global_types: &'b HashMap<String, CType>,
-        rodata: &'b mut Vec<blitz::emit::object::GlobalInfo>,
+        rodata: &'b mut Vec<blitzgen::emit::object::GlobalInfo>,
         string_counter: &'b mut usize,
         string_dedup: &'b mut HashMap<Vec<u8>, String>,
     ) -> Self {

@@ -1,6 +1,6 @@
-use blitz::ir::builder::Value;
-use blitz::ir::condcode::CondCode;
-use blitz::ir::types::Type;
+use blitzgen::ir::builder::Value;
+use blitzgen::ir::condcode::CondCode;
+use blitzgen::ir::types::Type;
 
 use crate::ast::{BinOp, CType, Expr, SpannedExpr, UnaryOp};
 use crate::error::TinyErr;
@@ -226,7 +226,7 @@ impl<'b> FnCtx<'b> {
                     let label = format!(".L.str.{}", self.string_counter);
                     *self.string_counter += 1;
 
-                    self.rodata.push(blitz::emit::object::GlobalInfo {
+                    self.rodata.push(blitzgen::emit::object::GlobalInfo {
                         name: label.clone(),
                         size: data.len(),
                         align: 1,

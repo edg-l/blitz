@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::Command;
 
-use blitz::compile::CompileOptions;
+use blitzgen::compile::CompileOptions;
 
 use super::*;
 
@@ -12,7 +12,7 @@ fn compile_and_disasm(src: &str) -> String {
     let mut out = String::new();
     for func_info in &obj.functions {
         let code = &obj.code[func_info.offset..func_info.offset + func_info.size];
-        if let Some(disasm) = blitz::test_utils::objdump_disasm(code) {
+        if let Some(disasm) = blitzgen::test_utils::objdump_disasm(code) {
             out.push_str(&format!(
                 "=== {} ({} bytes) ===\n",
                 func_info.name, func_info.size
@@ -1375,7 +1375,7 @@ fn test_uncalled_definition_survives_separate_compilation() {
         int helper(int x) { return x * 3; }
         int main() { return 0; }";
 
-    let mut opts = blitz::compile::CompileOptions::o1();
+    let mut opts = blitzgen::compile::CompileOptions::o1();
     assert!(!opts.whole_program);
     let obj = compile_to_object_with_opts(src, &opts).expect("compile failed");
     let names: Vec<&str> = obj.functions.iter().map(|f| f.name.as_str()).collect();
@@ -1406,7 +1406,7 @@ fn test_uncalled_definition_survives_separate_compilation() {
 /// paddable before it trusts its own verdict.
 #[test]
 fn loop_headers_are_aligned_or_too_far_to_be_worth_it() {
-    use blitz::emit::align::MAX_SKIP;
+    use blitzgen::emit::align::MAX_SKIP;
 
     let mut aligned_off = CompileOptions::o1();
     aligned_off.enable_nop_alignment = false;
@@ -1467,7 +1467,7 @@ fn loop_headers(src: &str, opts: &CompileOptions) -> Vec<usize> {
     let mut out = Vec::new();
     for fi in &obj.functions {
         let code = &obj.code[fi.offset..fi.offset + fi.size];
-        let Some(disasm) = blitz::test_utils::objdump_disasm(code) else {
+        let Some(disasm) = blitzgen::test_utils::objdump_disasm(code) else {
             return Vec::new();
         };
         out.extend(backward_jump_targets(&disasm));

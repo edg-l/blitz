@@ -2,11 +2,13 @@
 name = "tinyc"
 version = "0.1.0"
 edition = "2024"
+# Test consumer / internal harness, not a product.
+publish = false
 
 [[bin]]
 name = "tinyc"
 path = "src/main.rs"
 
 [dependencies]
-blitz = { path = "../.." }
+blitzgen = { path = "../.." }
 tracing = "0.1"

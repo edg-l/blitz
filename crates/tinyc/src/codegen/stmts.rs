@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use blitz::ir::builder::{FunctionBuilder, Variable};
-use blitz::ir::function::{Function, StackSlot};
-use blitz::ir::types::Type;
+use blitzgen::ir::builder::{FunctionBuilder, Variable};
+use blitzgen::ir::function::{Function, StackSlot};
+use blitzgen::ir::types::Type;
 
 use crate::addr_analysis::find_addressed_vars;
 use crate::ast::{CType, Expr, FnDef, SpannedExpr, Stmt, UnaryOp};
@@ -18,7 +18,7 @@ pub(super) fn compile_fn(
     fn_sigs: &HashMap<String, super::FnSig>,
     struct_registry: &StructRegistry,
     global_types: &HashMap<String, CType>,
-    rodata: &mut Vec<blitz::emit::object::GlobalInfo>,
+    rodata: &mut Vec<blitzgen::emit::object::GlobalInfo>,
     string_counter: &mut usize,
     string_dedup: &mut HashMap<Vec<u8>, String>,
 ) -> Result<Function, TinyErr> {

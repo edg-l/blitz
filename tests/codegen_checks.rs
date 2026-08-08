@@ -6,12 +6,12 @@
 //!
 //! This is the Blitz equivalent of LLVM's FileCheck workflow.
 
-use blitz::compile::{CompileOptions, compile, compile_to_ir_string};
-use blitz::ir::builder::FunctionBuilder;
-use blitz::ir::condcode::CondCode;
-use blitz::ir::function::Function;
-use blitz::ir::types::Type;
-use blitz::test_utils::objdump_disasm;
+use blitzgen::compile::{CompileOptions, compile, compile_to_ir_string};
+use blitzgen::ir::builder::FunctionBuilder;
+use blitzgen::ir::condcode::CondCode;
+use blitzgen::ir::function::Function;
+use blitzgen::ir::types::Type;
+use blitzgen::test_utils::objdump_disasm;
 use blitztest::check::run_checks;
 use blitztest::directive::{CheckPattern, Directive, parse_directives};
 

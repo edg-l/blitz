@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/target-x86--64%20SysV-3B82F6?style=flat-square" alt="target: x86-64 SysV">
   <img src="https://img.shields.io/badge/output-ELF%20objects-3B82F6?style=flat-square" alt="output: ELF objects">
   <img src="https://img.shields.io/badge/rust-2024%20edition-7C3AED?style=flat-square" alt="rust 2024 edition">
-  <img src="https://img.shields.io/badge/tests-1033%20unit%20%C2%B7%20592%20lit%20%C2%B7%201352%20fuzz-22C55E?style=flat-square" alt="tests">
+  <img src="https://img.shields.io/badge/tests-1036%20unit%20%C2%B7%20594%20lit%20%C2%B7%201352%20fuzz-22C55E?style=flat-square" alt="tests">
 </sub>
 
 </div>
@@ -29,10 +29,14 @@ There is no separate "isel" phase to undo the optimizer's work.
 
 ## Quick start
 
+```console
+$ cargo add blitzgen
+```
+
 ```rust
-use blitz::compile::{CompileOptions, compile};
-use blitz::ir::builder::FunctionBuilder;
-use blitz::ir::types::Type;
+use blitzgen::compile::{CompileOptions, compile};
+use blitzgen::ir::builder::FunctionBuilder;
+use blitzgen::ir::types::Type;
 
 // fn add(a: i64, b: i64) -> i64 { a + b }
 let mut b = FunctionBuilder::new("add", &[Type::I64, Type::I64], &[Type::I64]);
@@ -81,7 +85,7 @@ fold one away and print the answer.
 
 <table>
 <tr><th align="left">geomean over 24 kernels</th><th>vs <code>gcc -O2</code></th><th>vs <code>clang -O2</code></th></tr>
-<tr><td><b>cycles</b> &nbsp;<code>tests/run_perf.sh</code></td><td align="center"><b>x2.21</b></td><td align="center"><b>x2.83</b></td></tr>
+<tr><td><b>cycles</b> &nbsp;<code>tests/run_perf.sh</code></td><td align="center"><b>x2.11</b></td><td align="center"><b>x2.70</b></td></tr>
 <tr><td>instructions &nbsp;<code>run_codesize.sh --gap</code></td><td align="center">x1.05</td><td align="center">x0.72</td></tr>
 </table>
 
@@ -139,12 +143,12 @@ worth reading — what previous attempts measured, including the ones that lost.
 ## Testing
 
 ```console
-$ cargo test --all-targets --workspace   # 1033 unit and codegen tests
-$ bash tests/lit/run_tests.sh            # 592 FileCheck-style tests
-$ bash tests/lit/run_diff.sh             # 356 comparisons: -O0 vs -O1 vs cc
+$ cargo test --all-targets --workspace   # 1036 unit and codegen tests
+$ bash tests/lit/run_tests.sh            # 594 FileCheck-style tests
+$ bash tests/lit/run_diff.sh             # 357 comparisons: -O0 vs -O1 vs cc
 $ bash tests/fuzz/run_fuzz.sh            # 1352 random UB-free programs
 $ bash tests/fuzz/run_corpus.sh          # the saved failures, in seconds
-$ bash tests/run_codesize.sh --check     # 1008 rows of code quality, vs baselines
+$ bash tests/run_codesize.sh --check     # 1010 rows of code quality, vs baselines
 ```
 
 Two harnesses check *values* rather than patterns, and they fail differently.
@@ -169,3 +173,16 @@ memory access with addressing-mode fusion, and programs that need spilling.
 
 `crates/tinyc` is a small C frontend that exists to feed the backend realistic
 input in tests. It is not a product.
+
+## License
+
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.

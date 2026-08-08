@@ -2,6 +2,8 @@
 name = "blitztest"
 version = "0.1.0"
 edition = "2024"
+# Test consumer / internal harness, not a product.
+publish = false
 
 [[bin]]
 name = "blitztest"
