@@ -193,8 +193,7 @@ pub fn compile_module_to_ir(
     mut functions: Vec<Function>,
     opts: &CompileOptions,
 ) -> Result<String, CompileError> {
-    let has_main = functions.iter().any(|f| f.name == "main");
-    crate::inline::inline_module(&mut functions, opts, has_main);
+    crate::inline::inline_module(&mut functions, opts);
 
     // DCE1: remove unreachable blocks created by inlining. Unconditional, to
     // match the pipeline module.rs runs.

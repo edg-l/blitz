@@ -338,8 +338,8 @@ what makes attribution possible here.
       the same one -- they have to, or the colourer needs a register the splitter
       was never asked to free. `lit/functions/fifteen_int_params.c`. Found by the
       ABI enumeration; changed none of the 980 codesize rows.
-- [ ] **A non-`static` function with no caller in its own file is not emitted**,
-      so separate compilation produces an object nobody can link against. Two
+- [x] **A non-`static` function with no caller in its own file was not emitted**,
+      so separate compilation produced an object nobody could link against. Two
       files, `helper` defined in one and called from the other:
 
       ```
@@ -347,19 +347,36 @@ what makes attribution possible here.
       (.text+0x18): undefined reference to `helper'
       ```
 
-      `readelf -sW` on the object shows `main` alone where `cc` emits `main` and
+      `readelf -sW` on the object showed `main` alone where `cc` emits `main` and
       `helper`. Nothing in that translation unit calls `helper`, so the
       dead-function elimination that `lit/inline/dead_func_eliminated.c` covers
-      removes it -- which is right for a whole program and wrong for a `-c`
-      compile, where any external definition may be the one another object needs.
-      The fix is a condition, not a removal: eliminate only when compiling a whole
-      program. `compile_module_with_globals` already knows `has_main`, which is not
-      the same question and is the nearest thing to it that exists.
+      removed it -- right for a whole program, wrong for a `-c` compile, where any
+      external definition may be the one another object needs.
 
+      **The condition it was gated on was `has_main`, and that is a fact about the
+      module rather than about the compilation.** `CompileOptions::whole_program`
+      is the fact that was missing, it defaults to `false`, and only the driver
+      sets it: a module is the whole program when it is the sole input *and* this
+      run produces the executable. That covers `-c` and the multi-input link too,
+      which fails identically -- `tinyc a.c b.c` compiles each file separately and
+      links the objects afterwards, so neither is a whole program either.
+      `has_main` is now checked inside `eliminate_dead_functions`, next to the BFS
+      that needs a root, rather than derived by two callers.
+
+      **What it costs**: a `static` helper is kept as well, because `ir::Function`
+      carries no visibility and nothing can tell the two apart. Recovering that
+      needs `static` in tinyc and a linkage field on `Function`. Note also that
+      elimination is still reached only through `inline_module`, so it does not run
+      at `-O0` at all.
+
+      `lit/multifile/cross_file_uncalled_definition.c` and the tinyc unit test
+      `test_uncalled_definition_survives_separate_compilation` pin both halves.
       Found while checking that a cross-object *tail* call links. It has nothing to
-      do with tail calls -- the non-tail version fails identically -- and it is the
+      do with tail calls -- the non-tail version failed identically -- and it is the
       kind of defect no single-file corpus can see, which is the same gap the
-      multi-file tests exist for and evidently do not cover.
+      multi-file tests exist for and did not cover: every one of them puts `main`
+      in the file under test and the helpers in a file that has none, so
+      `has_main` was false there and the elimination never ran.
 - [ ] **`assign_args` `unreachable!()`s on a struct** (`src/x86/abi.rs`). Same
       tier mistake: the frontend cannot produce one today, so it reads as a
       feature gap, but the failure mode is a panic rather than a diagnostic.

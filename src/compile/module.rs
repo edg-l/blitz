@@ -35,11 +35,9 @@ pub fn compile_module_with_globals(
     rodata: Vec<crate::emit::object::GlobalInfo>,
     extern_globals: Vec<String>,
 ) -> Result<ObjectFile, CompileError> {
-    let has_main = functions.iter().any(|f| f.name == "main");
-
     verify_all("ir-construction", &functions);
 
-    crate::inline::inline_module(&mut functions, opts, has_main);
+    crate::inline::inline_module(&mut functions, opts);
     verify_all("inlining", &functions);
 
     // DCE1: remove unreachable blocks created by inlining. Unconditional, for

@@ -1364,3 +1364,25 @@ fn test_struct_extern_param_error() {
     let result = compile_source(src);
     assert!(result.is_err());
 }
+
+/// A definition with no caller in its own translation unit must survive
+/// separate compilation: the caller may be in another object.
+#[test]
+fn test_uncalled_definition_survives_separate_compilation() {
+    let src = "
+        int helper(int x) { return x * 3; }
+        int main() { return 0; }";
+
+    let mut opts = blitz::compile::CompileOptions::o1();
+    assert!(!opts.whole_program);
+    let obj = compile_to_object_with_opts(src, &opts).expect("compile failed");
+    let names: Vec<&str> = obj.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"helper"), "got {names:?}");
+    assert!(names.contains(&"main"), "got {names:?}");
+
+    opts.whole_program = true;
+    let obj = compile_to_object_with_opts(src, &opts).expect("compile failed");
+    let names: Vec<&str> = obj.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(!names.contains(&"helper"), "got {names:?}");
+    assert!(names.contains(&"main"), "got {names:?}");
+}

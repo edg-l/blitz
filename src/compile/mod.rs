@@ -128,6 +128,20 @@ pub struct CompileOptions {
     pub enable_phi_removal: bool,
     /// Enable function inlining before optimization.
     pub enable_inlining: bool,
+    /// This module is the entire program being linked, so a function no path
+    /// from `main` reaches is dead and can be dropped.
+    ///
+    /// **Defaults to `false`, and the default is the safe one.** A module is a
+    /// translation unit; nothing inside the compiler can tell whether a
+    /// definition it holds is the one another object needs at link time. Only
+    /// the driver knows, and only when it is producing an executable from this
+    /// module alone -- with `-c`, or with a second input file, an unreferenced
+    /// non-`static` definition must survive or the object is unlinkable.
+    ///
+    /// Note that C linkage is not modelled: `ir::Function` carries no
+    /// visibility, so a `static` helper is indistinguishable from an
+    /// externally-visible one and is kept too.
+    pub whole_program: bool,
     /// Turn a tail call to this same function into a jump to the top of its own
     /// body. Off at `-O0`: the recursion's frames are what a debugger walks.
     pub enable_tail_calls: bool,
@@ -233,6 +247,7 @@ impl CompileOptions {
             enable_dse: false,
             enable_phi_removal: true,
             enable_inlining: false,
+            whole_program: false,
             enable_tail_calls: false,
             enable_dead_insts: false,
             max_inline_depth: 3,
@@ -257,6 +272,7 @@ impl CompileOptions {
             enable_dse: true,
             enable_phi_removal: true,
             enable_inlining: true,
+            whole_program: false,
             enable_tail_calls: true,
             enable_dead_insts: true,
             max_inline_depth: 3,

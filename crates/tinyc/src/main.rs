@@ -95,6 +95,12 @@ fn main() {
         usage();
     }
 
+    // Each input file is compiled on its own and the objects are linked
+    // afterwards, so a module is the whole program only when it is the only
+    // one and this run produces the executable. Under `-c`, or beside a second
+    // input, an unreferenced definition here may be what another object needs.
+    opts.whole_program = !compile_only && input_paths.len() == 1;
+
     // Apply compile_only flag to mode
     if compile_only {
         mode = Mode::CompileOnly;

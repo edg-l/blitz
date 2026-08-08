@@ -15,9 +15,9 @@ use transform::inline_call_site;
 
 /// Inline function calls across a module, then eliminate dead functions.
 ///
-/// When `is_executable` is true, only functions reachable from `main` are kept.
-/// When false (library/object-only compilation), all functions are kept.
-pub fn inline_module(functions: &mut Vec<Function>, opts: &CompileOptions, is_executable: bool) {
+/// Dead function elimination needs `opts.whole_program`: a definition nothing
+/// here calls may still be the one another object links against.
+pub fn inline_module(functions: &mut Vec<Function>, opts: &CompileOptions) {
     if !opts.enable_inlining {
         return;
     }
@@ -84,8 +84,7 @@ pub fn inline_module(functions: &mut Vec<Function>, opts: &CompileOptions, is_ex
         }
     }
 
-    // Dead function elimination: only for executable mode (has main).
-    if is_executable {
+    if opts.whole_program {
         eliminate_dead_functions(functions);
     }
 }
@@ -111,6 +110,12 @@ fn eliminate_dead_functions(functions: &mut Vec<Function>) {
 
     let call_graph = build_call_graph(functions);
     let func_names: BTreeSet<String> = functions.iter().map(|f| f.name.clone()).collect();
+
+    // The reachability root. Without a definition of it the BFS reaches
+    // nothing and every function in the module looks dead.
+    if !func_names.contains("main") {
+        return;
+    }
 
     // BFS from "main".
     let mut reachable = BTreeSet::new();
