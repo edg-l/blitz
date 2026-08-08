@@ -972,21 +972,21 @@ call-point detection it was written for. Its callee now stores.
 
 ## Current state (2026-08-08)
 
-- 1025 Rust tests + 586 lit tests, all green. `cargo fmt` clean, `cargo clippy
+- 1036 Rust tests + 594 lit tests, all green. `cargo fmt` clean, `cargo clippy
   --all-targets` clean, zero build warnings, zero rustdoc warnings.
 - `BLITZ_VERIFY=1` and `BLITZ_VERIFY=strict` green across both suites, with no
   row red on purpose. **No `P0` item is in the Start here queue any more**: the
   queue starts at `P1`. `P0` still holds the items below that no reproducer names
   -- the `assign_args` panic, the C-surface probe, the second implementation, the
   one-fact-one-place audit.
-- `bash tests/lit/run_diff.sh`: 353 compared `-O0`-vs-`-O1` and against a
+- `bash tests/lit/run_diff.sh`: 357 compared `-O0`-vs-`-O1` and against a
   reference compiler; no skips, no differences under gcc or clang.
 - **`-O0` is on `regalloc::fast` and both levels are correct.** Everything below
   is `-O1` unless it says otherwise.
 - `bash tests/fuzz/run_corpus.sh`: 19 `fixed` programs, all passing at both
   levels, and nothing open.
 - Generated programs: `mixed` 400/400, `args` 400/400, `pressure` 400/400, which
-  is what `run_fuzz.sh` now sweeps by default, plus `abi` -- 98 programs
+  is what `run_fuzz.sh` now sweeps by default, plus `abi` -- 152 programs
   enumerating the argument surface rather than sampling it, all passing. **The width is what makes it a
   check** -- the `-O1` allocator bug in `fixed/args-seed310.c` is at seed 310 of
   `args` alone, and at the 30 seeds the gates used to be run at, all three
@@ -994,8 +994,9 @@ call-point detection it was written for. Its callee now stores.
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, over `lit`,
   `bench`, `live` and `fuzz`, fed by `BLITZ_DEBUG=stats`.
 - Code quality also has an *absolute* number, which is the one the Goal is
-  written against: `bash tests/run_perf.sh`, `x2.49` cycles vs `gcc -O2` over
-  the 24 `live` kernels, median of 5 `perf stat` samples each. Cycle counts vary
+  written against: `bash tests/run_perf.sh`, `x2.11` cycles vs `gcc -O2` and
+  `x2.70` vs `clang -O2` over the 24 `live` kernels, median of 5 `perf stat`
+  samples each. Cycle counts vary
   ~1% run to run here; instructions retired vary 0.00%, and are the wrong metric
   for the reason the Goal gives. Widening `live` has no natural ceiling and is
   always a valid use of leftover time.
@@ -1011,8 +1012,12 @@ call-point detection it was written for. Its callee now stores.
   the truth was `x3.07`.
 - **Compile time is superlinear in blocks x classes**: `secs ~ (B*C)^0.86`,
   R2=0.92, and **both levels sit on one line**. `-O1` is not intrinsically
-  cheaper, it hands the same pipeline a smaller IR. On a 6048-line input the two
-  levels are now 246ms (`-O0`) and 250ms (`-O1`). The remaining Theta(B*C) site
+  cheaper, it hands the same pipeline a smaller IR. **How far that cancels out
+  is the program's, not a property**: on a 6048-line input the two levels came
+  out at 246ms (`-O0`) and 250ms (`-O1`), where on the largest `gen_c.py` will
+  produce today -- 3193 lines, `mixed` seed 28 -- they are 89ms and 225ms. Do
+  not quote "both levels sit on one line" as a general claim; the line is
+  `secs ~ (B*C)^0.86`, and the levels sit on it at different `B*C`. The remaining Theta(B*C) site
   is the splitter's pressure scan; linearize's per-block class-map
   evict-and-restore has been narrowed. `bash tests/profile.sh <src> [flags]` is
   the way in; `perf report` hangs on these profiles, `perf script` does not.
