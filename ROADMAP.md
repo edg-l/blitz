@@ -72,9 +72,9 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **`P2`'s constant cost model** -- the only entry left with a measured payoff,
-  and it is not in `P1`. It unblocks three isel items at once *and* `P1`'s
-  narrowing item, and the missing structure is a parents map in the e-graph.
+- **`P2`'s `subsume` marker** -- no measurement, but it is the one item whose
+  payoff is structural rather than guessed: it makes `saturate_isel` a property
+  of the rules instead of a pass and shrinks every class isel touches.
 - **Loop strength reduction** -- `P1`, the largest *claimed* payoff and no
   measurement at all. Count what the `live` kernels recompute before writing the
   pass.
@@ -84,10 +84,10 @@ rather than restating it. Take them top to bottom.
   still puts 150 of 371 in `cp_other`, which is no longer one shape. Measure
   before choosing a fix -- doing that is what found both of the last two.
 
-`P1` is ordered by evidence and **no open entry has any** -- see the note at the
-head of that section. **`P2` is where the single-target thesis pays off**,
-though half of it is unreachable until tinyc grows builtins -- see the note
-there.
+**No open entry anywhere has a measurement**, which is the state to read this
+document in: the last two that did have both landed. `P1` is ordered by
+argument, and **`P2` is where the single-target thesis pays off**, though half
+of it is unreachable until tinyc grows builtins -- see the note there.
 
 The argument this paragraph used to make is gone and worth not repeating: it
 said the temptation is to start on GVN or LSR because they are the recognizable
@@ -301,6 +301,59 @@ three-operand `lea` that existed to dodge a copy blitz no longer makes:
 `lea x,[x+1]` is now `inc x` and `lea x,[x+y]` is `add x,y`.
 
 What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
+
+### ~~A cost model that can see a constant being materialized~~
+
+**`Iconst` still costs 0.0, and that was never the bug.** Whether a constant is
+free is the *consumer's* question -- an immediate field costs nothing, a
+register operand costs `mov r, imm32` -- so the charge belongs at the parent.
+`CostModel::operand_needs_register` already did this for addressing modes; it
+now answers true for **every** machine op.
+
+**The generalization is a fact about the representation, not a list.** An
+immediate in this e-graph rides on the *op* -- `X86AddI(i32)`, `X86ShlImm(u8)`,
+`X86CmpI { imm }`, `X86Lea4 { disp }` -- so an operand still present as a child
+class is one the encoding will read from a register. Every other `PureOp` is
+priced `INFINITY` and never extracted, so `Op::Mach(_) | PureOp::Addr` is the
+whole predicate.
+
+**The `imm32` ALU form now wins on its own**, which was the item's first
+consequence and had been priced to lose. `argc & 123456` is `and edx,0x1e240`
+where it was `mov edx,0x1e240; and edx,eax`; `tests/lit/asm/alu_imm32.c` pins
+it. Nothing had to be re-checked in
+`tests/lit/control/main_falls_off_end.c` -- pricing the form to win directly is
+what broke that, and charging the register form instead does not.
+
+```
+lit    O1   36 rows  insts -1.9%  spills  -0.7%  reloads  -0.8%  copies -3.1%
+fuzz   O1   86 rows  insts -2.2%  spills  -2.1%  reloads  -2.8%  copies -2.2%
+bench  O1   10 rows  insts -2.7%  spills -15.4%  reloads -25.5%
+live   O1   24 rows  insts -7.3%  spills -17.9%  reloads -14.2%
+```
+
+**Cycles `x2.459` to `x2.377` against `gcc -O2`**, twice, which is the first
+change in a while to move them past run-to-run variance -- and `live` is where
+the instruction count moved most, so for once the two agree. Both levels move:
+extraction runs at `-O0` too, and pricing an instruction correctly is not an
+optimization a level buys.
+
+Two of 1004 rows got *more* instructions (`bench/matmul.c` at `-O0`, 393 to
+400; `fuzz/mixed-seed14` at `-O1`, 370 to 372).
+
+**What is left of the item is only the exactness**: the same constant is
+charged once per parent, where a shared one is materialized once. That
+overcharge is what tilts the choice toward the immediate forms, and it measures
+better than the truth would -- see the open parents-map entry.
+
+**A second overcharge is deliberate and was measured out.** The immediate ALU
+forms price `size` as their true encoding *less the register form's* `3.0`,
+which double-counts against the `mov` now charged to the register form. Pricing
+them honestly moves 11 of 1004 rows -- `-0.6%` instructions on `lit`, `-2.6%`
+on `bench`, `-1.5%` on `live`, `+0.1%` on `fuzz` -- and costs `bts r, imm8` to
+`or r, imm32`, correctly: Skylake's reciprocal throughput is 0.25 against 0.5,
+and `Balanced` weights `size` at 0.1. Giving up an x86-64 form for a generic
+one to gain nothing is the wrong trade, so the relative pricing stays and
+`tests/lit/asm/bit_ops.c` is what says so.
 
 ### ~~SCCP~~
 
@@ -930,9 +983,9 @@ predicted.
       corpora is cheap and would move this up or off the list.
 
 - [ ] **Narrowing / type-width analysis.** **Last because it is blocked, not
-      merely unmeasured**: it needs known-bits to reach loop-carried values and
-      it needs a cost model that can say "free only when the registers
-      coincide", and both are named below. **Attempted, measured, reverted, and
+      merely unmeasured**: it needs known-bits to reach loop-carried values,
+      which is named below, and it needs a cost model that can say "free only
+      when the registers coincide", which nothing on this list provides. **Attempted, measured, reverted, and
       the reason is a cost-model hazard worth knowing before the next
       attempt.**
 
@@ -979,20 +1032,6 @@ cheapest unblock for the whole group is a small set of builtins in tinyc, which
 is a decision to take deliberately or not at all; picking one of these items up
 without taking it is picking up work that cannot land.
 
-- [ ] **A cost model that can see a constant being materialized.** This blocks
-      three separate items, which is why it leads the list -- and with half this
-      tier unreachable it is the highest ratio of unblocks-to-cost in the whole
-      document, not just here. `Iconst` costs 0.0,
-      so the `mov r, imm32` a register form needs is invisible to extraction and
-      any immediate form has to carry the credit itself. Consequences today: the
-      `imm32` ALU form is not selected (only `imm8`), worth a measured -1.4pp on
-      `lit` and `fuzz` and -0.13pp on `bench`; the demanded-bits direction of
-      shift+mask folding cannot be done; and store-of-immediate and the
-      3-operand LEA had to be peepholes rather than isel rules. The credit is
-      owed only where the constant has a single use, and **the e-graph has no
-      parents map to ask**. That is the actual missing structure. If it lands,
-      re-check `tests/lit/control/main_falls_off_end.c`, which is what pricing
-      the `imm32` form to win broke last time.
 - [ ] **A `subsume` marker on rewrite rules**, so a rule can say its result
       *replaces* the alternatives rather than joining them (Fallin, 2026). Isel
       classes carry the generic op forever at infinite cost, extraction skips it
@@ -1000,6 +1039,19 @@ without taking it is picking up work that cannot land.
       because extraction fails outright on a class with no machine op. Subsume
       makes that a property of the rules instead of a pass, and shrinks every
       class isel touches.
+- [ ] **A parents map, so the materialization credit can be exact.** The credit
+      itself is charged -- see the closed entry -- but once per parent, where a
+      shared constant is materialized once and read from its register. What is
+      owed is the credit for a constant with a *single use*, and the e-graph
+      cannot count uses.
+
+      **Unmeasured, and the overcharge currently wins**, so this is a
+      refinement rather than a fix: every corpus improved with the credit
+      charged unconditionally. Before building the map, count how often an
+      extracted `Iconst` class has more than one extracted parent -- if the
+      answer is "rarely", there is nothing here. Note the map cannot be read
+      naively either: an e-node parent is not an *extracted* parent, and
+      extraction is what decides which parents exist.
 - [ ] *(unreachable: needs builtins)* **Bit instructions**: `popcnt`, `bsr`/`bsf`, `tzcnt`/`lzcnt`, `bswap`, and
       `bt` itself -- the read form, whose result is a flag and so needs the
       compare seam rather than a value class. `bt` needs a cc-carrying node like
@@ -1200,9 +1252,10 @@ measured, not what it seems to settle.**
      both cases where extraction took the distributed form and the allocator paid
      for it, `+10.1%` and `+1.2%` instructions for `+17%` and `+19%` cycles.
 
-  **What would have to change first**: `P2`'s cost model item, since a cost that
-  cannot see pressure cannot choose between these forms. Do not write more
-  exploration rules until it can. The two that already pay -- commutativity and
+  **What would have to change first**: a cost model that can see register
+  pressure, which nothing on this list provides -- the constant-materialization
+  item that used to be cited here was about immediates and has landed without
+  touching pressure. Do not write more exploration rules until one exists. The two that already pay -- commutativity and
   constant-multiply decomposition -- both offer alternatives whose cost *is*
   visible per node, which is now the distinguishing property rather than a
   coincidence.

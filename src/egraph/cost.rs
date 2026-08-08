@@ -42,11 +42,10 @@ impl CostModel {
 
     /// Cost of getting a constant into a register with `mov r, imm32`.
     ///
-    /// `Iconst` is priced at 0.0 because a constant is normally an immediate
-    /// field of the instruction that reads it, and so costs nothing of its own.
-    /// An operand position with no immediate encoding is the exception: there
-    /// the constant needs a register and a `mov` to fill it, and only the
-    /// consumer knows that. See [`Self::operand_needs_register`].
+    /// `Iconst` is priced at 0.0 because a constant that ends up in an
+    /// instruction's immediate field costs nothing of its own. Whether it does
+    /// is the consumer's question, not the constant's, which is why this is
+    /// charged at the parent. See [`Self::operand_needs_register`].
     pub fn const_materialization(&self) -> f64 {
         CostTuple {
             latency: 1.0,
@@ -59,16 +58,25 @@ impl CostModel {
     /// Whether an operand of `op` has to be a register, so a constant there is
     /// paid for at [`Self::const_materialization`] rather than being free.
     ///
-    /// x86-64 addressing modes encode a displacement, never an immediate base
-    /// or index, so every operand of an address computation is a register.
+    /// **Every machine op's operands do**, and that is a fact about how this
+    /// e-graph represents immediates rather than about x86-64: an immediate
+    /// rides on the *op* -- `X86AddI(i32)`, `X86ShlImm(u8)`, `X86CmpI { imm }`,
+    /// `X86Lea4 { disp }` -- so an operand that is still a child class is one
+    /// the encoding will read from a register. A constant there needs a `mov`
+    /// to fill it, and the parent is the only node that knows.
+    ///
+    /// `PureOp::Addr` joins them because it lowers into a load or store's
+    /// addressing mode, which encodes a displacement and never an immediate
+    /// base or index. Every other `PureOp` is priced `INFINITY` and never
+    /// extracted, so it cannot be a parent of anything.
+    ///
+    /// **This charges the same constant once per parent**, where a shared one
+    /// is materialized once and read from its register. Overstating it is what
+    /// makes the immediate forms win, and they do measure better -- but the
+    /// exact credit is owed only to a constant with a single use, and the
+    /// e-graph has no parents map to ask.
     pub fn operand_needs_register(op: &Op) -> bool {
-        matches!(
-            op,
-            Op::Pure(PureOp::Addr { .. })
-                | Op::Mach(MachOp::X86Lea2)
-                | Op::Mach(MachOp::X86Lea3 { .. })
-                | Op::Mach(MachOp::X86Lea4 { .. })
-        )
+        matches!(op, Op::Mach(_) | Op::Pure(PureOp::Addr { .. }))
     }
 
     /// Cost of a single node (not including children).
@@ -117,21 +125,21 @@ impl CostModel {
 
             // ── x86-64 immediate-form ALU ────────────────────────────────────────
             //
-            // Priced against the register form it replaces, not on its own: the
-            // node that form needs in addition is an `Iconst`, which costs 0.0
-            // here, so the `mov r, imm32` materializing it is invisible. The
-            // real comparison is against `mov` + the register op, seven bytes.
+            // `size` is the true encoding -- three bytes, six -- less the
+            // register form's own `3.0`, so an immediate form is credited the
+            // difference twice: once here and once as the `mov r, imm32` that
+            // `operand_needs_register` charges the register form for its
+            // `Iconst` operand. Removing the credit here leaves the model
+            // truthful and is worth nothing: 11 of 1004 rows move, `-0.6%`
+            // instructions on `lit`, `-2.6%` on `bench`, `-1.5%` on `live`,
+            // `+0.1%` on `fuzz`.
             //
-            // An `imm8` form is three bytes against those seven, so it wins by a
-            // margin no tie-break has to be invented for. An `imm32` form is six
-            // against seven -- one byte -- and pricing it to win costs
-            // `tests/lit/control/main_falls_off_end.c` its compile: it changes
-            // the schedule at a point the allocator already cannot colour.
-            // Measured, the wide case is worth -1.4pp of instructions on `lit`
-            // and `fuzz` and 0.13pp on `bench`, which is not a capacity failure's
-            // worth. It comes back when the credit can be made honest -- it is
-            // only owed where the constant has a single use, and the e-graph has
-            // no parents map to ask.
+            // What it does cost is the single-bit forms below. On honest sizes
+            // `or r, imm32` beats `bts r, imm8` under `Balanced`, and correctly
+            // so -- Skylake's reciprocal throughput is 0.25 against 0.5, which
+            // at `size * 0.1` outweighs the two bytes. A wash in aggregate that
+            // gives up an x86-64 form for a generic one is the wrong trade, so
+            // the relative pricing stays.
             Op::Mach(MachOp::X86AddI(imm))
             | Op::Mach(MachOp::X86SubI(imm))
             | Op::Mach(MachOp::X86AndI(imm))
@@ -198,17 +206,16 @@ impl CostModel {
             }
 
             // The constant-index forms are priced against the register form they
-            // replace, as the immediate-form ALU is. The mask is a bit at 7 or
-            // above, so no immediate-form ALU node exists for it and the only
-            // other way to reach it is an `Iconst` -- 0.0 here -- read by a
-            // register-form `or`/`and`/`xor` at 3.0. The `mov r, imm32` that
-            // `Iconst` needs is five bytes, ten for a 64-bit mask, so the pair
-            // is eight bytes or thirteen where `bts r, imm8` is four; `size` is
-            // that difference against the register form's own 3.0, clamped at
-            // zero. Where the constant is shared it is materialized anyway and
-            // the four bytes buy only a freed register, but a one-bit mask past
-            // `imm8` with more than one use is rare enough to pay for the case
-            // that is not.
+            // replace, as the immediate-form ALU is, and `0.0` is that
+            // difference clamped: `bts r, imm8` is four bytes where the
+            // register form is a `mov r, imm32` and an `or` -- eight, or
+            // thirteen for a 64-bit mask.
+            //
+            // Four is what this should read on its own encoding, and it loses
+            // there: `or r, imm32` is one `size` step worse and one throughput
+            // step better, and `Balanced` weights throughput ten times as
+            // heavily. The register form it is priced against no longer exists
+            // by then, because the `imm32` ALU form takes it first.
             Op::Mach(MachOp::X86BtsI(_))
             | Op::Mach(MachOp::X86BtrI(_))
             | Op::Mach(MachOp::X86BtcI(_)) => CostTuple {
