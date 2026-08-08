@@ -1,49 +1,88 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Blitz">
+  <title>Blitz</title>
+  <desc>A lightning bolt extracted from an e-graph: candidate nodes and edges behind one chosen path.</desc>
+
   <defs>
-    <linearGradient id="bolt" x1="30%" y1="0%" x2="70%" y2="100%">
-      <stop offset="0%" stop-color="#60A5FA"/>
-      <stop offset="50%" stop-color="#3B82F6"/>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0%" stop-color="#7DD3FC"/>
+      <stop offset="45%" stop-color="#3B82F6"/>
       <stop offset="100%" stop-color="#7C3AED"/>
     </linearGradient>
-    <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#60A5FA" stop-opacity="0.25"/>
-      <stop offset="100%" stop-color="#7C3AED" stop-opacity="0.08"/>
+
+    <!-- A band of light that travels down the bolt. Purely additive: with SMIL
+         stripped the stops sit where they start and the overlay is invisible. -->
+    <linearGradient id="shine" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0%" stop-color="#F8FAFC" stop-opacity="0">
+        <animate attributeName="offset" values="-0.35;1" dur="3.2s" repeatCount="indefinite"/>
+      </stop>
+      <stop offset="0%" stop-color="#F8FAFC" stop-opacity="0.55">
+        <animate attributeName="offset" values="-0.20;1.15" dur="3.2s" repeatCount="indefinite"/>
+      </stop>
+      <stop offset="0%" stop-color="#F8FAFC" stop-opacity="0">
+        <animate attributeName="offset" values="-0.05;1.30" dur="3.2s" repeatCount="indefinite"/>
+      </stop>
     </linearGradient>
-    <filter id="boltshadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blur"/>
-      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.23  0 0 0 0 0.51  0 0 0 0 0.96  0 0 0 0.5 0"/>
+
+    <radialGradient id="halo" cx="50%" cy="42%" r="55%">
+      <stop offset="0%" stop-color="#3B82F6" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#3B82F6" stop-opacity="0"/>
+    </radialGradient>
+
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
       <feMerge>
-        <feMergeNode/>
+        <feMergeNode in="b"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
+
+    <path id="boltPath" d="M157,28 L89,140 L127,140 L99,228 L167,110 L129,110 Z"/>
   </defs>
 
-  <!-- Background -->
-  <circle cx="256" cy="256" r="248" fill="#0B1120"/>
-  <circle cx="256" cy="256" r="248" fill="url(#glow)"/>
+  <rect width="256" height="256" rx="56" fill="#0B1120"/>
+  <rect width="256" height="256" rx="56" fill="url(#halo)"/>
 
-  <!-- Lightning bolt - sharp, angular, aggressive -->
-  <path d="M 310 48 L 178 228 L 236 228 L 158 464 L 340 252 L 276 252 Z"
-        fill="url(#bolt)" filter="url(#boltshadow)"/>
+  <!-- The e-graph the bolt is extracted from: alternatives that did not win.
+       Deliberately low contrast, so at favicon size it reads as texture and the
+       bolt still carries the mark. -->
+  <g stroke="#38BDF8" stroke-width="1.5" fill="none" opacity="0.22">
+    <path d="M62,70 L110,54 M110,54 L128,92 M62,70 L46,122 M46,122 L128,92
+             M196,62 L128,92 M196,62 L210,126 M210,126 L128,92
+             M128,92 L128,166 M46,122 L74,198 M74,198 L128,166
+             M210,126 L202,194 M202,194 L128,166 M74,198 L146,200 M146,200 L128,166
+             M146,200 L202,194"/>
+  </g>
+  <g fill="#7DD3FC" opacity="0.5">
+    <circle cx="62" cy="70" r="4">
+      <animate attributeName="opacity" values="0.35;1;0.35" dur="4s" begin="0s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="110" cy="54" r="3.5">
+      <animate attributeName="opacity" values="0.35;1;0.35" dur="4s" begin="1.3s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="196" cy="62" r="4">
+      <animate attributeName="opacity" values="0.35;1;0.35" dur="4s" begin="2.1s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="46" cy="122" r="3.5">
+      <animate attributeName="opacity" values="0.35;1;0.35" dur="4s" begin="0.7s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="210" cy="126" r="4">
+      <animate attributeName="opacity" values="0.35;1;0.35" dur="4s" begin="2.8s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="74" cy="198" r="3.5">
+      <animate attributeName="opacity" values="0.35;1;0.35" dur="4s" begin="1.9s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="146" cy="200" r="3.5">
+      <animate attributeName="opacity" values="0.35;1;0.35" dur="4s" begin="3.4s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="202" cy="194" r="4">
+      <animate attributeName="opacity" values="0.35;1;0.35" dur="4s" begin="0.4s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="128" cy="92" r="3"/>
+    <circle cx="128" cy="166" r="3"/>
+  </g>
 
-  <!-- Smaller secondary bolt shard - left -->
-  <path d="M 168 140 L 122 220 L 148 220 L 118 308 L 192 232 L 162 232 Z"
-        fill="#3B82F6" opacity="0.35"/>
-
-  <!-- Smaller secondary bolt shard - right -->
-  <path d="M 358 200 L 384 268 L 364 268 L 394 372 L 338 280 L 360 280 Z"
-        fill="#7C3AED" opacity="0.3"/>
-
-  <!-- Binary bits -->
-  <text x="108" y="168" font-family="monospace" font-size="24" fill="#475569" font-weight="bold">0</text>
-  <text x="384" y="172" font-family="monospace" font-size="24" fill="#475569" font-weight="bold">1</text>
-  <text x="88" y="320" font-family="monospace" font-size="24" fill="#475569" font-weight="bold">1</text>
-  <text x="400" y="350" font-family="monospace" font-size="24" fill="#475569" font-weight="bold">0</text>
-  <text x="134" y="420" font-family="monospace" font-size="18" fill="#334155" font-weight="bold">1</text>
-  <text x="370" y="126" font-family="monospace" font-size="18" fill="#334155" font-weight="bold">0</text>
-
-  <!-- Register names -->
-  <text x="72" y="244" font-family="monospace" font-size="14" fill="#334155">rax</text>
-  <text x="406" y="270" font-family="monospace" font-size="14" fill="#334155">rcx</text>
+  <!-- The extracted node: one path chosen out of all of them. -->
+  <use href="#boltPath" fill="url(#bolt)" filter="url(#soft)"/>
+  <use href="#boltPath" fill="url(#shine)"/>
+  <use href="#boltPath" fill="none" stroke="#BFDBFE" stroke-width="1.5" stroke-opacity="0.55"/>
 </svg>

@@ -1,12 +1,19 @@
-<p align="center">
-  <img src="logo.svg" width="160" alt="Blitz logo">
-</p>
+<div align="center">
 
-<h1 align="center">Blitz</h1>
+<img src="logo.svg" width="132" alt="Blitz">
 
-<p align="center">
-  <em>A compiler backend that targets x86-64, and nothing else, on purpose.</em>
-</p>
+# Blitz
+
+**A compiler backend that targets x86-64, and nothing else, on purpose.**
+
+<sub>
+  <img src="https://img.shields.io/badge/target-x86--64%20SysV-3B82F6?style=flat-square" alt="target: x86-64 SysV">
+  <img src="https://img.shields.io/badge/output-ELF%20objects-3B82F6?style=flat-square" alt="output: ELF objects">
+  <img src="https://img.shields.io/badge/rust-2024%20edition-7C3AED?style=flat-square" alt="rust 2024 edition">
+  <img src="https://img.shields.io/badge/tests-1033%20unit%20%C2%B7%20592%20lit%20%C2%B7%201352%20fuzz-22C55E?style=flat-square" alt="tests">
+</sub>
+
+</div>
 
 ---
 
@@ -68,58 +75,76 @@ and tagged enums, with worked examples.
 
 ## Code quality
 
-The point of the project is the output, so it is measured rather than asserted.
-`bash tests/run_codesize.sh --gap` compares instruction counts against system
-compilers on 21 loop kernels that seed their data from `argc`, so no reference
-compiler can fold the program away and print the answer:
+The point of the project is the output, so it is measured rather than asserted,
+on 24 loop kernels that seed their data from `argc` — no reference compiler can
+fold one away and print the answer.
 
-| | instructions, geomean |
-|---|---|
-| vs `gcc -O2` | **x1.29** |
-| vs `clang -O2` | **x0.78** |
+<table>
+<tr><th align="left">geomean over 24 kernels</th><th>vs <code>gcc -O2</code></th><th>vs <code>clang -O2</code></th></tr>
+<tr><td><b>cycles</b> &nbsp;<code>tests/run_perf.sh</code></td><td align="center"><b>x2.21</b></td><td align="center"><b>x2.83</b></td></tr>
+<tr><td>instructions &nbsp;<code>run_codesize.sh --gap</code></td><td align="center">x1.05</td><td align="center">x0.72</td></tr>
+</table>
 
-The `clang` figure is not a victory lap; clang unrolls and vectorizes where
-blitz does not, which inflates its count on these kernels. `gcc -O2` is the
-number to watch. The worst kernel is `call_hot` at `x2.29`, the ABI cost of a
-loop around a `noinline` callee.
+**Cycles is the ranking; instructions is a diagnostic.** They disagree often
+enough that keeping both is the point. Laying a loop body after its header moved
+cycles 7.9% with the instruction count *flat*, because what changed is which
+branches are taken and no static count models that. Folding a stack slot into
+the addressing mode that reads it took 3% of the instructions off the loop
+corpus and moved cycles by nothing, so it was measured and shelved.
+
+The `clang` instruction figure is not a victory lap: clang unrolls and vectorizes
+where blitz does not, which inflates its count on these kernels. Blitz has no
+vectorizer, and that is worth about 12% of the cycles gap — the rest is scalar
+codegen.
 
 ## What's in it
 
-- **E-graph optimizer**: union-find, hashcons, typed e-classes, phased rewrites,
-  and cost-based extraction with DAG-sharing awareness. Optimization goals:
-  latency, throughput, size, balanced.
-- **Function-scope register allocator**: Chaitin-Briggs coloring with MCS
-  ordering, conservative coalescing, rematerialization, loop-aware spill choice,
+- **E-graph optimizer** — union-find, hashcons, typed e-classes, phased
+  rewrites, and cost-based extraction with DAG-sharing awareness. Optimization
+  goals: latency, throughput, size, balanced.
+- **Function-scope register allocator** — Chaitin-Briggs coloring with MCS
+  ordering, optimistic coalescing, rematerialization, loop-aware spill choice,
   and pressure-driven live-range splitting across blocks.
-- **Hand-written encoder**: 70+ x86-64 instruction forms with correct REX,
+- **A second allocator, on purpose** — `-O0` puts every value in a frame slot
+  and borrows registers one instruction at a time. Two implementations of one
+  contract is what makes an allocation bug a disagreement the differential
+  harness can see, rather than an answer both levels give.
+- **Hand-written encoder** — 93 x86-64 instruction forms with correct REX,
   ModRM, SIB and displacement encoding, plus branch relaxation.
-- **SysV AMD64 ABI**: register and stack arguments, callee-saved preservation,
+- **SysV AMD64 ABI** — register and stack arguments, callee-saved preservation,
   16-byte frames, parallel-copy sequentialization for phi elimination.
-- **Optimization passes**: inlining, LICM, store-to-load and load-to-load
+- **Optimization passes** — inlining, SCCP, LICM, store-to-load and load-to-load
   forwarding, dead store elimination with offset-aware alias analysis, DCE,
-  peephole, loop-header alignment.
+  block layout, peephole, dead-instruction removal, loop-header alignment.
 
 ## Pipeline
 
 ```
-  IR  →  inline  →  DCE  →  memory  →  LICM  →  e-graph  →  extract
-                                                               ↓
-  ELF  ←  encode  ←  post-RA  ←  regalloc  ←  split  ←  schedule
+  IR  →  inline  →  DCE  →  memory  →  LICM  →  SCCP  →  e-graph  →  extract
+                                                                       ↓
+  ELF  ←  encode  ←  layout  ←  post-RA  ←  regalloc  ←  split  ←  schedule
 ```
 
 The IR is dual: the e-graph holds pure values, the CFG holds effectful ops and
 control flow, and effectful ops reference pure values by e-class.
-[`ROADMAP.md`](ROADMAP.md) has the priorities and non-goals; `docs/internal/` has
-the implementation notes.
+
+Two orders matter and they are not the same order. **RPO is the dominance
+order** and everything up to register allocation reads it; **block layout is a
+greedy trace** that puts a loop body directly after its header, so the header's
+conditional leaves the loop and the fallthrough enters it.
+
+[`ROADMAP.md`](ROADMAP.md) has the priorities, the non-goals, and — the part
+worth reading — what previous attempts measured, including the ones that lost.
 
 ## Testing
 
 ```console
-$ cargo test --all-targets --workspace   # 1010 unit and codegen tests
-$ bash tests/lit/run_tests.sh            # 543 FileCheck-style tests
-$ bash tests/lit/run_diff.sh             # 334 comparisons: -O0 vs -O1 vs cc
-$ bash tests/fuzz/run_fuzz.sh 40 mixed   # random UB-free programs
+$ cargo test --all-targets --workspace   # 1033 unit and codegen tests
+$ bash tests/lit/run_tests.sh            # 592 FileCheck-style tests
+$ bash tests/lit/run_diff.sh             # 356 comparisons: -O0 vs -O1 vs cc
+$ bash tests/fuzz/run_fuzz.sh            # 1352 random UB-free programs
 $ bash tests/fuzz/run_corpus.sh          # the saved failures, in seconds
+$ bash tests/run_codesize.sh --check     # 1008 rows of code quality, vs baselines
 ```
 
 Two harnesses check *values* rather than patterns, and they fail differently.
@@ -131,7 +156,8 @@ generates, so it knows the expected output before any compiler runs.
 
 `BLITZ_VERIFY=1` checks the IR at every pass boundary and the machine code after
 branch relaxation; `BLITZ_VERIFY=strict` also requires every e-class reference in
-the CFG to be canonical.
+the CFG to be canonical. `BLITZ_PASSES=-licm` and friends bisect the pass set
+against a miscompile.
 
 End-to-end tests need `cc` on `PATH` and skip gracefully without it.
 
