@@ -141,6 +141,36 @@ pub(super) fn linearize(
         .map(|(cid, _)| *cid)
         .collect();
 
+    // Where each class is emitted, when that is not the first block to name it.
+    //
+    // **A class is one expression, and it should be computed once in a block
+    // that reaches every use.** Emitting it in the first block that happens to
+    // name it puts it in the wrong place whenever two siblings both use it:
+    // neither dominates the other, so the second re-emits, and a diamond whose
+    // arms share a computation pays for it twice. The e-graph already made the
+    // two arms one class -- cross-block CSE is not the missing part -- so what
+    // is left is purely *placement*.
+    //
+    // The entry block's parameters were already fixed this way, one op at a
+    // time: "a param that two sibling branches both read gets re-emitted in
+    // each ... emitting at entry, which dominates everything, leaves exactly
+    // one VReg per parameter." This is that rule for every class, with the
+    // nearest common dominator in place of the entry block.
+    //
+    // Not hoisted: anything already re-emitted per block on purpose. Flags do
+    // not survive a block boundary and a division's results live in RAX and
+    // RDX, so those classes are placed where they are used and stay there.
+    let placement = class_placement(
+        func,
+        &rpo_order,
+        &idom,
+        extraction,
+        egraph,
+        block_param_map,
+        extra_roots,
+        &div_classes,
+    );
+
     // Build per-block VRegInst lists in RPO order, stored by block index.
     let mut block_vreg_insts: Vec<Vec<VRegInst>> = vec![Vec::new(); func.blocks.len()];
     // Snapshot of class_to_vreg AT THE END of each block's processing (before
@@ -205,6 +235,10 @@ pub(super) fn linearize(
         // Include LICM-hoisted roots for this block (invariant classes to emit here).
         if let Some(hoisted) = extra_roots.get(&block_idx) {
             all_roots.extend(hoisted.iter().copied());
+        }
+        // Classes this block is the nearest common dominator of the users of.
+        if let Some(placed) = placement.get(&block_idx) {
+            all_roots.extend(placed.iter().copied());
         }
         // Every parameter is a root of the entry block, whether or not the entry
         // block uses it.
@@ -437,6 +471,150 @@ pub(super) fn linearize(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/// A subtree cheaper than this is re-emitted where it is used rather than
+/// placed above its users: one spill store and one reload is what hoisting
+/// risks, and the splitter prices that pair at 5.0.
+const PLACEMENT_MIN_COST: f64 = 5.0;
+
+/// The block each class is emitted in: the nearest common dominator of every
+/// block that needs it.
+///
+/// Returns only the classes whose placement differs from the block that would
+/// otherwise emit them, keyed by that block, so the emission walk adds them to
+/// its roots and everything else is untouched.
+///
+/// **Needing a class is transitive.** A block that names a root needs the whole
+/// subtree the extraction chose for it, so the walk below closes over
+/// `children`. That also makes the result consistent by construction: a child is
+/// needed everywhere its parent is, so the child's nearest common dominator
+/// dominates the parent's, and every operand is in scope where its consumer is
+/// emitted.
+///
+/// A class placed above every block that uses it is live from there to its last
+/// use, where re-emitting kept each copy's range short. That is the same trade
+/// rematerialization makes in the other direction, and it is why this is judged
+/// on measurement rather than on being obviously right.
+#[allow(clippy::too_many_arguments)]
+fn class_placement(
+    func: &Function,
+    rpo_order: &[usize],
+    idom: &[Option<usize>],
+    extraction: &ExtractionResult,
+    egraph: &EGraph,
+    block_param_map: &BTreeMap<(BlockId, u32), ClassId>,
+    extra_roots: &ExtraRoots,
+    div_classes: &BTreeSet<ClassId>,
+) -> BTreeMap<usize, Vec<ClassId>> {
+    let mut rpo_pos = vec![usize::MAX; func.blocks.len()];
+    for (pos, &b) in rpo_order.iter().enumerate() {
+        rpo_pos[b] = pos;
+    }
+    // The nearest block that dominates both, walking the two idom chains
+    // towards the entry. `None` where either block is unreachable and so in no
+    // dominator tree.
+    let ncd = |mut a: usize, mut b: usize| -> Option<usize> {
+        while a != b {
+            if rpo_pos[a] == usize::MAX || rpo_pos[b] == usize::MAX {
+                return None;
+            }
+            if rpo_pos[a] > rpo_pos[b] {
+                a = idom[a]?;
+            } else {
+                b = idom[b]?;
+            }
+        }
+        Some(a)
+    };
+
+    // The first block to name each class, and where it must end up.
+    let mut first_seen: BTreeMap<ClassId, usize> = BTreeMap::new();
+    let mut place: BTreeMap<ClassId, Option<usize>> = BTreeMap::new();
+    let mut stack: Vec<ClassId> = Vec::new();
+    let mut seen_here: BTreeSet<ClassId> = BTreeSet::new();
+
+    for &block_idx in rpo_order {
+        let block = &func.blocks[block_idx];
+        let mut roots = cfg::collect_block_roots(block, egraph);
+        for pidx in 0..block.param_types.len() as u32 {
+            if let Some(&cid) = block_param_map.get(&(block.id, pidx)) {
+                roots.push(cid);
+            }
+        }
+        if let Some(hoisted) = extra_roots.get(&block_idx) {
+            roots.extend(hoisted.iter().copied());
+        }
+        if block_idx == 0 {
+            roots.extend(
+                func.param_class_ids
+                    .iter()
+                    .map(|&cid| egraph.unionfind.find_immutable(cid)),
+            );
+        }
+
+        seen_here.clear();
+        stack.extend(roots);
+        while let Some(cid) = stack.pop() {
+            if !seen_here.insert(cid) {
+                continue;
+            }
+            first_seen.entry(cid).or_insert(block_idx);
+            let slot = place.entry(cid).or_insert(Some(block_idx));
+            if let Some(cur) = *slot {
+                *slot = ncd(cur, block_idx);
+            }
+            if let Some(node) = extraction.choices.get(&cid) {
+                stack.extend(
+                    node.children
+                        .iter()
+                        .copied()
+                        .filter(|c| *c != ClassId::NONE),
+                );
+            }
+        }
+    }
+
+    let mut out: BTreeMap<usize, Vec<ClassId>> = BTreeMap::new();
+    for (cid, target) in place {
+        let Some(target) = target else { continue };
+        if first_seen.get(&cid) == Some(&target) {
+            continue; // already emitted where it belongs
+        }
+        // A class re-emitted per block on purpose is not placed.
+        if div_classes.contains(&cid) {
+            continue;
+        }
+        let ty = &egraph.classes[cid.0 as usize].ty;
+        if matches!(ty, Type::Flags) || matches!(ty, Type::Pair(_, b) if **b == Type::Flags) {
+            continue;
+        }
+        // A block parameter is the block's own, and means nothing anywhere else.
+        if matches!(
+            extraction.choices.get(&cid).map(|n| &n.op),
+            Some(Op::Pure(PureOp::BlockParam(..)))
+        ) {
+            continue;
+        }
+        // Only where recomputing costs more than keeping the value live.
+        //
+        // Placing a class above its users is a trade, not an improvement:
+        // computed once, it is then live from the dominator to the last use and
+        // the allocator may have to spill it, where re-emitting kept each range
+        // inside one block. Unrestricted, the trade loses -- `+6.5%` spills,
+        // `+10.1%` reloads, `+13.8%` cycles -- so it is taken only for a subtree
+        // dear enough that one store and one reload is the cheaper end of it.
+        // The threshold is the splitter's, which prices exactly that pair.
+        if extraction
+            .choices
+            .get(&cid)
+            .is_none_or(|n| n.cost <= PLACEMENT_MIN_COST)
+        {
+            continue;
+        }
+        out.entry(target).or_default().push(cid);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,8 +637,11 @@ mod tests {
         egraph
     }
 
-    /// The only extraction an e-graph of constants has: each class's one node.
-    fn extraction_of(egraph: &EGraph) -> ExtractionResult {
+    /// The only extraction an e-graph of constants has: each class's one node,
+    /// with every subtree priced at `cost` -- which is the one input placement
+    /// reads, since it decides only whether recomputing is dearer than keeping
+    /// the value live.
+    fn extraction_costing(egraph: &EGraph, cost: f64) -> ExtractionResult {
         ExtractionResult {
             choices: (0..egraph.arena_len() as u32)
                 .map(|i| {
@@ -470,7 +651,7 @@ mod tests {
                         ExtractedNode {
                             op: class.nodes[0].op.clone(),
                             children: vec![],
-                            cost: 0.0,
+                            cost,
                         },
                     )
                 })
@@ -536,10 +717,14 @@ mod tests {
     }
 
     fn run(func: &Function, egraph: &EGraph) -> Linearized {
+        run_costing(func, egraph, 0.0)
+    }
+
+    fn run_costing(func: &Function, egraph: &EGraph, cost: f64) -> Linearized {
         linearize(
             func,
             egraph,
-            &extraction_of(egraph),
+            &extraction_costing(egraph, cost),
             &BTreeMap::new(),
             &ExtraRoots::new(),
         )
@@ -582,26 +767,47 @@ mod tests {
         (func, constants(2))
     }
 
-    /// The rule the whole pass exists to apply: neither arm of a diamond
-    /// dominates the other, so the second one to be reached emits its own VReg
-    /// for a class the first already has.
+    /// A class both arms of a diamond name, and that is dear enough to be worth
+    /// keeping live, is emitted once in the block that dominates them.
+    ///
+    /// Neither arm dominates the other, so emitting in the first block to *name*
+    /// the class makes the second re-emit and the diamond pay twice. The nearest
+    /// common dominator of the two arms is block 0, which reaches both.
     #[test]
-    fn a_class_named_by_both_arms_is_re_emitted_in_the_second() {
+    fn a_costly_class_named_by_both_arms_is_emitted_in_their_dominator() {
         let (func, egraph) = diamond_naming_class_one();
-        let lin = run(&func, &egraph);
+        let lin = run_costing(&func, &egraph, PLACEMENT_MIN_COST + 1.0);
 
-        let first_arm = lin.rpo_order.iter().find(|&&b| b == 1 || b == 2).copied();
         assert_eq!(
-            Some(lin.class_emitted_in[&ClassId(1)]),
-            first_arm,
-            "the class belongs to the first arm the RPO reaches",
+            lin.class_emitted_in[&ClassId(1)],
+            0,
+            "the class belongs to the block that dominates both arms",
         );
+        assert!(emits(&lin, 0, ClassId(1)));
+        assert!(!emits(&lin, 1, ClassId(1)), "arm 1 must reuse it");
+        assert!(!emits(&lin, 2, ClassId(1)), "arm 2 must reuse it");
+        assert_eq!(
+            lin.block_snapshots[1].lookup_any(ClassId(1)),
+            lin.block_snapshots[2].lookup_any(ClassId(1)),
+            "one emission is one VReg, which both arms read",
+        );
+    }
+
+    /// A cheap one is not: recomputing it in each arm costs less than the one
+    /// spill store and reload that holding it across the branch risks. Hoisting
+    /// these regardless measured `+6.5%` spills and `+13.8%` cycles.
+    #[test]
+    fn a_cheap_class_named_by_both_arms_is_re_emitted_in_each() {
+        let (func, egraph) = diamond_naming_class_one();
+        let lin = run_costing(&func, &egraph, PLACEMENT_MIN_COST);
+
+        assert!(!emits(&lin, 0, ClassId(1)), "block 0 does not name it");
         assert!(emits(&lin, 1, ClassId(1)));
         assert!(emits(&lin, 2, ClassId(1)));
         assert_ne!(
             lin.block_snapshots[1].lookup_any(ClassId(1)),
             lin.block_snapshots[2].lookup_any(ClassId(1)),
-            "each arm must carry the class in its own VReg",
+            "each arm carries its own",
         );
     }
 

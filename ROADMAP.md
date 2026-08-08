@@ -72,9 +72,9 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Dominance-scoped elaboration** -- `P1`, and the largest remaining item now
-  that copies are done. Read `docs/internal/refactor-roadmap.md` before
-  starting.
+- **Loop strength reduction** -- `P1`, and the largest remaining item now that
+  copies and placement are done. No measurement yet; the `live` loop kernels are
+  where it would show.
 - **What is left of the copies** -- `P1`, and much smaller than it was. blitz
   emits 385 register-to-register moves in 2138 `bench` instructions against
   `gcc -O2`'s 429 in 2388, so the headline gap is closed; `BLITZ_DEBUG=stats`
@@ -563,24 +563,45 @@ so the holes stay visible.
       `lea x,[x+1]` is now `inc x` and `lea x,[x+y]` is `add x,y`.
 
       What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
-- [ ] **Dominance-scoped elaboration, which is GVN and several other things at
-      once.** The e-graph does local CSE only, so repeated address computations
-      and field loads survive across blocks -- typically 5-15% on real code. But
-      blitz does worse than miss them: linearization *re-emits* a class in every
-      block whose uses the original definition does not reach, which is the
-      anti-GVN.
+- [x] **Dominance-scoped elaboration -- and the premise was wrong, which is why
+      it cost a placement rule rather than a rewrite.**
 
-      Cranelift gets GVN for free instead, by rebuilding SSA in dominator-tree
-      order with layered scope maps and computing each value on demand in the
-      scope that needs it (Fallin, 2026 -- the aegraph retrospective). One
-      change would collapse this item, delete the per-block re-emission
-      machinery, and shrink the "one class maps to several VRegs" hazard that
-      has produced nine wrong-code bugs here.
+      The item read: "the e-graph does local CSE only, so repeated address
+      computations and field loads survive across blocks -- typically 5-15% on
+      real code", and proposed Cranelift's answer, rebuilding SSA in
+      dominator-tree order. **But blitz's e-graph is function-wide.** The same
+      expression in two blocks is already *one class*; cross-block CSE is not
+      missing and never was. What was missing is only *placement*: which block
+      emits the class. Checked on a diamond whose arms both compute
+      `argc * 7 + 3` -- one class, emitted twice, because linearization emits in
+      the first block to name a class and neither arm dominates the other.
 
-      **Invasive, and it lands squarely in what
-      `docs/internal/refactor-roadmap.md` warns about.** Read that first. It is
-      still the single largest take from an outside design that blitz has not
-      already arrived at independently.
+      **The fix is one pre-pass**, `linearize::class_placement`: emit each class
+      in the nearest common dominator of the blocks that need it, closing over
+      the extraction's children so an operand is always in scope where its
+      consumer lands. The precedent was already in the file, applied to one op --
+      entry parameters are emitted at the entry block because "a param that two
+      sibling branches both read gets re-emitted in each". This is that rule for
+      every class.
+
+      **Unrestricted it loses, and the number is the point**: `+6.5%` spills,
+      `+10.1%` reloads, `+1.7%` instructions, `+13.8%` cycles. Computing once
+      and holding the value from the dominator to the last use is a *trade*
+      against re-emitting into short ranges, and the allocator pays for it. So
+      placement is taken only where the subtree costs more than the one spill
+      store and reload it risks -- the splitter's `SLOT_STORE_LOAD_COST` of 5.0,
+      already the price of exactly that pair.
+
+      Gated: **instructions `-5.3%`, spills `-3.6%`, reloads `-4.3%`, copies
+      `-11.2%`, and not one of the 124 changed rows got worse.** Cycles
+      unchanged at `x2.49` over two samples -- the work removed is real and is
+      not on the `live` kernels' hot paths, which is the same lesson the
+      instruction count keeps teaching.
+
+      The Cranelift rewrite is still available and would additionally delete the
+      per-block re-emission machinery and shrink the "one class maps to several
+      VRegs" hazard. It is no longer justified by GVN, because there is no GVN
+      here to win.
 - [ ] **Loop strength reduction + induction variable recognition.** Every array
       loop recomputes `base + i*scale`. Worth 2-5x on loop-heavy code and is
       table stakes for calling the backend "optimizing".

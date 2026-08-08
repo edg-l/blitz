@@ -14,7 +14,7 @@ hash_table.c	O0	496	2920	137	188	66
 hash_table.c	O1	233	875	4	44	42
 loop_nest.c	O0	371	2218	97	140	50
 loop_nest.c	O1	105	414	0	0	23
-matmul.c	O0	402	2457	104	153	46
+matmul.c	O0	393	2401	102	150	44
 matmul.c	O1	117	464	0	0	20
 nbody_step.c	O0	595	3991	150	241	49
 nbody_step.c	O1	169	796	6	10	28
@@ -22,8 +22,8 @@ queens.c	O0	461	2791	129	201	36
 queens.c	O1	166	663	11	35	32
 sieve.c	O0	206	1145	53	81	20
 sieve.c	O1	62	245	0	0	11
-sort_insert.c	O0	452	2705	116	167	58
-sort_insert.c	O1	135	498	0	0	36
+sort_insert.c	O0	427	2572	111	160	51
+sort_insert.c	O1	126	456	0	0	33
 sort_quick.c	O0	462	2514	118	185	54
 sort_quick.c	O1	137	504	0	0	37
 strops.c	O0	524	2694	139	204	58
