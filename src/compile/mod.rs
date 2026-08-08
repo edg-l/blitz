@@ -90,6 +90,12 @@ pub struct CompileOptions {
     /// O0 uses 1 (minimum for isel; the lowerer requires x86 ops).
     pub saturation_limit: u32,
     pub enable_peephole: bool,
+    /// Pad loop headers onto 16-byte boundaries with multi-byte NOPs.
+    ///
+    /// **On at `-O1`, off at `-O0`**: it buys speed with bytes, and it is the
+    /// only thing that makes a loop's distance from a fetch boundary a property
+    /// of the loop rather than of everything emitted before it.
+    /// `BLITZ_PASSES=-loop-align` turns it off.
     pub enable_nop_alignment: bool,
     pub verbosity: Verbosity,
     /// Force the frame pointer (push rbp / mov rbp, rsp / pop rbp) to always be emitted.
@@ -219,11 +225,12 @@ impl CompileOptions {
                 "dead-insts" => self.enable_dead_insts = on,
                 "peephole" => self.enable_peephole = on,
                 "fast-regalloc" => self.enable_fast_regalloc = on,
+                "loop-align" => self.enable_nop_alignment = on,
                 other => {
                     return Err(format!(
                         "BLITZ_PASSES: unknown pass `{other}`; known: licm, dce, \
                          store-forwarding, dse, phi-removal, inlining, peephole, \
-                         fast-regalloc, tail-calls, dead-insts"
+                         fast-regalloc, tail-calls, dead-insts, loop-align"
                     ));
                 }
             }
@@ -262,7 +269,7 @@ impl CompileOptions {
             opt_goal: OptGoal::Balanced,
             saturation_limit: 16,
             enable_peephole: true,
-            enable_nop_alignment: false,
+            enable_nop_alignment: true,
             verbosity: Verbosity::Silent,
             force_frame_pointer: false,
             enable_licm: true,
@@ -2061,36 +2068,41 @@ pub fn compile(
         }
     }
 
-    let mut flat_insts: Vec<MachInst> = Vec::new();
-    let mut label_positions: BTreeMap<LabelId, usize> = BTreeMap::new();
+    // The flat stream is a projection of `block_items`: one entry per `Inst`
+    // item, in emission order, with every label bound at the index of the
+    // instruction that follows it. The encoder walks `block_items` against this
+    // by index, so the two must be derived the same way each time one is
+    // rebuilt.
+    let flatten = |block_items: &[Vec<BlockItem>]| {
+        let mut insts: Vec<MachInst> = Vec::new();
+        let mut labels: BTreeMap<LabelId, usize> = BTreeMap::new();
+        for (rpo_pos, items) in block_items.iter().enumerate() {
+            let block_id = func.blocks[rpo_order[rpo_pos]].id;
+            // The block label is bound before the first instruction of this block.
+            labels.insert(block_id as LabelId, insts.len());
 
-    for (rpo_pos, items) in block_items.iter().enumerate() {
-        let block_id = func.blocks[rpo_order[rpo_pos]].id;
-        // The block label is bound before the first instruction of this block.
-        label_positions.insert(block_id as LabelId, flat_insts.len());
-
-        for item in items {
-            match item {
-                BlockItem::Inst(inst) => {
-                    flat_insts.push(inst.clone());
-                }
-                BlockItem::BindLabel(label_id) => {
-                    // Trampoline label: bound at the position of the next instruction.
-                    label_positions.insert(*label_id, flat_insts.len());
+            for item in items {
+                match item {
+                    BlockItem::Inst(inst) => insts.push(inst.clone()),
+                    BlockItem::BindLabel(label_id) => {
+                        // Trampoline label: bound at the position of the next instruction.
+                        labels.insert(*label_id, insts.len());
+                    }
                 }
             }
         }
-    }
+        (insts, labels)
+    };
 
-    // Step 10b: Branch relaxation -- determine which jumps use short (rel8) form.
-    //
+    let (mut flat_insts, mut label_positions) = flatten(&block_items);
+
     // MachInst::Ret is lowered by `emit_epilogue`, not by `encode_inst`. The
     // default `inst_size` routes Ret through `encode_inst` (a single c3 byte)
     // and therefore underestimates the expansion to epilogue size (frame
-    // teardown + callee-saved pops + ret). relax_branches' byte offsets would
-    // drift, potentially leaving a short jump whose real displacement is out
-    // of rel8 range (panics at fixup time). Provide a size oracle that
-    // substitutes the actual epilogue byte count for each Ret.
+    // teardown + callee-saved pops + ret). Byte offsets would drift,
+    // potentially leaving a short jump whose real displacement is out of rel8
+    // range (panics at fixup time). Provide a size oracle that substitutes the
+    // actual epilogue byte count for each Ret.
     let epilogue_size = {
         let mut scratch = Encoder::new();
         emit_epilogue(&mut scratch, &frame_layout);
@@ -2103,6 +2115,43 @@ pub fn compile(
             inst_size(inst)
         }
     };
+
+    // Step 10a2: pad loop headers onto 16-byte boundaries.
+    //
+    // Where a hot loop falls relative to a fetch boundary is otherwise whatever
+    // the instruction stream happens to produce, and it is worth up to 20% --
+    // removing four dead instructions from `live/matmul_rt.c` cost `+20.7%`
+    // cycles, and three unrelated instructions before the same loop took the
+    // comparison back the other way.
+    //
+    // The padding goes in before branch relaxation because relaxation only ever
+    // widens a jump: bytes inserted here are counted by the relaxation that
+    // follows, so no jump can be left short and out of range. What relaxation
+    // can do is move a header off the boundary it was just padded to, which
+    // `align::loop_header_pads` iterates against.
+    if opts.enable_nop_alignment {
+        let headers = crate::emit::loop_header_labels(&flat_insts, &label_positions);
+        let prologue_size = {
+            let mut scratch = Encoder::new();
+            emit_prologue(&mut scratch, &frame_layout);
+            scratch.buf.len()
+        };
+        let pads = crate::emit::loop_header_pads(
+            &flat_insts,
+            &label_positions,
+            &headers,
+            prologue_size,
+            &inst_size_for_relax,
+        );
+        if !pads.is_empty() {
+            insert_alignment_nops(&mut block_items, func, &rpo_order, &pads);
+            let rebuilt = flatten(&block_items);
+            flat_insts = rebuilt.0;
+            label_positions = rebuilt.1;
+        }
+    }
+
+    // Step 10b: Branch relaxation -- determine which jumps use short (rel8) form.
     let (flat_insts, is_short) =
         crate::emit::relax::relax_branches(&flat_insts, &label_positions, &inst_size_for_relax);
 
@@ -2245,6 +2294,57 @@ pub use module::{compile_module, compile_module_with_globals};
 pub(crate) enum BlockItem {
     Inst(MachInst),
     BindLabel(LabelId),
+}
+
+/// Put each loop-header pad in the item list, immediately *before* the point
+/// its label binds.
+///
+/// Which side of the label the NOPs land on is the whole question: padding
+/// after the binding puts them inside the loop, where every iteration pays for
+/// them. A block's label is bound by the encoder before the block's first item,
+/// so the pad for one belongs at the end of the block that precedes it in
+/// emission order; a trampoline label is bound where its `BindLabel` item sits,
+/// so the pad goes just before that item.
+///
+/// The first emitted block cannot be padded this way -- nothing precedes it but
+/// the prologue -- and does not need to be: it starts at the function's own
+/// 16-byte-aligned first byte plus the prologue, and a back edge to the entry
+/// block is not a loop header any code generated here produces.
+fn insert_alignment_nops(
+    block_items: &mut [Vec<BlockItem>],
+    func: &Function,
+    rpo_order: &[usize],
+    pads: &BTreeMap<LabelId, u8>,
+) {
+    // (block position, item index, pad). An item index equal to the list length
+    // means "append".
+    let mut inserts: Vec<Vec<(usize, u8)>> = vec![Vec::new(); block_items.len()];
+
+    for (rpo_pos, items) in block_items.iter().enumerate() {
+        let block_id = func.blocks[rpo_order[rpo_pos]].id as LabelId;
+        if let Some(&pad) = pads.get(&block_id)
+            && rpo_pos > 0
+        {
+            let prev = rpo_pos - 1;
+            let at = block_items[prev].len();
+            inserts[prev].push((at, pad));
+        }
+        for (item_idx, item) in items.iter().enumerate() {
+            if let BlockItem::BindLabel(label) = item
+                && let Some(&pad) = pads.get(label)
+            {
+                inserts[rpo_pos].push((item_idx, pad));
+            }
+        }
+    }
+
+    for (rpo_pos, mut sites) in inserts.into_iter().enumerate() {
+        // Descending, so an insertion never shifts one still to be made.
+        sites.sort_by_key(|&(at, _)| std::cmp::Reverse(at));
+        for (at, pad) in sites {
+            block_items[rpo_pos].insert(at, BlockItem::Inst(MachInst::Nop { size: pad }));
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

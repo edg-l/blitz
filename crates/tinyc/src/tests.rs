@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::process::Command;
 
+use blitz::compile::CompileOptions;
+
 use super::*;
 
 /// Compile TinyC source and return disassembly of all functions.
@@ -1385,4 +1387,125 @@ fn test_uncalled_definition_survives_separate_compilation() {
     let names: Vec<&str> = obj.functions.iter().map(|f| f.name.as_str()).collect();
     assert!(!names.contains(&"helper"), "got {names:?}");
     assert!(names.contains(&"main"), "got {names:?}");
+}
+
+/// Every loop header is either on a 16-byte boundary or more than `MAX_SKIP`
+/// bytes from the next one.
+///
+/// That is the alignment policy stated as a property of the emitted code, so it
+/// holds whatever the code generator does next. It fails if the pass is not
+/// wired up, and it fails if the offset it pads against leaves out the prologue
+/// -- which is encoded separately from the instruction stream and is part of
+/// every absolute offset.
+///
+/// **The variants are what make it a check.** A single program proves nothing:
+/// its loops may sit 9 to 15 bytes from a boundary, which the policy declines to
+/// pad, and the assertion then holds with the pass switched off. Each variant
+/// puts a different number of instructions in front of the loop and so moves it
+/// to a different offset modulo 16; the test requires that some variant was
+/// paddable before it trusts its own verdict.
+#[test]
+fn loop_headers_are_aligned_or_too_far_to_be_worth_it() {
+    const MAX_SKIP: usize = 8;
+
+    let mut aligned_off = CompileOptions::o1();
+    aligned_off.enable_nop_alignment = false;
+    let aligned_on = CompileOptions::o1();
+
+    let mut paddable_without_the_pass = 0;
+    let mut checked = 0;
+
+    for shift in 0..8 {
+        let filler = "total = total + 3;\n".repeat(shift);
+        let src = format!(
+            "extern int printf(char* fmt, int a);
+             int main() {{
+                 int total = 0;
+                 int i = 0;
+                 {filler}
+                 while (i < 100) {{
+                     int j = 0;
+                     while (j < i) {{ total = total + i * j; j = j + 1; }}
+                     i = i + 1;
+                 }}
+                 printf(\"%d\\n\", total);
+                 return 0;
+             }}"
+        );
+
+        for target in loop_headers(&src, &aligned_off) {
+            let misalign = target % 16;
+            if misalign != 0 && 16 - misalign <= MAX_SKIP {
+                paddable_without_the_pass += 1;
+            }
+        }
+
+        for target in loop_headers(&src, &aligned_on) {
+            let misalign = target % 16;
+            assert!(
+                misalign == 0 || 16 - misalign > MAX_SKIP,
+                "loop header at {target:#x} (shift {shift}) is {} bytes from the \
+                 next boundary, within MAX_SKIP, and should have been padded",
+                16 - misalign,
+            );
+            checked += 1;
+        }
+    }
+
+    assert!(checked > 0, "no loop found to check");
+    assert!(
+        paddable_without_the_pass > 0,
+        "no variant put a loop header within MAX_SKIP of a boundary, so this \
+         assertion would hold with the pass switched off"
+    );
+}
+
+/// Every loop header in the compiled program: an address that a jump later in
+/// the listing targets. Empty if objdump is unavailable.
+fn loop_headers(src: &str, opts: &CompileOptions) -> Vec<usize> {
+    let obj = compile_to_object_with_opts(src, opts).expect("compile failed");
+    let mut out = Vec::new();
+    for fi in &obj.functions {
+        let code = &obj.code[fi.offset..fi.offset + fi.size];
+        let Some(disasm) = blitz::test_utils::objdump_disasm(code) else {
+            return Vec::new();
+        };
+        out.extend(backward_jump_targets(&disasm));
+    }
+    out
+}
+
+/// Addresses that a jump earlier in the listing targets: a loop header, as the
+/// emitted stream sees it.
+fn backward_jump_targets(disasm: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for line in disasm.lines() {
+        let Some((addr, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let Ok(addr) = usize::from_str_radix(addr.trim(), 16) else {
+            continue;
+        };
+        // `\t<encoded bytes>\t<mnemonic>    <operands>`
+        let Some((_, text)) = rest.rsplit_once('\t') else {
+            continue;
+        };
+        let mut words = text.split_whitespace();
+        let (Some(mnemonic), Some(operand)) = (words.next(), words.next()) else {
+            continue;
+        };
+        if !mnemonic.starts_with('j') {
+            continue;
+        }
+        let Some(hex) = operand.strip_prefix("0x") else {
+            continue;
+        };
+        if let Ok(target) = usize::from_str_radix(hex, 16)
+            && target <= addr
+            && !out.contains(&target)
+        {
+            out.push(target);
+        }
+    }
+    out
 }

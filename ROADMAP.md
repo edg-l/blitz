@@ -72,12 +72,6 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **Loop headers are aligned by accident** -- `P1`. Function starts are aligned
-  now, so a change in one function no longer re-times another; the loop headers
-  themselves still are not, and `align_loop_headers` needs align and relax
-  iterated to a fixpoint before it can be wired. Worth up to 20% on one kernel:
-  removing 4 dead instructions from `matmul_rt` cost `+20.7%` cycles, and three
-  unrelated instructions before its loop took the same comparison to `-1.0%`.
 - **Copies are still a third of what blitz emits** -- `P1`.
   697 register-to-register moves in 2407 instructions over `bench` against
   `gcc -O2`'s 351 in 2322, and **585 of the 697 are parallel copies** -- phi
@@ -244,11 +238,16 @@ pre-coloring conflict assertion exists (`coloring::check_precolorings`, under
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, over `lit`,
   `bench`, `live` and `fuzz`, fed by `BLITZ_DEBUG=stats`.
 - Code quality also has an *absolute* number, which is the one the Goal is
-  written against: `bash tests/run_perf.sh`, `x3.07` cycles vs `gcc -O2` over
-  the 21 `live` kernels, median of 5 `perf stat` samples each. Cycle counts vary
+  written against: `bash tests/run_perf.sh`, `x2.80` cycles vs `gcc -O2` over
+  the 24 `live` kernels, median of 5 `perf stat` samples each. Cycle counts vary
   ~1% run to run here; instructions retired vary 0.00%, and are the wrong metric
   for the reason the Goal gives. Widening `live` has no natural ceiling and is
   always a valid use of leftover time.
+- **Loop headers are aligned**, so a loop's distance from a fetch boundary is a
+  property of the loop and not of everything emitted before it. Together with
+  16-byte function starts that closes the layout term the perf numbers used to
+  carry; it does not make the numbers noise-free, since a change that moves code
+  *within* a function still moves its unpadded headers.
 - `--gap` still prints the static instruction and byte ratios and is still
   worth reading -- it is how a folded program is *detected*, since `lit` and
   `fuzz` compute a fixed answer from no runtime input and `gcc -O2` emits the
@@ -630,11 +629,46 @@ so the holes stay visible.
       `lit/functions/tail_self_call.c` pins it, with `n * f(n - 1)` as the control
       that must keep its call.
 
-- [ ] **Loop headers are aligned by accident, and it is worth up to 20%.**
-      `emit::align_loop_headers` is written, exported from `emit/mod.rs`, and
-      **never called**; `enable_nop_alignment` is `false` at both levels and is
-      never read. So where a hot loop falls relative to a fetch boundary is
-      whatever the instruction stream happens to produce.
+- [x] **Loop headers were aligned by accident, and it was worth up to 20%.**
+      `emit::align_loop_headers` was written, exported from `emit/mod.rs`, and
+      **never called**; `enable_nop_alignment` was `false` at both levels and was
+      never read. So where a hot loop fell relative to a fetch boundary was
+      whatever the instruction stream happened to produce.
+
+      **Landed, `-O1` only, `BLITZ_PASSES=-loop-align` to turn it off.** Over the
+      24 `live` kernels, `x2.852` cycles against `gcc -O2` became `x2.797`:
+      **`-1.9%`**, and repeat runs put it at `-2.3%` (`2.852/2.849` off against
+      `2.797/2.773` on, so the off side reproduces to `0.1%`). `.text` grows
+      `+0.46%` and instructions `+0.51%` over the 167 rows that changed.
+
+      **It is not a monotone win and the spread is the finding.** `matmul_rt`
+      `-20.2%` -- which is the `+20.7%` layout artifact below, reclaimed -- then
+      `call_hot` `-8.7%`, `state_machine` `-5.4%`, `int_divide` `-4.8%`,
+      `accum_pair` `-4.1%`, `hash_mix` `-3.8%`. Against `mixed_width` `+4.7%`,
+      `transpose` `+2.8%`, `float_convert` `+2.0%`, `byte_copy` `+1.7%`.
+      Alignment is a coin flip on any one loop; what it buys is that the flip is
+      now a property of the loop.
+
+      **The cap was measured, not assumed.** `MAX_SKIP = 8` aligns 54% of the 184
+      `bench`+`live` loop headers, up from 8%, which is exactly the 9-in-16 the
+      policy allows -- so nothing is lost to relaxation moving a header after it
+      was padded. Removing the cap entirely aligns 99% and measures `x2.819`:
+      **no better than capping at 8, for roughly twice the bytes.**
+
+      **A loop header is a label a backward jump targets**, computed from the
+      emitted stream. Not from the CFG: `cfg::block_loop_depths` is keyed on
+      `func.blocks` order, blocks are emitted in RPO, and a trampoline label can
+      be a back-edge target without being a block.
+
+      **Two things it had to get right.** The offset is measured from the
+      function's first byte, so it includes the prologue -- which is encoded
+      separately from the instruction stream, and which the pass as written did
+      not count. And padding and relaxation each move the other, so
+      `align::loop_header_pads` iterates them; correctness does not rest on that
+      converging, because relaxation runs last on the padded stream and only ever
+      *widens* a jump, so no jump can be left short and out of range. Which side
+      of the label the NOPs land on is the other half: padding after the binding
+      point puts them inside the loop, where every iteration pays.
 
       **Function starts are aligned now, which is the half of this that had no
       hazard.** `compile_module_with_globals` pads to 16 between functions, and

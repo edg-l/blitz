@@ -14,6 +14,35 @@ const JCC_SHORT_SIZE: usize = 2;
 const JMP_NEAR_SIZE: usize = 5;
 const JCC_NEAR_SIZE: usize = 6;
 
+/// Encoded size of one instruction, given whether a branch is in its short form.
+///
+/// The one place a jump's size is decided. `align` sizes the same stream to
+/// find where a loop header lands, and two derivations of this would let the
+/// padding be computed against an offset the encoder does not produce.
+pub fn branch_size(
+    inst: &MachInst,
+    is_short: bool,
+    inst_sizes: &dyn Fn(&MachInst) -> usize,
+) -> usize {
+    match inst {
+        MachInst::Jmp { .. } => {
+            if is_short {
+                JMP_SHORT_SIZE
+            } else {
+                JMP_NEAR_SIZE
+            }
+        }
+        MachInst::Jcc { .. } => {
+            if is_short {
+                JCC_SHORT_SIZE
+            } else {
+                JCC_NEAR_SIZE
+            }
+        }
+        _ => inst_sizes(inst),
+    }
+}
+
 /// Compute a `Vec<usize>` of byte offsets, one per instruction (offset of that instruction).
 fn compute_offsets(
     insts: &[MachInst],
@@ -24,24 +53,8 @@ fn compute_offsets(
     let mut cur = 0usize;
     for (i, inst) in insts.iter().enumerate() {
         offsets.push(cur);
-        let sz = match inst {
-            MachInst::Jmp { .. } => {
-                if *short_jumps.get(&i).unwrap_or(&true) {
-                    JMP_SHORT_SIZE
-                } else {
-                    JMP_NEAR_SIZE
-                }
-            }
-            MachInst::Jcc { .. } => {
-                if *short_jumps.get(&i).unwrap_or(&true) {
-                    JCC_SHORT_SIZE
-                } else {
-                    JCC_NEAR_SIZE
-                }
-            }
-            _ => inst_sizes(inst),
-        };
-        cur += sz;
+        let short = *short_jumps.get(&i).unwrap_or(&true);
+        cur += branch_size(inst, short, inst_sizes);
     }
     offsets.push(cur); // sentinel: total size
     offsets

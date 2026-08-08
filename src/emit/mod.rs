@@ -6,7 +6,7 @@ pub mod peephole;
 pub mod phi_elim;
 pub mod relax;
 
-pub use align::align_loop_headers;
+pub use align::{apply_pads, loop_header_labels, loop_header_pads, shift_positions};
 pub use object::{FunctionInfo, ObjectFile};
 pub use peephole::{flags_dead_after, peephole};
 pub use phi_elim::phi_copies;

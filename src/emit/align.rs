@@ -1,62 +1,194 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::x86::inst::{LabelId, MachInst};
 
-/// Insert multi-byte NOPs before loop headers to align them to 16-byte boundaries.
-///
-/// `loop_headers` is the set of label IDs that are loop headers.
-/// `inst_sizes` returns the encoded byte size of a given instruction.
-///
-/// The instruction list is expected to contain `MachInst::Label` markers that
-/// record where labels are defined. Since `MachInst` does not have a `Label`
-/// variant, callers must use a parallel structure or a wrapper. In this
-/// implementation the function uses the `Label` instructions from the
-/// instruction stream to track positions.
-///
-/// Because `MachInst` has no `Label` variant, label positions are passed in
-/// separately via `label_defs`: a slice of `(inst_idx, LabelId)` pairs
-/// indicating that `label` is defined just before `insts[inst_idx]`.
-///
-/// NOP alignment MUST run before branch relaxation.
-pub fn align_loop_headers(
-    insts: &mut Vec<MachInst>,
-    label_defs: &[(usize, LabelId)],
-    loop_headers: &BTreeSet<LabelId>,
-    inst_sizes: &dyn Fn(&MachInst) -> usize,
-) {
-    if loop_headers.is_empty() {
-        return;
-    }
+/// Loop headers are padded to this boundary.
+const LOOP_ALIGN: usize = 16;
 
-    // Build a sorted list of (inst_idx, label_id) for loop headers only.
-    let mut sites: Vec<(usize, LabelId)> = label_defs
-        .iter()
-        .filter(|(_, lid)| loop_headers.contains(lid))
-        .copied()
-        .collect();
-    // Process in reverse order so that inserting NOPs before an earlier site
-    // does not shift the indices of later sites.
-    sites.sort_by_key(|&(idx, _)| idx);
-    sites.reverse();
+/// The largest padding worth paying for. A header 9 to 15 bytes short of the
+/// next boundary is left where it is: alignment is a coin flip on any one loop,
+/// and past half a boundary the bytes cost more than the flip is worth. This is
+/// the max-skip form of gcc's `-falign-loops`.
+const MAX_SKIP: usize = 8;
 
-    for (inst_idx, _label) in sites {
-        // Compute the byte offset at inst_idx by summing sizes of all instructions before it.
-        let offset: usize = insts[..inst_idx].iter().map(inst_sizes).sum();
-        let misalign = offset % 16;
-        if misalign == 0 {
-            continue; // already aligned
+/// How many align/relax rounds to run before taking what the last one produced.
+/// Each round only moves an offset when relaxation widened a jump, and widening
+/// is monotone, so the sequence settles quickly or not at all.
+const MAX_ROUNDS: usize = 8;
+
+/// The labels a backward jump targets: a loop header, as the emitted stream
+/// sees it.
+///
+/// Nothing here consults the CFG. `cfg::block_loop_depths` is keyed on
+/// `func.blocks` order, blocks are emitted in RPO, and a trampoline label can
+/// be a back-edge target without being a block at all. A jump whose target
+/// sits at or before the jump itself is the whole definition.
+pub fn loop_header_labels(
+    insts: &[MachInst],
+    label_positions: &BTreeMap<LabelId, usize>,
+) -> BTreeSet<LabelId> {
+    let mut headers = BTreeSet::new();
+    for (i, inst) in insts.iter().enumerate() {
+        let target = match inst {
+            MachInst::Jmp { target } => *target,
+            MachInst::Jcc { target, .. } => *target,
+            _ => continue,
+        };
+        if label_positions.get(&target).is_some_and(|&pos| pos <= i) {
+            headers.insert(target);
         }
-        let pad = 16 - misalign;
-        // Insert a single multi-byte NOP of `pad` bytes (1..=15).
-        debug_assert!(pad <= 15, "NOP pad size must be 1-15");
-        insts.insert(inst_idx, MachInst::Nop { size: pad as u8 });
     }
+    headers
+}
+
+/// Byte offset of every instruction, given which jumps are short.
+fn offsets(
+    insts: &[MachInst],
+    is_short: &[bool],
+    start: usize,
+    inst_sizes: &dyn Fn(&MachInst) -> usize,
+) -> Vec<usize> {
+    let mut out = Vec::with_capacity(insts.len() + 1);
+    let mut cur = start;
+    for (i, inst) in insts.iter().enumerate() {
+        out.push(cur);
+        cur += super::relax::branch_size(inst, is_short[i], inst_sizes);
+    }
+    out.push(cur);
+    out
+}
+
+/// Padding to insert before each loop header, so that the header lands on a
+/// 16-byte boundary in the *encoded* function.
+///
+/// `prologue_size` is the distance from the function's first byte to the first
+/// instruction of `insts`. The prologue is encoded separately from the
+/// instruction stream and is part of every absolute offset; a function's own
+/// first byte is 16-byte aligned by `compile::module`, which is what makes the
+/// answer stable at all.
+///
+/// The result maps a header label to the number of NOP bytes that must precede
+/// its binding point. Only labels in the map are padded, and a pad is never
+/// larger than [`MAX_SKIP`].
+///
+/// **Padding and relaxation each move the other**, so this iterates them.
+/// Inserting bytes can push a jump out of rel8 range, which widens it by 3 or 4
+/// and moves every header after it; re-padding for the new offsets can in turn
+/// widen another jump. The caller must relax the *final* padded stream --
+/// correctness does not rest on this converging, only the quality of the
+/// alignment does.
+pub fn loop_header_pads(
+    insts: &[MachInst],
+    label_positions: &BTreeMap<LabelId, usize>,
+    headers: &BTreeSet<LabelId>,
+    prologue_size: usize,
+    inst_sizes: &dyn Fn(&MachInst) -> usize,
+) -> BTreeMap<LabelId, u8> {
+    if headers.is_empty() {
+        return BTreeMap::new();
+    }
+
+    // One header per binding point. Two labels can bind at the same instruction
+    // -- a trampoline label at the top of a block shares its position with the
+    // block label -- and padding both would pad twice for one boundary.
+    let mut sites: BTreeMap<usize, LabelId> = BTreeMap::new();
+    for &label in headers {
+        if let Some(&pos) = label_positions.get(&label) {
+            sites.entry(pos).or_insert(label);
+        }
+    }
+
+    let mut pads: BTreeMap<LabelId, u8> = BTreeMap::new();
+    for _ in 0..MAX_ROUNDS {
+        let padded = apply_pads(insts, label_positions, &pads);
+        let padded_positions = shift_positions(label_positions, insts.len(), &pads);
+        let (_, is_short) = super::relax::relax_branches(&padded, &padded_positions, inst_sizes);
+        let offs = offsets(&padded, &is_short, prologue_size, inst_sizes);
+
+        let mut next: BTreeMap<LabelId, u8> = BTreeMap::new();
+        for &label in sites.values() {
+            // This offset already includes the label's own padding, which is in
+            // `padded`. Take it back off to ask where the header would sit
+            // unpadded, or a header that is aligned *because* it was padded
+            // reads as needing nothing and loses its pad next round.
+            let current = pads.get(&label).copied().unwrap_or(0) as usize;
+            let bare = offs[padded_positions[&label]] - current;
+            let want = (LOOP_ALIGN - bare % LOOP_ALIGN) % LOOP_ALIGN;
+            if want > 0 && want <= MAX_SKIP {
+                next.insert(label, want as u8);
+            }
+        }
+
+        if next == pads {
+            break;
+        }
+        pads = next;
+    }
+
+    pads
+}
+
+/// The instruction stream with each pad inserted immediately before the
+/// instruction its header label binds to.
+pub fn apply_pads(
+    insts: &[MachInst],
+    label_positions: &BTreeMap<LabelId, usize>,
+    pads: &BTreeMap<LabelId, u8>,
+) -> Vec<MachInst> {
+    if pads.is_empty() {
+        return insts.to_vec();
+    }
+    let mut at: BTreeMap<usize, u8> = BTreeMap::new();
+    for (label, &pad) in pads {
+        let pos = label_positions[label];
+        at.insert(pos, pad);
+    }
+    let mut out = Vec::with_capacity(insts.len() + at.len());
+    for (i, inst) in insts.iter().enumerate() {
+        if let Some(&pad) = at.get(&i) {
+            out.push(MachInst::Nop { size: pad });
+        }
+        out.push(inst.clone());
+    }
+    if let Some(&pad) = at.get(&insts.len()) {
+        out.push(MachInst::Nop { size: pad });
+    }
+    out
+}
+
+/// Label positions after [`apply_pads`] inserted its NOPs.
+///
+/// Every label binds *after* the NOPs inserted at or before its position: the
+/// padding belongs to the boundary, so a label sharing a padded position with
+/// the header that owns the pad moves with it.
+pub fn shift_positions(
+    label_positions: &BTreeMap<LabelId, usize>,
+    inst_count: usize,
+    pads: &BTreeMap<LabelId, u8>,
+) -> BTreeMap<LabelId, usize> {
+    if pads.is_empty() {
+        return label_positions.clone();
+    }
+    let padded_at: BTreeSet<usize> = pads.keys().map(|l| label_positions[l]).collect();
+    // inserted[i] = how many NOPs precede original instruction index i.
+    let mut inserted = vec![0usize; inst_count + 1];
+    let mut running = 0usize;
+    for (i, slot) in inserted.iter_mut().enumerate() {
+        if padded_at.contains(&i) {
+            running += 1;
+        }
+        *slot = running;
+    }
+    label_positions
+        .iter()
+        .map(|(&label, &pos)| (label, pos + inserted[pos]))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::x86::inst::MachInst;
+    use crate::ir::condcode::CondCode;
 
     /// Toy size function: each instruction is 4 bytes except Nop (its size field).
     fn size(inst: &MachInst) -> usize {
@@ -66,84 +198,142 @@ mod tests {
         }
     }
 
-    #[test]
-    fn loop_header_at_aligned_offset_unchanged() {
-        // 4 instructions * 4 bytes = 16-byte offset -> already aligned.
-        let mut insts: Vec<MachInst> = vec![
-            MachInst::Ret, // 0..4
-            MachInst::Ret, // 4..8
-            MachInst::Ret, // 8..12
-            MachInst::Ret, // 12..16
-            MachInst::Ret, // <- label here at offset 16
-        ];
-        let label_id: LabelId = 0;
-        let label_defs = [(4, label_id)];
-        let mut headers = BTreeSet::new();
-        headers.insert(label_id);
+    fn positions(pairs: &[(LabelId, usize)]) -> BTreeMap<LabelId, usize> {
+        pairs.iter().copied().collect()
+    }
 
-        align_loop_headers(&mut insts, &label_defs, &headers, &size);
-        assert_eq!(
-            insts.len(),
-            5,
-            "no NOP should be inserted when already aligned"
+    /// `total` filler instructions, then a backward jump to `label`.
+    fn loop_at(label: LabelId, total: usize) -> Vec<MachInst> {
+        let mut insts = vec![MachInst::Ret; total];
+        insts.push(MachInst::Jcc {
+            cc: CondCode::Ne,
+            target: label,
+        });
+        insts
+    }
+
+    #[test]
+    fn backward_jump_target_is_a_header() {
+        let insts = loop_at(7, 4);
+        let pos = positions(&[(7, 2)]);
+        let headers = loop_header_labels(&insts, &pos);
+        assert_eq!(headers.iter().copied().collect::<Vec<_>>(), vec![7]);
+    }
+
+    #[test]
+    fn forward_jump_target_is_not_a_header() {
+        let insts = vec![
+            MachInst::Jmp { target: 3 },
+            MachInst::Ret,
+            MachInst::Ret,
+            MachInst::Ret,
+        ];
+        let pos = positions(&[(3, 3)]);
+        assert!(loop_header_labels(&insts, &pos).is_empty());
+    }
+
+    #[test]
+    fn header_already_aligned_gets_no_pad() {
+        // Prologue 0, four 4-byte instructions, header at 16.
+        let insts = loop_at(1, 8);
+        let pos = positions(&[(1, 4)]);
+        let headers = loop_header_labels(&insts, &pos);
+        let pads = loop_header_pads(&insts, &pos, &headers, 0, &size);
+        assert!(pads.is_empty(), "got {pads:?}");
+    }
+
+    #[test]
+    fn prologue_is_part_of_the_offset() {
+        // Header at instruction index 4 = 16 bytes into the stream, but the
+        // prologue puts it at 20. It needs 12, which exceeds MAX_SKIP, so it is
+        // left alone -- and with a 4-byte prologue it needs 12 too.
+        let insts = loop_at(1, 8);
+        let pos = positions(&[(1, 4)]);
+        let headers = loop_header_labels(&insts, &pos);
+        assert!(loop_header_pads(&insts, &pos, &headers, 0, &size).is_empty());
+
+        // A prologue of 8 leaves the header at 24, wanting 8: exactly MAX_SKIP.
+        let pads = loop_header_pads(&insts, &pos, &headers, 8, &size);
+        assert_eq!(pads.get(&1), Some(&8), "got {pads:?}");
+    }
+
+    #[test]
+    fn pad_above_max_skip_is_skipped() {
+        // Prologue 4 puts the header at 20; the next boundary is 12 away.
+        let insts = loop_at(1, 8);
+        let pos = positions(&[(1, 4)]);
+        let headers = loop_header_labels(&insts, &pos);
+        let pads = loop_header_pads(&insts, &pos, &headers, 4, &size);
+        assert!(pads.is_empty(), "12 > MAX_SKIP, got {pads:?}");
+    }
+
+    #[test]
+    fn padding_lands_the_header_on_a_boundary() {
+        // Prologue 12, header at instruction index 5 -> 12 + 20 = 32. Aligned.
+        // Move it: prologue 10 -> 30, wants 2.
+        let insts = loop_at(1, 10);
+        let pos = positions(&[(1, 5)]);
+        let headers = loop_header_labels(&insts, &pos);
+        let pads = loop_header_pads(&insts, &pos, &headers, 10, &size);
+        assert_eq!(pads.get(&1), Some(&2));
+
+        // Verify by re-encoding: the padded stream puts the label at 32.
+        let padded = apply_pads(&insts, &pos, &pads);
+        let padded_pos = shift_positions(&pos, insts.len(), &pads);
+        let (_, is_short) = super::super::relax::relax_branches(&padded, &padded_pos, &size);
+        let offs = offsets(&padded, &is_short, 10, &size);
+        assert!(offs[padded_pos[&1]].is_multiple_of(LOOP_ALIGN));
+    }
+
+    #[test]
+    fn two_labels_at_one_position_are_padded_once() {
+        let insts = loop_at(1, 10);
+        let mut pos = positions(&[(1, 5)]);
+        pos.insert(2, 5);
+        let mut headers = BTreeSet::new();
+        headers.insert(1);
+        headers.insert(2);
+        let pads = loop_header_pads(&insts, &pos, &headers, 10, &size);
+        assert_eq!(pads.len(), 1, "one boundary, one pad: got {pads:?}");
+    }
+
+    #[test]
+    fn relaxation_after_padding_is_accounted_for() {
+        // A conditional jump whose target is just inside rel8 range, followed by
+        // a loop header. Padding pushes the target out of range, the jump widens
+        // by 4, and the header must still come out aligned.
+        let label_fwd: LabelId = 20;
+        let label_hdr: LabelId = 21;
+
+        let mut insts = vec![MachInst::Jcc {
+            cc: CondCode::Eq,
+            target: label_fwd,
+        }];
+        insts.extend(vec![MachInst::Ret; 31]);
+        // Forward target lands here.
+        insts.push(MachInst::Ret);
+        // Loop header a little further on, with a back edge to it.
+        insts.extend(vec![MachInst::Ret; 3]);
+        let hdr_idx = insts.len();
+        insts.push(MachInst::Ret);
+        insts.push(MachInst::Jcc {
+            cc: CondCode::Ne,
+            target: label_hdr,
+        });
+
+        let pos = positions(&[(label_fwd, 32), (label_hdr, hdr_idx)]);
+        let headers = loop_header_labels(&insts, &pos);
+        assert!(headers.contains(&label_hdr));
+
+        let pads = loop_header_pads(&insts, &pos, &headers, 6, &size);
+        let padded = apply_pads(&insts, &pos, &pads);
+        let padded_pos = shift_positions(&pos, insts.len(), &pads);
+        let (_, is_short) = super::super::relax::relax_branches(&padded, &padded_pos, &size);
+        let offs = offsets(&padded, &is_short, 6, &size);
+        let landed = offs[padded_pos[&label_hdr]];
+        assert!(
+            landed.is_multiple_of(LOOP_ALIGN) || pads.is_empty(),
+            "header at {landed}, pads {pads:?}"
         );
-    }
-
-    #[test]
-    fn loop_header_at_non_aligned_offset_padded() {
-        // 6 instructions * 4 bytes = 24 bytes (offset 0x18). Nearest 16-boundary
-        // above is 0x20 (32). Pad = 32 - 24 = 8 bytes.
-        let mut insts: Vec<MachInst> = vec![
-            MachInst::Ret, // 0
-            MachInst::Ret, // 4
-            MachInst::Ret, // 8
-            MachInst::Ret, // 12
-            MachInst::Ret, // 16
-            MachInst::Ret, // 20
-            MachInst::Ret, // <- label at offset 24 (0x18)
-        ];
-        let label_id: LabelId = 1;
-        let label_defs = [(6, label_id)];
-        let mut headers = BTreeSet::new();
-        headers.insert(label_id);
-
-        align_loop_headers(&mut insts, &label_defs, &headers, &size);
-
-        // A NOP should have been inserted at position 6.
-        assert_eq!(insts.len(), 8);
-        assert_eq!(insts[6], MachInst::Nop { size: 8 });
-
-        // Verify resulting offset is 16-byte aligned.
-        let offset: usize = insts[..7].iter().map(size).sum();
-        assert_eq!(offset % 16, 0);
-    }
-
-    #[test]
-    fn spec_example_offset_0x1a() {
-        // Loop header at offset 0x1A (26). Pad = 32 - 26 = 6 bytes.
-        // Construct: 6 * 4 = 24 bytes, then 1 * 2 bytes = 26 total.
-        // Use a Nop{2} as the last instruction before the label.
-        let mut insts: Vec<MachInst> = vec![
-            MachInst::Ret,             // 4
-            MachInst::Ret,             // 8
-            MachInst::Ret,             // 12
-            MachInst::Ret,             // 16
-            MachInst::Ret,             // 20
-            MachInst::Ret,             // 24
-            MachInst::Nop { size: 2 }, // 26 = 0x1A
-            MachInst::Ret,             // <- label here at offset 26
-        ];
-        let label_id: LabelId = 2;
-        let label_defs = [(7, label_id)];
-        let mut headers = BTreeSet::new();
-        headers.insert(label_id);
-
-        align_loop_headers(&mut insts, &label_defs, &headers, &size);
-
-        assert_eq!(insts[7], MachInst::Nop { size: 6 });
-
-        let offset: usize = insts[..8].iter().map(size).sum();
-        assert_eq!(offset, 32); // 0x20
-        assert_eq!(offset % 16, 0);
     }
 }
