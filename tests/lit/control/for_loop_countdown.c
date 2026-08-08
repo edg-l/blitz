@@ -4,7 +4,7 @@
 // counting down from 10 to 0, the decrement a negative lea displacement --
 // the constant is in the instruction rather than a register of its own
 // CHECK: mov    {{[a-z0-9]+}},0xa
-// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}-0x1]
+// CHECK: dec    {{[a-z0-9]+}}
 // backward jump
 // CHECK: jmp
 

@@ -1158,6 +1158,27 @@ fn lower_op(
 /// The two facts `lower_block_pure_ops` needs about instructions it may not be
 /// given: which VRegs a division defines, and which VRegs some `Proj0` reads.
 ///
+/// The VRegs a division defines.
+///
+/// `X86Idiv`/`X86Div` leave the quotient in RAX and the remainder in RDX
+/// whatever the allocator says, so a projection of one is a copy out of a
+/// *fixed* register and the pair VReg names nothing. Lowering needs that to emit
+/// the right source; the interference graph and the coalescing candidate list
+/// need it to know that this projection's result cannot share its operand's
+/// register.
+pub(crate) fn division_dst_vregs(insts: &[ScheduledInst]) -> BTreeSet<VReg> {
+    insts
+        .iter()
+        .filter(|i| {
+            matches!(
+                i.op,
+                Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..))
+            )
+        })
+        .map(|i| i.dst)
+        .collect()
+}
+
 /// Both must be computed over the WHOLE block. Lowering runs on each run of pure
 /// ops between two barriers, so a projection and the op it projects routinely
 /// land in different runs -- a division's remainder is often consumed before the
@@ -1169,16 +1190,7 @@ fn lower_op(
 /// - an ALU op whose `Proj0` is in a later run looks register-dead and gets
 ///   downgraded to a flags-only form, so its result is never materialized.
 pub(super) fn division_and_proj0_sets(insts: &[ScheduledInst]) -> (BTreeSet<VReg>, BTreeSet<VReg>) {
-    let div_dst_vregs = insts
-        .iter()
-        .filter(|i| {
-            matches!(
-                i.op,
-                Op::Mach(MachOp::X86Idiv(..)) | Op::Mach(MachOp::X86Div(..))
-            )
-        })
-        .map(|i| i.dst)
-        .collect();
+    let div_dst_vregs = division_dst_vregs(insts);
     let has_proj0_consumer = insts
         .iter()
         .filter(|i| matches!(i.op, Op::Pure(PureOp::Proj0)))

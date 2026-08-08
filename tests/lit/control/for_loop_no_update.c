@@ -5,7 +5,7 @@
 // CHECK: cmp    {{[a-z0-9]+}},0xa
 // CHECK: jl
 // increment inside body, the constant a lea displacement
-// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}+0x1]
+// CHECK: inc    {{[a-z0-9]+}}
 // CHECK: jmp
 
 int main() {

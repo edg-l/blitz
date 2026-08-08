@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::egraph::extract::VReg;
-use crate::ir::op::{MachOp, Op, PseudoOp};
+use crate::ir::op::{MachOp, Op, PseudoOp, PureOp};
 use crate::schedule::scheduler::ScheduledInst;
 use crate::x86::reg::RegClass;
 
@@ -161,6 +161,37 @@ impl InterferenceGraph {
 /// path, which allocates and populates `reg_class` itself) and the global
 /// allocator path (which pre-populates `reg_class` from all blocks before
 /// calling this for each block).
+/// The operand index whose register this instruction's result is meant to reuse,
+/// so that lowering emits no copy for it.
+///
+/// Two shapes qualify and they are the same shape from different directions.
+///
+/// **A two-address op**: `add dst, src` reads and writes `dst`, so the result
+/// and `operands[0]` want one register and `lower.rs` emits `mov dst,
+/// operands[0]` when they do not get it. `Op::two_address_src` names those.
+///
+/// **A `Proj0`**: a pair-producing x86 op keeps its result in the pair VReg and
+/// the projection reads it out, so lowering emits `mov proj, pair` for exactly
+/// the same reason. Leaving it out of this rule gave every projection's result
+/// an edge to the value it is a copy of -- which made the interference graph
+/// state that a value and its own copy cannot share a register, and put the
+/// copy beyond coalescing's reach as well, since a pair that interferes is
+/// refused. It was the largest group of surviving copies on `bench`.
+///
+/// A division is the exception, and it is why this cannot be a property of `Op`
+/// alone: `X86Idiv`/`X86Div` leave their results in RAX and RDX, so the
+/// projection copies out of a fixed register and the pair VReg holds nothing.
+/// Claiming reuse there would let the colourer place the projection on the
+/// pair's register and lowering would then emit no copy at all, leaving the
+/// value in RAX.
+pub fn result_shares_operand(inst: &ScheduledInst, div_dsts: &BTreeSet<VReg>) -> Option<usize> {
+    if matches!(inst.op, Op::Pure(PureOp::Proj0)) {
+        let pair = inst.operands.first()?;
+        return (!div_dsts.contains(pair)).then_some(0);
+    }
+    inst.op.two_address_src()
+}
+
 pub fn build_interference_into(
     graph: &mut InterferenceGraph,
     liveness: &LivenessInfo,
@@ -176,7 +207,7 @@ pub fn build_interference_into(
     // one operand it is supposed to overwrite.
     //
     // x86 arithmetic is two-address: `add dst, src` reads and writes `dst`, so
-    // the result and `operands[0]` of every op in `Op::two_address_src` are
+    // the result and `operands[0]` of every op `result_shares_operand` names are
     // meant to be one register, and `lower.rs` emits `mov dst, operands[0]`
     // when they are not. `live_at[i]` is the set live *before* instruction i,
     // which contains that operand, so the blanket rule gave the def an edge to
@@ -193,6 +224,7 @@ pub fn build_interference_into(
     // - any *other* operand, dying or not. Lowering writes `dst` with the copy
     //   from `operands[0]` before the instruction reads them, so a second
     //   operand sharing `dst` is read after it has been overwritten.
+    let div_dsts = crate::compile::lower::division_dst_vregs(insts);
     for (i, inst) in insts.iter().enumerate() {
         if inst.op.has_no_result() {
             continue;
@@ -206,9 +238,7 @@ pub fn build_interference_into(
         } else {
             &liveness.live_out
         };
-        let reusable = inst
-            .op
-            .two_address_src()
+        let reusable = result_shares_operand(inst, &div_dsts)
             .and_then(|k| inst.operands.get(k))
             .filter(|v| !live_after.contains(v.0 as usize))
             .filter(|v| inst.operands.iter().filter(|o| o == v).count() == 1)
@@ -409,6 +439,41 @@ mod tests {
 
     fn set(elems: &[usize]) -> VRegSet {
         elems.iter().copied().collect()
+    }
+
+    fn inst(op: Op, dst: u32, operands: &[u32]) -> ScheduledInst {
+        ScheduledInst {
+            op,
+            dst: VReg(dst),
+            operands: operands.iter().copied().map(VReg).collect(),
+        }
+    }
+
+    #[test]
+    fn a_projection_shares_the_register_of_the_pair_it_reads() {
+        let proj = inst(Op::Pure(PureOp::Proj0), 8, &[7]);
+        assert_eq!(result_shares_operand(&proj, &BTreeSet::new()), Some(0));
+    }
+
+    #[test]
+    fn a_projection_of_a_division_shares_nothing() {
+        // The quotient is in RAX whatever the pair VReg was given, so lowering
+        // copies out of RAX and the pair's register never held the value.
+        let proj = inst(Op::Pure(PureOp::Proj0), 8, &[7]);
+        let divs: BTreeSet<VReg> = [VReg(7)].into_iter().collect();
+        assert_eq!(result_shares_operand(&proj, &divs), None);
+    }
+
+    #[test]
+    fn a_two_address_op_still_shares_its_first_operand() {
+        let add = inst(Op::Mach(MachOp::X86Add), 3, &[1, 2]);
+        assert_eq!(result_shares_operand(&add, &BTreeSet::new()), Some(0));
+    }
+
+    #[test]
+    fn an_op_that_is_not_two_address_shares_nothing() {
+        let lea = inst(Op::Mach(MachOp::X86Lea2), 3, &[1, 2]);
+        assert_eq!(result_shares_operand(&lea, &BTreeSet::new()), None);
     }
 
     #[test]

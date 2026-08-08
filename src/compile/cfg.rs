@@ -677,6 +677,44 @@ pub(super) fn compute_copy_pairs_from_schedules(
     pairs
 }
 
+/// The copy pairs a projection makes, one per `Proj0` that lowering will emit a
+/// `mov` for.
+///
+/// **A pair-producing x86 op keeps its result in the pair VReg and `Proj0` reads
+/// it out**, so `lower.rs` emits `mov proj, pair` whenever the two got different
+/// registers -- and nothing offered that pair to coalescing, because
+/// `compute_copy_pairs_from_schedules` collects phi copies and only those. On
+/// `bench` this is the single largest group of surviving copies: an `X86Add`
+/// lowered to `lea ebx, [rdi+r10]` followed by `mov r12d, ebx` and then a use of
+/// r12d, where the `lea` could have written r12d in the first place.
+///
+/// Which projections qualify is `interference::result_shares_operand`, the same
+/// predicate the interference graph excludes its edge from -- a division is not
+/// one, because `X86Idiv`/`X86Div` leave their results in RAX and RDX and the
+/// pair VReg holds nothing.
+pub(super) fn projection_copy_pairs(block_schedules: &[Vec<ScheduledInst>]) -> Vec<(VReg, VReg)> {
+    let mut pairs: Vec<(VReg, VReg)> = Vec::new();
+    for schedule in block_schedules {
+        let div_dsts = super::lower::division_dst_vregs(schedule);
+        for inst in schedule {
+            if !matches!(inst.op, Op::Pure(PureOp::Proj0)) {
+                continue;
+            }
+            // The same predicate the interference graph draws its edges from,
+            // so a pair offered here is never one the graph forbids.
+            let Some(k) = crate::regalloc::interference::result_shares_operand(inst, &div_dsts)
+            else {
+                continue;
+            };
+            let Some(&pair) = inst.operands.get(k) else {
+                continue;
+            };
+            pairs.push((pair, inst.dst));
+        }
+    }
+    pairs
+}
+
 /// Loop depth per block index, by back-edge counting.
 ///
 /// A target at or before its source is a back edge, and every block between the

@@ -6,10 +6,10 @@
 // loop comparison against the 10 bound (immediate fused into cmp via X86CmpI)
 // CHECK: cmp    {{[a-z0-9]+}},0xa
 // CHECK: jle
-// loop body: the sum, as a three-operand lea rather than a copy and an add
-// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}+{{[a-z0-9]+}}*1]
-// loop increment: i + 1, the constant a displacement
-// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}+0x1]
+// loop body: the sum accumulated in place, no copy to set up the addend
+// CHECK: add    {{[a-z0-9]+}},{{[a-z0-9]+}}
+// loop increment: i + 1, in place
+// CHECK: inc    {{[a-z0-9]+}}
 // backward jump to loop header
 // CHECK: jmp
 

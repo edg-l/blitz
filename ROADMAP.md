@@ -72,14 +72,14 @@ frame slots at fixed offsets is what debug info describes.
 section is the queue: what to pick up next, in order, each entry naming its tier
 rather than restating it. Take them top to bottom.
 
-- **`cp_other` is the copies that are left** -- `P1`. Optimistic coalescing took
-  the corpus from 709 register-to-register moves in 2379 `bench` instructions to
-  599 in 2340, against `gcc -O2`'s 429 in 2388. Of the 585 `MachInst`-level
-  copies that remain, `BLITZ_DEBUG=stats` puts **264 in `cp_other`**: not a
-  two-address fixup, not on an edge, not argument setup. Measure what they are
-  before choosing a fix -- doing that is what found the last one.
-- **Dominance-scoped elaboration** -- `P1`, and the largest remaining item.
-  Read `docs/internal/refactor-roadmap.md` before starting.
+- **Dominance-scoped elaboration** -- `P1`, and the largest remaining item now
+  that copies are done. Read `docs/internal/refactor-roadmap.md` before
+  starting.
+- **What is left of the copies** -- `P1`, and much smaller than it was. blitz
+  emits 385 register-to-register moves in 2138 `bench` instructions against
+  `gcc -O2`'s 429 in 2388, so the headline gap is closed; `BLITZ_DEBUG=stats`
+  still puts 150 of 371 in `cp_other`, which is no longer one shape. Measure
+  before choosing a fix -- doing that is what found both of the last two.
 
 `P1` is ordered by measured impact. **`P2` is where the
 single-target thesis pays off**, though half of it is unreachable until tinyc
@@ -239,7 +239,7 @@ pre-coloring conflict assertion exists (`coloring::check_precolorings`, under
 - Code quality has a baseline: `bash tests/run_codesize.sh --check`, over `lit`,
   `bench`, `live` and `fuzz`, fed by `BLITZ_DEBUG=stats`.
 - Code quality also has an *absolute* number, which is the one the Goal is
-  written against: `bash tests/run_perf.sh`, `x2.69` cycles vs `gcc -O2` over
+  written against: `bash tests/run_perf.sh`, `x2.49` cycles vs `gcc -O2` over
   the 24 `live` kernels, median of 5 `perf stat` samples each. Cycle counts vary
   ~1% run to run here; instructions retired vary 0.00%, and are the wrong metric
   for the reason the Goal gives. Widening `live` has no natural ceiling and is
@@ -531,11 +531,38 @@ so the holes stay visible.
       Nothing else in `lit`, `bench`, `live`, the corpus or 1352 generated
       programs needed a second round.
 
-      **What is left is `cp_other`**, 264 of the remaining 585 on `bench`: copies
-      that are not two-address fixups, not adjacent to a branch or block
-      boundary, and not argument setup. Some are the move back out of a
-      two-address result; the rest want the same treatment this item just got,
-      which is to measure what they are before choosing a fix.
+      **Then `cp_other` turned out to be one thing, and it was an
+      interference-graph bug.** A pair-producing x86 op keeps its result in the
+      pair VReg and `Proj0` reads it out, so lowering emits `mov proj, pair`
+      unless the two share a register -- and `Op::two_address_src` did not name
+      `Proj0`, so the graph gave every projection's result an edge to the very
+      value it is a copy of. **The graph asserted that a value and its own copy
+      cannot share a register**, which also put the copy beyond coalescing's
+      reach, since a pair whose groups interfere is refused. It is the same
+      defect `interference.rs` already documents for two-address ops, on a
+      different op.
+
+      `interference::result_shares_operand` is now the one predicate, read by the
+      graph and by the coalescing candidate list so a pair offered to one is
+      never forbidden by the other. A division is the exception and is why this
+      cannot be a property of `Op` alone: `X86Idiv`/`X86Div` leave their results
+      in RAX and RDX, so the projection copies out of a fixed register and the
+      pair VReg holds nothing.
+
+      Over `bench`: copies **585 -> 371**, instructions **2062 -> 1857**; over
+      `live`, copies **1071 -> 472** and instructions **4060 -> 3455**. Across
+      the corpora, **copies `-36.6%`, instructions `-6.4%`, bytes `-2.7%`, and
+      not one of the 288 changed rows got worse on instructions.** Cycles
+      `x2.685 -> x2.489`.
+
+      **This is where the item's own claim came true.** On `bench` blitz now
+      emits **385 copies in 2138 instructions against `gcc -O2`'s 429 in 2388**
+      -- fewer copies than gcc, at the same 18.0% rate, in 250 fewer
+      instructions. Eight `lit` tests changed, all of them pinning a
+      three-operand `lea` that existed to dodge a copy blitz no longer makes:
+      `lea x,[x+1]` is now `inc x` and `lea x,[x+y]` is `add x,y`.
+
+      What remains in `cp_other` is 150 of 371 on `bench`, no longer one shape.
 - [ ] **Dominance-scoped elaboration, which is GVN and several other things at
       once.** The e-graph does local CSE only, so repeated address computations
       and field loads survive across blocks -- typically 5-15% on real code. But

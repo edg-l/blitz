@@ -50,7 +50,7 @@ mod phi_removal;
 use cfg::{
     collect_alloc_block_params, collect_externals, collect_roots, commit_block_param_vregs,
     commit_effectful_vregs, commit_terminator_arg_vregs, compute_copy_pairs_from_schedules,
-    compute_loop_depths,
+    compute_loop_depths, projection_copy_pairs,
 };
 mod effectful;
 use effectful::lower_effectful_op;
@@ -58,7 +58,7 @@ mod dce;
 mod flags_remat;
 pub(crate) use flags_remat::writes_flags as flags_writer;
 mod licm;
-mod lower;
+pub(crate) mod lower;
 use lower::lower_block_pure_ops;
 mod precolor;
 pub(crate) mod pressure;
@@ -1192,13 +1192,14 @@ pub fn compile(
                     &slot_spilled_params,
                     &block_id_to_idx,
                 );
-                let cp = compute_copy_pairs_from_schedules(
+                let mut cp = compute_copy_pairs_from_schedules(
                     func,
                     &block_schedules,
                     &egraph,
                     &class_to_vreg,
                     &block_param_map,
                 );
+                cp.extend(projection_copy_pairs(&block_schedules));
                 if let Ok(result) = allocate_global(
                     &block_schedules,
                     &param_vregs,
@@ -1506,13 +1507,17 @@ pub fn compile(
         // CRITICAL ORDER: after the splitter, so an argument it routed through a
         // stack slot -- which has no operand and no copy -- contributes no pair.
         let copy_pairs = probe_cp.unwrap_or_else(|| {
-            compute_copy_pairs_from_schedules(
+            let mut pairs = compute_copy_pairs_from_schedules(
                 func,
                 &block_schedules,
                 &egraph,
                 &class_to_vreg,
                 &block_param_map,
-            )
+            );
+            // A `Proj0` is a copy out of the pair VReg, and it is the largest
+            // group of copies phi pairs alone do not reach.
+            pairs.extend(projection_copy_pairs(&block_schedules));
+            pairs
         });
 
         verify_block_params = block_param_vregs_per_block.clone();

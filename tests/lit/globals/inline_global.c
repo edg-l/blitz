@@ -11,9 +11,9 @@
 // CHECK-NOT: call
 // RIP-relative LEA for the global address
 // CHECK: lea    {{[a-z0-9]+}},[rip+{{.*}}]
-// The two increment(5) and increment(3) calls, each addend a lea displacement
-// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}+0x5]
-// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}+0x3]
+// The two increment(5) and increment(3) calls, each added in place
+// CHECK: add    {{[a-z0-9]+}},0x5
+// CHECK: add    {{[a-z0-9]+}},0x3
 // CHECK: ret
 
 int counter;

@@ -2,7 +2,7 @@
 // RUN: %tinyc %s -o %t --emit-asm | %blitztest %s
 // CHECK-LABEL: # main
 // field assign in update clause, the increment a lea displacement
-// CHECK: lea    {{[a-z0-9]+}},[{{[a-z0-9]+}}+0x1]
+// CHECK: inc    {{[a-z0-9]+}}
 // CHECK: jmp
 
 struct Counter {
